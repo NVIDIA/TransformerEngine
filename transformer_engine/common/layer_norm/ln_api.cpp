@@ -154,12 +154,13 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
                    Tensor* workspace,
                    Tensor* barrier,
                    Tensor* amax,
-                   Tensor *scale_inv,
-                   bool fp8_out
+                   Tensor *scale_inv
 ) {
     auto itype = x.dtype;
     auto wtype = gamma.dtype;
     auto otype = z->dtype;
+    bool fp8_out = otype == DType::kFloat8E4M3 ||
+                   otype == DType::kFloat8E5M2;
     auto ctype = layer_norm::DType::kFloat32;
 
     NVTE_CHECK(x.shape.size() == 2);
@@ -382,8 +383,7 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                         NVTETensor workspace,
                         NVTETensor barrier,
                         NVTETensor amax,
-                        NVTETensor scale_inv,
-                        bool fp8_out) {
+                        NVTETensor scale_inv) {
   using namespace transformer_engine;
   layernorm_fwd(*reinterpret_cast<const Tensor*>(x),
                 *reinterpret_cast<const Tensor*>(gamma),
@@ -398,8 +398,7 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                 reinterpret_cast<Tensor*>(workspace),
                 reinterpret_cast<Tensor*>(barrier),
                 reinterpret_cast<Tensor*>(amax),
-                reinterpret_cast<Tensor*>(scale_inv),
-                fp8_out);
+                reinterpret_cast<Tensor*>(scale_inv));
 }
 
 void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size

@@ -119,8 +119,7 @@ void dispatch_layernorm(void* input,                                    // i
                         void* scale_inv,                                // o
                         const std::vector<size_t>& scale_inv_shape,
                         const transformer_engine::DType scale_inv_type,
-                        const int multiProcessorCount,
-                        const bool fp8_out
+                        const int multiProcessorCount
 ) {
     auto input_cu     = makeTransformerEngineTensor(input, input_shape, input_type);
     auto gamma_cu     = makeTransformerEngineTensor(gamma, gamma_shape, gamma_type);
@@ -139,7 +138,7 @@ void dispatch_layernorm(void* input,                                    // i
                        z_cu.data(), mu_cu.data(), rsigma_cu.data(),
                        at::cuda::getCurrentCUDAStream(), multiProcessorCount,
                        workspace.data(), barrier.data(), amax_cu.data(),
-                       scale_inv_cu.data(), fp8_out);
+                       scale_inv_cu.data());
 
     // Fill workspace and barrier
     auto workspace_data = allocateSpace(workspace.shape(),
@@ -160,7 +159,7 @@ void dispatch_layernorm(void* input,                                    // i
                        z_cu.data(), mu_cu.data(), rsigma_cu.data(),
                        at::cuda::getCurrentCUDAStream(), multiProcessorCount,
                        workspace.data(), barrier.data(), amax_cu.data(),
-                       scale_inv_cu.data(), fp8_out);
+                       scale_inv_cu.data());
 }
 
 
