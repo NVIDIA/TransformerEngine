@@ -163,12 +163,12 @@ void performTest(const size_t N, const size_t H) {
   float epsilon = 1e-5;
   nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), scale.data(), epsilon,
                      z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data(), amax.data(), scale_inv.data(), true);
+                     workspace.data(), barrier.data(), amax.data(), scale_inv.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), scale.data(), epsilon,
                      z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data(), amax.data(), scale_inv.data(), true);
+                     workspace.data(), barrier.data(), amax.data(), scale_inv.data());
 
   // Backward kernel
   nvte_layernorm_bwd(dz.data(), input.data(),
