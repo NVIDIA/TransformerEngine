@@ -1,0 +1,24 @@
+{
+    "initial_year": 2022,
+    "copyright": "Copyright (c) <YEAR>, NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+    "license": "See LICENSE for license information.",
+    "exclude": ["3rdparty",
+                "Dockerfile",
+                "Dockerfile.base",
+                "Dockerfile.qa",
+                "Dockerfile.devel",
+                "Dockerfile.docs",
+                "docker-build.sh",
+                ".png",
+                ".ipynb",
+                "docs/Makefile",
+                "layout.html",
+                "LICENSE",
+                "VERSION",
+                "Doxyfile",
+                "pylintrc",
+                ".json"
+               ],
+    "exclude_copyright": [],
+    "copyright_only": false
+}

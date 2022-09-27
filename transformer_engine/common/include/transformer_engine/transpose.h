@@ -1,0 +1,122 @@
+/*************************************************************************
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file transpose.h
+ *  \brief Functions handling transposes.
+ */
+
+#ifndef TRANSFORMER_ENGINE_TRANSPOSE_H_
+#define TRANSFORMER_ENGINE_TRANSPOSE_H_
+
+#include "transformer_engine.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*! \brief Cast and transpose the input.
+ *
+ * This function casts the input and produces 2 results:
+ *  - `cast_output` is the result of the cast
+ *  - `transposed_output` is the transposed result of the cast.
+ *
+ *  \param[in]     input               Input tensor of shape [N, H].
+ *  \param[in]     scale               Scaling factor used for outputs.
+ *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
+ *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
+ *  \param[in,out] amax                AMAX value of the output tensor.
+ *  \param[out]    scale_inv           Inverse of the output's scaling factor.
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_cast_transpose(const NVTETensor input,
+                         const NVTETensor scale,
+                         NVTETensor cast_output,
+                         NVTETensor transposed_output,
+                         NVTETensor amax,
+                         NVTETensor scale_inv,
+                         cudaStream_t stream);
+
+/*! \brief Transpose the input.
+ *
+ *  \param[in]     input               Input tensor of shape [N, H].
+ *  \param[out]    transposed_output   Result of the transpose. Shape: [H, N].
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_transpose(const NVTETensor input,
+                    NVTETensor transposed_output,
+                    cudaStream_t stream);
+
+/*! \brief Cast and transpose the input. Additionally, reduce the input along the first dimension.
+ *
+ * This function casts the input and produces 3 results:
+ *  - `cast_output` is the result of the cast
+ *  - `transposed_output` is the transposed result of the cast.
+ *  - `dbias` is the result of the reduction of the input along the first dimension.
+ *
+ *  Calling this function with workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input               Input tensor of shape [N, H].
+ *  \param[in]     scale               Scaling factor used for outputs.
+ *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
+ *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
+ *  \param[in,out] amax                AMAX value of the output tensor.
+ *  \param[out]    dbias               Result of the reduction of the input along the
+ *                                     first dimension. Shape: [H].
+ *  \param[out]    scale_inv           Inverse of the output's scaling factor.
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_cast_transpose_dbias(const NVTETensor input,
+                               const NVTETensor scale,
+                               NVTETensor cast_output,
+                               NVTETensor transposed_output,
+                               NVTETensor amax,
+                               NVTETensor dbias,
+                               NVTETensor scale_inv,
+                               NVTETensor workspace,
+                               cudaStream_t stream);
+
+/*! \brief Compute backward of GELU operation on the input, then cast and transpose. Additionally,
+ *         reduce the result of the GELU backward along the first dimension.
+ *
+ * This function produces 3 results:
+ *  - `cast_output` is equal to `cast(dGELU(input))`
+ *  - `transposed_output` is equal to `transpose(cast(dGELU(input)))`
+ *  - `dbias` is equal to `reduce(dGELU(input), axis=0)`
+ *
+ *  Calling this function with workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input               Input tensor of shape [N, H].
+ *  \param[in]     gelu_input          Tensor used as input to the forward of GELU operation.
+ *                                     Shape [N, H].
+ *  \param[in]     scale               Scaling factor used for outputs.
+ *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
+ *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
+ *  \param[in,out] amax                AMAX value of the output tensor.
+ *  \param[out]    dbias               Result of the reduction of the dGELU(input) along the
+ *                                     first dimension. Shape: [H].
+ *  \param[out]    scale_inv           Inverse of the output's scaling factor.
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
+                                     const NVTETensor gelu_input,
+                                     const NVTETensor scale,
+                                     NVTETensor cast_output,
+                                     NVTETensor transposed_output,
+                                     NVTETensor amax,
+                                     NVTETensor dbias,
+                                     NVTETensor scale_inv,
+                                     NVTETensor workspace,
+                                     cudaStream_t stream);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+#endif  // TRANSFORMER_ENGINE_TRANSPOSE_H_
