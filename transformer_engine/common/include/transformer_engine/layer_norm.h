@@ -88,6 +88,33 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
                         NVTETensor workspace,
                         NVTETensor barrier);
 
+void nvte_rmsnorm_fwd(const NVTETensor x,         // Nxhidden_size
+                      const NVTETensor gamma,     // hidden_size
+                      const NVTETensor scale,     // 1
+                      const float epsilon,
+                      NVTETensor z,
+                      NVTETensor rsigma,
+                      cudaStream_t stream,
+                      const int multiprocessorCount,
+                      NVTETensor workspace,
+                      NVTETensor barrier,
+                      NVTETensor amax,
+                      NVTETensor scale_inv,
+                      bool fp8_out);
+
+void nvte_rmsnorm_bwd(const NVTETensor dz,        // Nxhidden_size
+                      const NVTETensor x,         // Nxhidden_size
+                      const NVTETensor rsigma,    // N, FP32!
+                      const NVTETensor gamma,     // hidden_size
+                      NVTETensor dx,
+                      NVTETensor dgamma,
+                      NVTETensor dgamma_part,
+                      cudaStream_t stream,
+                      const int multiprocessorCount,
+                      NVTETensor workspace,
+                      NVTETensor barrier
+);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

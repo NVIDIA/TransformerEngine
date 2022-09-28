@@ -134,10 +134,20 @@ using BwdTunedRegistry = std::unordered_map<FunctionKey, BwdFunction>;
 using FwdGeneralRegistry = std::unordered_map<FunctionKey, std::map<uint64_t, FwdFunction>>;
 using BwdGeneralRegistry = std::unordered_map<FunctionKey, std::map<uint64_t, BwdFunction>>;
 
+using RMSNormFwdTunedRegistry = FwdTunedRegistry;
+using RMSNormBwdTunedRegistry = BwdTunedRegistry;
+using RMSNormFwdGeneralRegisty = FwdGeneralRegistry;
+using RMSNormBwdGeneralRegisty = BwdGeneralRegistry;
+
 extern FwdTunedRegistry FWD_TUNED_FUNCS;
 extern BwdTunedRegistry BWD_TUNED_FUNCS;
 extern FwdGeneralRegistry FWD_GENERAL_FUNCS;
 extern BwdGeneralRegistry BWD_GENERAL_FUNCS;
+
+extern RMSNormFwdTunedRegistry RMSNORM_FWD_TUNED_FUNCS;
+extern RMSNormBwdTunedRegistry RMSNORM_BWD_TUNED_FUNCS;
+extern RMSNormFwdGeneralRegisty RMSNORM_FWD_GENERAL_FUNCS;
+extern RMSNormBwdGeneralRegisty RMSNORM_BWD_GENERAL_FUNCS;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -230,6 +240,47 @@ struct BwdGeneralRegistrar{
     explicit BwdGeneralRegistrar(BwdFunction f){
         uint64_t key = Types2Key<W, I, O, C>::get(0);
         BWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
+struct RMSNormFwdTunedRegistrar{
+    explicit RMSNormFwdTunedRegistrar(FwdFunction f){
+        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+        RMSNORM_FWD_TUNED_FUNCS.insert({ key, f });
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
+struct RMSNormFwdGeneralRegistrar{
+    explicit RMSNormFwdGeneralRegistrar(FwdFunction f){
+        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(0);
+        RMSNORM_FWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
+struct RMSNormBwdTunedRegistrar{
+    explicit RMSNormBwdTunedRegistrar(BwdFunction f){
+        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+        RMSNORM_BWD_TUNED_FUNCS.insert({ key, f });
+    }
+};
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
+struct RMSNormBwdGeneralRegistrar{
+    explicit RMSNormBwdGeneralRegistrar(BwdFunction f){
+        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(0);
+        RMSNORM_BWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
     }
 };
 
