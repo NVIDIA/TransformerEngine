@@ -89,6 +89,11 @@ Clone the repository and inside it type:
 
   pip install .
 
+User Guide
+----------
+
+For examples, tutorials and API reference please refer to the
+`User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_.
 
 Transformer Architectures
 -------------------------
