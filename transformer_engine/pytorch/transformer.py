@@ -32,6 +32,10 @@ from transformer_engine.pytorch.constants import (
     LayerTypes,
     dist_group_type,
 )
+from transformer_engine.pytorch.emha import (
+    EMHA_MASK_MODE,
+    EMHA,
+)
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
@@ -83,6 +87,7 @@ class CoreAttention(torch.nn.Module):
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
+        use_emha: bool = False,
     ) -> None:
         super().__init__()
 
@@ -121,17 +126,38 @@ class CoreAttention(torch.nn.Module):
             coeff = self.layer_number
             self.norm_factor *= coeff
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            self.attn_mask_type,
-            attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff,
-        )
+        self.use_emha = use_emha
 
-        # Dropout. Note that for a single iteration, this layer will generate
-        # different outputs on different number of parallel partitions but
-        # on average it should not be partition dependent.
-        self.attention_dropout = torch.nn.Dropout(attention_dropout)
+        if not self.use_emha:
+            self.scale_mask_softmax = FusedScaleMaskSoftmax(
+                self.attn_mask_type,
+                attention_mask_func,
+                self.attention_softmax_in_fp32,
+                coeff,
+            )
+
+            # Dropout. Note that for a single iteration, this layer will generate
+            # different outputs on different number of parallel partitions but
+            # on average it should not be partition dependent.
+            self.attention_dropout = torch.nn.Dropout(attention_dropout)
+        else:
+            if self.attn_mask_type == "causal":
+                self.emha_attn_mask_mode = EMHA_MASK_MODE.CAUSAL
+            else:
+                raise ValueError('`eMHA only supports "causal"')
+            self.p_attention_dropout = attention_dropout
+            self.delegate = EMHA(
+                    num_attention_heads,
+                    kv_channels,
+                    attention_dropout,
+                    layer_number,
+                    apply_query_key_layer_scaling,
+                    attention_softmax_in_fp32,
+                    attn_mask_type,
+                    tp_size,
+                    get_rng_state_tracker,
+                    sequence_parallel,
+                    )
 
     def forward(
         self,
@@ -148,6 +174,17 @@ class CoreAttention(torch.nn.Module):
             query_layer.size(0),
             key_layer.size(0),
         )
+
+        if self.use_emha:
+            assert query_layer.dtype in (
+                torch.float16,
+                torch.bfloat16,
+            ), "EMHA only supported for 16 bit types."
+            assert (
+                query_layer.size(0) == 2048
+            ), "EMHA only supported for sequence length 2048."
+
+            return self.delegate(query_layer, key_layer, value_layer, attention_mask)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(
@@ -249,6 +286,7 @@ class MultiHeadAttention(torch.nn.Module):
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",
+        use_emha: bool = False,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
     ) -> None:
@@ -365,6 +403,7 @@ class MultiHeadAttention(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
+            use_emha=use_emha,
         )
 
         # Linear
@@ -821,6 +860,7 @@ class TransformerLayer(torch.nn.Module):
         output_layernorm: bool = False,
         layer_type: str = "encoder",
         drop_path_rate: float = 0.0,
+        use_emha: bool = False,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
     ) -> None:
@@ -877,6 +917,7 @@ class TransformerLayer(torch.nn.Module):
             "sequence_parallel": self.sequence_parallel,
             "params_dtype": params_dtype,
             "return_layernorm_output": apply_residual_connection_post_layernorm,
+            "use_emha": use_emha,
             "set_parallel_mode": set_parallel_mode,
             "fuse_qkv_params": fuse_qkv_params,
         }
