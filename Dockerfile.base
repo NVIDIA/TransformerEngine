@@ -1,0 +1,19 @@
+ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+
+FROM scratch as transformerengine
+COPY README.rst .
+COPY transformer_engine/ transformer_engine/
+COPY 3rdparty/ 3rdparty/
+COPY docs/ docs/
+COPY setup.py .
+COPY tests/ tests/
+
+FROM ${FROM_IMAGE_NAME}
+
+WORKDIR /opt/transformerengine/
+COPY --from=transformerengine . .
+
+RUN pip install . && \
+    rm -rf transformer_engine.egg-info dist build
+
+WORKDIR /workspace/

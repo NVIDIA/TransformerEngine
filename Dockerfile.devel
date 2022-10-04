@@ -1,0 +1,27 @@
+ARG BASE_IMAGE
+
+FROM ${BASE_IMAGE}
+COPY qa/ /opt/transformerengine/qa/
+COPY qa/L0_lint/pylintrc /opt/transformerengine/
+COPY qa/L0_lint/CPPLINT.cfg /opt/transformerengine/
+COPY .git/ /opt/transformerengine/.git/
+COPY .gitignore /opt/transformerengine/
+COPY .gitlab-ci.yml docker-build.sh Dockerfile.base Dockerfile.devel Dockerfile.qa /opt/transformerengine/
+
+# Avoid "Problem with the SSL CA cert" from git commands in the container
+RUN set -x \
+ && cd /opt/transformerengine \
+ && GIT_URL="$(git config --get remote.origin.url)" \
+ && NO_PROT="${GIT_URL#*://}" \
+ && NO_USER="${NO_PROT#*@}" \
+ && SERVER_NAME="${NO_USER/\/*}" \
+ && git config --local --unset http.https://${SERVER_NAME}.sslcainfo
+
+# Strip out the CI Token from the git remote; it will be invalid after this build's job is done anyway
+RUN set -x \
+ && cd /opt/transformerengine \
+ && GIT_URL="$(git config --get remote.origin.url)" \
+ && NO_PROT="${GIT_URL#*://}" \
+ && NO_USER="${NO_PROT#*@}" \
+ && git remote set-url origin "https://${NO_USER}"
+

@@ -1,0 +1,416 @@
+######################################################
+## Variables used by the test runs
+######################################################
+
+variables:
+    EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+    DATADIR: /mnt/nvdl/datasets
+
+    # variables that may be overridden by the pipeline vars
+    API_LOGGING: 0
+    VIRTUAL: 0
+
+    # the following will be overridden by jobs of the pipeline that actually need to check out the sources
+    GIT_STRATEGY: none
+    GIT_SUBMODULE_STRATEGY: none
+
+#########################################################
+## Build steps.
+##    DO NOT MODIFY THIS SECTION
+#########################################################
+
+stages:
+    - build base
+    - build devel
+    - trigger
+    - test
+    - finalize
+
+before_script:
+    - export PYVER=3.8   && echo "${PYVER}"
+    - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
+    - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
+    - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
+    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
+    - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
+    - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
+    - export DEVEL_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-devel"               && echo "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME_PIPELINEID="${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}-devel"            && echo "${DEVEL_IMAGE_NAME_PIPELINEID}"
+    - export STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"                                           && echo "${STAGE_IMAGE_NAME}"
+    - export QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa"                                                 && echo "${QA_IMAGE_NAME}"
+    - export DOCS_IMAGE_NAME="${IMAGE_NAME_ROOT}-docs"                                             && echo "${DOCS_IMAGE_NAME}"
+    - export ORIGIN1="${CI_REPOSITORY_URL##*@}"
+    - export ORIGIN_SSH=ssh://git@${ORIGIN1/\//:12051\/}                                           && echo "${ORIGIN_SSH}"
+    - export ORIGIN_HTTPS=https://${ORIGIN1}                                                       && echo "${ORIGIN_HTTPS}"
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+
+.base_template : &BASE
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=b --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+    except:
+    - tags
+    tags:
+    - builder
+
+py3-base:
+    stage: build base
+    <<: *BASE
+
+.devel_template : &DEVEL
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=d --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+    except:
+    - tags
+
+py3-devel:
+    stage: build devel
+    <<: *DEVEL
+
+.stage_template : &STAGE
+    environment: staging
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      SQRL_REGISTRY_URL: "sqrl.nvidia.com:443"
+      TARGET_TOKEN_SQRL: "nvadmin"
+      TARGET_REGISTRY_USER_SQRL: "nvadmin"
+    dependencies: []
+    script:
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - echo "${TARGET_TOKEN_SQRL}" | (set -x && docker login -u "${TARGET_REGISTRY_USER_SQRL}" --password-stdin "${SQRL_REGISTRY_URL}")
+    - bash docker-build.sh --mode=s --push --pyver=${PYVER} $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}") $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+    only:
+    - /^.*-devel$/
+    - /sqrl/
+    - /sqrl_registry/
+    except:
+    - api
+    - external
+    - schedules
+    - tags
+    - triggers
+    - web
+    when: manual
+
+py3-stage:
+    stage: finalize
+    <<: *STAGE
+
+.test_template: &TEST_TEMPLATE
+    environment: "${CI_JOB_NAME}"
+    variables:
+      TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
+      TEST_SCRIPT: "./test.sh"
+    script:
+    - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - test "${CI_JOB_NAME:0:3}" == "L3_" && export TEST_TIMEOUT=$((24*60*60)) || export TEST_TIMEOUT=$((3*60*60))
+    - test "${API_LOGGING}" == "0" && export LOGGER="" || export LOGGER="cudnnLog.sh"
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker stop "${CONTAINER_NAME}") &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             -w ${TEST_WORK_DIR}
+             ${DEVEL_IMAGE_NAME_VERSIONED}
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && exec ${LOGGER} bash -ex ${TEST_SCRIPT}" || RV=$?;
+      if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
+      set +x;
+      rm -rf logs/;
+      docker cp "${CONTAINER_NAME}:/logs/" "logs/" 2>/dev/null || true;
+      for LOGNAME in logs/*; do
+          mv "${LOGNAME}" $(echo "${LOGNAME}" | sed "s/-.....\./-${CI_JOB_NAME}./") 2>/dev/null || true;
+      done;
+      if [ $(cat logs/cudnnapilog-*.txt 2>/dev/null | wc -l) -eq 0 ]; then rm -f logs/cudnnapilog-* 2>/dev/null; fi;
+      gzip logs/*.txt 2>/dev/null || true;
+      docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1;
+      pkill -HUP sleep >/dev/null 2>&1 || true;
+      exit ${RV:-0}
+    artifacts:
+      name: "${CI_JOB_NAME}"
+      paths:
+      - logs/*
+      expire_in: 3 days
+      when: always
+    tags:
+    - must_specify_runner
+    except:
+    - tags
+    allow_failure: false
+    needs: [ py3-devel ]
+
+.docs_template: &DOCS_BUILD
+    stage: test
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+    script:
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - export TEST_TIMEOUT=$((20*60))
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - docker build --progress=plain
+                   -t ${DOCS_IMAGE_NAME}
+                   --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
+                   --build-arg "GIT_SHA=${CI_COMMIT_SHORT_SHA}"
+                   -f Dockerfile.docs .
+    - ( sleep $RUN_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data:ro
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             $(eval echo ${DOCS_IMAGE_NAME})
+             /bin/bash -exc "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
+      set +x;
+      pkill -HUP sleep || true;
+      test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
+    - docker cp "${CONTAINER_NAME}:/opt/transformerengine/docs/_build/html/." "html"
+    - docker rm -f ${CONTAINER_NAME}
+    - docker rmi ${DOCS_IMAGE_NAME}
+    artifacts:
+      name: "${CI_JOB_NAME}.${CI_PIPELINE_ID}"
+      paths:
+      - html/
+      expire_in: 1 month
+    tags:
+    - 1GPU
+    except:
+    - tags
+    allow_failure: false
+    needs: [ py3-devel ]
+
+gather:
+    stage: finalize
+    script:
+    - /bin/true
+    artifacts:
+      name: "${CI_PIPELINE_ID}"
+      paths:
+      - logs/*
+      - wheelhouse/*
+      expire_in: 1 month
+      when: always
+    when: manual
+    except:
+      refs:
+        - tags
+      variables:
+        - $API_LOGGING == "0"
+
+.manual_test_trigger: &MANUAL_TEST_TRIGGER
+    stage: trigger
+    script:
+    - export SCOPE1=${CI_JOB_NAME%% tests}; export SCOPE=${SCOPE1##Run all }
+    - docker pull ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler
+    - docker run --init --rm ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler ${CI_PIPELINE_ID} ${CI_PROJECT_PATH} ${SCOPE}
+    except:
+    - tags
+    when: manual
+
+.L0_test: &L0_TEST
+    stage: test
+    <<: *TEST_TEMPLATE
+
+.L1_test: &L1_TEST
+    stage: test
+    <<: *TEST_TEMPLATE
+    when: manual
+    allow_failure: true
+
+.L2_test: &L2_TEST
+    stage: test
+    <<: *TEST_TEMPLATE
+    when: manual
+    allow_failure: true
+
+.L3_test: &L3_TEST
+    stage: test
+    <<: *TEST_TEMPLATE
+    when: manual
+    allow_failure: true
+
+"Run all L1 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+"Run all L2 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+.P100_4GPU: &P100_4GPU
+    tags:
+    - P100
+    - 4GPU
+
+.V100_4GPU: &V100_4GPU
+    tags:
+    - V100
+    - 4GPU
+
+.V100_1GPU: &V100_1GPU
+    tags:
+    - V100
+    - 1GPU
+
+.V100_R410_8GPU: &V100_R410_8GPU
+    tags:
+    - V100
+    - R410
+    - 8GPU
+
+.TU102_R445_1GPU: &TU102_R445_1GPU
+    tags:
+    - TU102
+    - R445
+    - 1GPU
+
+.TU104_1GPU: &TU104_1GPU
+    tags:
+    - TU104
+    - 1GPU
+    only:
+    - /^.*-devel$/
+    - /^main$/
+
+.TitanXP_R384_2GPU: &TitanXP_R384_2GPU
+    tags:
+    - TitanXP
+    - R384
+    - 2GPU
+    only:
+    - /^.*-devel$/
+    - /^main$/
+
+.P40_R384_1GPU: &P40_R384_1GPU
+    tags:
+    - P40
+    - R384
+    - 1GPU
+    only:
+    - /^.*-devel$/
+    - /^main$/
+
+.A100_1GPU: &A100_1GPU
+    tags:
+    - A100
+    - 1GPU
+
+.A100_vGPU: &A100_vGPU
+    tags:
+    - A100-vGPU
+
+.A100_2GPU_P2P: &A100_2GPU_P2P
+    tags:
+    - A100
+    - 2GPU
+    - P2P
+
+.A102_1GPU: &A102_1GPU
+    tags:
+    - A102
+    - 1GPU
+
+.M40_R384_1GPU: &M40_R384_1GPU
+    tags:
+    - M40
+    - R384
+    - 1GPU
+    only:
+    - /^.*-devel$/
+    - /^main$/
+
+.DGX2_R410_16GPU: &DGX2_R410_16GPU
+    tags:
+    - V100
+    - R410
+    - 16GPU
+    only:
+    - /^.*-devel$/
+    - /^main$/
+
+######################################################
+##
+## Test definitions.
+##
+##   By convention, test names should be prefixed
+##   with "L0_" or "L1_" etc.
+##
+##   Normally qa/ will be a submodule that pulls in
+##   all of the stuff needed to run the tests into the
+##   *-devel images.
+##
+##   The CI script templates above expect each test to
+##   be defined in /opt/<project>/qa/<testname>/test.sh.
+##   This behavior is specified by the variables
+##   $TEST_WORK_DIR and $TEST_SCRIPT.  You can override
+##   either of those variables for a given test, but if
+##   you do, you have to override them both together,
+##   like this:
+##
+##   L0_mytest:
+##      <<: *L0_TEST
+##      variables:
+##        TEST_WORK_DIR: "/some/other/path"
+##        TEST_SCRIPT: "./test.sh"
+##
+######################################################
+
+L0_lint:
+    <<: *L0_TEST
+    tags:
+    - 1GPU
+
+L0_license:
+    <<: *L0_TEST
+    tags:
+    - 1GPU
+
+L0_unittest--V100_1GPU:
+    <<: *L0_TEST
+    <<: *V100_1GPU
+
+L0_unittest--A100_1GPU:
+    <<: *L0_TEST
+    <<: *A100_1GPU
+
+L0_unittest--TU102_R445_1GPU:
+    <<: *L0_TEST
+    <<: *TU102_R445_1GPU
+
+L0_cppunittest--V100_1GPU:
+    <<: *L0_TEST
+    <<: *V100_1GPU
+
+L0_cppunittest--A100_1GPU:
+    <<: *L0_TEST
+    <<: *A100_1GPU
+
+docs:
+    <<: *DOCS_BUILD
