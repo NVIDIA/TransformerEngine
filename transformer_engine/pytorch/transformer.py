@@ -271,10 +271,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.tp_size = tp_size
         self.sequence_parallel = (tp_size > 1) and sequence_parallel
 
-        projection_size = kv_channels * num_attention_heads
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
-        )
+        self.hidden_size_per_attention_head = kv_channels
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
 
         common_gemm_kwargs = {

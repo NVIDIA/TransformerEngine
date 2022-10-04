@@ -494,6 +494,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
         sequence_parallel: bool,
+        tensor_parallel: bool,
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         return_layernorm_output: bool,
@@ -609,6 +610,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ctx.is_first_microbatch = is_first_microbatch
         ctx.use_bias = use_bias
         ctx.sequence_parallel = sequence_parallel
+        ctx.tensor_parallel = tensor_parallel
         ctx.inp_shape = inp.shape
         ctx.parallel_mode = parallel_mode
         ctx.tp_group = tp_group
@@ -617,7 +619,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
-        elif parallel_mode == "row":
+        elif parallel_mode == "row" and tensor_parallel:
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
@@ -706,7 +708,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad, handle = reduce_scatter_along_first_dim(
                 dgrad, ctx.tp_group, async_op=True
             )
-        elif ctx.parallel_mode == "column":
+        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
             dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
         if ctx.fp8:
@@ -764,7 +766,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
         # Column Parallel Linear
-        if ctx.parallel_mode == "column" and handle is not None:
+        if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
             handle.wait()
 
         # LayerNorm gradient
@@ -793,6 +795,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1041,6 +1044,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.fuse_wgrad_accumulation,
             self.tp_group,
             self.sequence_parallel,
+            self.tp_size > 1,
             self.activation_dtype,
             self.parallel_mode,
             self.return_layernorm_output,
@@ -1083,6 +1087,7 @@ class _Linear(torch.autograd.Function):
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
         sequence_parallel: bool,
+        tensor_parallel: bool,
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
     ) -> torch.Tensor:
@@ -1184,6 +1189,7 @@ class _Linear(torch.autograd.Function):
         ctx.is_first_microbatch = is_first_microbatch
         ctx.use_bias = use_bias
         ctx.sequence_parallel = sequence_parallel
+        ctx.tensor_parallel = tensor_parallel
         ctx.inp_shape = inp.shape
         ctx.parallel_mode = parallel_mode
         ctx.tp_group = tp_group
@@ -1191,7 +1197,7 @@ class _Linear(torch.autograd.Function):
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
-        elif parallel_mode == "row":
+        elif parallel_mode == "row" and tensor_parallel:
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
@@ -1279,7 +1285,7 @@ class _Linear(torch.autograd.Function):
             dgrad, handle = reduce_scatter_along_first_dim(
                 dgrad, ctx.tp_group, async_op=True
             )
-        elif ctx.parallel_mode == "column":
+        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
             dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
         if ctx.fp8:
@@ -1329,7 +1335,7 @@ class _Linear(torch.autograd.Function):
             )
 
         # Column Parallel Linear
-        if ctx.parallel_mode == "column" and handle is not None:
+        if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
             handle.wait()
 
         if not ctx.use_bias:
@@ -1345,6 +1351,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape),
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1559,6 +1566,7 @@ class Linear(TransformerEngineBaseModule):
             self.fuse_wgrad_accumulation,
             self.tp_group,
             self.sequence_parallel,
+            self.tp_size > 1,
             self.activation_dtype,
             self.parallel_mode,
         )
@@ -1600,6 +1608,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
         sequence_parallel: bool,
+        tensor_parallel: bool,
         activation_dtype: torch.dtype,
         return_layernorm_output: bool,
         bias_gelu_nvfusion: bool,
@@ -1770,6 +1779,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ctx.is_first_microbatch = is_first_microbatch
         ctx.use_bias = use_bias
         ctx.sequence_parallel = sequence_parallel
+        ctx.tensor_parallel = tensor_parallel
         ctx.inp_shape = inp.shape
         ctx.tp_group = tp_group
         ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
@@ -1779,7 +1789,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # Row Parallel Linear
         if set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
-        elif set_parallel_mode:
+        elif set_parallel_mode and tensor_parallel:
             fc2_out, _ = allreduce(fc2_out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
@@ -1977,7 +1987,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_dgrad, handle = reduce_scatter_along_first_dim(
                 fc1_dgrad, ctx.tp_group, async_op=True
             )
-        elif ctx.set_parallel_mode:
+        elif ctx.set_parallel_mode and ctx.tensor_parallel:
             fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
 
         if ctx.fp8:
@@ -2040,7 +2050,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
 
         # Column Parallel Linear
-        if ctx.set_parallel_mode and handle is not None:
+        if ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
             handle.wait()
 
         # LayerNorm gradient
@@ -2073,6 +2083,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             fc2_bias_grad,
+            None,
             None,
             None,
             None,
@@ -2351,6 +2362,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.fuse_wgrad_accumulation,
             self.tp_group,
             self.sequence_parallel,
+            self.tp_size > 1,
             self.activation_dtype,
             self.return_layernorm_output,
             self.bias_gelu_nvfusion,
