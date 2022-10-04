@@ -374,3 +374,65 @@ def test_sanity_fused_qkv_params(dtype, bs, model):
     )
 
     _test_sanity_e2e(block, bs, dtype, config)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_with_emha(dtype, bs, model):
+    if dtype == torch.float32:
+        return
+
+    try:
+        from transformer_engine.pytorch import emha  # noqa: F401
+    except ImportError:
+        return
+    else:
+        if not (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability("cuda") >= (8, 0)
+        ):
+            return
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    block = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0.1,
+        attention_dropout=0.1,
+        kv_channels=config.embed,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        use_emha=True,
+    ).to(dtype=dtype, device="cuda")
+
+    te_inp_hidden_states = torch.randn(
+        config.seq_len,
+        bs,
+        config.hidden_size,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    with torch.no_grad():
+        te_inp_attn_mask = [0] + [config.seq_len for _ in range(bs)]
+        te_inp_attn_mask = torch.tensor(
+            te_inp_attn_mask, dtype=torch.int32, device="cuda"
+        )
+        te_inp_attn_mask = torch.cumsum(te_inp_attn_mask, dim=0)
+
+    with torch.cuda.amp.autocast(dtype=dtype):
+        te_out = block(te_inp_hidden_states, te_inp_attn_mask)
+        loss = te_out.mean()
+
+    assert te_out.dtype == dtype
+    loss.backward()
+    torch.cuda.synchronize()
