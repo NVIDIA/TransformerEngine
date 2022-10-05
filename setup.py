@@ -380,7 +380,6 @@ setup(
     ),
     description="Transformer acceleration library",
     ext_modules=ext_modules,
-    setup_requires=["pytest-runner"],
     cmdclass={"build_ext": TEBuildExtension},
     license_files=("LICENSE",),
 )
