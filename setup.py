@@ -21,6 +21,7 @@ path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
 
+
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
         [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
@@ -179,11 +180,10 @@ if framework in ("all", "pytorch"):
             },
             include_dirs=[
                 os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax"),
-                os.path.join(path, "transformer_engine/pytorch/csrc/emha")
+                os.path.join(path, "transformer_engine/pytorch/csrc/emha"),
             ],
         )
     )
-
 
     ext_modules.append(
         CUDAExtension(

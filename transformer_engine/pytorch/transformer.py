@@ -147,17 +147,17 @@ class CoreAttention(torch.nn.Module):
                 raise ValueError('`eMHA only supports "causal"')
             self.p_attention_dropout = attention_dropout
             self.delegate = EMHA(
-                    num_attention_heads,
-                    kv_channels,
-                    attention_dropout,
-                    layer_number,
-                    apply_query_key_layer_scaling,
-                    attention_softmax_in_fp32,
-                    attn_mask_type,
-                    tp_size,
-                    get_rng_state_tracker,
-                    sequence_parallel,
-                    )
+                num_attention_heads,
+                kv_channels,
+                attention_dropout,
+                layer_number,
+                apply_query_key_layer_scaling,
+                attention_softmax_in_fp32,
+                attn_mask_type,
+                tp_size,
+                get_rng_state_tracker,
+                sequence_parallel,
+            )
 
     def forward(
         self,
@@ -184,7 +184,7 @@ class CoreAttention(torch.nn.Module):
                 query_layer.size(0) == 2048
             ), "EMHA only supported for sequence length 2048."
 
-            return self.delegate(query_layer, key_layer, value_layer, attention_mask)
+            return self.delegate(query_layer, key_layer, value_layer)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(
