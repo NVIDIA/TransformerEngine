@@ -1,13 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include "relu_gemm.h"
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
 using ReluGemmKernel = typename ReluGemmUniversal<

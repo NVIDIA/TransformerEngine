@@ -1,11 +1,11 @@
-#pragma once
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+#pragma once
+
 
 #include <cutlass/gemm/device/gemm.h>
 #include <cutlass/gemm/device/gemm_universal.h>
@@ -14,7 +14,6 @@
 #include <cutlass/gemm/kernel/default_gemm_universal.h>
 #include <cutlass/numeric_types.h>
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
 inline __device__ uint32_t my_relu(uint32_t);

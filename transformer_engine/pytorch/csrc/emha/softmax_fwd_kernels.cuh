@@ -1,9 +1,10 @@
-#pragma once
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
+
+#pragma once
 
 #include "philox.h"
 #include "softmax.h"

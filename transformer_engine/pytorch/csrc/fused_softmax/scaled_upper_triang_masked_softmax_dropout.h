@@ -1,7 +1,7 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
 
 #ifndef TRANSFORMER_ENGINE_SCALED_UPPER_TRIANG_SOFTMAX_H_

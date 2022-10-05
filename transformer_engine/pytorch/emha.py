@@ -1,3 +1,7 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Efficient multi-head attention"""
 
 import math

@@ -1,8 +1,9 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
+
 #include "ln_utils.cuh"
 #include "softmax.h"
 #include "softmax_fwd_kernels.cuh"
