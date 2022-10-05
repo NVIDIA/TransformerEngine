@@ -21,6 +21,8 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.constants import AttnMaskTypes
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 
+EMHA_MASK_MODE = emha_C.MaskMode
+
 
 class ScaledUpperTriangMaskedSoftmaxDropout(torch.autograd.Function):
     """Fused softmax-dropout function"""
