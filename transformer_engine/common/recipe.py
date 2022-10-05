@@ -63,7 +63,7 @@ class DelayedScaling:
             Margin for the scaling factor computation.
     interval : int, default = 1
               Controls how often the scaling factor is recomputed.
-    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
     amax_history_len : int, default = 1
