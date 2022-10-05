@@ -140,14 +140,10 @@ struct ReluGemmUniversal {
       constexpr size_t N = Base::TransformedFragmentA::kElements;
       static_assert(N == Base::FragmentA::kElements);
       static_assert(N % 2 == 0);
-      //constexpr uint32_t zero = 0;
 
       uint32_t *tmp = reinterpret_cast<uint32_t *>(&dst_A);
 #pragma unroll
       for (int it = 0; it < N / 2; it++) {
-        // uint32_t &x = tmp[it];
-        // asm volatile("max.NaN.f16x2 %0, %1, %2;\n" : "=r"(x) : "r"(x),
-        // "r"(zero));
         tmp[it] = my_relu<ElementC>(tmp[it]);
       }
     }
@@ -162,10 +158,6 @@ struct ReluGemmUniversal {
       typename MmaCore::SmemIteratorA, Mma::MmaCore::kCacheOpA,
       typename Mma::IteratorB, typename MmaCore::SmemIteratorB,
       MmaCore::kCacheOpB, ElementAccumulator, LayoutC, MmaPolicy, Stages>;
-
-  // static_assert(std::is_same<MmaPolicy, typename MmaCore::MmaPolicy>::value);
-  // static_assert(std::is_same<ThreadblockMma, typename
-  // Mma::ThreadblockMma>::value);
 
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
       ThreadblockMma, typename DefaultGemmKernel::Epilogue, ThreadblockSwizzle>;

@@ -15,8 +15,7 @@ torch::Tensor fwd_cuda(
     torch::Tensor const& input,
     float scale_factor,
     float p_dropout,
-    c10::optional<at::Generator> gen_
-    );
+    c10::optional<at::Generator> gen_);
 
 torch::Tensor bwd_cuda(
     torch::Tensor const& output_grads,
@@ -24,7 +23,11 @@ torch::Tensor bwd_cuda(
     float scale_factor,
     float p_dropout);
 
-torch::Tensor fwd(torch::Tensor const& input, float scale_factor, float p_dropout, c10::optional<at::Generator> gen_) {
+torch::Tensor fwd(
+    torch::Tensor const& input,
+    float scale_factor,
+    float p_dropout,
+    c10::optional<at::Generator> gen_) {
   AT_ASSERTM(input.dim() == 3, "expected 3D tensor");
   AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
        (input.scalar_type() == at::ScalarType::BFloat16),
