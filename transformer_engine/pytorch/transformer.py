@@ -831,6 +831,9 @@ class TransformerLayer(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
+    use_emha: bool, default = 'False'
+             if set to `True`, efficient multihead-attention (EMHA) is used. This optimization
+             fuses softmax and dropout, which can result in upto 30% e2e speedup.
     """
 
     def __init__(
