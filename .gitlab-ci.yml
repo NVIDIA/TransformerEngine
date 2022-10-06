@@ -30,7 +30,7 @@ stages:
 before_script:
     - export PYVER=3.8   && echo "${PYVER}"
     - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
-    - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}
+    - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
     - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
