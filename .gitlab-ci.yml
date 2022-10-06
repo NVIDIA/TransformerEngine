@@ -29,6 +29,7 @@ stages:
 before_script:
     - export PYVER=3.8   && echo "${PYVER}"
     - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
+    - export GH_BRANCH=${GH_BRANCH:-main}
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
     - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
@@ -43,7 +44,113 @@ before_script:
     - export ORIGIN1="${CI_REPOSITORY_URL##*@}"
     - export ORIGIN_SSH=ssh://git@${ORIGIN1/\//:12051\/}                                           && echo "${ORIGIN_SSH}"
     - export ORIGIN_HTTPS=https://${ORIGIN1}                                                       && echo "${ORIGIN_HTTPS}"
+    - export GITHUB_REPO="https://github.com/NVIDIA/TransformerEngine.git"                         && echo "${GITHUB_REPO}"
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+
+.create_branch_hidden: &CREATE_BRANCH
+    stage: create branch
+    tags: 
+      - vm-builder
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
+    script:
+    - export CI_TIMESTAMP=$(date +%Y%m%d)                                                          && echo "${CI_TIMESTAMP}"
+    - export REPO="${ORIGIN1/${CI_PROJECT_NAME}/${CI_JOB_NAME}}"
+    - git config --global user.name "gitlab-runner"
+    - git config --global user.email "gitlab-runner@${REPO%%/*}"
+    - git config --global push.default simple
+    - git remote -v
+    - git remote add github ${GITHUB_REPO}
+    - git fetch github
+    - export GIT_SHA=$(git show-ref --hash github/${GH_BRANCH})                                    && echo "${GIT_SHA}"
+    - git rebase --abort || true
+    - git am --abort || true
+    - git merge --abort || true
+    - git clean -f
+    # sometimes HEAD is not what we think is so use explicitly CI_COMMIT_SHA
+    - git reset --hard ${CI_COMMIT_SHA}
+    # to avoid conflicts during rebase squash everything into one commit
+    - git reset $(git commit-tree HEAD^{tree} -m "CI one commit squash")
+    - git rebase github/${GH_BRANCH}
+    - BUILD_BRANCH_NAME=test
+    - test ${RELEASE} && BUILD_BRANCH_NAME=build
+    - test ${GH_NIGHTLY} && BUILD_BRANCH_NAME=nightly_${CI_TIMESTAMP}
+    - test ${GH_WEEKLY} && BUILD_BRANCH_NAME=weekly_${CI_TIMESTAMP}
+    - test ${GH_PR} && BUILD_BRANCH_NAME=pr_${GH_PR}
+    - test ${GL_MR} && BUILD_BRANCH_NAME=pr_gl${GL_MR}
+    - test ${GL_MR_BRANCH} && BUILD_BRANCH_NAME=pr_gl_${GL_MR_BRANCH}
+    - BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${GH_BRANCH}
+    - export BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${CI_PIPELINE_ID}_CI  && echo "${BUILD_BRANCH_NAME}"
+    - git branch -D ${BUILD_BRANCH_NAME} || true
+    - test ${GH_PR} &&
+      FETCH_BRANCH=fetch_${GH_PR} &&
+      git remote -v &&
+      (git remote remove github || true) &&
+      (git branch -D ${FETCH_BRANCH} || true) &&
+      git remote add github ${GITHUB_REPO} &&
+      git fetch github pull/${GH_PR}/head:${FETCH_BRANCH} &&
+      git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git checkout -b ${BUILD_BRANCH_NAME} &&
+      git remote remove github &&
+      git branch -D ${FETCH_BRANCH} &&
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    - test ${GL_MR} &&
+      FETCH_BRANCH=fetch_gl${GL_MR} &&
+      git remote -v &&
+      (git branch -D ${FETCH_BRANCH} || true) &&
+      git fetch ${ORIGIN_SSH} merge-requests/${GL_MR}/head:${FETCH_BRANCH} &&
+      git merge ${FETCH_BRANCH} -m "Merged MR gitlab${GL_MR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
+      git checkout -b ${BUILD_BRANCH_NAME} &&
+      git branch -D ${FETCH_BRANCH} &&
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    - echo "test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} || git checkout -b ${BUILD_BRANCH_NAME} && git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force"
+    - test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} || git checkout -b ${BUILD_BRANCH_NAME} && git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    # version is available only after checkout so provide it here only once
+    - export CODE_VERSION=$(cat VERSION)                                                           && echo "${DALI_VERSION}"
+    - tmp_file="${BUILD_BRANCH_NAME}_output"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --form token=${CI_JOB_TOKEN} \
+            --form ref=${BUILD_BRANCH_NAME} \
+            --form "variables[GH_BRANCH]=${GH_BRANCH}" \
+            --form "variables[GIT_SHA]=${GIT_SHA}" \
+            --form "variables[GH_PR]=${GH_PR}" \
+            --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[GH_NIGHTLY]=${GH_NIGHTLY}" \
+            --form "variables[GH_WEEKLY]=${GH_WEEKLY}" \
+            --form "variables[RELEASE]=${RELEASE}" \
+            --form "variables[PUBLISH_DOCS]=${PUBLISH_DOCS}" \
+            --form "variables[PUBLISH_MAIN_DOCS]=${PUBLISH_MAIN_DOCS}" \
+            --form "variables[PUBLISH_RELEASE_DOCS]=${PUBLISH_RELEASE_DOCS}" \
+            --form "variables[PUBLISH_WHL]=${PUBLISH_WHL}" \
+            --form "variables[PUBLISH_RELEASE_WHL]=${PUBLISH_RELEASE_WHL}" \
+            --form "variables[PUBLISH_DEV_WHL]=${PUBLISH_DEV_WHL}" \
+            --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
+            --form "variables[CODE_VERSION]=${CODE_VERSION}" \
+            https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
+      done
+    - exit 1
+
+create_branch:
+    <<: *CREATE_BRANCH
+    only:
+    - web
+    - schedules
+    - triggers
+    except:
+    - tags
+    tags:
+        - vm-builder
+
 
 .base_template : &BASE
     variables:
@@ -61,6 +168,8 @@ before_script:
     - tags
     tags:
     - builder
+    only:
+    - pipelines
 
 py3-base:
     stage: build base
@@ -80,6 +189,8 @@ py3-base:
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
     except:
     - tags
+    only:
+    - pipelines
 
 py3-devel:
     stage: build devel
@@ -163,6 +274,8 @@ py3-stage:
     - tags
     allow_failure: false
     needs: [ py3-devel ]
+    only:
+    - pipelines
 
 .docs_template: &DOCS_BUILD
     stage: test
@@ -207,6 +320,8 @@ py3-stage:
     - tags
     allow_failure: false
     needs: [ py3-devel ]
+    only:
+    - pipelines
 
 gather:
     stage: finalize
