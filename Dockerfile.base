@@ -1,12 +1,17 @@
 ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
 
 FROM scratch as transformerengine
-COPY README.rst .
-COPY transformer_engine/ transformer_engine/
 COPY 3rdparty/ 3rdparty/
 COPY docs/ docs/
-COPY setup.py .
+COPY examples/ examples/
+COPY qa/ qa/
 COPY tests/ tests/
+COPY transformer_engine/ transformer_engine/
+COPY CONTRIBUTING.rst .
+COPY LICENSE .
+COPY README.rst .
+COPY setup.py .
+COPY VERSION .
 
 FROM ${FROM_IMAGE_NAME}
 

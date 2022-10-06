@@ -1,7 +1,6 @@
 ARG BASE_IMAGE
 
 FROM ${BASE_IMAGE}
-COPY qa/ /opt/transformerengine/qa/
 COPY qa/L0_lint/pylintrc /opt/transformerengine/
 COPY qa/L0_lint/CPPLINT.cfg /opt/transformerengine/
 COPY .git/ /opt/transformerengine/.git/
