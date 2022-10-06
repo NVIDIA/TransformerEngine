@@ -20,6 +20,7 @@ variables:
 #########################################################
 
 stages:
+    - create branch
     - build base
     - build devel
     - trigger
