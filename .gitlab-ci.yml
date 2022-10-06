@@ -351,6 +351,8 @@ gather:
     except:
     - tags
     when: manual
+    only:
+    - pipelines
 
 .L0_test: &L0_TEST
     stage: test
