@@ -1,0 +1,22 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger C++ lint test on GitHub
+name: 'Lint test'
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  cpplint:
+    name: C++
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Lint
+        run: |
+          cp qa/L0_lint/CPPLINT.cfg . && \
+          export CPP_ONLY=1 && \
+          export TE_PATH=. && \
+          bash ./qa/L0_lint/test.sh
