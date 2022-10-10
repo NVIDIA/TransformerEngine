@@ -327,7 +327,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         just in case. The autocast exit will pick up the most recent.
         """
 
-        if self.fp8 and torch.is_grad_enabled() and self.training:
+        if (
+            self.fp8
+            and torch.is_grad_enabled()
+            and self.training
+            and self.fp8_meta["recipe"].reduce_amax
+        ):
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 global_amax_reduction,
@@ -368,7 +373,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8:
             return
 
-        if fp8_meta["first_module"]:
+        if fp8_meta["first_module"] and fp8_meta["recipe"].reduce_amax:
             global_amax_reduction(
                 fp8_meta, reduce_amax_across_tp_group, tp_group, forward=False
             )

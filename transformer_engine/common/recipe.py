@@ -98,6 +98,9 @@ class DelayedScaling:
     override_linear_precision: Tuple(bool, bool, bool), default=(False, False, False)
                               Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
                               GEMMs (respectively) in higher precision when using FP8.
+    reduce_amax: bool, default = `True`
+                If set to `True`, the `amax` value for fp8 tensors is reduced across the given
+                `fp8_group` using the `fp8_autocast` API after every iteration.
 
     Notes
     -----
@@ -121,6 +124,7 @@ class DelayedScaling:
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "most_recent"
     override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
+    reduce_amax: bool = True
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
