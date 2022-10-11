@@ -99,8 +99,13 @@ class DelayedScaling:
                               Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
                               GEMMs (respectively) in higher precision when using FP8.
     reduce_amax: bool, default = `True`
-                If set to `True`, the `amax` value for fp8 tensors is reduced across the given
-                `fp8_group` using the `fp8_autocast` API after every iteration.
+                By default, if `torch.distributed` is initialized, the `amax` value for fp8
+                tensors is reduced across the specified `fp8_group` using the `fp8_autocast`
+                API after every iteration. This keeps the amaxes and scaling factors synced
+                across the given distributed group. If set to `False`, this reduction is
+                skipped and every GPU maintains localized amax and scaling factors. To ensure
+                results are numerically identical across checkpointing boundaries, all ranks
+                must checkpoint in order to store the local tensors.
 
     Notes
     -----
