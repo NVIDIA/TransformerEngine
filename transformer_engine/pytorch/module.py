@@ -147,10 +147,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state.append(self.fp8_meta["scaling_bwd"].amax_history)
             state.append(get_global_fp8_buffer())
             state.append(self.fp8_meta["update_amax_and_scale_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_bwd"])
-            state.append(self.fp8_meta["autocast_id_fwd"])
-            state.append(self.fp8_meta["autocast_id_bwd"])
+
+            # Store extra items for amax reduction
+            if self.fp8_meta["recipe"].reduce_amax:
+                state.append(self.fp8_meta["global_fp8_buffer_pos_fwd"])
+                state.append(self.fp8_meta["global_fp8_buffer_pos_bwd"])
+                state.append(self.fp8_meta["autocast_id_fwd"])
+                state.append(self.fp8_meta["autocast_id_bwd"])
+
             return state
         return None
 
@@ -180,10 +184,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Restore global FP8 buffer state.
         set_global_fp8_buffer(state[4])
         self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
-        self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
-        self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
-        self.fp8_meta["autocast_id_fwd"] = state[8]
-        self.fp8_meta["autocast_id_bwd"] = state[9]
+
+        # Load extra items for amax reduction
+        if len(state) > 6:
+            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
+            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
+            self.fp8_meta["autocast_id_fwd"] = state[8]
+            self.fp8_meta["autocast_id_bwd"] = state[9]
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -300,22 +307,25 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_init(num_gemms=num_gemms)
         self.set_fp8_weights()
 
+        # Previous iteration was grad_enabled
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            # Previous iteration was grad_enabled
-            copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-            amax_and_scale_update(self.fp8_meta, True)
-            set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+            if self.fp8_meta["recipe"].reduce_amax:
+                copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                amax_and_scale_update(self.fp8_meta, True)
+                set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+            else:
+                amax_and_scale_update(self.fp8_meta, True)
 
         if self.fp8 and torch.is_grad_enabled() and self.training:
-            self.fp8_meta["first_module"] = is_first_fp8_module()
-
-            if self.fp8_meta["first_module"]:
-                self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-                set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
-            else:
-                self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
-
-            add_amax_to_global_buffer(self.fp8_meta, forward=True)
+            # Setup for amax reduction
+            if self.fp8_meta["recipe"].reduce_amax:
+                self.fp8_meta["first_module"] = is_first_fp8_module()
+                if self.fp8_meta["first_module"]:
+                    self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
+                    set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                else:
+                    self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                add_amax_to_global_buffer(self.fp8_meta, forward=True)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
@@ -349,6 +359,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8:
             return
 
+        # Update amax and scale; Skip all setup for global amax reduction
+        if not fp8_meta["recipe"].reduce_amax:
+            amax_and_scale_update(fp8_meta, False)
+            return
+
         # From previous iteration
         copy_amax_from_global_buffer(fp8_meta, forward=False)
         amax_and_scale_update(fp8_meta, False)
@@ -370,10 +385,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         tp_group: Union[dist_group_type, None],
     ) -> None:
         """Checks and prep for BWD."""
-        if not fp8:
+        if not fp8 or not fp8_meta["recipe"].reduce_amax:
             return
 
-        if fp8_meta["first_module"] and fp8_meta["recipe"].reduce_amax:
+        if fp8_meta["first_module"]:
             global_amax_reduction(
                 fp8_meta, reduce_amax_across_tp_group, tp_group, forward=False
             )
