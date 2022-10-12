@@ -171,4 +171,8 @@ void fillUniform(const Tensor &t) {
   t.from_cpu();
 }
 
+bool isFp8Type(DType type) {
+    return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2;
+}
+
 }  // namespace test
