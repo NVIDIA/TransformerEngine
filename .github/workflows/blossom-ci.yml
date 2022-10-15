@@ -22,14 +22,6 @@ jobs:
     runs-on: blossom
     outputs:
       args: ${{ env.args }}
-
-    # This job only runs for pull request comments
-    # The check will not scale, need to change it to
-    # something more general in the future.
-    if: |
-         (contains( 'ptrendx,', format('{0},', github.actor)) ||
-         contains( 'ksivamani,', format('{0},', github.actor))) &&
-         github.event.comment.body == '/blossom-ci'
     steps:
       - name: Check if comment is issued by authorized person
         run: blossom-ci
