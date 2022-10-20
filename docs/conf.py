@@ -31,8 +31,31 @@ else:
 project = u'Transformer Engine'
 copyright = u'{}, NVIDIA CORPORATION & AFFILIATES. All rights reserved.'.format(copyright_year)
 author = u'NVIDIA CORPORATION & AFFILIATES'
-version = te_version
-release = version
+
+git_sha = os.getenv("GIT_SHA")
+
+if not git_sha:
+    try:
+        git_sha = subprocess.check_output(["git", "log", "--pretty=format:'%h'", "-n1"]).decode('ascii').replace("'","").strip()
+    except:
+        git_sha = u'0000000'
+
+git_sha = git_sha[:7] if len(git_sha) > 7 else git_sha
+
+version = str(te_version + u"-" + git_sha)
+release = te_version
+
+# hack: version is used for html creation, so put the version picker
+# link here as well:
+option_on = " selected"
+option_off = ""
+release_opt = option_on
+option_nr = 0
+version = version + """<br/>
+Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
+    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>
+    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/archives/index.html">Older releases</option>
+</select>""".format(option_nr, release_opt)
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
