@@ -269,4 +269,26 @@ void dispatch_bgrad_dgelu_cast_transpose_fusion(
 );
 
 
+void dispatch_multi_cast_transpose(
+        std::vector<void*> input_dptr_list,                     // i
+        const std::vector<std::vector<size_t>>& input_shape_list,
+        const std::vector<transformer_engine::DType>& input_type_list,
+        std::vector<void*> scale_dptr_list,                     // i
+        const std::vector<std::vector<size_t>>& scale_shape_list,
+        const std::vector<transformer_engine::DType>& scale_type_list,
+        std::vector<void*> cast_output_dptr_list,               // o
+        const std::vector<std::vector<size_t>>& cast_output_shape_list,
+        const std::vector<transformer_engine::DType>& cast_output_type_list,
+        std::vector<void*> transposed_output_dptr_list,         // o
+        const std::vector<std::vector<size_t>>& transposed_output_shape_list,
+        const std::vector<transformer_engine::DType>& transposed_output_type_list,
+        std::vector<void*> amax_dptr_list,                      // o
+        const std::vector<std::vector<size_t>>& amax_shape_list,
+        const std::vector<transformer_engine::DType>& amax_type_list,
+        std::vector<void*> scale_inv_dptr_list,                 // o
+        const std::vector<std::vector<size_t>>& scale_inv_shape_list,
+        const std::vector<transformer_engine::DType>& scale_inv_type_list
+);
+
+
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
