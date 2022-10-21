@@ -2,8 +2,11 @@
 #
 # See LICENSE for license information.
 
-import importlib
+try:
+    import transformer_engine.pytorch
+    te_imported = True
+except:
+    te_imported = False
 
-te = importlib.util.find_spec('transformer_engine.pytorch')
-assert te is not None, 'transformer_engine import failed'
+assert te_imported, 'transformer_engine import failed'
 print("OK")
