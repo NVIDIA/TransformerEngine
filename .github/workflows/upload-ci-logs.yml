@@ -1,0 +1,52 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger ci on hybrid infra (github + self hosted runner)
+name: Blossom-CI Logs
+on:
+  workflow_dispatch:
+      inputs:
+          platform:
+            description: 'runs-on argument'
+            required: false
+          args:
+            description: 'argument'
+            required: false
+          job_name:
+            description: 'name of the job'
+            required: true
+          commit_sha:
+            description: 'SHA of the commit that was tested.'
+            required: true
+          result:
+            description: 'Job result'
+            required: true
+run-name: PR ${{ fromJson(github.event.inputs.args).pr }} - ${{ inputs.job_name }}
+jobs:
+  Upload-Log:
+    name: Upload log
+    runs-on: blossom
+    steps:
+      - name: Log
+        run: blossom-ci
+        env:
+          OPERATION: 'POST-PROCESSING'
+          CI_SERVER: ${{ secrets.CI_SERVER }}
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  status_update:
+    name: Update commit status
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    needs: [Upload-Log]
+    if: ${{ always() }}
+    steps:
+      - name: Set status
+        run: |
+          curl \
+          -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          https://api.github.com/repos/${{ github.repository }}/statuses/${{ inputs.commit_sha }} \
+          -d "{\"state\":\"${{ inputs.result }}\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"description\":\"\",\"context\":\"blossom-ci/${{ inputs.job_name }}\"}"
