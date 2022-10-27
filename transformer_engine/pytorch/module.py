@@ -1251,92 +1251,93 @@ class _Linear(torch.autograd.Function):
             )
         else:
             accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
+        if inputmat.requires_grad:
+            if ctx.fp8:
+                fp8_dtype_forward = get_fp8_te_dtype(
+                    ctx.fp8_meta["recipe"], fprop_tensor=True
+                )
+                fp8_dtype_backward = get_fp8_te_dtype(
+                    ctx.fp8_meta["recipe"], fprop_tensor=False
+                )
 
-        if ctx.fp8:
-            fp8_dtype_forward = get_fp8_te_dtype(
-                ctx.fp8_meta["recipe"], fprop_tensor=True
-            )
-            fp8_dtype_backward = get_fp8_te_dtype(
-                ctx.fp8_meta["recipe"], fprop_tensor=False
-            )
-
-            # DGRAD
-            dgrad = fp8_gemm(
-                weight_t_fp8,
-                fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
-                fp8_dtype_forward,
-                grad_output_c,
-                ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
-                fp8_dtype_backward,
-                ctx.activation_dtype,
-                get_workspace(),
-                use_split_accumulator=_2X_ACC_DGRAD,
-            )
-        else:
-            # DGRAD
-            dgrad, _, _ = gemm(
-                weight,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NN",
-                grad=True,
-            )
-
-        # Overlap dgrad-RS/AR with wgrad
-        if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-            handle.wait()
-            dgrad, handle = reduce_scatter_along_first_dim(
-                dgrad, ctx.tp_group, async_op=True
-            )
-        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-            dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
-
-        if ctx.fp8:
-            # WGRAD
-            if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                wgrad = fp8_gemm(
-                    inputmat_t_total,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
+                # DGRAD
+                dgrad = fp8_gemm(
+                    weight_t_fp8,
+                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
                     fp8_dtype_forward,
-                    grad_output_t,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[
-                        tex.FP8BwdTensors.GRAD_OUTPUT1
-                    ],
+                    grad_output_c,
+                    ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
                     fp8_dtype_backward,
                     ctx.activation_dtype,
                     get_workspace(),
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
+                    use_split_accumulator=_2X_ACC_DGRAD,
                 )
             else:
-                wgrad, _, _ = gemm(
+                # DGRAD
+                dgrad, _, _ = gemm(
+                    weight,
+                    grad_output,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    layout="NN",
+                    grad=True,
+                )
+
+            # Overlap dgrad-RS/AR with wgrad
+            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                handle.wait()
+                dgrad, handle = reduce_scatter_along_first_dim(
+                    dgrad, ctx.tp_group, async_op=True
+                )
+            elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+                dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+
+        if weight.requires_grad or ctx.fuse_wgrad_accumulation:
+            if ctx.fp8:
+                # WGRAD
+                if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                    wgrad = fp8_gemm(
+                        inputmat_t_total,
+                        fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
+                        fp8_dtype_forward,
+                        grad_output_t,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv[
+                            tex.FP8BwdTensors.GRAD_OUTPUT1
+                        ],
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
+                else:
+                    wgrad, _, _ = gemm(
+                        inputmat_total,
+                        grad_output,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    )
+            else:
+                # WGRAD
+                wgrad, grad_bias, _ = gemm(
                     inputmat_total,
                     grad_output,
                     ctx.activation_dtype,
                     get_workspace(),
                     layout="NT",
                     grad=True,
+                    use_bias=ctx.use_bias,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     fp32_output=ctx.fuse_wgrad_accumulation,
                     out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-        else:
-            # WGRAD
-            wgrad, grad_bias, _ = gemm(
-                inputmat_total,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_bias,
-                accumulate=accumulate_wgrad_into_param_main_grad,
-                fp32_output=ctx.fuse_wgrad_accumulation,
-                out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-            )
 
         # Column Parallel Linear
         if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
@@ -1350,7 +1351,7 @@ class _Linear(torch.autograd.Function):
         )
 
         return (
-            wgrad,
+            wgrad if weight.requires_grad or ctx.fuse_wgrad_accumulation else None,
             None,
             None,
             dgrad.view(ctx.inp_shape),
