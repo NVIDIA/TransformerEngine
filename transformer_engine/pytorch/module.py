@@ -159,7 +159,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
         num_fp8_tensors = (
-            self.fp8_meta["num_gemms"] * 2 if fwd else self.fp8_meta["num_gemms"]
+            self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
         )
 
         self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
