@@ -69,7 +69,7 @@ void ln_fwd_tuned_kernel(FwdParams params) {
 
     constexpr compute_t rn = 1.f / compute_t(Ktraits::COLS);
 
-    compute_t scale;
+    compute_t scale = 1.f;
     if (params.fp8_out) {
         scale = *reinterpret_cast<compute_t*>(params.scale);
     }

@@ -39,7 +39,6 @@ extern "C" {
  *  \param[out]    barrier             Barrier tensor.
  *  \param[in,out] amax                AMAX value of the output tensor.
  *  \param[out]    scale_inv           Inverse of the output's scaling factor.
- *  \param[in]     fp8_out             Whether to output FP8.
  */
 void nvte_layernorm_fwd(const NVTETensor x,
                         const NVTETensor gamma,
@@ -54,8 +53,7 @@ void nvte_layernorm_fwd(const NVTETensor x,
                         NVTETensor workspace,
                         NVTETensor barrier,
                         NVTETensor amax,
-                        NVTETensor scale_inv,
-                        bool fp8_out);
+                        NVTETensor scale_inv);
 
 
 /*! \brief Compute backward of LayerNorm.
