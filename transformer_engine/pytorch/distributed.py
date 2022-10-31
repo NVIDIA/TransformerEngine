@@ -3,19 +3,25 @@
 # See LICENSE for license information.
 
 """Methods needed for distributed training (DP/TP)."""
-from typing import Union, Optional, Callable, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Union, Optional, Callable, Tuple
+
 import torch
 from torch.cuda import _lazy_call
 from torch.utils.checkpoint import detach_variable
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
+from .fp8 import is_fp8_enabled
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "tensor_model_parallel": False,
     "partition_dim": -1,
     "partition_stride": 1,
 }
+
+_FP8_ACTIVATION_RECOMPUTE_ENABLED = False
+_FP8_ACTIVATION_RECOMPUTE_PHASE = False
 
 
 def _set_cuda_rng_state(new_state: torch.Tensor, device: Union[int, str] = -1) -> None:
@@ -125,6 +131,35 @@ def gather_split_1d_tensor(
     return gathered
 
 
+@contextmanager
+def activation_recompute_forward(
+    activation_recompute: bool = False,
+    recompute_phase: bool = False,
+) -> None:
+    """Context manager used to control the forward runtime behavior when
+    executed under the `CheckpointFunction` function. For running FP8, the
+    first forward execution will be as is ... TODO(ksivamani)
+    """
+    global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
+    try:
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = activation_recompute and is_fp8_enabled()
+        _FP8_ACTIVATION_RECOMPUTE_PHASE = recompute_phase
+        yield
+    finally:
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = False
+        _FP8_ACTIVATION_RECOMPUTE_PHASE = False
+
+
+def is_fp8_activation_recompute_enabled() -> bool:
+    """Return global boolean"""
+    return _FP8_ACTIVATION_RECOMPUTE_ENABLED
+
+
+def in_fp8_activation_recompute_phase() -> bool:
+    """Return global boolean"""
+    return _FP8_ACTIVATION_RECOMPUTE_PHASE
+
+
 class CheckpointFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
     two main changes:
@@ -140,6 +175,7 @@ class CheckpointFunction(torch.autograd.Function):
         distribute_saved_activations: bool,
         get_cuda_rng_tracker: Callable,
         tp_group: dist_group_type,
+        kwargs: Dict[str, Any],
         *args: Tuple[torch.Tensor, ...],
     ) -> Tuple[torch.Tensor, ...]:
         ctx.run_function = run_function
@@ -151,7 +187,10 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         with torch.no_grad():
-            outputs = run_function(*args)
+            with activation_recompute_forward(
+                activation_recompute=True, recompute_phase=False
+            ):
+                outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
         # the chunk corresponding to the current rank.
@@ -168,6 +207,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.save_for_backward(*args)
         ctx.get_cuda_rng_tracker = get_cuda_rng_tracker
         ctx.tp_group = tp_group
+        ctx.kwargs = kwargs
 
         return outputs
 
@@ -204,7 +244,10 @@ class CheckpointFunction(torch.autograd.Function):
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad():
-            outputs = ctx.run_function(*detached_inputs)
+            with activation_recompute_forward(
+                activation_recompute=True, recompute_phase=True
+            ):
+                outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
@@ -218,7 +261,7 @@ class CheckpointFunction(torch.autograd.Function):
             inp.grad if isinstance(inp, torch.Tensor) else inp
             for inp in detached_inputs
         )
-        return (None, None, None, None) + grads
+        return (None, None, None, None, None) + grads
 
 
 def checkpoint(
@@ -227,11 +270,17 @@ def checkpoint(
     get_cuda_rng_tracker: Callable,
     tp_group: dist_group_type,
     *args: Tuple[torch.Tensor, ...],
+    **kwargs: Dict[str, Any],
 ) -> Tuple[torch.Tensor, ...]:
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
     return CheckpointFunction.apply(
-        function, distribute_saved_activations, get_cuda_rng_tracker, tp_group, *args
+        function,
+        distribute_saved_activations,
+        get_cuda_rng_tracker,
+        tp_group,
+        kwargs,
+        *args,
     )
 
 
