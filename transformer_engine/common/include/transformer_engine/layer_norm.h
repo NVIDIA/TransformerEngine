@@ -39,6 +39,7 @@ extern "C" {
  *  \param[out]    barrier             Barrier tensor.
  *  \param[in,out] amax                AMAX value of the output tensor.
  *  \param[out]    scale_inv           Inverse of the output's scaling factor.
+ *  \param[in]     fp8_out             Whether to output FP8.
  */
 void nvte_layernorm_fwd(const NVTETensor x,
                         const NVTETensor gamma,
@@ -53,7 +54,8 @@ void nvte_layernorm_fwd(const NVTETensor x,
                         NVTETensor workspace,
                         NVTETensor barrier,
                         NVTETensor amax,
-                        NVTETensor scale_inv);
+                        NVTETensor scale_inv,
+                        bool fp8_out);
 
 
 /*! \brief Compute backward of LayerNorm.
@@ -93,6 +95,33 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
                         const int multiprocessorCount,
                         NVTETensor workspace,
                         NVTETensor barrier);
+
+void nvte_rmsnorm_fwd(const NVTETensor x,         // Nxhidden_size
+                      const NVTETensor gamma,     // hidden_size
+                      const NVTETensor scale,     // 1
+                      const float epsilon,
+                      NVTETensor z,
+                      NVTETensor rsigma,
+                      cudaStream_t stream,
+                      const int multiprocessorCount,
+                      NVTETensor workspace,
+                      NVTETensor barrier,
+                      NVTETensor amax,
+                      NVTETensor scale_inv,
+                      bool fp8_out);
+
+void nvte_rmsnorm_bwd(const NVTETensor dz,        // Nxhidden_size
+                      const NVTETensor x,         // Nxhidden_size
+                      const NVTETensor rsigma,    // N, FP32!
+                      const NVTETensor gamma,     // hidden_size
+                      NVTETensor dx,
+                      NVTETensor dgamma,
+                      NVTETensor dgamma_part,
+                      cudaStream_t stream,
+                      const int multiprocessorCount,
+                      NVTETensor workspace,
+                      NVTETensor barrier
+);
 
 #ifdef __cplusplus
 }  // extern "C"

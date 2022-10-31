@@ -96,6 +96,89 @@ constexpr uint32_t THREADS_PER_WARP = 32;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // NOLINTEND
 
+// NOLINTBEGIN
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define REGISTER_RMSNORM_FWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,               \
+                              CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG)                       \
+    void rmsnorm_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                  \
+            LaunchParams<FwdParams> &launch_params,                                                \
+            const bool configure_params) {                                                         \
+        launch_rmsnorm_tuned_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, CTAS_PER_ROW,     \
+        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
+            launch_params, configure_params);                                                      \
+    }                                                                                              \
+    static RMSNormFwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                       \
+           reg_rmsnorm_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                \
+        rmsnorm_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+#define REGISTER_RMSNORM_FWD_GENERAL_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,             \
+                              WARPS_M, WARPS_N, BYTES_PER_LDG)                                     \
+    void rmsnorm_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                \
+            LaunchParams<FwdParams> &launch_params,                                                \
+            const bool configure_params) {                                                         \
+        launch_rmsnorm_general_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                 \
+        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
+            launch_params, configure_params);                                                      \
+    }                                                                                              \
+    static RMSNormFwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                     \
+           reg_rmsnorm_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(              \
+        rmsnorm_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// NOLINTEND
+
+// NOLINTBEGIN
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define REGISTER_RMSNORM_BWD_TUNED_LAUNCHER(                                                       \
+    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG,        \
+                                                                BYTES_PER_LDG_FINALIZE)            \
+    void rmsnorm_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                  \
+            LaunchParams<BwdParams>                                                                \
+            &launch_params,                                                                        \
+            const bool configure_params) {                                                         \
+        launch_rmsnorm_tuned_<WTYPE,                                                               \
+                ITYPE,                                                                             \
+                OTYPE,                                                                             \
+                CTYPE,                                                                             \
+                uint32_t,                                                                          \
+                HIDDEN_SIZE,                                                                       \
+                CTAS_PER_ROW,                                                                      \
+                WARPS_M,                                                                           \
+                WARPS_N,                                                                           \
+                BYTES_PER_LDG,                                                                     \
+                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
+    }                                                                                              \
+    static RMSNormBwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                       \
+                reg_rmsnorm_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(           \
+                rmsnorm_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+#define REGISTER_RMSNORM_BWD_GENERAL_LAUNCHER(                                                     \
+    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, BYTES_PER_LDG,                      \
+                                                                BYTES_PER_LDG_FINALIZE)            \
+    void rmsnorm_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                \
+            LaunchParams<BwdParams>                                                                \
+            &launch_params,                                                                        \
+            const bool configure_params) {                                                         \
+        launch_rmsnorm_general_<WTYPE,                                                             \
+                ITYPE,                                                                             \
+                OTYPE,                                                                             \
+                CTYPE,                                                                             \
+                uint32_t,                                                                          \
+                HIDDEN_SIZE,                                                                       \
+                WARPS_M,                                                                           \
+                WARPS_N,                                                                           \
+                BYTES_PER_LDG,                                                                     \
+                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
+    }                                                                                              \
+    static RMSNormBwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                     \
+                reg_rmsnorm_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(         \
+                rmsnorm_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// NOLINTEND
+
 inline __device__ float2 operator+(const float2 & a, const float2 & b) {  // NOLINT(*)
     return {a.x + b.x, a.y + b.y};
 }

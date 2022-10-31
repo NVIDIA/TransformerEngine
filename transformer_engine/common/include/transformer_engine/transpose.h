@@ -115,6 +115,15 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      NVTETensor workspace,
                                      cudaStream_t stream);
 
+void nvte_cast_transpose_dgated_gelu(const NVTETensor input,
+                                     const NVTETensor gated_gelu_input,
+                                     const NVTETensor scale,
+                                     NVTETensor cast_output,
+                                     NVTETensor transposed_output,
+                                     NVTETensor amax,
+                                     NVTETensor scale_inv,
+                                     cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -307,7 +307,8 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
             rsigma.data_ptr(), {N}, DType::kFloat32,
             amax.data_ptr(), {1}, DType::kFloat32,
             scale_inv.data_ptr(), {1}, DType::kFloat32,
-            at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+            at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+            true);
 
     return {ln_out, mu, rsigma};
 }
@@ -339,7 +340,8 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                        rsigma.data_ptr(), {N}, DType::kFloat32,
                        nullptr, {1}, DType::kFloat32,
                        nullptr, {1}, DType::kFloat32,
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       false);
 
     return {ln_out, mu, rsigma};
 }

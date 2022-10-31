@@ -165,7 +165,8 @@ void dispatch_layernorm(void* input,                                    // i
                         void* scale_inv,                                // o
                         const std::vector<size_t>& scale_inv_shape,
                         const transformer_engine::DType scale_inv_type,
-                        const int multiProcessorCount
+                        const int multiProcessorCount,
+                        const bool fp8_out
 );
 
 

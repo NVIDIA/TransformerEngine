@@ -33,6 +33,13 @@ void nvte_gelu(const NVTETensor input,
                NVTETensor scale_inv,
                cudaStream_t stream);
 
+void nvte_gated_gelu(const NVTETensor input,
+                     NVTETensor output,
+                     const NVTETensor scale,
+                     NVTETensor amax,
+                     NVTETensor scale_inv,
+                     cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
