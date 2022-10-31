@@ -148,12 +148,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state.append(get_global_fp8_buffer())
             state.append(self.fp8_meta["update_amax_and_scale_fwd"])
 
-            # Store extra items for amax reduction
-            if self.fp8_meta["recipe"].reduce_amax:
-                state.append(self.fp8_meta["global_fp8_buffer_pos_fwd"])
-                state.append(self.fp8_meta["global_fp8_buffer_pos_bwd"])
-                state.append(self.fp8_meta["autocast_id_fwd"])
-                state.append(self.fp8_meta["autocast_id_bwd"])
+            # Store other pickelable values.
+            extra = {}
+            for k, v in self.fp8_meta.items():
+                if isinstance(v, (bool, int, float, str)):
+                    extra[k] = v
+            state.append(extra)
 
             return state
         return None
@@ -185,12 +185,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         set_global_fp8_buffer(state[4])
         self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
 
-        # Load extra items for amax reduction
-        if len(state) > 6:
-            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
-            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
-            self.fp8_meta["autocast_id_fwd"] = state[8]
-            self.fp8_meta["autocast_id_bwd"] = state[9]
+        # Load extra items.
+        self.fp8_meta.update(state[6])
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
