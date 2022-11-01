@@ -683,7 +683,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
-            # DGRAD
+            # DGRAD: Evaluated unconditionally to feed into Linear backward
             dgrad = fp8_gemm(
                 weight_t_fp8,
                 fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
@@ -696,7 +696,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_DGRAD,
             )
         else:
-            # DGRAD
+            # DGRAD: Evaluated unconditionally to feed into Linear backward
             dgrad, _, _ = gemm(
                 weight,
                 grad_output,
@@ -1934,19 +1934,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 dgelu_t = None
 
-            # FC1 DGRAD
-            if inputmat.requires_grad:
-                fc1_dgrad = fp8_gemm(
-                    fc1_weight_t_fp8,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
-                    fp8_dtype_forward,
-                    dgelu,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT2],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    use_split_accumulator=_2X_ACC_DGRAD,
-                )
+            # FC1 DGRAD: Unconditional
+            fc1_dgrad = fp8_gemm(
+                fc1_weight_t_fp8,
+                fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
+                fp8_dtype_forward,
+                dgelu,
+                ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT2],
+                fp8_dtype_backward,
+                ctx.activation_dtype,
+                get_workspace(),
+                use_split_accumulator=_2X_ACC_DGRAD,
+            )
         else:
             # FC2 DGRAD; Unconditional
             fc2_dgrad, _, _ = gemm(
@@ -1961,7 +1960,7 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # FC2 WGRAD
-            if fc2_weight.needs_grad:
+            if fc2_weight.requires_grad:
                 fc2_wgrad, fc2_bias_grad, _ = gemm(
                     gelu_out,
                     grad_output,
@@ -1980,26 +1979,24 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 dgelu = fc2_dgrad
 
-            # FC1 DGRAD
-            if inputmat.requires_grad:
-                fc1_dgrad, _, _ = gemm(
-                    fc1_weight,
-                    dgelu,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NN",
-                    grad=True,
-                )
+            # FC1 DGRAD: Unconditional
+            fc1_dgrad, _, _ = gemm(
+                fc1_weight,
+                dgelu,
+                ctx.activation_dtype,
+                get_workspace(),
+                layout="NN",
+                grad=True,
+            )
 
         # Overlap dgrad-RS/AR with wgrad
-        if inputmat.requires_grad:
-            if ctx.set_parallel_mode and ctx.sequence_parallel:
-                handle.wait()
-                fc1_dgrad, handle = reduce_scatter_along_first_dim(
-                    fc1_dgrad, ctx.tp_group, async_op=True
-                )
-            elif ctx.set_parallel_mode and ctx.tensor_parallel:
-                fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
+        if ctx.set_parallel_mode and ctx.sequence_parallel:
+            handle.wait()
+            fc1_dgrad, handle = reduce_scatter_along_first_dim(
+                fc1_dgrad, ctx.tp_group, async_op=True
+            )
+        elif ctx.set_parallel_mode and ctx.tensor_parallel:
+            fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
 
         if fc1_weight.requires_grad:
             if ctx.fp8:
@@ -2087,11 +2084,11 @@ class _LayerNormMLP(torch.autograd.Function):
             dxmat.view(ctx.inp_shape),
             dgamma,
             dbeta,
-            fc1_wgrad,
+            fc1_wgrad if fc1_weight.requires_grad else None,
             None,
             None,
             fc1_bias_grad,
-            fc2_wgrad,
+            fc2_wgrad if fc2_weight.requires_grad else None,
             None,
             None,
             fc2_bias_grad,
