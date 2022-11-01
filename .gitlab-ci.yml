@@ -9,6 +9,8 @@ variables:
     # variables that may be overridden by the pipeline vars
     API_LOGGING: 0
     VIRTUAL: 0
+    JOB_START_STRING: "=== JOB START ==="
+    JOB_END_STRING: "=== JOB END ==="
 
     # the following will be overridden by jobs of the pipeline that actually need to check out the sources
     GIT_STRATEGY: none
@@ -50,7 +52,7 @@ before_script:
 
 .create_branch_hidden: &CREATE_BRANCH
     stage: create branch
-    tags: 
+    tags:
       - vm-builder
     variables:
       GIT_STRATEGY: fetch
@@ -94,6 +96,8 @@ before_script:
       (git branch -D ${FETCH_BRANCH} || true) &&
       git remote add github ${GITHUB_REPO} &&
       git fetch github pull/${GH_PR}/head:${FETCH_BRANCH} &&
+      export GIT_SHA=$(git rev-list $FETCH_BRANCH -n 1) &&
+      echo $TEST_COMMIT_SHA &&
       git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git remote remove github &&
@@ -160,11 +164,13 @@ create_branch:
       GET_SOURCES_ATTEMPTS: 3
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+    - echo ${JOB_START_STRING}
     - bash docker-build.sh --pyver=${PYVER}
                            --mode=b --push
                            $(test "$VIRTUAL" -eq 1 && echo "--virtual")
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+    - echo ${JOB_END_STRING}
     except:
     - tags
     tags:
@@ -224,10 +230,6 @@ py3-devel:
     - web
     when: manual
 
-py3-stage:
-    stage: finalize
-    <<: *STAGE
-
 .test_template: &TEST_TEMPLATE
     environment: "${CI_JOB_NAME}"
     variables:
@@ -250,7 +252,7 @@ py3-stage:
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              -w ${TEST_WORK_DIR}
              ${DEVEL_IMAGE_NAME_VERSIONED}
-             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && exec ${LOGGER} bash -ex ${TEST_SCRIPT}" || RV=$?;
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -ex ${TEST_SCRIPT} && echo ${JOB_END_STRING}" || RV=$?;
       if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
       set +x;
       rm -rf logs/;
@@ -296,7 +298,8 @@ py3-stage:
                    --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
                    --build-arg "GIT_SHA=${CI_COMMIT_SHORT_SHA}"
                    -f Dockerfile.docs .
-    - ( sleep $RUN_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
+    - echo ${JOB_START_STRING}
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
       set -x &&
       docker run $(eval ${NV_DOCKER_ARGS})
              --name "${CONTAINER_NAME}"
@@ -307,6 +310,7 @@ py3-stage:
       set +x;
       pkill -HUP sleep || true;
       test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
+    - echo ${JOB_END_STRING}
     - docker cp "${CONTAINER_NAME}:/opt/transformerengine/docs/_build/html/." "html"
     - docker rm -f ${CONTAINER_NAME}
     - docker rmi ${DOCS_IMAGE_NAME}
@@ -341,6 +345,16 @@ gather:
         - tags
       variables:
         - $API_LOGGING == "0"
+
+upload_logs:
+  stage: finalize
+  script:
+    - echo "Job to upload logs!"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
+      when: always
+  tags:
+    - vm-builder
 
 .manual_test_trigger: &MANUAL_TEST_TRIGGER
     stage: trigger
@@ -509,26 +523,3 @@ L0_license:
     <<: *L0_TEST
     tags:
     - 1GPU
-
-L0_unittest--V100_1GPU:
-    <<: *L0_TEST
-    <<: *V100_1GPU
-
-L0_unittest--A100_1GPU:
-    <<: *L0_TEST
-    <<: *A100_1GPU
-
-L0_unittest--TU102_R445_1GPU:
-    <<: *L0_TEST
-    <<: *TU102_R445_1GPU
-
-L0_cppunittest--V100_1GPU:
-    <<: *L0_TEST
-    <<: *V100_1GPU
-
-L0_cppunittest--A100_1GPU:
-    <<: *L0_TEST
-    <<: *A100_1GPU
-
-docs:
-    <<: *DOCS_BUILD
