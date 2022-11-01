@@ -4,6 +4,7 @@
 
 """FP8 utilies for TransformerEngine"""
 from contextlib import contextmanager
+from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
@@ -20,7 +21,7 @@ _FP8_AUTOCAST_COUNTER = 0
 _FP8_CURRENT_CONTEXT_ID = 0
 _FP8_AUTOCAST_DEPTH = 0
 _global_fp8_buffer = {}
-_fp8_tensors_recompute_buffer = {}
+_fp8_tensors_recompute_buffer = []
 _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
@@ -108,12 +109,13 @@ def copy_forward_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> Non
     )
 
     if buffer_position_key in fp8_meta:
-        _fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]] = to_copy
+        _fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].append(to_copy)
     else:
         if len(_fp8_tensors_recompute_buffer) == 0:
-            _fp8_tensors_recompute_buffer = [to_copy]
+            _fp8_tensors_recompute_buffer = [deque()]
         else:
-            _fp8_tensors_recompute_buffer.append(to_copy)
+            _fp8_tensors_recompute_buffer.append(deque())
+        _fp8_tensors_recompute_buffer[-1].append(to_copy)
         fp8_meta[buffer_position_key] = len(_fp8_tensors_recompute_buffer) - 1
 
 
@@ -129,7 +131,9 @@ def get_old_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> None:
 
     # Retrieve stashed amaxes and scales from phase 1 pre forward.
     buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
-    stashed_fp8_meta = _fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]]
+    stashed_fp8_meta = _fp8_tensors_recompute_buffer[
+        fp8_meta[buffer_position_key]
+    ].popleft()
 
     # Replace amaxes and scales with stashed values for phase 2 forward
     fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
