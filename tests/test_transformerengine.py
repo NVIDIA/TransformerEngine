@@ -37,6 +37,8 @@ param_types = [torch.float32, torch.bfloat16, torch.float16]
 
 batch_sizes = [1, 2]
 
+skip_wgrad = [True, False]
+
 
 def _test_sanity_e2e_amp(block, bs, dtype, config):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
@@ -116,6 +118,10 @@ def _test_sanity_common(block, bs, dtype, config):
     te_inp = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
+    
+    for param in block.parameters():
+        param.requires_grad = False
+
     te_out = block(te_inp)
     if isinstance(te_out, tuple):
         te_out = te_out[0]
@@ -149,7 +155,8 @@ def test_sanity_layernorm_linear(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_linear(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_linear(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -162,6 +169,11 @@ def test_sanity_linear(dtype, bs, model):
         .to(dtype=dtype)
         .cuda()
     )
+
+    if (skip_wgrad):
+        for p in block.parameters():
+            p.requires_grad = False
+
     _test_sanity_common(block, bs, dtype, config)
 
 
