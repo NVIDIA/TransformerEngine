@@ -252,7 +252,8 @@ py3-devel:
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              -w ${TEST_WORK_DIR}
              ${DEVEL_IMAGE_NAME_VERSIONED}
-             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -ex ${TEST_SCRIPT} && echo ${JOB_END_STRING}" || RV=$?;
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
+      echo ${JOB_END_STRING};
       if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
       set +x;
       rm -rf logs/;
@@ -306,11 +307,11 @@ py3-devel:
              -v $DATADIR:/data:ro
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              $(eval echo ${DOCS_IMAGE_NAME})
-             /bin/bash -exc "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
+             /bin/bash -ec "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
+      echo ${JOB_END_STRING};
       set +x;
       pkill -HUP sleep || true;
       test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
-    - echo ${JOB_END_STRING}
     - docker cp "${CONTAINER_NAME}:/opt/transformerengine/docs/_build/html/." "html"
     - docker rm -f ${CONTAINER_NAME}
     - docker rmi ${DOCS_IMAGE_NAME}
