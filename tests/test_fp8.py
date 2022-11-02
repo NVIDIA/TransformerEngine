@@ -86,8 +86,13 @@ param_types = [torch.float32, torch.bfloat16, torch.float16]
 
 batch_sizes = [1, 2]
 
+skip_wgrad = [True, False]
 
-def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe):
+def _disable_wgrads(block):
+    for p in block.parameters():
+            p.requires_grad = False
+
+def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=torch.float32, requires_grad=True
     ).cuda()
@@ -103,6 +108,10 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
         with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
             te_out = block(te_inp_hidden_states, te_inp_attn_mask)
@@ -113,7 +122,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe):
     torch.cuda.synchronize()
 
 
-def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe):
+def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
@@ -129,6 +138,10 @@ def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         te_out = block(te_inp_hidden_states, te_inp_attn_mask)
     loss = te_out.sum()
@@ -136,7 +149,7 @@ def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe):
     torch.cuda.synchronize()
 
 
-def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe):
+def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
@@ -152,6 +165,10 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         te_out = block(
             te_inp_hidden_states, te_inp_attn_mask, encoder_output=te_inp_hidden_states
@@ -161,10 +178,14 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe):
     torch.cuda.synchronize()
 
 
-def _test_sanity_common(block, bs, dtype, config, fp8_recipe):
+def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         te_out = block(te_inp)
     if isinstance(te_out, tuple):
@@ -178,7 +199,8 @@ def _test_sanity_common(block, bs, dtype, config, fp8_recipe):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -194,14 +216,15 @@ def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_linear(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -214,14 +237,15 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -239,14 +263,15 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_gpt(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -271,14 +296,15 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_bert(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -303,14 +329,15 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_T5(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -336,14 +363,15 @@ def test_sanity_T5(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_amp_and_nvfuser(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_amp_and_nvfuser(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -366,14 +394,15 @@ def test_sanity_amp_and_nvfuser(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_drop_path(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_drop_path(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -399,14 +428,15 @@ def test_sanity_drop_path(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_fused_qkv_params(dtype, bs, fp8_recipe, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_fused_qkv_params(dtype, bs, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -432,4 +462,4 @@ def test_sanity_fused_qkv_params(dtype, bs, fp8_recipe, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe)
+    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)

@@ -38,6 +38,10 @@ batch_sizes = [1, 2]
 
 skip_wgrad = [True, False]
 
+def _disable_wgrads(block):
+    for p in block.parameters():
+            p.requires_grad = False
+
 def _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         return
@@ -60,8 +64,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad):
     )
 
     if (skip_wgrad):
-        for p in block.parameters():
-            p.requires_grad = False
+        _disable_wgrads(block)
 
     with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
         te_out = block(te_inp_hidden_states, te_inp_attn_mask)
@@ -90,8 +93,7 @@ def _test_sanity_e2e(block, bs, dtype, config, skip_wgrad):
     )
 
     if (skip_wgrad):
-        for p in block.parameters():
-            p.requires_grad = False
+        _disable_wgrads(block)
 
     te_out = block(te_inp_hidden_states, te_inp_attn_mask)
     loss = te_out.sum()
@@ -117,8 +119,7 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, skip_wgrad):
     )
 
     if (skip_wgrad):
-        for p in block.parameters():
-            p.requires_grad = False
+        _disable_wgrads(block)
 
     te_out = block(
         te_inp_hidden_states, te_inp_attn_mask, encoder_output=te_inp_hidden_states
@@ -135,8 +136,7 @@ def _test_sanity_common(block, bs, dtype, config, skip_wgrad):
 
  
     if (skip_wgrad):
-        for param in block.parameters():
-            param.requires_grad = False
+        _disable_wgrads(block)
 
     te_out = block(te_inp)
     if isinstance(te_out, tuple):
