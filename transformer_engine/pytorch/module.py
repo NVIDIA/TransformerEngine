@@ -1252,46 +1252,46 @@ class _Linear(torch.autograd.Function):
             )
         else:
             accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
-        if inputmat.requires_grad:
-            if ctx.fp8:
-                fp8_dtype_forward = get_fp8_te_dtype(
-                    ctx.fp8_meta["recipe"], fprop_tensor=True
-                )
-                fp8_dtype_backward = get_fp8_te_dtype(
-                    ctx.fp8_meta["recipe"], fprop_tensor=False
-                )
 
-                # DGRAD
-                dgrad = fp8_gemm(
-                    weight_t_fp8,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
-                    fp8_dtype_forward,
-                    grad_output_c,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    use_split_accumulator=_2X_ACC_DGRAD,
-                )
-            else:
-                # DGRAD
-                dgrad, _, _ = gemm(
-                    weight,
-                    grad_output,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NN",
-                    grad=True,
-                )
+        if ctx.fp8:
+            fp8_dtype_forward = get_fp8_te_dtype(
+                ctx.fp8_meta["recipe"], fprop_tensor=True
+            )
+            fp8_dtype_backward = get_fp8_te_dtype(
+                ctx.fp8_meta["recipe"], fprop_tensor=False
+            )
 
-            # Overlap dgrad-RS/AR with wgrad
-            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                handle.wait()
-                dgrad, handle = reduce_scatter_along_first_dim(
-                    dgrad, ctx.tp_group, async_op=True
-                )
-            elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-                dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+            # DGRAD
+            dgrad = fp8_gemm(
+                weight_t_fp8,
+                fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
+                fp8_dtype_forward,
+                grad_output_c,
+                ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
+                fp8_dtype_backward,
+                ctx.activation_dtype,
+                get_workspace(),
+                use_split_accumulator=_2X_ACC_DGRAD,
+            )
+        else:
+            # DGRAD
+            dgrad, _, _ = gemm(
+                weight,
+                grad_output,
+                ctx.activation_dtype,
+                get_workspace(),
+                layout="NN",
+                grad=True,
+            )
+
+        # Overlap dgrad-RS/AR with wgrad
+        if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            handle.wait()
+            dgrad, handle = reduce_scatter_along_first_dim(
+                dgrad, ctx.tp_group, async_op=True
+            )
+        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+            dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
         if weight.requires_grad:
             if ctx.fp8:
@@ -1355,7 +1355,7 @@ class _Linear(torch.autograd.Function):
             wgrad if weight.requires_grad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape) if inputmat.requires_grad else None,
+            dgrad.view(ctx.inp_shape),
             grad_bias,
             None,
             None,
@@ -1893,7 +1893,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                         use_split_accumulator=_2X_ACC_WGRAD,
                     )
-                # TODO: Add a path to skip calculating dbias if bias.requires_grad = false, but leave dgelu
+
                 fc1_bias_grad, dgelu, dgelu_t = fp8_cast_transpose_bgrad_dgelu_fused(
                     fc2_dgrad,
                     fc1_out,
@@ -1923,10 +1923,10 @@ class _LayerNormMLP(torch.autograd.Function):
                         out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
-                # TODO: Add a path to skip calculating dbias if bias.requires_grad = false, but leave dgelu
                 fc1_bias_grad, dgelu_no_fp8 = bgrad_dgelu_fused(
                     fc2_dgrad, fc1_out, fc1_bias
                 )
+
                 dgelu = cast_to_fp8(
                     dgelu_no_fp8,
                     ctx.fp8_meta["scaling_bwd"],
@@ -2054,10 +2054,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
 
-            if ctx.bias_gelu_nvfusion:
-                fc1_wgrad, _, _ = fc1_wgrad_outputs
-            else:
-                fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
+                if ctx.bias_gelu_nvfusion:
+                    fc1_wgrad, _, _ = fc1_wgrad_outputs
+                else:
+                    fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
 
         # Column Parallel Linear
         if ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
