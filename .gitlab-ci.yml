@@ -355,15 +355,16 @@ upload_logs:
       CURL_SLEEP: 5
   script:
     - tmp_file="${CI_PIPELINE_ID}_upload_tmp"
+    - echo "Uploading logs for the commit ${GIT_SHA}"
     - |
       for i in `seq 1 ${CURL_ATTEMPTS}`; do
           sleep ${CURL_SLEEP}
           CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
             --user ptredak:${JENKINS_TOKEN} \
-            --data token=${JENKINS_CI_TOKEN} \
-            --data PIPELINE_ID=${CI_PIPELINE_ID} \
-            --data githubData=${githubData} \
-            --data COMMIT_SHA=${GIT_SHA} \
+            --data token="${JENKINS_CI_TOKEN}" \
+            --data PIPELINE_ID="${CI_PIPELINE_ID}" \
+            --data githubData="${githubData}" \
+            --data COMMIT_SHA="${GIT_SHA}" \
             "https://blossom.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
           echo "\n" | cat ${tmp_file} -
           rm ${tmp_file}
