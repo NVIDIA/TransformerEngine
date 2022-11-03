@@ -138,6 +138,7 @@ before_script:
             --form "variables[PUBLISH_DEV_WHL]=${PUBLISH_DEV_WHL}" \
             --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
             --form "variables[CODE_VERSION]=${CODE_VERSION}" \
+            --form "variables[githubData]=${githubData}" \
             https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
           echo "\n" | cat ${tmp_file} -
           rm ${tmp_file}
@@ -349,8 +350,24 @@ gather:
 
 upload_logs:
   stage: finalize
+  variables:
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
   script:
-    - echo "Job to upload logs!"
+    - tmp_file="${CI_PIPELINE_ID}_upload_tmp"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --user ptredak:${JENKINS_TOKEN} \
+            --data token=${JENKINS_CI_TOKEN} \
+            --data PIPELINE_ID=${CI_PIPELINE_ID} \
+            --data githubData=${githubData} \
+            --data COMMIT_SHA=${GIT_SHA} \
+            "https://blossom.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
