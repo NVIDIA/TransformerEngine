@@ -368,6 +368,8 @@ upload_logs:
           echo "\n" | cat ${tmp_file} -
           rm ${tmp_file}
           test $CURL_RESULT && exit 0
+      done
+    - exit 1
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
