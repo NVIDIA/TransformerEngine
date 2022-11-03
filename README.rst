@@ -48,7 +48,7 @@ Transformer Engine in action:
   hidden_size = 2048
 
   # Initialize model and inputs.
-  model = te.Linear(in_features, out_features, use_bias=True)
+  model = te.Linear(in_features, out_features, bias=True)
   inp = torch.randn(hidden_size, in_features, device="cuda")
 
   # Create FP8 recipe. Note: All input args are optional.
