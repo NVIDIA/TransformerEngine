@@ -16,6 +16,7 @@ from transformer_engine.pytorch import (
     TransformerLayer,
 )
 
+
 class ModelConfig:
     def __init__(
         self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
@@ -38,9 +39,11 @@ batch_sizes = [1, 2]
 
 skip_wgrad = [True, False]
 
+
 def _disable_wgrads(block):
     for p in block.parameters():
-            p.requires_grad = False
+        p.requires_grad = False
+
 
 def _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
@@ -63,7 +66,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad):
         .bool()
     )
 
-    if (skip_wgrad):
+    if skip_wgrad:
         _disable_wgrads(block)
 
     with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
@@ -92,7 +95,7 @@ def _test_sanity_e2e(block, bs, dtype, config, skip_wgrad):
         .bool()
     )
 
-    if (skip_wgrad):
+    if skip_wgrad:
         _disable_wgrads(block)
 
     te_out = block(te_inp_hidden_states, te_inp_attn_mask)
@@ -118,7 +121,7 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, skip_wgrad):
         .bool()
     )
 
-    if (skip_wgrad):
+    if skip_wgrad:
         _disable_wgrads(block)
 
     te_out = block(
@@ -134,8 +137,7 @@ def _test_sanity_common(block, bs, dtype, config, skip_wgrad):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
 
- 
-    if (skip_wgrad):
+    if skip_wgrad:
         _disable_wgrads(block)
 
     te_out = block(te_inp)

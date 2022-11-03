@@ -1860,7 +1860,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
-            # FC2 DGRAD: Evaluated unconditionally since the API is a 2-layer MLP, and FC2 DGRAD is needed for FC1 bprop.
+            # FC2 DGRAD; Unconditional
             fc2_dgrad = fp8_gemm(
                 fc2_weight_t_fp8,
                 fwd_scale_inverses[tex.FP8FwdTensors.GEMM2_WEIGHT],
@@ -1890,7 +1890,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         get_workspace(),
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         fp32_output=ctx.fuse_wgrad_accumulation,
-                        out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        out=fc2_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
                         use_split_accumulator=_2X_ACC_WGRAD,
                     )
 
@@ -1920,7 +1922,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         fp32_output=ctx.fuse_wgrad_accumulation,
-                        out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        out=fc2_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
                     )
 
                 fc1_bias_grad, dgelu_no_fp8 = bgrad_dgelu_fused(
@@ -2017,7 +2021,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         get_workspace(),
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         fp32_output=ctx.fuse_wgrad_accumulation,
-                        out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        out=fc1_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
                         use_split_accumulator=_2X_ACC_WGRAD,
                     )
                 else:
@@ -2037,7 +2043,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         grad=True,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         fp32_output=ctx.fuse_wgrad_accumulation,
-                        out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        out=fc1_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
                     )
             else:
                 # FC1 WGRAD

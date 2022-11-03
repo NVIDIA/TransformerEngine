@@ -88,9 +88,11 @@ batch_sizes = [1, 2]
 
 skip_wgrad = [True, False]
 
+
 def _disable_wgrads(block):
     for p in block.parameters():
-            p.requires_grad = False
+        p.requires_grad = False
+
 
 def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
