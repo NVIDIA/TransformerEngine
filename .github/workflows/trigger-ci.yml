@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 # A workflow to trigger ci on hybrid infra (github + self hosted runner)
-name: Blossom-CI Trigger
+name: TE-CI Trigger
 on:
   issue_comment:
     types: [created]
