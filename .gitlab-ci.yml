@@ -544,3 +544,26 @@ L0_license:
     <<: *L0_TEST
     tags:
     - 1GPU
+
+L0_unittest--V100_1GPU:
+    <<: *L0_TEST
+    <<: *V100_1GPU
+
+L0_unittest--A100_1GPU:
+    <<: *L0_TEST
+    <<: *A100_1GPU
+
+L0_unittest--TU102_R445_1GPU:
+    <<: *L0_TEST
+    <<: *TU102_R445_1GPU
+
+L0_cppunittest--V100_1GPU:
+    <<: *L0_TEST
+    <<: *V100_1GPU
+
+L0_cppunittest--A100_1GPU:
+    <<: *L0_TEST
+    <<: *A100_1GPU
+
+docs:
+    <<: *DOCS_BUILD
