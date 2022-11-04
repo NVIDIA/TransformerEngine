@@ -37,14 +37,22 @@ param_types = [torch.float32, torch.bfloat16, torch.float16]
 
 batch_sizes = [1, 2]
 
+skip_wgrad = [True, False]
 
-def _test_sanity_e2e_amp(block, bs, dtype, config):
+
+def _disable_wgrads(block):
+    for p in block.parameters():
+        p.requires_grad = False
+
+
+def _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         return
 
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=torch.float32, requires_grad=True
     ).cuda()
+
     te_inp_attn_mask = (
         torch.rand(
             (
@@ -57,6 +65,10 @@ def _test_sanity_e2e_amp(block, bs, dtype, config):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
         te_out = block(te_inp_hidden_states, te_inp_attn_mask)
         loss = te_out.sum()
@@ -66,7 +78,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config):
     torch.cuda.synchronize()
 
 
-def _test_sanity_e2e(block, bs, dtype, config):
+def _test_sanity_e2e(block, bs, dtype, config, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
@@ -82,13 +94,17 @@ def _test_sanity_e2e(block, bs, dtype, config):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     te_out = block(te_inp_hidden_states, te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
 
 
-def _test_sanity_e2e_T5(block, bs, dtype, config):
+def _test_sanity_e2e_T5(block, bs, dtype, config, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
@@ -104,6 +120,10 @@ def _test_sanity_e2e_T5(block, bs, dtype, config):
         .cuda()
         .bool()
     )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     te_out = block(
         te_inp_hidden_states, te_inp_attn_mask, encoder_output=te_inp_hidden_states
     )
@@ -112,10 +132,14 @@ def _test_sanity_e2e_T5(block, bs, dtype, config):
     torch.cuda.synchronize()
 
 
-def _test_sanity_common(block, bs, dtype, config):
+def _test_sanity_common(block, bs, dtype, config, skip_wgrad):
     te_inp = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
     te_out = block(te_inp)
     if isinstance(te_out, tuple):
         te_out = te_out[0]
@@ -127,7 +151,8 @@ def _test_sanity_common(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_layernorm_linear(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_layernorm_linear(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -143,13 +168,14 @@ def test_sanity_layernorm_linear(dtype, bs, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config)
+    _test_sanity_common(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_linear(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_linear(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -162,13 +188,15 @@ def test_sanity_linear(dtype, bs, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config)
+
+    _test_sanity_common(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_layernorm_mlp(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_layernorm_mlp(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -186,13 +214,14 @@ def test_sanity_layernorm_mlp(dtype, bs, model):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config)
+    _test_sanity_common(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_gpt(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_gpt(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -217,13 +246,14 @@ def test_sanity_gpt(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config)
+    _test_sanity_e2e(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_bert(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_bert(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -248,13 +278,14 @@ def test_sanity_bert(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config)
+    _test_sanity_e2e(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_T5(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_T5(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -280,13 +311,14 @@ def test_sanity_T5(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e_T5(block, bs, dtype, config)
+    _test_sanity_e2e_T5(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_amp_and_nvfuser(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_amp_and_nvfuser(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -309,13 +341,14 @@ def test_sanity_amp_and_nvfuser(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e_amp(block, bs, dtype, config)
+    _test_sanity_e2e_amp(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_drop_path(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_drop_path(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -341,13 +374,14 @@ def test_sanity_drop_path(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config)
+    _test_sanity_e2e(block, bs, dtype, config, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_sanity_fused_qkv_params(dtype, bs, model):
+@pytest.mark.parametrize("skip_wgrad", skip_wgrad)
+def test_sanity_fused_qkv_params(dtype, bs, model, skip_wgrad):
     config = model_configs[model]
 
     sigma = 0.023
@@ -373,4 +407,4 @@ def test_sanity_fused_qkv_params(dtype, bs, model):
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config)
+    _test_sanity_e2e(block, bs, dtype, config, skip_wgrad)
