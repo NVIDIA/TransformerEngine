@@ -272,8 +272,45 @@ def checkpoint(
     *args: Tuple[torch.Tensor, ...],
     **kwargs: Dict[str, Any],
 ) -> Tuple[torch.Tensor, ...]:
-    """Checkpoint a model or part of the model.
-    This has been directly copied from torch.utils.checkpoint."""
+    """
+    Checkpoint a part of the model by trading compute for memory. This function is based on
+    `torch.utils.checkpoint.checkpoint <https://pytorch.org/docs/stable/checkpoint.html>`_.
+
+    .. warning::
+
+        It is the user's responsibility to ensure identical behavior when calling
+        :attr:`function` from the forward and backward pass. If different output is
+        produced (e.g. due to global state), then the checkpointed version won't
+        be numerically equivalent.
+
+    .. warning::
+
+        The tuple :attr:`args` must contain only tensors (or :attr:`None`) in order to comply with
+        PyTorch's :attr:`save_for_backward` method. :attr:`function` must be callable to produce
+        valid outputs with the inputs :attr:`args` and :attr:`kwargs`.
+
+    Parameters
+    ----------
+    function: Callable
+            whether or not to enable fp8
+    distribute_saved_activations: bool
+            if set to `True`, the first tensor argument is distributed across the
+            specified tensor parallel group (`tp_group`) before saving it for the
+            backward pass.
+    get_cuda_rng_tracker: `Callable`
+            python function with the functionality to retrieve a state via
+            :attr:`state = get_cuda_rng_tracker().get_states()` and to reset the state via
+            :attr:`get_cuda_rng_tracker().set_states(state)`. This is used to ensure any
+            extra cuda rng state or general global state can be reproduced across the 2
+            forward phases; original and recompute.
+    tp_group : ProcessGroup, default = `None`
+            tensor parallel process group.
+    args : tuple
+            tuple of torch tensors for inputs to :attr:`function`.
+    kwargs : dict
+            dictionary of string keys for keyword arguments to :attr:`function`.
+    """
+
     return CheckpointFunction.apply(
         function,
         distribute_saved_activations,
