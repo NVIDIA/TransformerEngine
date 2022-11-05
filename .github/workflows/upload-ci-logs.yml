@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 # A workflow to trigger ci on hybrid infra (github + self hosted runner)
-name: Blossom-CI Logs
+name: TE-CI Logs
 on:
   workflow_dispatch:
       inputs:
@@ -49,4 +49,4 @@ jobs:
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
           https://api.github.com/repos/${{ github.repository }}/statuses/${{ inputs.commit_sha }} \
-          -d "{\"state\":\"${{ inputs.result }}\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"description\":\"\",\"context\":\"blossom-ci/${{ inputs.job_name }}\"}"
+          -d "{\"state\":\"${{ inputs.result }}\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"description\":\"\",\"context\":\"te-ci/${{ inputs.job_name }}\"}"
