@@ -109,6 +109,7 @@ void cublas_gemm(const Tensor *inputA,
                                                transb == CUBLAS_OP_N ? k : n,
                                                transb == CUBLAS_OP_N ? n : k,
                                                ldb));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, gemm_compute_type, CUDA_R_32F));
@@ -135,6 +136,17 @@ void cublas_gemm(const Tensor *inputA,
                                                      CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
+    if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
+        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                         CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
+                                                         &D_scale_inverse,
+                                                         sizeof(D_scale_inverse)));
+        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                         CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+                                                         &D_amax,
+                                                         sizeof(D_amax)));
+        NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
+    }
     if (bias) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
@@ -190,7 +202,7 @@ void cublas_gemm(const Tensor *inputA,
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
 
-  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
                                                    Ddesc, preference, 1, &heuristicResult,
                                                    &returnedResults));
 
@@ -205,8 +217,8 @@ void cublas_gemm(const Tensor *inputA,
                                    B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
-                                   D,                                      /* C */
-                                   Ddesc,
+                                   nullptr,                                /* C */
+                                   Cdesc,
                                    D,                                      /* D */
                                    Ddesc,
                                    &heuristicResult.algo,                  /* algo */
@@ -217,6 +229,7 @@ void cublas_gemm(const Tensor *inputA,
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Cdesc));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
@@ -227,6 +240,8 @@ void cublas_gemm(const Tensor *inputA,
 void nvte_cublas_gemm(const NVTETensor A,
                       const NVTETensor B,
                       NVTETensor D,
+                      const NVTETensor D_scale_inverse,
+                      const NVTETensor D_amax,
                       const NVTETensor bias,
                       NVTETensor pre_gelu_out,
                       bool transa,
@@ -241,6 +256,8 @@ void nvte_cublas_gemm(const NVTETensor A,
   const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
   const Tensor *inputB = reinterpret_cast<const Tensor*>(B);
   Tensor *outputD = reinterpret_cast<Tensor*>(D);
+  const Tensor *Dinvscale = reinterpret_cast<const Tensor*>(D_scale_inverse);
+  const Tensor *Damax = reinterpret_cast<const Tensor*>(D_amax);
   const Tensor *biasTensor = reinterpret_cast<const Tensor*>(bias);
   Tensor *outputGelu = reinterpret_cast<Tensor*>(pre_gelu_out);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);

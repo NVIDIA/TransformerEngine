@@ -22,14 +22,19 @@ def fp8_gemm(
     workspace: torch.Tensor,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
+    out_index = None,
+    fp8_meta_tensor: tex.FP8TensorMeta = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
     fp32_output: bool = False,
     use_split_accumulator: bool = False,
+    out_fp8_subtype: tex.DType = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
     empty_tensor = torch.Tensor()
+    if out_index is not None:
+        assert fp8_meta_tensor is not None
 
     return_output = False
     if out is None:
@@ -42,6 +47,8 @@ def fp8_gemm(
         return_output = True
 
     out_dtype = tex.DType.kFloat32 if fp32_output else TE_DType[out_dtype]
+    bias_dtype = output_dtype if bias is None else TE_DType[bias.dtype]
+    out_dtype = out_fp8_subtype if out_fp8_subtype is not None else out_dtype
 
     _ = torch.ops.tex_ts.te_gemm_ts(
         A,
@@ -55,8 +62,11 @@ def fp8_gemm(
         B_dtype,
         False,  # transb
         out,
+        empty_tensor if out_index is None else fp8_meta_tensor.scale[out_index],
         out_dtype,
+        empty_tensor if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
         bias if use_bias else empty_tensor,
+        bias_dtype,
         empty_tensor,  # this is pre_gelu_out
         False,  # grad
         workspace,
@@ -64,6 +74,8 @@ def fp8_gemm(
         accumulate,
         use_split_accumulator,
     )
+    if out_index is not None:
+        fp8_meta_tensor.scale_inv[out_index] = 1./fp8_meta_tensor.scale[out_index]
 
     if return_output:
         return out
@@ -95,6 +107,7 @@ def gemm(
 
     input_dtype = TE_DType[dtype]
     output_dtype = tex.DType.kFloat32 if fp32_output else input_dtype
+    bias_dtype = output_dtype if bias is None else TE_DType[bias.dtype]
 
     return_output = False
     if out is None:
@@ -132,8 +145,11 @@ def gemm(
         input_dtype,
         transb,
         out,
+        empty_tensor, # out_scale
         output_dtype,
+        empty_tensor, # out_amax
         grad_bias if grad else bias,
+        bias_dtype,
         gelu_input,
         grad,
         workspace,
