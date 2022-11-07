@@ -136,9 +136,12 @@ def activation_recompute_forward(
     activation_recompute: bool = False,
     recompute_phase: bool = False,
 ) -> None:
-    """Context manager used to control the forward runtime behavior when
-    executed under the `CheckpointFunction` function. For running FP8, the
-    first forward execution will be as is ... TODO(ksivamani)
+    """Context manager used to control the forward runtime behavior when executed
+    under the `CheckpointFunction` function. For running FP8, the forward pass will
+    run without storing intermediate activations. Instead, the forward pass saves
+    the inputs tuple and the calling function. In the backwards pass, these are
+    retrieved, and the forward pass is computed again while tracking the intermediate
+    activations, followed by calculation of gradients using these values.
     """
     global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
     try:
