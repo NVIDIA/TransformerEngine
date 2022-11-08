@@ -167,10 +167,11 @@ void performTest() {
 
 }  // namespace
 
-class CTTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
-                                                               transformer_engine::DType>> {};
+class MultiCastTransposeTestSuite
+  : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
+                                               transformer_engine::DType>> {};
 
-TEST_P(CTTestSuite, TestMultiCastTranspose) {
+TEST_P(MultiCastTransposeTestSuite, TestMultiCastTranspose) {
   using namespace transformer_engine;
   using namespace test;
 
@@ -188,11 +189,11 @@ TEST_P(CTTestSuite, TestMultiCastTranspose) {
 
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
-  CTTestSuite,
+  MultiCastTransposeTestSuite,
   ::testing::Combine(
       ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
       ::testing::ValuesIn(test::all_fp_types)),
-  [](const testing::TestParamInfo<CTTestSuite::ParamType>& info) {
+  [](const testing::TestParamInfo<MultiCastTransposeTestSuite::ParamType>& info) {
     std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                        test::typeName(std::get<1>(info.param));
     return name;
