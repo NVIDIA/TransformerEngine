@@ -140,20 +140,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def get_extra_state(self) -> Union[List[Any], None]:
         """Save before checkpointing."""
         if self.fp8:
-            state = []
-            state.append(self.fp8_meta["scaling_fwd"].scale)
-            state.append(self.fp8_meta["scaling_fwd"].amax_history)
-            state.append(self.fp8_meta["scaling_bwd"].scale)
-            state.append(self.fp8_meta["scaling_bwd"].amax_history)
-            state.append(get_global_fp8_buffer())
-            state.append(self.fp8_meta["update_amax_and_scale_fwd"])
+            state = {}
+            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
+            state["global_fp8_buffer"] = get_global_fp8_buffer()
 
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
                 if isinstance(v, (bool, int, float, str)):
                     extra[k] = v
-            state.append(extra)
+            state["extra_fp8_variables"] = extra
 
             return state
         return None
@@ -163,30 +162,49 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Retrieve checkpointed items.
-        scale_fwd = state[0]
-        amax_history_fwd = state[1]
-        scale_bwd = state[2]
-        amax_history_bwd = state[3]
-        self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
-        self.fp8_meta["num_gemms"] = (
-            amax_history_fwd.shape[1] // 2
-        )  # Two FWD tensors per GEMM
+        # Maintain backward compatibility with v0.2.0 and older.
+        if isinstance(state, list):
+            # Retrieve checkpointed items.
+            scale_fwd = state[0]
+            amax_history_fwd = state[1]
+            scale_bwd = state[2]
+            amax_history_bwd = state[3]
+            self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
+            self.fp8_meta["num_gemms"] = (
+                amax_history_fwd.shape[1] // 2
+            )  # Two FWD tensors per GEMM
 
-        # Initialize before loading
-        self.init_fp8_meta_tensors()
-        self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
-        self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
-        self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
-        self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
-        self.fp8_meta_tensors_initialized = True
+            # Initialize before loading
+            self.init_fp8_meta_tensors()
+            self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
+            self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
+            self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
+            self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
+            self.fp8_meta_tensors_initialized = True
+
+            # Restore global FP8 buffer state.
+            set_global_fp8_buffer(state[4])
+            self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
+            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
+            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
+            self.fp8_meta["autocast_id_fwd"] = state[8]
+            self.fp8_meta["autocast_id_bwd"] = state[9]
+            return
 
         # Restore global FP8 buffer state.
-        set_global_fp8_buffer(state[4])
-        self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
+        set_global_fp8_buffer(state["global_fp8_buffer"])
 
         # Load extra items.
-        self.fp8_meta.update(state[6])
+        self.fp8_meta.update(state["extra_fp8_variables"])
+        self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+
+        # Initialize before loading.
+        self.init_fp8_meta_tensors()
+        self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
+        self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
+        self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
+        self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
+        self.fp8_meta_tensors_initialized = True
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
