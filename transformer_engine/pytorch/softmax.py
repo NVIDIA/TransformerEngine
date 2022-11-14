@@ -9,6 +9,8 @@ from typing import Callable, Tuple, Union
 import torch
 from torch import nn
 
+import transformer_engine_extensions as tex
+
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
@@ -21,10 +23,8 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledUpperTriangMaskedSoftmax fwd"""
-        import scaled_upper_triang_masked_softmax_cuda
-
         scale_t = torch.tensor([scale])
-        softmax_results = scaled_upper_triang_masked_softmax_cuda.forward(
+        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(
             inputs, scale_t[0]
         )
 
@@ -36,10 +36,8 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledUpperTriangMaskedSoftmax bwd"""
-        import scaled_upper_triang_masked_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
-        input_grads = scaled_upper_triang_masked_softmax_cuda.backward(
+        input_grads = tex.scaled_upper_triang_masked_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
 
@@ -59,11 +57,9 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float
     ) -> torch.Tensor:
         """ScaledMaskedSoftmax fwd"""
-        import scaled_masked_softmax_cuda
-
         scale_t = torch.tensor([scale])
 
-        softmax_results = scaled_masked_softmax_cuda.forward(inputs, mask, scale_t[0])
+        softmax_results = tex.scaled_masked_softmax_forward(inputs, mask, scale_t[0])
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
@@ -72,11 +68,9 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledMaskedSoftmax bwd"""
-        import scaled_masked_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = scaled_masked_softmax_cuda.backward(
+        input_grads = tex.scaled_masked_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
         return input_grads, None, None
@@ -92,11 +86,9 @@ class ScaledSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledSoftmax fwd"""
-        import scaled_softmax_cuda
-
         scale_t = torch.tensor([scale])
 
-        softmax_results = scaled_softmax_cuda.forward(inputs, scale_t[0])
+        softmax_results = tex.scaled_softmax_forward(inputs, scale_t[0])
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
@@ -105,11 +97,9 @@ class ScaledSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledSoftmax bwd"""
-        import scaled_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = scaled_softmax_cuda.backward(
+        input_grads = tex.scaled_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
         return input_grads, None, None
@@ -222,6 +212,4 @@ class FusedScaleMaskSoftmax(nn.Module):
     @staticmethod
     def get_batch_per_block(sq: int, sk: int, b: int, np: int) -> int:
         """Softmax utility"""
-        import scaled_masked_softmax_cuda
-
-        return scaled_masked_softmax_cuda.get_batch_per_block(sq, sk, b, np)
+        return tex.softmax_get_batch_per_block(sq, sk, b, np)

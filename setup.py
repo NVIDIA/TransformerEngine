@@ -137,75 +137,6 @@ if framework in ("all", "pytorch"):
         )
     )
 
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_upper_triang_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
-        )
-    )
-
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
-        )
-    )
-
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
-        )
-    )
-
 
 def get_cmake_bin():
     cmake_bin = "cmake"
@@ -267,7 +198,7 @@ class CMakeBuildExtension(build_ext, object):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
 
-        cmake_build_args = ["--config", config]
+        cmake_build_args = ["--config", config, "-v"]
 
         cmake_build_dir = os.path.join(self.build_temp, config)
         if not os.path.exists(cmake_build_dir):

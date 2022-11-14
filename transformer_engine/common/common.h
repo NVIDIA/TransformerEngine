@@ -219,6 +219,26 @@ struct TypeInfo{
             NVTE_ERROR("Invalid type."); \
     }
 
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                 \
+  switch (dtype)                                                               \
+    {                                                                          \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat16:                                                      \
+      {                                                                        \
+          using type = fp16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    case DType::kBFloat16:                                                     \
+      {                                                                        \
+          using type = bf16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    default:                                                                   \
+          NVTE_ERROR("Invalid type for 16 bit.");                              \
+      }
+
 template<typename T>
 struct TypeId{};
 
