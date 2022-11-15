@@ -2372,7 +2372,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.weight2_fp8 if self.fp8 else None,
             self.weight2_t_fp8 if self.fp8 else None,
             self.fc2_bias,
-            False,  # use_bias set to False for RPL
+            self.use_bias,
             self.eps,
             is_first_microbatch,
             self.fp8,
