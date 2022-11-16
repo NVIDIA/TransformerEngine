@@ -164,6 +164,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Maintain backward compatibility with v0.2.0 and older.
         if isinstance(state, list):
+            warnings.warn(
+                "This format of checkpointing deprecated and will be"
+                "removed in future releases of TransformerEngine"
+            )
+
             # Retrieve checkpointed items.
             scale_fwd = state[0]
             amax_history_fwd = state[1]
