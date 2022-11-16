@@ -33,6 +33,9 @@ from .fp8 import (
     set_global_fp8_buffer,
     set_amax_buffer_key_deletion,
     delete_key_from_amax_buffer,
+    copy_forward_fp8_meta_tensors_for_recompute,
+    get_old_fp8_meta_tensors_for_recompute,
+    restore_fp8_meta_tensors,
 )
 from .jit import (
     bias_gelu_fused,
@@ -53,6 +56,8 @@ from .distributed import (
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     gather_along_last_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from .cpp_extensions import (
     fp8_gemm,
@@ -317,6 +322,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
         """Checks and prep for FWD."""
 
+        # Activation recomputation is used and this is the second forward phase.
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            return
+
         assert inp.is_cuda, "TransformerEngine needs CUDA."
 
         if self.tp_size > 1:
@@ -335,7 +345,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 amax_and_scale_update(self.fp8_meta, True)
 
-        if self.fp8 and torch.is_grad_enabled() and self.training:
+        if self.fp8 and self.training:
             # Setup for amax reduction
             if self.fp8_meta["recipe"].reduce_amax:
                 self.fp8_meta["first_module"] = is_first_fp8_module()
@@ -349,6 +359,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
 
+        # Activation recomputation is used and this is the first forward phase.
+        if (
+            self.fp8
+            and is_fp8_activation_recompute_enabled()
+            and not in_fp8_activation_recompute_phase()
+        ):
+            copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+
     def post_forward(self) -> None:
         """This is needed because there isn't a way for a module to know
         if it's the last FP8 module in the forward autocast. It is useful
@@ -356,12 +374,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         just in case. The autocast exit will pick up the most recent.
         """
 
-        if (
-            self.fp8
-            and torch.is_grad_enabled()
-            and self.training
-            and self.fp8_meta["recipe"].reduce_amax
-        ):
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            restore_fp8_meta_tensors(self.fp8_meta)
+            return
+
+        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 global_amax_reduction,
@@ -2411,7 +2428,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.weight2_fp8 if self.fp8 else None,
             self.weight2_t_fp8 if self.fp8 else None,
             self.fc2_bias,
-            False,  # use_bias set to False for RPL
+            self.use_bias,
             self.eps,
             is_first_microbatch,
             self.fp8,
