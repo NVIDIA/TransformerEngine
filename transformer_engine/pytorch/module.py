@@ -173,8 +173,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Maintain backward compatibility with v0.2.0 and older.
         if isinstance(state, list):
             warnings.warn(
-                "This format of checkpointing deprecated and will be"
-                "removed in future releases of TransformerEngine"
+                "This checkpoint format is deprecated and will be"
+                "removed in a future release of Transformer Engine"
             )
 
             # Retrieve checkpointed items.
