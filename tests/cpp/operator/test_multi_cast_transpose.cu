@@ -121,12 +121,13 @@ void performTest() {
     }
     return nvte_tensor_list;
   };
-  nvte_multi_cast_transpose(make_nvte_vector(input_list),
-                            make_nvte_vector(scale_list),
-                            make_nvte_vector(output_c_list),
-                            make_nvte_vector(output_t_list),
-                            make_nvte_vector(amax_list),
-                            make_nvte_vector(scale_inv_list),
+  nvte_multi_cast_transpose(num_tensors,
+                            make_nvte_vector(input_list).data(),
+                            make_nvte_vector(scale_list).data(),
+                            make_nvte_vector(output_c_list).data(),
+                            make_nvte_vector(output_t_list).data(),
+                            make_nvte_vector(amax_list).data(),
+                            make_nvte_vector(scale_inv_list).data(),
                             0);
 
   // Reference implementation

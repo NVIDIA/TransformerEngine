@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cfloat>
+#include <vector>
 #include "../utils.cuh"
 #include "../common.h"
 
@@ -355,33 +356,24 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
 
 }  // namespace transformer_engine
 
-void nvte_multi_cast_transpose(const std::vector<NVTETensor> input_list,
-                               const std::vector<NVTETensor> scale_list,
-                               std::vector<NVTETensor> cast_output_list,
-                               std::vector<NVTETensor> transposed_output_list,
-                               std::vector<NVTETensor> amax_list,
-                               std::vector<NVTETensor> scale_inv_list,
+void nvte_multi_cast_transpose(size_t num_tensors,
+                               const NVTETensor* input_list,
+                               const NVTETensor* scale_list,
+                               NVTETensor* cast_output_list,
+                               NVTETensor* transposed_output_list,
+                               NVTETensor* amax_list,
+                               NVTETensor* scale_inv_list,
                                cudaStream_t stream) {
   using namespace transformer_engine;
   std::vector<Tensor*> input_list_, scale_list_,
     cast_output_list_, transposed_output_list_, amax_list_, scale_inv_list_;
-  for (const auto& tensor : input_list) {
-    input_list_.push_back(const_cast<Tensor*>(reinterpret_cast<const Tensor*>(tensor)));
-  }
-  for (const auto& tensor : scale_list) {
-    scale_list_.push_back(const_cast<Tensor*>(reinterpret_cast<const Tensor*>(tensor)));
-  }
-  for (auto& tensor : cast_output_list) {
-    cast_output_list_.push_back(reinterpret_cast<Tensor*>(tensor));
-  }
-  for (auto& tensor : transposed_output_list) {
-    transposed_output_list_.push_back(reinterpret_cast<Tensor*>(tensor));
-  }
-  for (auto& tensor : amax_list) {
-    amax_list_.push_back(reinterpret_cast<Tensor*>(tensor));
-  }
-  for (auto& tensor : scale_inv_list) {
-    scale_inv_list_.push_back(reinterpret_cast<Tensor*>(tensor));
+  for (size_t i = 0; i < num_tensors; ++i) {
+    input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
+    scale_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(scale_list[i])));
+    cast_output_list_.push_back(reinterpret_cast<Tensor*>(cast_output_list[i]));
+    transposed_output_list_.push_back(reinterpret_cast<Tensor*>(transposed_output_list[i]));
+    amax_list_.push_back(reinterpret_cast<Tensor*>(amax_list[i]));
+    scale_inv_list_.push_back(reinterpret_cast<Tensor*>(scale_inv_list[i]));
   }
   multi_cast_transpose(input_list_,
                        scale_list_,

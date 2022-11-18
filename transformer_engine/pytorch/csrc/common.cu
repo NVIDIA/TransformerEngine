@@ -408,12 +408,25 @@ void dispatch_multi_cast_transpose(
                                             scale_inv_type_list[i]));
   }
 
+  // Check tensor lists
+  NVTE_CHECK(scale_list.size() == input_list.size(),
+             "Number of input and scale tensors must match");
+  NVTE_CHECK(cast_output_list.size() == input_list.size(),
+             "Number of input and C output tensors must match");
+  NVTE_CHECK(transposed_output_list.size() == input_list.size(),
+             "Number of input and T output tensors must match");
+  NVTE_CHECK(amax_list.size() == input_list.size(),
+             "Number of input and AMAX tensors must match");
+  NVTE_CHECK(scale_inv_list.size() == input_list.size(),
+             "Number of input and scale_inv tensors must match");
+
   // Launch TE kernel
-  nvte_multi_cast_transpose(input_list,
-                            scale_list,
-                            cast_output_list,
-                            transposed_output_list,
-                            amax_list,
-                            scale_inv_list,
+  nvte_multi_cast_transpose(input_list.size(),
+                            input_list.data(),
+                            scale_list.data(),
+                            cast_output_list.data(),
+                            transposed_output_list.data(),
+                            amax_list.data(),
+                            scale_inv_list.data(),
                             at::cuda::getCurrentCUDAStream());
 }
