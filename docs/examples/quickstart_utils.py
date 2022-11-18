@@ -5,11 +5,15 @@
 import math
 from typing import Callable, Optional
 import torch
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.fp8 import DelayedScaling, dist_group_type
 
 def speedometer(
         module: torch.nn.Module,
         input: torch.Tensor,
         output_grad: torch.Tensor,
+        forward_kwargs: dict = {},
+        fp8_autocast_kwargs: Optional[dict] = None,
         timing_iters: int = 50,
         warmup_iters: int = 50,
 ) -> None:
@@ -19,17 +23,21 @@ def speedometer(
     """
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
+    if fp8_autocast_kwargs is None:
+        fp8_autocast_kwargs = { "enabled": False }
 
     # Warmup runs
     torch.cuda.synchronize()
     for _ in range(warmup_iters):
-        output = module(input, attention_mask=None)
+        with te.fp8_autocast(**fp8_autocast_kwargs):
+            output = module(input, **forward_kwargs)
         output.backward(output_grad)
 
     # Timing runs
     start.record()
     for _ in range(timing_iters):
-        output = module(input, attention_mask=None)
+        with te.fp8_autocast(**fp8_autocast_kwargs):
+            output = module(input, **forward_kwargs)
         output.backward(output_grad)
     end.record()
     torch.cuda.synchronize()

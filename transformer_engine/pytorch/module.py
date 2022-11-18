@@ -31,8 +31,13 @@ from .fp8 import (
     amax_and_scale_update,
     get_global_fp8_buffer,
     set_global_fp8_buffer,
+    get_global_fp8_recompute_buffer,
+    set_global_fp8_recompute_buffer,
     set_amax_buffer_key_deletion,
     delete_key_from_amax_buffer,
+    copy_forward_fp8_meta_tensors_for_recompute,
+    get_old_fp8_meta_tensors_for_recompute,
+    restore_fp8_meta_tensors,
 )
 from .jit import (
     bias_gelu_fused,
@@ -53,6 +58,8 @@ from .distributed import (
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     gather_along_last_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from .cpp_extensions import (
     fp8_gemm,
@@ -140,17 +147,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def get_extra_state(self) -> Union[List[Any], None]:
         """Save before checkpointing."""
         if self.fp8:
-            state = []
-            state.append(self.fp8_meta["scaling_fwd"].scale)
-            state.append(self.fp8_meta["scaling_fwd"].amax_history)
-            state.append(self.fp8_meta["scaling_bwd"].scale)
-            state.append(self.fp8_meta["scaling_bwd"].amax_history)
-            state.append(get_global_fp8_buffer())
-            state.append(self.fp8_meta["update_amax_and_scale_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_bwd"])
-            state.append(self.fp8_meta["autocast_id_fwd"])
-            state.append(self.fp8_meta["autocast_id_bwd"])
+            state = {}
+            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
+            state["global_fp8_buffer"] = get_global_fp8_buffer()
+            state["global_fp8_recompute_buffer"] = get_global_fp8_recompute_buffer()
+
+            # Store other pickelable values.
+            extra = {}
+            for k, v in self.fp8_meta.items():
+                if isinstance(v, (bool, int, float, str)):
+                    extra[k] = v
+            state["extra_fp8_variables"] = extra
+
             return state
         return None
 
@@ -159,31 +170,55 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Retrieve checkpointed items.
-        scale_fwd = state[0]
-        amax_history_fwd = state[1]
-        scale_bwd = state[2]
-        amax_history_bwd = state[3]
-        self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
-        self.fp8_meta["num_gemms"] = (
-            amax_history_fwd.shape[1] // 2
-        )  # Two FWD tensors per GEMM
+        # Maintain backward compatibility with v0.2.0 and older.
+        if isinstance(state, list):
+            warnings.warn(
+                "This checkpoint format is deprecated and will be"
+                "removed in a future release of Transformer Engine"
+            )
 
-        # Initialize before loading
+            # Retrieve checkpointed items.
+            scale_fwd = state[0]
+            amax_history_fwd = state[1]
+            scale_bwd = state[2]
+            amax_history_bwd = state[3]
+            self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
+            self.fp8_meta["num_gemms"] = (
+                amax_history_fwd.shape[1] // 2
+            )  # Two FWD tensors per GEMM
+
+            # Initialize before loading
+            self.init_fp8_meta_tensors()
+            self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
+            self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
+            self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
+            self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
+            self.fp8_meta_tensors_initialized = True
+
+            # Restore global FP8 buffer state.
+            set_global_fp8_buffer(state[4])
+            self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
+            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
+            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
+            self.fp8_meta["autocast_id_fwd"] = state[8]
+            self.fp8_meta["autocast_id_bwd"] = state[9]
+            return
+
+        # Restore global FP8 buffer states.
+        set_global_fp8_buffer(state["global_fp8_buffer"])
+        set_global_fp8_recompute_buffer(state["global_fp8_recompute_buffer"])
+
+        # Load extra items.
+        self.fp8_meta.update(state["extra_fp8_variables"])
+        self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+
+        # Initialize before loading.
         self.init_fp8_meta_tensors()
-        self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
-        self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
-        self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
-        self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
+        self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
+        self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
+        self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
+        self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
         self.fp8_meta_tensors_initialized = True
-
-        # Restore global FP8 buffer state.
-        set_global_fp8_buffer(state[4])
-        self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
-        self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
-        self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
-        self.fp8_meta["autocast_id_fwd"] = state[8]
-        self.fp8_meta["autocast_id_bwd"] = state[9]
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -291,6 +326,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
         """Checks and prep for FWD."""
 
+        # Activation recomputation is used and this is the second forward phase.
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            return
+
         assert inp.is_cuda, "TransformerEngine needs CUDA."
 
         if self.tp_size > 1:
@@ -300,25 +340,36 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_init(num_gemms=num_gemms)
         self.set_fp8_weights()
 
+        # Previous iteration was grad_enabled
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            # Previous iteration was grad_enabled
-            copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-            amax_and_scale_update(self.fp8_meta, True)
-            set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
-
-        if self.fp8 and torch.is_grad_enabled() and self.training:
-            self.fp8_meta["first_module"] = is_first_fp8_module()
-
-            if self.fp8_meta["first_module"]:
-                self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-                set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+            if self.fp8_meta["recipe"].reduce_amax:
+                copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                amax_and_scale_update(self.fp8_meta, True)
+                set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
             else:
-                self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                amax_and_scale_update(self.fp8_meta, True)
 
-            add_amax_to_global_buffer(self.fp8_meta, forward=True)
+        if self.fp8 and self.training:
+            # Setup for amax reduction
+            if self.fp8_meta["recipe"].reduce_amax:
+                self.fp8_meta["first_module"] = is_first_fp8_module()
+                if self.fp8_meta["first_module"]:
+                    self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
+                    set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                else:
+                    self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                add_amax_to_global_buffer(self.fp8_meta, forward=True)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+        # Activation recomputation is used and this is the first forward phase.
+        if (
+            self.fp8
+            and is_fp8_activation_recompute_enabled()
+            and not in_fp8_activation_recompute_phase()
+        ):
+            copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
     def post_forward(self) -> None:
         """This is needed because there isn't a way for a module to know
@@ -327,7 +378,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         just in case. The autocast exit will pick up the most recent.
         """
 
-        if self.fp8 and torch.is_grad_enabled() and self.training:
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            restore_fp8_meta_tensors(self.fp8_meta)
+            return
+
+        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 global_amax_reduction,
@@ -342,6 +397,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def pre_backward(fp8: bool, fp8_meta: Dict[str, Any]) -> None:
         """Checks and prep for BWD."""
         if not fp8:
+            return
+
+        # Update amax and scale; Skip all setup for global amax reduction
+        if not fp8_meta["recipe"].reduce_amax:
+            amax_and_scale_update(fp8_meta, False)
             return
 
         # From previous iteration
@@ -365,7 +425,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         tp_group: Union[dist_group_type, None],
     ) -> None:
         """Checks and prep for BWD."""
-        if not fp8:
+        if not fp8 or not fp8_meta["recipe"].reduce_amax:
             return
 
         if fp8_meta["first_module"]:
@@ -2372,7 +2432,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.weight2_fp8 if self.fp8 else None,
             self.weight2_t_fp8 if self.fp8 else None,
             self.fc2_bias,
-            False,  # use_bias set to False for RPL
+            self.use_bias,
             self.eps,
             is_first_microbatch,
             self.fp8,
