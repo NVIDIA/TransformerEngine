@@ -13,9 +13,6 @@ cpplint --root transformer_engine/common/include --recursive transformer_engine/
 echo "Checking C++ files"
 cd $TE_PATH && \
 cpplint --recursive --exclude=transformer_engine/common/include transformer_engine
-if [ -z "${CPP_ONLY}" ]
-then
-  echo "Checking Python files"
-  cd $TE_PATH && \
-  pylint --recursive=y transformer_engine
-fi
+echo "Checking Python files"
+cd $TE_PATH && \
+pylint --recursive=y --rcfile=./pylintrc transformer_engine --ignore transformer_engine/pytorch

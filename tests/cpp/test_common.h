@@ -156,8 +156,6 @@ const std::string &typeName(DType type);
 
 extern std::vector<DType> all_fp_types;
 
-bool isFp8Type(DType type);
-
 }  // namespace test
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \

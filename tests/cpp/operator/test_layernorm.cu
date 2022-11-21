@@ -163,12 +163,12 @@ void performTest(const size_t N, const size_t H) {
   float epsilon = 1e-5;
   nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), scale.data(), epsilon,
                      z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data(), amax.data(), scale_inv.data());
+                     workspace.data(), barrier.data(), amax.data(), scale_inv.data(), true);
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), scale.data(), epsilon,
                      z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data(), amax.data(), scale_inv.data());
+                     workspace.data(), barrier.data(), amax.data(), scale_inv.data(), true);
 
   // Backward kernel
   nvte_layernorm_bwd(dz.data(), input.data(),
@@ -195,7 +195,6 @@ void performTest(const size_t N, const size_t H) {
   float ref_amax;
   compute_ref_stats(input.cpu_dptr<InputType>(), ref_mu.get(),
                     ref_rsigma.get(), N, H, epsilon);
-  float ref_scale = isFp8Type(otype) ? *(scale.cpu_dptr<float>()) : 1.f;
   compute_ref_output(input.cpu_dptr<InputType>(),
                      gamma.cpu_dptr<WeightType>(),
                      beta.cpu_dptr<WeightType>(),
@@ -204,7 +203,7 @@ void performTest(const size_t N, const size_t H) {
                      rsigma.cpu_dptr<float>(),
                      N, H,
                      &ref_amax,
-                     ref_scale);
+                     *(scale.cpu_dptr<float>()));
   compute_ref_backward(dz.cpu_dptr<WeightType>(), input.cpu_dptr<InputType>(),
                        mu.cpu_dptr<float>(), rsigma.cpu_dptr<float>(),
                        gamma.cpu_dptr<WeightType>(),
@@ -216,11 +215,9 @@ void performTest(const size_t N, const size_t H) {
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-  if (isFp8Type(otype)) {
-    compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / (*scale.cpu_dptr<float>());
-    compareResults("scale_inv", scale_inv, &ref_scale_inv, atol_amax, rtol_amax);
-  }
+  compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
+  float ref_scale_inv = 1.f / (*scale.cpu_dptr<float>());
+  compareResults("scale_inv", scale_inv, &ref_scale_inv, atol_amax, rtol_amax);
 
   auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
   rtol_stats = 5e-5;
