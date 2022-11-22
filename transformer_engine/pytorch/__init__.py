@@ -9,3 +9,4 @@ from .module import LayerNormMLP
 from .module import LayerNorm
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
+from .distributed import checkpoint
