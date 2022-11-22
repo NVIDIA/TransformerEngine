@@ -101,6 +101,7 @@ before_script:
       git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git remote remove github &&
       git branch -D ${FETCH_BRANCH} &&
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
