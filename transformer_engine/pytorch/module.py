@@ -562,13 +562,12 @@ class _LayerNormLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         return_layernorm_output: bool,
+        update_fp8_weights: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
-
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -872,6 +871,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1113,6 +1113,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.activation_dtype,
             self.parallel_mode,
             self.return_layernorm_output,
+            (is_first_microbatch is None or is_first_microbatch) and self.training,
         )
 
         self.post_forward()
@@ -1155,13 +1156,12 @@ class _Linear(torch.autograd.Function):
         tensor_parallel: bool,
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
+        update_fp8_weights: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
-
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -1427,6 +1427,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1635,6 +1636,7 @@ class Linear(TransformerEngineBaseModule):
             self.tp_size > 1,
             self.activation_dtype,
             self.parallel_mode,
+            (is_first_microbatch is None or is_first_microbatch) and self.training,
         )
 
         self.post_forward()
@@ -1679,13 +1681,12 @@ class _LayerNormMLP(torch.autograd.Function):
         return_layernorm_output: bool,
         bias_gelu_nvfusion: bool,
         set_parallel_mode: bool,
+        update_fp8_weights: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
-
-        update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -2174,6 +2175,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2445,6 +2447,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.return_layernorm_output,
             self.bias_gelu_nvfusion,
             self.set_parallel_mode,
+            (is_first_microbatch is None or is_first_microbatch) and self.training,
         )
 
         self.post_forward()
