@@ -96,7 +96,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        self.fp8_initialized = False
         self.fp8 = False
+        self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = get_default_fp8_recipe()
@@ -139,7 +141,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def get_extra_state(self) -> Union[List[Any], None]:
         """Save before checkpointing."""
-        if self.fp8:
+        if self.fp8 or self.fp8_calibration:
             state = []
             state.append(self.fp8_meta["scaling_fwd"].scale)
             state.append(self.fp8_meta["scaling_fwd"].amax_history)
@@ -264,29 +266,33 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.tp_group = tp_group
         self.tp_group_initialized = True
 
+    # This routine is shared across FP8 and FP8_calibration paths so should not actually
+    # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        # If fp8 isn't enabled, turn off and return.
-        if not is_fp8_enabled():
-            self.fp8 = False
+        if is_fp8_enabled() or is_fp8_calibration():
+            # FP8 init has already been run and recipe is the same, don't do anything.
+            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+                return
+
+            # Set FP8, recipe, and other FP8 metadata
+            self.fp8 = is_fp8_enabled()
+            self.fp8_calibration = is_fp8_calibration()
+            self.fp8_meta["recipe"] = get_fp8_recipe()
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.fp8_meta["fp8_group"] = get_fp8_group()
+
+            # Set FP8_MAX per tensor according to recipe
+            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+
+            # Allocate scales and amaxes
+            self.init_fp8_meta_tensors()
+            self.fp8_initialized = True
+        else:
+            # If fp8 isn't enabled, turn off and return.
+            self.fp8_initialized = False
             return
-
-        # FP8 is already enabled and recipe is the same, don't do anything.
-        if self.fp8 and get_fp8_recipe() == self.fp8_meta["recipe"]:
-            return
-
-        # Set FP8, recipe, and other FP8 metadata
-        self.fp8 = True
-        self.fp8_meta["recipe"] = get_fp8_recipe()
-        self.fp8_meta["num_gemms"] = num_gemms
-        self.fp8_meta["fp8_group"] = get_fp8_group()
-
-        # Set FP8_MAX per tensor according to recipe
-        self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-        self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
-
-        # Allocate scales and amaxes
-        self.init_fp8_meta_tensors()
 
     def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
         """Checks and prep for FWD."""
@@ -1087,6 +1093,7 @@ class _Linear(torch.autograd.Function):
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
+        fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
@@ -1099,6 +1106,8 @@ class _Linear(torch.autograd.Function):
         in_features = weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
+
+        assert not fp8 and fp8_calibration, "fp8 and fp8_calibration cannot both be true"
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1172,19 +1181,27 @@ class _Linear(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=bias,
+                get_workspace(),
+                bias=bias,
+                get_workspace(),
+                bias=bias,
                 use_bias=use_bias,
             )
 
+        needs_fp8_wgrad = weight.requires_grad() and fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
+        needs_fp8_dgrad = inputmat.requires_grad() and fp8
+        needs_fp8_scaling_factors_for_bwd = fp8 and not fp8_calibration
         ctx.save_for_backward(
             inputmat_no_fp8
-            if not fp8 or fp8_meta["recipe"].override_linear_precision.wgrad
+            if not needs_fp8_wgrad
             else None,
             inputmat_t
-            if fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
+            if needs_fp8_wgrad
             else None,
             weight,
-            weight_t_fp8,
-            fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+            weight_t_fp8 if needs_fp8_dgrad
+            else None,
+            fp8_meta["scaling_fwd"].scale_inv.clone() if needs_fp8_scaling_factors_for_bwd else None,
         )
         ctx.activation_dtype = activation_dtype
         ctx.fp8 = fp8
@@ -1566,6 +1583,7 @@ class Linear(TransformerEngineBaseModule):
             self.use_bias,
             is_first_microbatch,
             self.fp8,
+            self.fp8_calibration,
             self.fp8_meta,
             self.fuse_wgrad_accumulation,
             self.tp_group,
@@ -2482,8 +2500,3 @@ class LayerNorm(torch.nn.Module):
         init.ones_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
-    def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        """LayerNorm FWD"""
-        return _LayerNorm.apply(
-            inp, self.layer_norm_weight, self.layer_norm_bias, self.eps
-        )

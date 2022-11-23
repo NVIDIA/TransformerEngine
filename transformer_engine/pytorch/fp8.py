@@ -132,6 +132,8 @@ def fp8_autocast(
     enabled: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_group: Optional[dist_group_type] = None,
+    calibrating: bool = False,
+    
 ) -> None:
     """
     Context manager for FP8 usage.
@@ -158,14 +160,15 @@ def fp8_autocast(
                are reduced at the end of each training step.
     """
 
-    global _FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP, _FP8_AUTOCAST_DEPTH
+    global _FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP, _FP8_AUTOCAST_DEPTH, _FP8_CALIBRATION
     global _IS_FIRST_FP8_MODULE, _FP8_AUTOCAST_COUNTER
     global _global_fp8_buffer, _buffer_delete_key_fwd
-    fp8_state = (_FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP)
+    fp8_state = (_FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP, _FP8_CALIBRATION)
     try:
         _FP8_ENABLED = enabled
         _FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         _FP8_DISTRIBUTED_GROUP = fp8_group
+        _FP8_CALIBRATION = calibrating
 
         if _FP8_AUTOCAST_DEPTH == 0:
             _IS_FIRST_FP8_MODULE = True
@@ -178,7 +181,7 @@ def fp8_autocast(
             ), "Device compute capability 9.x required for FP8 execution."
         yield
     finally:
-        _FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP = fp8_state
+        _FP8_ENABLED, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP, _FP8_CALIBRATION = fp8_state
         _IS_FIRST_FP8_MODULE = False
         _FP8_AUTOCAST_DEPTH -= 1
 
@@ -210,6 +213,9 @@ def is_fp8_enabled() -> bool:
     """Is FP8 enabled"""
     return _FP8_ENABLED
 
+def is_fp8_calibration() -> bool:
+    """Is FP8 calibration"""
+    return _FP8_CALIBRATION
 
 def is_first_fp8_module():
     """Returns `True` only the first time when called multiple
