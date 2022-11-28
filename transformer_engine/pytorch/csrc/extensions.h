@@ -54,6 +54,16 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
 );
 
 
+void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
+                                std::vector<at::Tensor> scale_list,
+                                std::vector<at::Tensor> cast_output_list,
+                                std::vector<at::Tensor> transposed_output_list,
+                                std::vector<at::Tensor> amax_output_list,
+                                std::vector<at::Tensor> scale_inv_output_list,
+                                transformer_engine::DType otype
+);
+
+
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 );
