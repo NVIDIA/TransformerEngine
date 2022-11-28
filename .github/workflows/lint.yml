@@ -22,7 +22,10 @@ jobs:
           bash ./qa/L0_lint/test.sh
   pylint:
     name: Python
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/pytorch:22.09-py3
+      options: --user root
     steps:
       - name: Checkout
         uses: actions/checkout@v3
