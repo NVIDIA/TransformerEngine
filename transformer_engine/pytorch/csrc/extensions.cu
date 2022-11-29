@@ -173,6 +173,96 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
 }
 
 
+void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
+                                std::vector<at::Tensor> scale_list,
+                                std::vector<at::Tensor> cast_output_list,
+                                std::vector<at::Tensor> transposed_output_list,
+                                std::vector<at::Tensor> amax_list,
+                                std::vector<at::Tensor> scale_inv_list,
+                                transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  // Extract properties from PyTorch tensors
+  std::vector<void*> input_dptr_list, scale_dptr_list,
+    cast_output_dptr_list, transposed_output_dptr_list,
+    amax_dptr_list, scale_inv_dptr_list;
+  std::vector<std::vector<size_t>> input_shape_list, scale_shape_list,
+    cast_output_shape_list, transposed_output_shape_list,
+    amax_shape_list, scale_inv_shape_list;
+  std::vector<transformer_engine::DType> input_type_list, scale_type_list,
+    cast_output_type_list, transposed_output_type_list,
+    amax_type_list, scale_inv_type_list;
+  auto extract_tensor_props_skip_dtype = [](at::Tensor& tensor,
+                                            std::vector<void*>& dptr_list,
+                                            std::vector<std::vector<size_t>>& shape_list) {
+    dptr_list.push_back(tensor.data_ptr());
+    shape_list.push_back({});
+    for (int d = 0; d < tensor.dim(); ++d) {
+      shape_list.back().push_back(tensor.size(d));
+    }
+  };
+  auto extract_tensor_props = [](at::Tensor& tensor,
+                                 std::vector<void*>& dptr_list,
+                                 std::vector<std::vector<size_t>>& shape_list,
+                                 std::vector<transformer_engine::DType>& type_list) {
+    dptr_list.push_back(tensor.data_ptr());
+    shape_list.push_back({});
+    for (int d = 0; d < tensor.dim(); ++d) {
+      shape_list.back().push_back(tensor.size(d));
+    }
+    type_list.push_back(GetTransformerEngineDType(tensor.scalar_type()));
+  };
+  for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
+    extract_tensor_props(input_list[tensor_id],
+                         input_dptr_list,
+                         input_shape_list,
+                         input_type_list);
+    extract_tensor_props(scale_list[tensor_id],
+                         scale_dptr_list,
+                         scale_shape_list,
+                         scale_type_list);
+    extract_tensor_props_skip_dtype(cast_output_list[tensor_id],
+                                    cast_output_dptr_list,
+                                    cast_output_shape_list);
+    cast_output_type_list.push_back(otype);
+    extract_tensor_props_skip_dtype(transposed_output_list[tensor_id],
+                                    transposed_output_dptr_list,
+                                    transposed_output_shape_list);
+    transposed_output_type_list.push_back(otype);
+    extract_tensor_props(amax_list[tensor_id],
+                         amax_dptr_list,
+                         amax_shape_list,
+                         amax_type_list);
+    extract_tensor_props(scale_inv_list[tensor_id],
+                         scale_inv_dptr_list,
+                         scale_inv_shape_list,
+                         scale_inv_type_list);
+  }
+
+  // Launch TE kernel
+  dispatch_multi_cast_transpose(
+          input_dptr_list,
+          input_shape_list,
+          input_type_list,
+          scale_dptr_list,
+          scale_shape_list,
+          scale_type_list,
+          cast_output_dptr_list,
+          cast_output_shape_list,
+          cast_output_type_list,
+          transposed_output_dptr_list,
+          transposed_output_shape_list,
+          transposed_output_type_list,
+          amax_dptr_list,
+          amax_shape_list,
+          amax_type_list,
+          scale_inv_dptr_list,
+          scale_inv_shape_list,
+          scale_inv_type_list);
+}
+
+
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 ) {
@@ -621,6 +711,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
                                               "Fused Cast + Transpose + BGRAD + DGELU");
+  m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
+                                              "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");

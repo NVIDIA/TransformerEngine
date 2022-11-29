@@ -352,3 +352,81 @@ void dispatch_bgrad_dgelu_cast_transpose_fusion(
                                   amax_cu.data(), dbias_cu.data(), scale_inv_cu.data(),
                                   workspace.data(), at::cuda::getCurrentCUDAStream());
 }
+
+
+void dispatch_multi_cast_transpose(
+    std::vector<void*> input_dptr_list,                     // i
+    const std::vector<std::vector<size_t>>& input_shape_list,
+    const std::vector<transformer_engine::DType>& input_type_list,
+    std::vector<void*> scale_dptr_list,                     // i
+    const std::vector<std::vector<size_t>>& scale_shape_list,
+    const std::vector<transformer_engine::DType>& scale_type_list,
+    std::vector<void*> cast_output_dptr_list,               // o
+    const std::vector<std::vector<size_t>>& cast_output_shape_list,
+    const std::vector<transformer_engine::DType>& cast_output_type_list,
+    std::vector<void*> transposed_output_dptr_list,         // o
+    const std::vector<std::vector<size_t>>& transposed_output_shape_list,
+    const std::vector<transformer_engine::DType>& transposed_output_type_list,
+    std::vector<void*> amax_dptr_list,                      // o
+    const std::vector<std::vector<size_t>>& amax_shape_list,
+    const std::vector<transformer_engine::DType>& amax_type_list,
+    std::vector<void*> scale_inv_dptr_list,                 // o
+    const std::vector<std::vector<size_t>>& scale_inv_shape_list,
+    const std::vector<transformer_engine::DType>& scale_inv_type_list
+) {
+  transformer_engine::TensorWrapper workspace;
+
+  // Construct TE tensors
+  std::vector<NVTETensor> input_list, scale_list,
+    cast_output_list, transposed_output_list, amax_list, scale_inv_list;
+  std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
+  auto make_tensor = [&tensor_wrappers](void* dptr,
+                                        const std::vector<size_t>& shape,
+                                        transformer_engine::DType dtype)
+    -> NVTETensor {
+    tensor_wrappers.emplace_back(makeTransformerEngineTensor(dptr, shape, dtype));
+    return tensor_wrappers.back().data();
+  };
+  for (size_t i = 0; i < input_dptr_list.size(); ++i) {
+    input_list.emplace_back(make_tensor(input_dptr_list[i],
+                                        input_shape_list[i],
+                                        input_type_list[i]));
+    scale_list.emplace_back(make_tensor(scale_dptr_list[i],
+                                        scale_shape_list[i],
+                                        scale_type_list[i]));
+    cast_output_list.emplace_back(make_tensor(cast_output_dptr_list[i],
+                                              cast_output_shape_list[i],
+                                              cast_output_type_list[i]));
+    transposed_output_list.emplace_back(make_tensor(transposed_output_dptr_list[i],
+                                                    transposed_output_shape_list[i],
+                                                    transposed_output_type_list[i]));
+    amax_list.emplace_back(make_tensor(amax_dptr_list[i],
+                                       amax_shape_list[i],
+                                       amax_type_list[i]));
+    scale_inv_list.emplace_back(make_tensor(scale_inv_dptr_list[i],
+                                            scale_inv_shape_list[i],
+                                            scale_inv_type_list[i]));
+  }
+
+  // Check tensor lists
+  NVTE_CHECK(scale_list.size() == input_list.size(),
+             "Number of input and scale tensors must match");
+  NVTE_CHECK(cast_output_list.size() == input_list.size(),
+             "Number of input and C output tensors must match");
+  NVTE_CHECK(transposed_output_list.size() == input_list.size(),
+             "Number of input and T output tensors must match");
+  NVTE_CHECK(amax_list.size() == input_list.size(),
+             "Number of input and AMAX tensors must match");
+  NVTE_CHECK(scale_inv_list.size() == input_list.size(),
+             "Number of input and scale_inv tensors must match");
+
+  // Launch TE kernel
+  nvte_multi_cast_transpose(input_list.size(),
+                            input_list.data(),
+                            scale_list.data(),
+                            cast_output_list.data(),
+                            transposed_output_list.data(),
+                            amax_list.data(),
+                            scale_inv_list.data(),
+                            at::cuda::getCurrentCUDAStream());
+}
