@@ -14,6 +14,7 @@ from .constants import dist_group_type
 
 _FP8_ENABLED = False
 _FP8_RECIPE = None
+_FP8_CALIBRATION = None
 _FP8_DISTRIBUTED_GROUP = None
 _IS_FIRST_FP8_MODULE = False
 _FP8_AUTOCAST_COUNTER = 0

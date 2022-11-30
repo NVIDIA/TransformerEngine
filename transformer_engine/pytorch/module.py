@@ -16,6 +16,7 @@ from torch.nn import init
 import transformer_engine_extensions as tex
 from .fp8 import (
     is_fp8_enabled,
+    is_fp8_calibration,
     get_fp8_recipe,
     get_fp8_group,
     get_default_fp8_recipe,
@@ -1093,7 +1094,6 @@ class _Linear(torch.autograd.Function):
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
-        fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
@@ -1106,8 +1106,6 @@ class _Linear(torch.autograd.Function):
         in_features = weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
-
-        assert not fp8 and fp8_calibration, "fp8 and fp8_calibration cannot both be true"
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1181,19 +1179,14 @@ class _Linear(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=bias,
-                get_workspace(),
-                bias=bias,
-                get_workspace(),
-                bias=bias,
                 use_bias=use_bias,
             )
 
-        needs_fp8_wgrad = weight.requires_grad() and fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
-        needs_fp8_dgrad = inputmat.requires_grad() and fp8
-        needs_fp8_scaling_factors_for_bwd = fp8 and not fp8_calibration
+        needs_fp8_wgrad = weight.requires_grad and fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
+        needs_fp8_dgrad = inputmat.requires_grad and fp8
         ctx.save_for_backward(
             inputmat_no_fp8
-            if not needs_fp8_wgrad
+            if not fp8 or fp8_meta["recipe"].override_linear_precision.wgrad
             else None,
             inputmat_t
             if needs_fp8_wgrad
@@ -1201,7 +1194,7 @@ class _Linear(torch.autograd.Function):
             weight,
             weight_t_fp8 if needs_fp8_dgrad
             else None,
-            fp8_meta["scaling_fwd"].scale_inv.clone() if needs_fp8_scaling_factors_for_bwd else None,
+            fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
         )
         ctx.activation_dtype = activation_dtype
         ctx.fp8 = fp8
@@ -1583,7 +1576,6 @@ class Linear(TransformerEngineBaseModule):
             self.use_bias,
             is_first_microbatch,
             self.fp8,
-            self.fp8_calibration,
             self.fp8_meta,
             self.fuse_wgrad_accumulation,
             self.tp_group,
@@ -2500,3 +2492,9 @@ class LayerNorm(torch.nn.Module):
         init.ones_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
+
+    def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        """LayerNorm FWD"""
+        return _LayerNorm.apply(
+            inp, self.layer_norm_weight, self.layer_norm_bias, self.eps
+        )
