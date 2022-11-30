@@ -24,19 +24,13 @@ extern "C" {
  *  - `transposed_output` is the transposed result of the cast.
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     scale               Scaling factor used for outputs.
- *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
- *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
- *  \param[in,out] amax                AMAX value of the output tensor.
- *  \param[out]    scale_inv           Inverse of the output's scaling factor.
+ *  \param[in,out] cast_output         Result of the cast. Shape: [N, H].
+ *  \param[in,out] transposed_output   Result of the cast and transpose. Shape: [H, N].
  *  \param[in]     stream              CUDA stream used for the operation.
  */
 void nvte_cast_transpose(const NVTETensor input,
-                         const NVTETensor scale,
                          NVTETensor cast_output,
                          NVTETensor transposed_output,
-                         NVTETensor amax,
-                         NVTETensor scale_inv,
                          cudaStream_t stream);
 
 /*! \brief Transpose the input.
@@ -60,23 +54,17 @@ void nvte_transpose(const NVTETensor input,
  *  but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     scale               Scaling factor used for outputs.
- *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
- *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
- *  \param[in,out] amax                AMAX value of the output tensor.
+ *  \param[in,out] cast_output         Result of the cast. Shape: [N, H].
+ *  \param[in,out] transposed_output   Result of the cast and transpose. Shape: [H, N].
  *  \param[out]    dbias               Result of the reduction of the input along the
  *                                     first dimension. Shape: [H].
- *  \param[out]    scale_inv           Inverse of the output's scaling factor.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
 void nvte_cast_transpose_dbias(const NVTETensor input,
-                               const NVTETensor scale,
                                NVTETensor cast_output,
                                NVTETensor transposed_output,
-                               NVTETensor amax,
                                NVTETensor dbias,
-                               NVTETensor scale_inv,
                                NVTETensor workspace,
                                cudaStream_t stream);
 
@@ -94,24 +82,18 @@ void nvte_cast_transpose_dbias(const NVTETensor input,
  *  \param[in]     input               Input tensor of shape [N, H].
  *  \param[in]     gelu_input          Tensor used as input to the forward of GELU operation.
  *                                     Shape [N, H].
- *  \param[in]     scale               Scaling factor used for outputs.
- *  \param[out]    cast_output         Result of the cast. Shape: [N, H].
- *  \param[out]    transposed_output   Result of the cast and transpose. Shape: [H, N].
- *  \param[in,out] amax                AMAX value of the output tensor.
+ *  \param[in,out] cast_output         Result of the cast. Shape: [N, H].
+ *  \param[in,out] transposed_output   Result of the cast and transpose. Shape: [H, N].
  *  \param[out]    dbias               Result of the reduction of the dGELU(input) along the
  *                                     first dimension. Shape: [H].
- *  \param[out]    scale_inv           Inverse of the output's scaling factor.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
 void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      const NVTETensor gelu_input,
-                                     const NVTETensor scale,
                                      NVTETensor cast_output,
                                      NVTETensor transposed_output,
-                                     NVTETensor amax,
                                      NVTETensor dbias,
-                                     NVTETensor scale_inv,
                                      NVTETensor workspace,
                                      cudaStream_t stream);
 

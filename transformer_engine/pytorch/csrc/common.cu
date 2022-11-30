@@ -44,6 +44,41 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
 }
 
 
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr,
+    const std::vector<size_t>& shape,
+    const transformer_engine::DType type,
+    void* amax_ptr,
+    void* scale_ptr,
+    void* scale_inv_ptr) {
+  return transformer_engine::TensorWrapper(data_ptr, shape, type,
+                                           reinterpret_cast<float*>(amax_ptr),
+                                           reinterpret_cast<float*>(scale_ptr),
+                                           reinterpret_cast<float*>(scale_inv_ptr));
+}
+
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
+                                                              at::Tensor amax,
+                                                              const at::Tensor scale,
+                                                              at::Tensor scale_inv) {
+    transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
+    std::vector<size_t> shape;
+
+    for (auto s : tensor.sizes()) {
+        shape.push_back(s);
+    }
+    NVTE_CHECK(amax.scalar_type() == at::kFloat);
+    NVTE_CHECK(scale.scalar_type() == at::kFloat);
+    NVTE_CHECK(scale_inv.scalar_type() == at::kFloat);
+
+    return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype,
+                                       amax.data_ptr(),
+                                       scale.data_ptr(),
+                                       scale_inv.data_ptr());
+}
+
+
 size_t product(const std::vector<size_t> &shape) {
     size_t ret = 1;
     for (auto s : shape) {
@@ -124,21 +159,16 @@ void dispatch_layernorm(void* input,                                    // i
     auto input_cu     = makeTransformerEngineTensor(input, input_shape, input_type);
     auto gamma_cu     = makeTransformerEngineTensor(gamma, gamma_shape, gamma_type);
     auto beta_cu      = makeTransformerEngineTensor(beta, beta_shape, beta_type);
-    auto scale_cu     = makeTransformerEngineTensor(scale, scale_shape, scale_type);
-    auto z_cu         = makeTransformerEngineTensor(z, z_shape, z_type);
+    auto z_cu         = makeTransformerEngineTensor(z, z_shape, z_type, amax, scale, scale_inv);
     auto mu_cu        = makeTransformerEngineTensor(mu, mu_shape, mu_type);
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma, rsigma_shape, rsigma_type);
-    auto amax_cu      = makeTransformerEngineTensor(amax, amax_shape, amax_type);
-    auto scale_inv_cu = makeTransformerEngineTensor(scale_inv, scale_inv_shape, scale_inv_type);
     transformer_engine::TensorWrapper workspace, barrier;
 
     // This call populates workspace and barrier tensors with the required config
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(),
-                       scale_cu.data(), epsilon,
-                       z_cu.data(), mu_cu.data(), rsigma_cu.data(),
+                       epsilon, z_cu.data(), mu_cu.data(), rsigma_cu.data(),
                        at::cuda::getCurrentCUDAStream(), multiProcessorCount,
-                       workspace.data(), barrier.data(), amax_cu.data(),
-                       scale_inv_cu.data());
+                       workspace.data(), barrier.data());
 
     // Fill workspace and barrier
     auto workspace_data = allocateSpace(workspace.shape(),
@@ -155,11 +185,9 @@ void dispatch_layernorm(void* input,                                    // i
 
     // Actual call to fwd kernel
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(),
-                       scale_cu.data(), epsilon,
-                       z_cu.data(), mu_cu.data(), rsigma_cu.data(),
+                       epsilon, z_cu.data(), mu_cu.data(), rsigma_cu.data(),
                        at::cuda::getCurrentCUDAStream(), multiProcessorCount,
-                       workspace.data(), barrier.data(), amax_cu.data(),
-                       scale_inv_cu.data());
+                       workspace.data(), barrier.data());
 }
 
 
@@ -184,17 +212,13 @@ void dispatch_cast_transpose_fusion(void* input,                                
 ) {
     auto input_cu            = makeTransformerEngineTensor(input, input_shape, input_type);
     auto output_cast_cu      = makeTransformerEngineTensor(output_cast, output_cast_shape,
-                                                           output_cast_type);
+                                                           output_cast_type, amax, scale,
+                                                           scale_inv);
     auto output_transpose_cu = makeTransformerEngineTensor(output_transpose, output_transpose_shape,
-                                                           output_transpose_type);
-    auto scale_cu            = makeTransformerEngineTensor(scale, scale_shape, scale_type);
-    auto amax_cu             = makeTransformerEngineTensor(amax, amax_shape, amax_type);
-    auto scale_inv_cu        = makeTransformerEngineTensor(scale_inv, scale_inv_shape,
-                                                           scale_inv_type);
+                                                           output_transpose_type, amax,
+                                                           scale, scale_inv);
 
-    nvte_cast_transpose(input_cu.data(), scale_cu.data(),
-                        output_cast_cu.data(), output_transpose_cu.data(),
-                        amax_cu.data(), scale_inv_cu.data(),
+    nvte_cast_transpose(input_cu.data(), output_cast_cu.data(), output_transpose_cu.data(),
                         at::cuda::getCurrentCUDAStream());
 }
 
@@ -216,13 +240,10 @@ void dispatch_gelu(void* input,                                            // i
                    const transformer_engine::DType scale_inv_type
 ) {
     auto input_cu =     makeTransformerEngineTensor(input, input_shape, input_type);
-    auto output_cu =    makeTransformerEngineTensor(output, output_shape, output_type);
-    auto scale_cu =     makeTransformerEngineTensor(scale, scale_shape, scale_type);
-    auto amax_cu =      makeTransformerEngineTensor(amax, amax_shape, amax_type);
-    auto scale_inv_cu = makeTransformerEngineTensor(scale_inv, scale_inv_shape, scale_inv_type);
+    auto output_cu =    makeTransformerEngineTensor(output, output_shape, output_type,
+                                                    amax, scale, scale_inv);
 
-    nvte_gelu(input_cu.data(), output_cu.data(), scale_cu.data(),
-              amax_cu.data(), scale_inv_cu.data(), at::cuda::getCurrentCUDAStream());
+    nvte_gelu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 }
 
 
@@ -263,22 +284,18 @@ void dispatch_bgrad_cast_transpose_fusion(void* input,                          
                                           const transformer_engine::DType scale_inv_type
 ) {
   auto input_cu             = makeTransformerEngineTensor(input, input_shape, input_type);
-  auto scale_cu             = makeTransformerEngineTensor(scale, scale_shape, scale_type);
   auto cast_output_cu       = makeTransformerEngineTensor(cast_output, cast_output_shape,
-                                                      cast_output_type);
+                                                          cast_output_type, amax, scale,
+                                                          scale_inv);
   auto transposed_output_cu = makeTransformerEngineTensor(transposed_output,
                                                           transposed_output_shape,
-                                                          transposed_output_type);
-  auto amax_cu              = makeTransformerEngineTensor(amax, amax_shape, amax_type);
+                                                          transposed_output_type,
+                                                          amax, scale, scale_inv);
   auto dbias_cu             = makeTransformerEngineTensor(dbias, dbias_shape, dbias_type);
-  auto scale_inv_cu         = makeTransformerEngineTensor(scale_inv,
-                                                          scale_inv_shape,
-                                                          scale_inv_type);
   transformer_engine::TensorWrapper workspace;
 
-  nvte_cast_transpose_dbias(input_cu.data(), scale_cu.data(), cast_output_cu.data(),
-                            transposed_output_cu.data(), amax_cu.data(),
-                            dbias_cu.data(), scale_inv_cu.data(),
+  nvte_cast_transpose_dbias(input_cu.data(), cast_output_cu.data(),
+                            transposed_output_cu.data(), dbias_cu.data(),
                             workspace.data(), at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
@@ -287,10 +304,9 @@ void dispatch_bgrad_cast_transpose_fusion(void* input,                          
                                           workspace.shape(),
                                           workspace.dtype());
 
-  nvte_cast_transpose_dbias(input_cu.data(), scale_cu.data(), cast_output_cu.data(),
-                            transposed_output_cu.data(), amax_cu.data(),
-                            dbias_cu.data(), scale_inv_cu.data(), workspace.data(),
-                            at::cuda::getCurrentCUDAStream());
+  nvte_cast_transpose_dbias(input_cu.data(), cast_output_cu.data(),
+                            transposed_output_cu.data(), dbias_cu.data(),
+                            workspace.data(), at::cuda::getCurrentCUDAStream());
 }
 
 
@@ -324,22 +340,19 @@ void dispatch_bgrad_dgelu_cast_transpose_fusion(
   auto gelu_input_cu        = makeTransformerEngineTensor(gelu_input, gelu_input_shape,
                                                           gelu_input_type);
   auto input_cu             = makeTransformerEngineTensor(input, input_shape, input_type);
-  auto scale_cu             = makeTransformerEngineTensor(scale, scale_shape, scale_type);
   auto cast_output_cu       = makeTransformerEngineTensor(cast_output, cast_output_shape,
-                                                          cast_output_type);
+                                                          cast_output_type, amax, scale,
+                                                          scale_inv);
   auto transposed_output_cu = makeTransformerEngineTensor(transposed_output,
                                                           transposed_output_shape,
-                                                          transposed_output_type);
-  auto amax_cu              = makeTransformerEngineTensor(amax, amax_shape, amax_type);
+                                                          transposed_output_type,
+                                                          amax, scale, scale_inv);
   auto dbias_cu             = makeTransformerEngineTensor(dbias, dbias_shape, dbias_type);
-  auto scale_inv_cu         = makeTransformerEngineTensor(scale_inv,
-                                                          scale_inv_shape,
-                                                          scale_inv_type);
 
-  nvte_cast_transpose_dbias_dgelu(input_cu.data(), gelu_input_cu.data(), scale_cu.data(),
+  nvte_cast_transpose_dbias_dgelu(input_cu.data(), gelu_input_cu.data(),
                                   cast_output_cu.data(), transposed_output_cu.data(),
-                                  amax_cu.data(), dbias_cu.data(), scale_inv_cu.data(),
-                                  workspace.data(), at::cuda::getCurrentCUDAStream());
+                                  dbias_cu.data(), workspace.data(),
+                                  at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
@@ -347,10 +360,10 @@ void dispatch_bgrad_dgelu_cast_transpose_fusion(
                                           workspace.shape(),
                                           workspace.dtype());
 
-  nvte_cast_transpose_dbias_dgelu(input_cu.data(), gelu_input_cu.data(), scale_cu.data(),
+  nvte_cast_transpose_dbias_dgelu(input_cu.data(), gelu_input_cu.data(),
                                   cast_output_cu.data(), transposed_output_cu.data(),
-                                  amax_cu.data(), dbias_cu.data(), scale_inv_cu.data(),
-                                  workspace.data(), at::cuda::getCurrentCUDAStream());
+                                  dbias_cu.data(), workspace.data(),
+                                  at::cuda::getCurrentCUDAStream());
 }
 
 

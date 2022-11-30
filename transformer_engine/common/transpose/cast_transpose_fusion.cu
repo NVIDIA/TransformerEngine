@@ -456,16 +456,16 @@ reduce_dbias_kernel(OutputType*  const dbias_output,
 void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /*cast*/
                                                     Tensor* workspace,
                                                     const int nvec_out) {
-  const size_t row_length = cast_output.shape[1];
-  const size_t num_rows   = cast_output.shape[0];
+  const size_t row_length = cast_output.data.shape[1];
+  const size_t num_rows   = cast_output.data.shape[0];
 
   const size_t tile_size_y = (nvec_out * THREADS_PER_WARP);
   NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");
 
   const size_t num_rows_partial_dbias = DIVUP(num_rows, tile_size_y);
 
-  workspace->shape = {num_rows_partial_dbias, row_length};
-  workspace->dtype = DType::kFloat32;
+  workspace->data.shape = {num_rows_partial_dbias, row_length};
+  workspace->data.dtype = DType::kFloat32;
 }
 
 template <typename InputType>
@@ -489,61 +489,54 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias,
     reduce_dbias_num_threads,
     0,
     stream>>>(
-        reinterpret_cast<InputType *>(dbias->dptr),
-        reinterpret_cast<const fp32 *>(workspace.dptr),
+        reinterpret_cast<InputType *>(dbias->data.dptr),
+        reinterpret_cast<const fp32 *>(workspace.data.dptr),
         reduce_dbias_row_length,
         reduce_dbias_num_rows);
 }
 
 void cast_transpose_dbias(const Tensor &input,
-                          const Tensor &scale,
                           Tensor *cast_output,
                           Tensor *transposed_output,
-                          Tensor *amax,
                           Tensor *dbias,
-                          Tensor *scale_inv,
                           Tensor *workspace,
                           cudaStream_t stream) {
-  NVTE_CHECK(input.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(cast_output->shape.size() == 2, "C output must have 2 dimensions.");
-  NVTE_CHECK(transposed_output->shape.size() == 2, "T output must have 2 dimensions.");
-  NVTE_CHECK(input.shape == cast_output->shape, "Input and C output must have the same shape.");
-  const size_t row_length = input.shape[1];
-  const size_t num_rows = input.shape[0];
+  CheckInputTensor(input, "cast_transpose_dbias_input");
+  CheckOutputTensor(*cast_output, "cast_output");
+  CheckOutputTensor(*transposed_output, "transposed_output");
+  CheckOutputTensor(*dbias, "dbias");
 
-  NVTE_CHECK(transposed_output->shape[0] == row_length, "Wrong dimension of T output.");
-  NVTE_CHECK(transposed_output->shape[1] == num_rows, "Wrong dimension of T output.");
+  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
+  NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
+  NVTE_CHECK(transposed_output->data.shape.size() == 2, "T output must have 2 dimensions.");
+  NVTE_CHECK(input.data.shape == cast_output->data.shape,
+             "Input and C output must have the same shape.");
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
 
-  NVTE_CHECK(cast_output->dtype == transposed_output->dtype,
-             "Both T and C outputs need to have the same type.");
+  NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
+  NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
-  NVTE_CHECK(amax->shape == std::vector<size_t>{ 1 }, "AMAX tensor must have 1 element.");
-  NVTE_CHECK(amax->dtype == DType::kFloat32, "AMAX tensor must have Float32 type.");
-  NVTE_CHECK(scale_inv->shape == std::vector<size_t>{ 1 },
-             "scale_inv tensor must have 1 element.");
-  NVTE_CHECK(scale_inv->dtype == DType::kFloat32, "scale_inv tensor must have Float32 type.");
-  NVTE_CHECK(scale.shape == std::vector<size_t>{ 1 }, "Scale tensor must have 1 element.");
-  NVTE_CHECK(scale.dtype == DType::kFloat32, "Scale tensor must have Float32 type.");
+  NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
+             "C and T outputs need to have the same type.");
+  NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
+             "C and T outputs need to share amax tensor.");
+  NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
+             "C and T outputs need to share scale tensor.");
+  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
+             "C and T outputs need to share scale inverse tensor.");
 
-  NVTE_CHECK(input.dptr != nullptr, "Input is not allocated.");
-  NVTE_CHECK(scale.dptr != nullptr, "Scale is not allocated.");
-  NVTE_CHECK(transposed_output->dptr != nullptr, "T output is not allocated.");
-  NVTE_CHECK(cast_output->dptr != nullptr, "C output is not allocated.");
-  NVTE_CHECK(amax->dptr != nullptr, "AMAX output is not allocated.");
-  NVTE_CHECK(scale_inv->dptr != nullptr, "scale_inv output is not allocated.");
+  NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
 
-  NVTE_CHECK(dbias->dptr != nullptr, "DBias is not allocated.");
-  NVTE_CHECK(dbias->dtype == input.dtype, "DBias must have the same type as input.");
-  NVTE_CHECK(dbias->shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.dtype, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->dtype, OutputType,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
       constexpr int itype_size = sizeof(InputType);
       constexpr int otype_size = sizeof(OutputType);
       constexpr int nvec_in = desired_load_size / itype_size;
       constexpr int nvec_out = desired_store_size / otype_size;
 
-      if (workspace->dptr == nullptr) {
+      if (workspace->data.dptr == nullptr) {
         populate_cast_transpose_dbias_workspace_config(*cast_output, workspace, nvec_out);
         return;
       }
@@ -567,13 +560,13 @@ void cast_transpose_dbias(const Tensor &input,
       static_assert(shared_size_transpose >= shared_size_dbias);
       using Param = CTDBiasParam<InputType, OutputType, ComputeType>;
       Param param;
-      param.input     = reinterpret_cast<const InputType *>(input.dptr);
-      param.output_c  = reinterpret_cast<OutputType *>(cast_output->dptr);
-      param.output_t  = reinterpret_cast<OutputType *>(transposed_output->dptr);
-      param.scale_ptr = reinterpret_cast<const ComputeType *>(scale.dptr);
-      param.amax      = reinterpret_cast<ComputeType *>(amax->dptr);
-      param.scale_inv = reinterpret_cast<ComputeType *>(scale_inv->dptr);
-      param.workspace = reinterpret_cast<ComputeType *>(workspace->dptr);
+      param.input     = reinterpret_cast<const InputType *>(input.data.dptr);
+      param.output_c  = reinterpret_cast<OutputType *>(cast_output->data.dptr);
+      param.output_t  = reinterpret_cast<OutputType *>(transposed_output->data.dptr);
+      param.scale_ptr = reinterpret_cast<const ComputeType *>(cast_output->scale.dptr);
+      param.amax      = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
+      param.scale_inv = reinterpret_cast<ComputeType *>(cast_output->scale_inv.dptr);
+      param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
       if (full_tile) {
         cudaFuncSetAttribute(cast_transpose_dbias_kernel<nvec_in, nvec_out, Param>,
@@ -967,54 +960,46 @@ cast_transpose_dbias_dgelu_kernel_notaligned(const Param param,
 
 void cast_transpose_dbias_dgelu(const Tensor &input,
                                 const Tensor &gelu_input,
-                                const Tensor &scale,
                                 Tensor *cast_output,
                                 Tensor *transposed_output,
-                                Tensor *amax,
                                 Tensor *dbias,
-                                Tensor *scale_inv,
                                 Tensor *workspace,
                                 cudaStream_t stream) {
-  NVTE_CHECK(input.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(cast_output->shape.size() == 2, "C output must have 2 dimensions.");
-  NVTE_CHECK(transposed_output->shape.size() == 2,
+  CheckInputTensor(input, "cast_transpose_dbias_dgelu_input");
+  CheckInputTensor(gelu_input, "gelu_input");
+  CheckOutputTensor(*cast_output, "cast_output");
+  CheckOutputTensor(*transposed_output, "transposed_output");
+  CheckOutputTensor(*dbias, "dbias");
+
+  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
+  NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
+  NVTE_CHECK(transposed_output->data.shape.size() == 2,
              "T output must have 2 dimensions.");
-  NVTE_CHECK(input.shape == cast_output->shape,
+  NVTE_CHECK(input.data.shape == cast_output->data.shape,
              "Input and C output must have the same shape.");
-  const size_t row_length = input.shape[1];
-  const size_t num_rows = input.shape[0];
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
 
-  NVTE_CHECK(transposed_output->shape[0] == row_length, "Wrong dimension of T output.");
-  NVTE_CHECK(transposed_output->shape[1] == num_rows, "Wrong dimension of T output.");
+  NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
+  NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
-  NVTE_CHECK(cast_output->dtype == transposed_output->dtype,
-             "Both C and T outputs need to have the same type.");
+  NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
+             "C and T outputs need to have the same type.");
+  NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
+             "C and T outputs need to share amax tensor.");
+  NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
+             "C and T outputs need to share scale tensor.");
+  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
+             "C and T outputs need to share scale inverse tensor.");
 
-  NVTE_CHECK(amax->shape == std::vector<size_t>{ 1 }, "AMAX tensor must have 1 element.");
-  NVTE_CHECK(amax->dtype == DType::kFloat32, "AMAX tensor must have Float32 type.");
-  NVTE_CHECK(scale_inv->shape == std::vector<size_t>{ 1 },
-             "scale_inv tensor must have 1 element.");
-  NVTE_CHECK(scale_inv->dtype == DType::kFloat32, "scale_inv tensor must have Float32 type.");
-  NVTE_CHECK(scale.shape == std::vector<size_t>{ 1 }, "Scale tensor must have 1 element.");
-  NVTE_CHECK(scale.dtype == DType::kFloat32, "Scale tensor must have Float32 type.");
+  NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
 
-  NVTE_CHECK(input.dptr != nullptr, "Input is not allocated.");
-  NVTE_CHECK(gelu_input.dptr != nullptr, "GeLU input is not allocated.");
-  NVTE_CHECK(scale.dptr != nullptr, "Scale is not allocated.");
-  NVTE_CHECK(transposed_output->dptr != nullptr, "T output is not allocated.");
-  NVTE_CHECK(cast_output->dptr != nullptr, "C output is not allocated.");
-  NVTE_CHECK(amax->dptr != nullptr, "AMAX output is not allocated.");
-  NVTE_CHECK(scale_inv->dptr != nullptr, "scale_inv output is not allocated.");
+  NVTE_CHECK(input.data.dtype == gelu_input.data.dtype, "Types of both inputs must match.");
+  NVTE_CHECK(input.data.shape == gelu_input.data.shape, "Shapes of both inputs must match.");
 
-  NVTE_CHECK(dbias->dptr != nullptr, "DBias is not allocated.");
-  NVTE_CHECK(dbias->dtype == input.dtype, "DBias must have the same type as input.");
-  NVTE_CHECK(dbias->shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
-
-  NVTE_CHECK(input.dtype == gelu_input.dtype, "Types of both inputs must match.");
-  NVTE_CHECK(input.shape == gelu_input.shape, "Shapes of both inputs must match.");
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.dtype, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->dtype, OutputType,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
       using InputType2 = InputType;
       /* dgelu fusion kernel uses more registers */
       constexpr int desired_load_size_dgelu = 4;
@@ -1024,7 +1009,7 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       constexpr int nvec_in = desired_load_size_dgelu / itype_size;
       constexpr int nvec_out = desired_store_size_dgelu / otype_size;
 
-      if (workspace->dptr == nullptr) {
+      if (workspace->data.dptr == nullptr) {
         populate_cast_transpose_dbias_workspace_config(*cast_output, workspace, nvec_out);
         return;
       }
@@ -1048,14 +1033,14 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       static_assert(shared_size_transpose >= shared_size_dbias);
       using Param = CTDBiasDGeluParam<InputType, InputType2, OutputType, ComputeType>;
       Param param;
-      param.input = reinterpret_cast<const InputType *>(input.dptr);
-      param.gelu_input = reinterpret_cast<const InputType2 *>(gelu_input.dptr);
-      param.output_c = reinterpret_cast<OutputType *>(cast_output->dptr);
-      param.output_t = reinterpret_cast<OutputType *>(transposed_output->dptr);
-      param.scale_ptr = reinterpret_cast<const ComputeType *>(scale.dptr);
-      param.amax = reinterpret_cast<ComputeType *>(amax->dptr);
-      param.scale_inv = reinterpret_cast<ComputeType *>(scale_inv->dptr);
-      param.workspace = reinterpret_cast<ComputeType *>(workspace->dptr);
+      param.input = reinterpret_cast<const InputType *>(input.data.dptr);
+      param.gelu_input = reinterpret_cast<const InputType2 *>(gelu_input.data.dptr);
+      param.output_c = reinterpret_cast<OutputType *>(cast_output->data.dptr);
+      param.output_t = reinterpret_cast<OutputType *>(transposed_output->data.dptr);
+      param.scale_ptr = reinterpret_cast<const ComputeType *>(cast_output->scale.dptr);
+      param.amax = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
+      param.scale_inv = reinterpret_cast<ComputeType *>(cast_output->scale_inv.dptr);
+      param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
       if (full_tile) {
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
@@ -1084,45 +1069,33 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
 }  // namespace transformer_engine
 
 void nvte_cast_transpose_dbias(const NVTETensor input,
-                               const NVTETensor scale,
                                NVTETensor cast_output,
                                NVTETensor transposed_output,
-                               NVTETensor amax,
                                NVTETensor dbias,
-                               NVTETensor scale_inv,
                                NVTETensor workspace,
                                cudaStream_t stream) {
   using namespace transformer_engine;
   cast_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
-                       *reinterpret_cast<const Tensor*>(scale),
                        reinterpret_cast<Tensor*>(cast_output),
                        reinterpret_cast<Tensor*>(transposed_output),
-                       reinterpret_cast<Tensor*>(amax),
                        reinterpret_cast<Tensor*>(dbias),
-                       reinterpret_cast<Tensor*>(scale_inv),
                        reinterpret_cast<Tensor*>(workspace),
                        stream);
 }
 
 void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      const NVTETensor gelu_input,
-                                     const NVTETensor scale,
                                      NVTETensor cast_output,
                                      NVTETensor transposed_output,
-                                     NVTETensor amax,
                                      NVTETensor dbias,
-                                     NVTETensor scale_inv,
                                      NVTETensor workspace,
                                      cudaStream_t stream) {
   using namespace transformer_engine;
   cast_transpose_dbias_dgelu(*reinterpret_cast<const Tensor*>(input),
                              *reinterpret_cast<const Tensor*>(gelu_input),
-                             *reinterpret_cast<const Tensor*>(scale),
                              reinterpret_cast<Tensor*>(cast_output),
                              reinterpret_cast<Tensor*>(transposed_output),
-                             reinterpret_cast<Tensor*>(amax),
                              reinterpret_cast<Tensor*>(dbias),
-                             reinterpret_cast<Tensor*>(scale_inv),
                              reinterpret_cast<Tensor*>(workspace),
                              stream);
 }
