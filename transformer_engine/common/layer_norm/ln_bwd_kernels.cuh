@@ -389,8 +389,12 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
           cta_row < params.rows;
           cta_row += gdimm ) {
         const int row = cta_row + warp_m;
-        const compute_t mu = static_cast<const compute_t *>(params.mu)[row];
-        const compute_t rs = static_cast<const compute_t *>(params.rs)[row];
+        compute_t mu = 0.f;
+        compute_t rs = 0.f;
+        if ( row < params.rows ) {
+            mu = static_cast<const compute_t *>(params.mu)[row];
+            rs = static_cast<const compute_t *>(params.rs)[row];
+        }
 
         Cvec dy[LDGS];
         Cvec y[LDGS];
