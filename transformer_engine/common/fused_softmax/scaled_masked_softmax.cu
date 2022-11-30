@@ -1,7 +1,7 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE.txt for license information
+ * See LICENSE for license information.
  ************************************************************************/
 
 #include <transformer_engine/softmax.h>
@@ -448,20 +448,6 @@ __global__ void scaled_masked_softmax_warp_backward(
 }
 
 
-int get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
-    int log2_elements = log2_ceil(key_seq_len);
-    const int next_power_of_two = 1 << log2_elements;
-
-    int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
-    int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
-
-    constexpr int threads_per_block = 128;
-    int warps_per_block = (threads_per_block / warp_size);
-    int batches_per_block = warps_per_block * batches_per_warp;
-
-    return batches_per_block;
-}
-
 template<typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_softmax_forward(
     output_t *dst,
@@ -472,7 +458,7 @@ void dispatch_scaled_softmax_forward(
     int batches,
     int attn_heads,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096);
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
     if (key_seq_len == 0) {
         return;
     } else {
@@ -494,7 +480,7 @@ void dispatch_scaled_softmax_forward(
 
         int warps_per_block = (threads_per_block / warp_size);
         int batches_per_block = warps_per_block * batches_per_warp;
-        NVTE_CHECK(query_seq_len%batches_per_block == 0);
+        NVTE_CHECK(query_seq_len%batches_per_block == 0, "Unsupported shape.");
         dim3 blocks(query_seq_len/batches_per_block, attn_heads, batches);
         dim3 threads(warp_size, warps_per_block, 1);
         // Launch code would be more elegant if C++ supported FOR CONSTEXPR
@@ -621,7 +607,7 @@ void dispatch_scaled_masked_softmax_forward(
     int attn_heads,
     int pad_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096);
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
     if (key_seq_len == 0) {
         return;
     } else {
@@ -643,7 +629,7 @@ void dispatch_scaled_masked_softmax_forward(
 
         int warps_per_block = (threads_per_block / warp_size);
         int batches_per_block = warps_per_block * batches_per_warp;
-        NVTE_CHECK(query_seq_len%batches_per_block == 0);
+        NVTE_CHECK(query_seq_len%batches_per_block == 0, "Unsupported shape.");
         dim3 blocks(query_seq_len/batches_per_block, attn_heads, batches);
         dim3 threads(warp_size, warps_per_block, 1);
         // Launch code would be more elegant if C++ supported FOR CONSTEXPR
@@ -795,7 +781,7 @@ void dispatch_scaled_masked_softmax_backward(
     int batches,
     int attn_heads,
     cudaStream_t stream) {
-    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096);
+    NVTE_CHECK(key_seq_len >= 0 && key_seq_len <= 4096, "Unsupported shape.");
     if (key_seq_len == 0) {
        return;
     } else {
@@ -958,7 +944,7 @@ void dispatch_scaled_masked_softmax_backward(
 }
 
 
-void scaled_softmax_forward_cuda(
+void scaled_softmax_forward(
     const Tensor &input,
     Tensor *softmax_results,
     float scale_factor,
@@ -981,7 +967,7 @@ void scaled_softmax_forward_cuda(
             stream););
 }
 
-void scaled_softmax_backward_cuda(
+void scaled_softmax_backward(
     const Tensor output_grads,
     const Tensor softmax_results,
     float scale_factor,
@@ -1008,7 +994,7 @@ void scaled_softmax_backward_cuda(
 }
 
 
-void scaled_masked_softmax_forward_cuda(
+void scaled_masked_softmax_forward(
     const Tensor input,
     const Tensor mask,
     Tensor *softmax_results,
@@ -1036,7 +1022,7 @@ void scaled_masked_softmax_forward_cuda(
 }
 
 
-void scaled_masked_softmax_backward_cuda(
+void scaled_masked_softmax_backward(
     const Tensor output_grads,
     const Tensor softmax_results,
     float scale_factor,
@@ -1066,20 +1052,30 @@ void scaled_masked_softmax_backward_cuda(
 }  // end namespace transformer_engine
 
 
-int get_batch_per_block_cuda(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
+int get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
     using namespace transformer_engine;
-    return get_batch_per_block(query_seq_len, key_seq_len, batches, attn_heads);
+    int log2_elements = log2_ceil(key_seq_len);
+    const int next_power_of_two = 1 << log2_elements;
+
+    int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
+    int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
+
+    constexpr int threads_per_block = 128;
+    int warps_per_block = (threads_per_block / warp_size);
+    int batches_per_block = warps_per_block * batches_per_warp;
+
+    return batches_per_block;
 }
 
 
-void nvte_scaled_softmax_forward_cuda(
+void nvte_scaled_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_softmax_forward_cuda(
+    scaled_softmax_forward(
         *reinterpret_cast<const Tensor*>(input),
         reinterpret_cast<Tensor*>(softmax_results),
         scale_factor,
@@ -1087,14 +1083,14 @@ void nvte_scaled_softmax_forward_cuda(
 }
 
 
-void nvte_scaled_softmax_backward_cuda(
+void nvte_scaled_softmax_backward(
     const NVTETensor output_grads,
     const NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_softmax_backward_cuda(
+    scaled_softmax_backward(
         *reinterpret_cast<const Tensor*>(output_grads),
         *reinterpret_cast<const Tensor*>(softmax_results),
         scale_factor,
@@ -1102,7 +1098,7 @@ void nvte_scaled_softmax_backward_cuda(
 }
 
 
-void nvte_scaled_masked_softmax_forward_cuda(
+void nvte_scaled_masked_softmax_forward(
     const NVTETensor input,
     const NVTETensor mask,
     NVTETensor softmax_results,
@@ -1110,7 +1106,7 @@ void nvte_scaled_masked_softmax_forward_cuda(
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_masked_softmax_forward_cuda(
+    scaled_masked_softmax_forward(
         *reinterpret_cast<const Tensor*>(input),
         *reinterpret_cast<const Tensor*>(mask),
         reinterpret_cast<Tensor*>(softmax_results),
@@ -1119,14 +1115,14 @@ void nvte_scaled_masked_softmax_forward_cuda(
 }
 
 
-void nvte_scaled_masked_softmax_backward_cuda(
+void nvte_scaled_masked_softmax_backward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_masked_softmax_backward_cuda(
+    scaled_masked_softmax_backward(
         *reinterpret_cast<const Tensor*>(input),
         *reinterpret_cast<Tensor*>(softmax_results),
         scale_factor,

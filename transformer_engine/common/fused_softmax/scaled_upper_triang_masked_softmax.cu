@@ -362,7 +362,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(
     int softmax_elements_stride,
     int attn_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048);
+    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048, "Unsupported shape.");
     if (softmax_elements == 0) {
         return;
     } else {
@@ -385,7 +385,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(
 
         int warps_per_block = (threads_per_block / warp_size);
         int batches_per_block = warps_per_block * batches_per_warp;
-        NVTE_CHECK(attn_batches % batches_per_block == 0);
+        NVTE_CHECK(attn_batches % batches_per_block == 0, "Unsupported shape.");
 
         int blocks_per_seq = attn_batches / batches_per_block;
         dim3 blocks(seq_len, blocks_per_seq, 1);
@@ -516,7 +516,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(
     int softmax_elements_stride,
     int attn_batches,
     cudaStream_t stream) {
-    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048);
+    NVTE_CHECK(softmax_elements >= 0 && softmax_elements <= 2048, "Unsupported shape.");
     if (softmax_elements == 0) {
        return;
     } else {
@@ -539,7 +539,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(
 
         int warps_per_block = (threads_per_block / warp_size);
         int batches_per_block = warps_per_block * batches_per_warp;
-        NVTE_CHECK(attn_batches % batches_per_block == 0);
+        NVTE_CHECK(attn_batches % batches_per_block == 0, "Unsupported shape.");
 
         int blocks_per_seq = attn_batches / batches_per_block;
         dim3 blocks(seq_len, blocks_per_seq, 1);
@@ -661,7 +661,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(
 }
 
 
-void scaled_upper_triang_masked_softmax_forward_cuda(
+void scaled_upper_triang_masked_softmax_forward(
     const Tensor input,
     Tensor *softmax_results,
     float scale_factor,
@@ -682,7 +682,7 @@ void scaled_upper_triang_masked_softmax_forward_cuda(
 }
 
 
-void scaled_upper_triang_masked_softmax_backward_cuda(
+void scaled_upper_triang_masked_softmax_backward(
     const Tensor output_grads,
     const Tensor softmax_results,
     float scale_factor,
@@ -707,14 +707,14 @@ void scaled_upper_triang_masked_softmax_backward_cuda(
 }  // end namespace transformer_engine
 
 
-void nvte_scaled_upper_triang_masked_softmax_forward_cuda(
+void nvte_scaled_upper_triang_masked_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_upper_triang_masked_softmax_forward_cuda(
+    scaled_upper_triang_masked_softmax_forward(
         *reinterpret_cast<const Tensor*>(input),
         reinterpret_cast<Tensor*>(softmax_results),
         scale_factor,
@@ -722,14 +722,14 @@ void nvte_scaled_upper_triang_masked_softmax_forward_cuda(
 }
 
 
-void nvte_scaled_upper_triang_masked_softmax_backward_cuda(
+void nvte_scaled_upper_triang_masked_softmax_backward(
     const NVTETensor output_grads,
     const NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
-    scaled_upper_triang_masked_softmax_backward_cuda(
+    scaled_upper_triang_masked_softmax_backward(
         *reinterpret_cast<const Tensor*>(output_grads),
         *reinterpret_cast<const Tensor*>(softmax_results),
         scale_factor,

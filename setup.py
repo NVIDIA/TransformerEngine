@@ -198,7 +198,7 @@ class CMakeBuildExtension(build_ext, object):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
 
-        cmake_build_args = ["--config", config, "-v"]
+        cmake_build_args = ["--config", config]
 
         cmake_build_dir = os.path.join(self.build_temp, config)
         if not os.path.exists(cmake_build_dir):

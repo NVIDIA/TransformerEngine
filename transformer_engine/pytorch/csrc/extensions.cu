@@ -508,8 +508,8 @@ at::Tensor scaled_softmax_forward(at::Tensor input,
   auto input_cu = makeTransformerEngineTensor(input);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-  nvte_scaled_softmax_forward_cuda(input_cu.data(), softmax_results_cu.data(), scale_factor,
-                                   at::cuda::getCurrentCUDAStream());
+  nvte_scaled_softmax_forward(input_cu.data(), softmax_results_cu.data(), scale_factor,
+                              at::cuda::getCurrentCUDAStream());
 
   return softmax_results;
 }
@@ -537,7 +537,7 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-    nvte_scaled_softmax_backward_cuda(
+    nvte_scaled_softmax_backward(
           output_grads_cu.data(), softmax_results_cu.data(),
           scale_factor, at::cuda::getCurrentCUDAStream());
 
@@ -578,7 +578,7 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input,
     auto mask_cu = makeTransformerEngineTensor(mask);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-    nvte_scaled_masked_softmax_forward_cuda(
+    nvte_scaled_masked_softmax_forward(
           input_cu.data(), mask_cu.data(), softmax_results_cu.data(),
           scale_factor, at::cuda::getCurrentCUDAStream());
 
@@ -608,7 +608,7 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-    nvte_scaled_softmax_backward_cuda(
+    nvte_scaled_softmax_backward(
           output_grads_cu.data(), softmax_results_cu.data(),
           scale_factor, at::cuda::getCurrentCUDAStream());
 
@@ -617,7 +617,7 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
 
 
 int softmax_get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
-    return get_batch_per_block_cuda(query_seq_len, key_seq_len, batches, attn_heads);
+    return get_batch_per_block(query_seq_len, key_seq_len, batches, attn_heads);
 }
 
 
@@ -643,10 +643,10 @@ at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
     auto input_cu = makeTransformerEngineTensor(input);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-    nvte_scaled_upper_triang_masked_softmax_forward_cuda(input_cu.data(),
-                                                         softmax_results_cu.data(),
-                                                         scale_factor,
-                                                         at::cuda::getCurrentCUDAStream());
+    nvte_scaled_upper_triang_masked_softmax_forward(input_cu.data(),
+                                                    softmax_results_cu.data(),
+                                                    scale_factor,
+                                                    at::cuda::getCurrentCUDAStream());
 
     return softmax_results;
 }
@@ -676,10 +676,10 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
-    nvte_scaled_upper_triang_masked_softmax_backward_cuda(output_grads_cu.data(),
-                                                          softmax_results_cu.data(),
-                                                          scale_factor,
-                                                          at::cuda::getCurrentCUDAStream());
+    nvte_scaled_upper_triang_masked_softmax_backward(output_grads_cu.data(),
+                                                     softmax_results_cu.data(),
+                                                     scale_factor,
+                                                     at::cuda::getCurrentCUDAStream());
 
   return output_grads;
 }

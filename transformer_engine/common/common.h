@@ -303,6 +303,12 @@ inline size_t product(const std::vector<size_t> &shape) {
     return ret;
 }
 
+inline int log2_ceil(int value) {
+    int log2_value = 0;
+    while ((1 << log2_value) < value) ++log2_value;
+    return log2_value;
+}
+
 template <typename T>
 struct is_fp8 : std::false_type {};
 

@@ -16,14 +16,7 @@ extern "C" {
 #endif
 
 
-inline int log2_ceil(int value) {
-    int log2_value = 0;
-    while ((1 << log2_value) < value) ++log2_value;
-    return log2_value;
-}
-
-
-void nvte_scaled_softmax_forward_cuda(
+void nvte_scaled_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
@@ -31,7 +24,7 @@ void nvte_scaled_softmax_forward_cuda(
 );
 
 
-void nvte_scaled_softmax_backward_cuda(
+void nvte_scaled_softmax_backward(
     const NVTETensor output_grads,
     const NVTETensor softmax_results,
     float scale_factor,
@@ -39,10 +32,10 @@ void nvte_scaled_softmax_backward_cuda(
 );
 
 
-int get_batch_per_block_cuda(int query_seq_len, int key_seq_len, int batches, int attn_heads);
+int get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads);
 
 
-void nvte_scaled_masked_softmax_forward_cuda(
+void nvte_scaled_masked_softmax_forward(
     const NVTETensor input,
     const NVTETensor mask,
     NVTETensor softmax_results,
@@ -51,7 +44,7 @@ void nvte_scaled_masked_softmax_forward_cuda(
 );
 
 
-void nvte_scaled_masked_softmax_backward_cuda(
+void nvte_scaled_masked_softmax_backward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
@@ -59,7 +52,7 @@ void nvte_scaled_masked_softmax_backward_cuda(
 );
 
 
-void nvte_scaled_upper_triang_masked_softmax_forward_cuda(
+void nvte_scaled_upper_triang_masked_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
     float scale_factor,
@@ -67,7 +60,7 @@ void nvte_scaled_upper_triang_masked_softmax_forward_cuda(
 );
 
 
-void nvte_scaled_upper_triang_masked_softmax_backward_cuda(
+void nvte_scaled_upper_triang_masked_softmax_backward(
     const NVTETensor output_grads,
     const NVTETensor softmax_results,
     float scale_factor,
