@@ -67,6 +67,7 @@ before_script:
     - git config --global user.email "gitlab-runner@${REPO%%/*}"
     - git config --global push.default simple
     - git remote -v
+    - git remote remove github || true
     - git remote add github ${GITHUB_REPO}
     - git fetch github
     - export GIT_SHA=$(git show-ref --hash github/${GH_BRANCH})                                    && echo "${GIT_SHA}"
