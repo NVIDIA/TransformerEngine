@@ -10,6 +10,7 @@ add_executable(test_operator
                test_cast_transpose_dbias_dgelu.cu
                test_gelu.cu
                test_layernorm.cu
+	       test_rmsnorm.cu
                test_multi_cast_transpose.cu
                ../test_common.cu)
 
