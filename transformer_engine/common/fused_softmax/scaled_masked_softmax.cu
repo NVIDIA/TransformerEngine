@@ -1052,22 +1052,6 @@ void scaled_masked_softmax_backward(
 }  // end namespace transformer_engine
 
 
-int get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
-    using namespace transformer_engine;
-    int log2_elements = log2_ceil(key_seq_len);
-    const int next_power_of_two = 1 << log2_elements;
-
-    int warp_size = (next_power_of_two < THREADS_PER_WARP) ? next_power_of_two : THREADS_PER_WARP;
-    int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
-
-    constexpr int threads_per_block = 128;
-    int warps_per_block = (threads_per_block / warp_size);
-    int batches_per_block = warps_per_block * batches_per_warp;
-
-    return batches_per_block;
-}
-
-
 void nvte_scaled_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,

@@ -11,6 +11,9 @@ from torch import nn
 
 import transformer_engine_extensions as tex
 
+THREADS_PER_WARP = 32
+THREADS_PER_BLOCK = 128
+
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
@@ -160,7 +163,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             and attn_batches % 4 == 0  # np * b must be divisor of 4
         ):
             if 0 <= sk <= 4096:
-                batch_per_block = self.get_batch_per_block(sq, sk, b, np)
+                batch_per_block = self.get_batch_per_block(sk)
 
                 if self.attn_mask_type == "causal":
                     if attn_batches % batch_per_block == 0:
@@ -210,6 +213,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         return probs
 
     @staticmethod
-    def get_batch_per_block(sq: int, sk: int, b: int, np: int) -> int:
+    def get_batch_per_block(key_seq_len: int) -> int:
         """Softmax utility"""
-        return tex.softmax_get_batch_per_block(sq, sk, b, np)
+        pow2 = 1 << (key_seq_len - 1).bit_length()
+        warp_size = pow2 if pow2 < THREADS_PER_WARP else THREADS_PER_WARP
+        batches_per_warp = 2 if pow2 <= 128 else 1
+        warps_per_block = THREADS_PER_BLOCK / warp_size
+        batches_per_block = warps_per_block * batches_per_warp
+        return batches_per_block

@@ -32,9 +32,6 @@ void nvte_scaled_softmax_backward(
 );
 
 
-int get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads);
-
-
 void nvte_scaled_masked_softmax_forward(
     const NVTETensor input,
     const NVTETensor mask,

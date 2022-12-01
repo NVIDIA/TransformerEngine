@@ -141,9 +141,6 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
 );
 
 
-int softmax_get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads);
-
-
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
                                                       float scale_factor
 );

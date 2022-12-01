@@ -616,11 +616,6 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
 }
 
 
-int softmax_get_batch_per_block(int query_seq_len, int key_seq_len, int batches, int attn_heads) {
-    return get_batch_per_block(query_seq_len, key_seq_len, batches, attn_heads);
-}
-
-
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
                                                       float scale_factor
 ) {
@@ -693,8 +688,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                     "Scaled Masked Softmax FWD");
   m.def("scaled_masked_softmax_backward", &scaled_masked_softmax_backward,
                                                     "Scaled Masked Softmax BWD");
-  m.def("softmax_get_batch_per_block", &softmax_get_batch_per_block,
-                                                    "Get per block BS for Softmax");
   m.def("scaled_upper_triang_masked_softmax_forward",
             &scaled_upper_triang_masked_softmax_forward,
             "Scaled Upper-Triangular Masked Softmax FWD");
