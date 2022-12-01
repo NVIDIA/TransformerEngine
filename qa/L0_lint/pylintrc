@@ -24,8 +24,8 @@ disable=too-many-locals,
         no-member,
         attribute-defined-outside-init,
         global-statement,
-	too-many-branches,
-	global-variable-not-assigned
+        too-many-branches,
+        global-variable-not-assigned
 
 [TYPECHECK]
 ignored-modules=torch

@@ -181,6 +181,8 @@ class CheckpointFunction(torch.autograd.Function):
         kwargs: Dict[str, Any],
         *args: Tuple[torch.Tensor, ...],
     ) -> Tuple[torch.Tensor, ...]:
+        """Call forward function while saving state to be able to
+        redo the computation later."""
         ctx.run_function = run_function
         ctx.distribute_saved_activations = distribute_saved_activations
 
@@ -216,8 +218,9 @@ class CheckpointFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx, *args: Tuple[torch.Tensor, ...]
+        ctx, *args: Tuple[Union[torch.Tensor, None], ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """Call backward function with activation recomputation."""
         if not torch.autograd._is_checkpoint_valid():
             raise RuntimeError(
                 "Checkpointing is not compatible with .grad(), "
