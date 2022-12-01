@@ -218,7 +218,7 @@ class CheckpointFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx, *args: Tuple[torch.Tensor, ...]
+        ctx, *args: Tuple[Union[torch.Tensor, None], ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Call backward function with activation recomputation."""
         if not torch.autograd._is_checkpoint_valid():
