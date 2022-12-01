@@ -14,6 +14,7 @@
 #include <transformer_engine/logging.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/softmax.h>
 #include <ATen/ATen.h>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/cuda/CUDAContext.h>

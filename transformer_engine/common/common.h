@@ -219,6 +219,26 @@ struct TypeInfo{
             NVTE_ERROR("Invalid type."); \
     }
 
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                 \
+  switch (dtype)                                                               \
+    {                                                                          \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat16:                                                      \
+      {                                                                        \
+          using type = fp16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    case DType::kBFloat16:                                                     \
+      {                                                                        \
+          using type = bf16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    default:                                                                   \
+          NVTE_ERROR("Invalid type for 16 bit.");                              \
+      }
+
 template<typename T>
 struct TypeId{};
 
@@ -281,6 +301,12 @@ inline size_t product(const std::vector<size_t> &shape) {
         ret *= elem;
     }
     return ret;
+}
+
+inline int log2_ceil(int value) {
+    int log2_value = 0;
+    while ((1 << log2_value) < value) ++log2_value;
+    return log2_value;
 }
 
 template <typename T>

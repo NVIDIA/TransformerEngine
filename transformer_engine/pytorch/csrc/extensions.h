@@ -116,3 +116,37 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType itype,
                          transformer_engine::DType otype
 );
+
+
+at::Tensor scaled_softmax_forward(at::Tensor input,
+                                  float scale_factor
+);
+
+
+at::Tensor scaled_softmax_backward(at::Tensor output_grad_,
+                                   at::Tensor softmax_results_,
+                                   float scale_factor
+);
+
+
+at::Tensor scaled_masked_softmax_forward(at::Tensor input,
+                                         at::Tensor mask,
+                                         float scale_factor
+);
+
+
+at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
+                                          at::Tensor softmax_results_,
+                                          float scale_factor
+);
+
+
+at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
+                                                      float scale_factor
+);
+
+
+at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
+                                                       at::Tensor softmax_results_,
+                                                       float scale_factor
+);
