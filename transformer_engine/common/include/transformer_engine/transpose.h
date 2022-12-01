@@ -115,6 +115,33 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      NVTETensor workspace,
                                      cudaStream_t stream);
 
+/*! \brief Cast and transpose multiple tensors.
+ *
+ * This function casts each input tensor and produces 2 results:
+ *  - `cast_output` is the result of the cast
+ *  - `transposed_output` is the transposed result of the cast.
+ *
+ *  \param[in]     num_tensors              Number of tensors.
+ *  \param[in]     input_list               List of 2D input tensors.
+ *  \param[in]     scale_list               Scaling factor to generate outputs.
+ *  \param[out]    cast_output_list         List of casted tensors. Dimensions
+ *                                          match tensors in input_list.
+ *  \param[out]    transposed_output_list   List of casted and transposed
+ *                                          tensors. Dimensions are transpose
+ *                                          of tensors in input_list.
+ *  \param[in,out] amax_list                AMAX values of the output tensors.
+ *  \param[out]    scale_inv_list           Inverses of the scaling factors.
+ *  \param[in]     stream                   CUDA stream used for the operation.
+ */
+void nvte_multi_cast_transpose(size_t num_tensors,
+                               const NVTETensor* input_list,
+                               const NVTETensor* scale_list,
+                               NVTETensor* cast_output_list,
+                               NVTETensor* transposed_output_list,
+                               NVTETensor* amax_list,
+                               NVTETensor* scale_inv_list,
+                               cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

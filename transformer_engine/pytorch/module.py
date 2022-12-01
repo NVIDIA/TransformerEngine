@@ -32,8 +32,13 @@ from .fp8 import (
     amax_and_scale_update,
     get_global_fp8_buffer,
     set_global_fp8_buffer,
+    get_global_fp8_recompute_buffer,
+    set_global_fp8_recompute_buffer,
     set_amax_buffer_key_deletion,
     delete_key_from_amax_buffer,
+    copy_forward_fp8_meta_tensors_for_recompute,
+    get_old_fp8_meta_tensors_for_recompute,
+    restore_fp8_meta_tensors,
 )
 from .jit import (
     bias_gelu_fused,
@@ -54,6 +59,8 @@ from .distributed import (
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     gather_along_last_dim,
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
 )
 from .cpp_extensions import (
     fp8_gemm,
@@ -143,17 +150,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def get_extra_state(self) -> Union[List[Any], None]:
         """Save before checkpointing."""
         if self.fp8 or self.fp8_calibration:
-            state = []
-            state.append(self.fp8_meta["scaling_fwd"].scale)
-            state.append(self.fp8_meta["scaling_fwd"].amax_history)
-            state.append(self.fp8_meta["scaling_bwd"].scale)
-            state.append(self.fp8_meta["scaling_bwd"].amax_history)
-            state.append(get_global_fp8_buffer())
-            state.append(self.fp8_meta["update_amax_and_scale_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_fwd"])
-            state.append(self.fp8_meta["global_fp8_buffer_pos_bwd"])
-            state.append(self.fp8_meta["autocast_id_fwd"])
-            state.append(self.fp8_meta["autocast_id_bwd"])
+            state = {}
+            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
+            state["global_fp8_buffer"] = get_global_fp8_buffer()
+            state["global_fp8_recompute_buffer"] = get_global_fp8_recompute_buffer()
+
+            # Store other pickelable values.
+            extra = {}
+            for k, v in self.fp8_meta.items():
+                if isinstance(v, (bool, int, float, str)):
+                    extra[k] = v
+            state["extra_fp8_variables"] = extra
+
             return state
         return None
 
@@ -162,31 +173,55 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Retrieve checkpointed items.
-        scale_fwd = state[0]
-        amax_history_fwd = state[1]
-        scale_bwd = state[2]
-        amax_history_bwd = state[3]
-        self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
-        self.fp8_meta["num_gemms"] = (
-            amax_history_fwd.shape[1] // 2
-        )  # Two FWD tensors per GEMM
+        # Maintain backward compatibility with v0.2.0 and older.
+        if isinstance(state, list):
+            warnings.warn(
+                "This checkpoint format is deprecated and will be"
+                "removed in a future release of Transformer Engine"
+            )
 
-        # Initialize before loading
+            # Retrieve checkpointed items.
+            scale_fwd = state[0]
+            amax_history_fwd = state[1]
+            scale_bwd = state[2]
+            amax_history_bwd = state[3]
+            self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
+            self.fp8_meta["num_gemms"] = (
+                amax_history_fwd.shape[1] // 2
+            )  # Two FWD tensors per GEMM
+
+            # Initialize before loading
+            self.init_fp8_meta_tensors()
+            self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
+            self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
+            self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
+            self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
+            self.fp8_meta_tensors_initialized = True
+
+            # Restore global FP8 buffer state.
+            set_global_fp8_buffer(state[4])
+            self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
+            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
+            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
+            self.fp8_meta["autocast_id_fwd"] = state[8]
+            self.fp8_meta["autocast_id_bwd"] = state[9]
+            return
+
+        # Restore global FP8 buffer states.
+        set_global_fp8_buffer(state["global_fp8_buffer"])
+        set_global_fp8_recompute_buffer(state["global_fp8_recompute_buffer"])
+
+        # Load extra items.
+        self.fp8_meta.update(state["extra_fp8_variables"])
+        self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+
+        # Initialize before loading.
         self.init_fp8_meta_tensors()
-        self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
-        self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
-        self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
-        self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
+        self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
+        self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
+        self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
+        self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
         self.fp8_meta_tensors_initialized = True
-
-        # Restore global FP8 buffer state.
-        set_global_fp8_buffer(state[4])
-        self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
-        self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
-        self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
-        self.fp8_meta["autocast_id_fwd"] = state[8]
-        self.fp8_meta["autocast_id_bwd"] = state[9]
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -298,6 +333,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
         """Checks and prep for FWD."""
 
+        # Activation recomputation is used and this is the second forward phase.
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            return
+
         assert inp.is_cuda, "TransformerEngine needs CUDA."
 
         if self.tp_size > 1:
@@ -307,25 +347,36 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_init(num_gemms=num_gemms)
         self.set_fp8_weights()
 
+        # Previous iteration was grad_enabled
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            # Previous iteration was grad_enabled
-            copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-            amax_and_scale_update(self.fp8_meta, True)
-            set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
-
-        if self.fp8 and torch.is_grad_enabled() and self.training:
-            self.fp8_meta["first_module"] = is_first_fp8_module()
-
-            if self.fp8_meta["first_module"]:
-                self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-                set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+            if self.fp8_meta["recipe"].reduce_amax:
+                copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                amax_and_scale_update(self.fp8_meta, True)
+                set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
             else:
-                self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                amax_and_scale_update(self.fp8_meta, True)
 
-            add_amax_to_global_buffer(self.fp8_meta, forward=True)
+        if self.fp8 and self.training:
+            # Setup for amax reduction
+            if self.fp8_meta["recipe"].reduce_amax:
+                self.fp8_meta["first_module"] = is_first_fp8_module()
+                if self.fp8_meta["first_module"]:
+                    self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
+                    set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                else:
+                    self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                add_amax_to_global_buffer(self.fp8_meta, forward=True)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+        # Activation recomputation is used and this is the first forward phase.
+        if (
+            self.fp8
+            and is_fp8_activation_recompute_enabled()
+            and not in_fp8_activation_recompute_phase()
+        ):
+            copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
     def post_forward(self) -> None:
         """This is needed because there isn't a way for a module to know
@@ -334,7 +385,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         just in case. The autocast exit will pick up the most recent.
         """
 
-        if self.fp8 and torch.is_grad_enabled() and self.training:
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            restore_fp8_meta_tensors(self.fp8_meta)
+            return
+
+        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 global_amax_reduction,
@@ -349,6 +404,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def pre_backward(fp8: bool, fp8_meta: Dict[str, Any]) -> None:
         """Checks and prep for BWD."""
         if not fp8:
+            return
+
+        # Update amax and scale; Skip all setup for global amax reduction
+        if not fp8_meta["recipe"].reduce_amax:
+            amax_and_scale_update(fp8_meta, False)
             return
 
         # From previous iteration
@@ -372,7 +432,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         tp_group: Union[dist_group_type, None],
     ) -> None:
         """Checks and prep for BWD."""
-        if not fp8:
+        if not fp8 or not fp8_meta["recipe"].reduce_amax:
             return
 
         if fp8_meta["first_module"]:
@@ -690,7 +750,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
-            # DGRAD
+            # DGRAD: Evaluated unconditionally to feed into Linear backward
             dgrad = fp8_gemm(
                 weight_t_fp8,
                 fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
@@ -703,7 +763,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_DGRAD,
             )
         else:
-            # DGRAD
+            # DGRAD: Evaluated unconditionally to feed into Linear backward
             dgrad, _, _ = gemm(
                 weight,
                 grad_output,
@@ -722,59 +782,60 @@ class _LayerNormLinear(torch.autograd.Function):
         elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
             dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-        if ctx.fp8:
-            # WGRAD
-            if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                wgrad = fp8_gemm(
-                    ln_out_total_t,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
-                    fp8_dtype_forward,
-                    grad_output_t,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[
-                        tex.FP8BwdTensors.GRAD_OUTPUT1
-                    ],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
-                )
+        if weight.requires_grad:
+            if ctx.fp8:
+                # WGRAD
+                if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                    ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                    wgrad = fp8_gemm(
+                        ln_out_total_t,
+                        fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
+                        fp8_dtype_forward,
+                        grad_output_t,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv[
+                            tex.FP8BwdTensors.GRAD_OUTPUT1
+                        ],
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
+                else:
+                    ln_out_total_c = cast_from_fp8(
+                        ln_out_total,
+                        ctx.fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                        TE_DType[ctx.activation_dtype],
+                    )
+                    wgrad, _, _ = gemm(
+                        ln_out_total_c,
+                        grad_output,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    )
             else:
-                ln_out_total_c = cast_from_fp8(
+                # WGRAD
+                wgrad, grad_bias, _ = gemm(
                     ln_out_total,
-                    ctx.fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    TE_DType[ctx.activation_dtype],
-                )
-                wgrad, _, _ = gemm(
-                    ln_out_total_c,
                     grad_output,
                     ctx.activation_dtype,
                     get_workspace(),
                     layout="NT",
                     grad=True,
+                    use_bias=ctx.use_bias,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     fp32_output=ctx.fuse_wgrad_accumulation,
                     out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-        else:
-            # WGRAD
-            wgrad, grad_bias, _ = gemm(
-                ln_out_total,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_bias,
-                accumulate=accumulate_wgrad_into_param_main_grad,
-                fp32_output=ctx.fuse_wgrad_accumulation,
-                out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-            )
 
         # Column Parallel Linear
         if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
@@ -802,7 +863,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dxmat.view(ctx.inp_shape),
             dgamma,
             dbeta,
-            wgrad,
+            wgrad if weight.requires_grad else None,
             None,
             None,
             grad_bias,
@@ -1302,51 +1363,52 @@ class _Linear(torch.autograd.Function):
         elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
             dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-        if ctx.fp8:
-            # WGRAD
-            if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                wgrad = fp8_gemm(
-                    inputmat_t_total,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
-                    fp8_dtype_forward,
-                    grad_output_t,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[
-                        tex.FP8BwdTensors.GRAD_OUTPUT1
-                    ],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
-                )
+        if weight.requires_grad:
+            if ctx.fp8:
+                # WGRAD
+                if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                    wgrad = fp8_gemm(
+                        inputmat_t_total,
+                        fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
+                        fp8_dtype_forward,
+                        grad_output_t,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv[
+                            tex.FP8BwdTensors.GRAD_OUTPUT1
+                        ],
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
+                else:
+                    wgrad, _, _ = gemm(
+                        inputmat_total,
+                        grad_output,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    )
             else:
-                wgrad, _, _ = gemm(
+                # WGRAD
+                wgrad, grad_bias, _ = gemm(
                     inputmat_total,
                     grad_output,
                     ctx.activation_dtype,
                     get_workspace(),
                     layout="NT",
                     grad=True,
+                    use_bias=ctx.use_bias,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     fp32_output=ctx.fuse_wgrad_accumulation,
                     out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-        else:
-            # WGRAD
-            wgrad, grad_bias, _ = gemm(
-                inputmat_total,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_bias,
-                accumulate=accumulate_wgrad_into_param_main_grad,
-                fp32_output=ctx.fuse_wgrad_accumulation,
-                out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-            )
 
         # Column Parallel Linear
         if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
@@ -1360,7 +1422,7 @@ class _Linear(torch.autograd.Function):
         )
 
         return (
-            wgrad,
+            wgrad if weight.requires_grad else None,
             None,
             None,
             dgrad.view(ctx.inp_shape),
@@ -1868,7 +1930,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
-            # FC2 DGRAD
+            # FC2 DGRAD; Unconditional
             fc2_dgrad = fp8_gemm(
                 fc2_weight_t_fp8,
                 fwd_scale_inverses[tex.FP8FwdTensors.GEMM2_WEIGHT],
@@ -1883,24 +1945,26 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FC2 WGRAD
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
-
-                fc2_wgrad = fp8_gemm(
-                    gelu_out_t,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM2_INPUT],
-                    fp8_dtype_forward,
-                    grad_output_t,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[
-                        tex.FP8BwdTensors.GRAD_OUTPUT1
-                    ],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
-                )
+                if fc2_weight.requires_grad:
+                    gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
+                    fc2_wgrad = fp8_gemm(
+                        gelu_out_t,
+                        fwd_scale_inverses[tex.FP8FwdTensors.GEMM2_INPUT],
+                        fp8_dtype_forward,
+                        grad_output_t,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv[
+                            tex.FP8BwdTensors.GRAD_OUTPUT1
+                        ],
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=fc2_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
 
                 fc1_bias_grad, dgelu, dgelu_t = fp8_cast_transpose_bgrad_dgelu_fused(
                     fc2_dgrad,
@@ -1910,29 +1974,33 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_dtype_backward,
                 )
             else:
-                gelu_out_c = cast_from_fp8(
-                    gelu_out,
-                    ctx.fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM2_INPUT,
-                    fp8_dtype_forward,
-                    TE_DType[ctx.activation_dtype],
-                )
-                fc2_wgrad, _, _ = gemm(
-                    gelu_out_c,
-                    grad_output,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
-                    use_bias=ctx.use_bias,
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                )
+                if fc2_weight.requires_grad:
+                    gelu_out_c = cast_from_fp8(
+                        gelu_out,
+                        ctx.fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM2_INPUT,
+                        fp8_dtype_forward,
+                        TE_DType[ctx.activation_dtype],
+                    )
+                    fc2_wgrad, _, _ = gemm(
+                        gelu_out_c,
+                        grad_output,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        use_bias=ctx.use_bias,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=fc2_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
+                    )
 
                 fc1_bias_grad, dgelu_no_fp8 = bgrad_dgelu_fused(
                     fc2_dgrad, fc1_out, fc1_bias
                 )
+
                 dgelu = cast_to_fp8(
                     dgelu_no_fp8,
                     ctx.fp8_meta["scaling_bwd"],
@@ -1941,7 +2009,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 dgelu_t = None
 
-            # FC1 DGRAD
+            # FC1 DGRAD: Unconditional
             fc1_dgrad = fp8_gemm(
                 fc1_weight_t_fp8,
                 fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
@@ -1954,7 +2022,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_DGRAD,
             )
         else:
-            # FC2 DGRAD
+            # FC2 DGRAD; Unconditional
             fc2_dgrad, _, _ = gemm(
                 fc2_weight,
                 grad_output,
@@ -1967,25 +2035,26 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # FC2 WGRAD
-            fc2_wgrad, fc2_bias_grad, _ = gemm(
-                gelu_out,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_bias,
-                accumulate=accumulate_wgrad_into_param_main_grad,
-                fp32_output=ctx.fuse_wgrad_accumulation,
-                out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-            )
+            if fc2_weight.requires_grad:
+                fc2_wgrad, fc2_bias_grad, _ = gemm(
+                    gelu_out,
+                    grad_output,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    layout="NT",
+                    grad=True,
+                    use_bias=ctx.use_bias,
+                    accumulate=accumulate_wgrad_into_param_main_grad,
+                    fp32_output=ctx.fuse_wgrad_accumulation,
+                    out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                )
 
             if ctx.bias_gelu_nvfusion:
                 fc1_bias_grad, dgelu = bgrad_dgelu_fused(fc2_dgrad, fc1_out, fc1_bias)
             else:
                 dgelu = fc2_dgrad
 
-            # FC1 DGRAD
+            # FC1 DGRAD: Unconditional
             fc1_dgrad, _, _ = gemm(
                 fc1_weight,
                 dgelu,
@@ -2004,64 +2073,69 @@ class _LayerNormMLP(torch.autograd.Function):
         elif ctx.set_parallel_mode and ctx.tensor_parallel:
             fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
 
-        if ctx.fp8:
-            # FC1 WGRAD
-            if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                fc1_wgrad = fp8_gemm(
-                    ln_out_total_t,
-                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
-                    fp8_dtype_forward,
-                    dgelu_t,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv[
-                        tex.FP8BwdTensors.GRAD_OUTPUT2
-                    ],
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    accumulate=accumulate_wgrad_into_param_main_grad,
-                    fp32_output=ctx.fuse_wgrad_accumulation,
-                    out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
-                )
+        if fc1_weight.requires_grad:
+            if ctx.fp8:
+                # FC1 WGRAD
+                if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                    ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                    fc1_wgrad = fp8_gemm(
+                        ln_out_total_t,
+                        fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_INPUT],
+                        fp8_dtype_forward,
+                        dgelu_t,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv[
+                            tex.FP8BwdTensors.GRAD_OUTPUT2
+                        ],
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=fc1_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
+                else:
+                    ln_out_total_c = cast_from_fp8(
+                        ln_out_total,
+                        ctx.fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                        TE_DType[ctx.activation_dtype],
+                    )
+                    fc1_wgrad, _, _ = gemm(
+                        ln_out_total_c,
+                        dgelu_no_fp8,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NT",
+                        grad=True,
+                        accumulate=accumulate_wgrad_into_param_main_grad,
+                        fp32_output=ctx.fuse_wgrad_accumulation,
+                        out=fc1_weight.main_grad
+                        if ctx.fuse_wgrad_accumulation
+                        else None,
+                    )
             else:
-                ln_out_total_c = cast_from_fp8(
+                # FC1 WGRAD
+                fc1_wgrad_outputs = gemm(
                     ln_out_total,
-                    ctx.fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    TE_DType[ctx.activation_dtype],
-                )
-                fc1_wgrad, _, _ = gemm(
-                    ln_out_total_c,
-                    dgelu_no_fp8,
+                    dgelu,
                     ctx.activation_dtype,
                     get_workspace(),
                     layout="NT",
                     grad=True,
+                    use_bias=not ctx.bias_gelu_nvfusion,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     fp32_output=ctx.fuse_wgrad_accumulation,
                     out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-        else:
-            # FC1 WGRAD
-            fc1_wgrad_outputs = gemm(
-                ln_out_total,
-                dgelu,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=not ctx.bias_gelu_nvfusion,
-                accumulate=accumulate_wgrad_into_param_main_grad,
-                fp32_output=ctx.fuse_wgrad_accumulation,
-                out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-            )
 
-            if ctx.bias_gelu_nvfusion:
-                fc1_wgrad, _, _ = fc1_wgrad_outputs
-            else:
-                fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
+                if ctx.bias_gelu_nvfusion:
+                    fc1_wgrad, _, _ = fc1_wgrad_outputs
+                else:
+                    fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
 
         # Column Parallel Linear
         if ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
@@ -2089,11 +2163,11 @@ class _LayerNormMLP(torch.autograd.Function):
             dxmat.view(ctx.inp_shape),
             dgamma,
             dbeta,
-            fc1_wgrad,
+            fc1_wgrad if fc1_weight.requires_grad else None,
             None,
             None,
             fc1_bias_grad,
-            fc2_wgrad,
+            fc2_wgrad if fc2_weight.requires_grad else None,
             None,
             None,
             fc2_bias_grad,
@@ -2368,7 +2442,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.weight2_fp8 if self.fp8 else None,
             self.weight2_t_fp8 if self.fp8 else None,
             self.fc2_bias,
-            False,  # use_bias set to False for RPL
+            self.use_bias,
             self.eps,
             is_first_microbatch,
             self.fp8,
