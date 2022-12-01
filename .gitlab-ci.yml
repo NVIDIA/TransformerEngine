@@ -55,7 +55,7 @@ before_script:
     tags:
       - vm-builder
     variables:
-      GIT_STRATEGY: fetch
+      GIT_STRATEGY: clone
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
       CURL_ATTEMPTS: 3
