@@ -18,5 +18,6 @@ directly from C/C++, without Python.
    cast.h <cast>
    gemm.h <gemm>
    layer_norm.h <layer_norm>
+   softmax.h <softmax>
    transformer_engine.h <transformer_engine>
    transpose.h <transpose>

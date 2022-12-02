@@ -15,7 +15,13 @@
 extern "C" {
 #endif
 
-
+/*! \brief Compute scaled softmax activation on the input.
+ *
+ *  \param[in]     input           Input tensor for softmax.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the input tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
@@ -23,15 +29,31 @@ void nvte_scaled_softmax_forward(
     cudaStream_t stream
 );
 
-
+/*! \brief Compute the backward of the scaled softmax activation.
+ *
+ *  - `output_grads` is the input tensor containing the gradients received from the following layer.
+ *  - `softmax_results` is the output tensor containing the computed gradients.
+ * 
+ *  \param[in]     output_grads    Input tensor for softmax.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the output tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_softmax_backward(
     const NVTETensor output_grads,
-    const NVTETensor softmax_results,
+    NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 );
 
-
+/*! \brief Compute scaled masked softmax activation on the input.
+ *
+ *  \param[in]     input           Input tensor for softmax.
+ *  \param[in]     mask            Mask for the input tensor.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the input tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_masked_softmax_forward(
     const NVTETensor input,
     const NVTETensor mask,
@@ -40,15 +62,30 @@ void nvte_scaled_masked_softmax_forward(
     cudaStream_t stream
 );
 
-
+/*! \brief Compute the backward of the scaled masked softmax activation.
+ *
+ *  - `output_grads` is the input tensor containing the gradients received from the following layer.
+ *  - `softmax_results` is the output tensor containing the computed gradients.
+ * 
+ *  \param[in]     output_grads    Input tensor for softmax.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the output tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_masked_softmax_backward(
-    const NVTETensor input,
+    const NVTETensor output_grads,
     NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 );
 
-
+/*! \brief Compute scaled softmax activation using a 2D upper triangular mask on the input.
+ *
+ *  \param[in]     input           Input tensor for softmax.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the input tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_upper_triang_masked_softmax_forward(
     const NVTETensor input,
     NVTETensor softmax_results,
@@ -56,10 +93,19 @@ void nvte_scaled_upper_triang_masked_softmax_forward(
     cudaStream_t stream
 );
 
-
+/*! \brief Compute the backward of the scaled softmax activation using a 2D upper triangular mask.
+ *
+ *  - `output_grads` is the input tensor containing the gradients received from the following layer.
+ *  - `softmax_results` is the output tensor containing the computed gradients.
+ * 
+ *  \param[in]     output_grads    Input tensor for softmax.
+ *  \param[out]    softmax_results Output tensor.
+ *  \param[in]     scale_factor    Scalar for the output tensor.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_scaled_upper_triang_masked_softmax_backward(
     const NVTETensor output_grads,
-    const NVTETensor softmax_results,
+    NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 );

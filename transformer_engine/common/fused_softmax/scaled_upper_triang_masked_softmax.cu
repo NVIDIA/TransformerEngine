@@ -249,7 +249,7 @@ template <typename input_t, typename output_t, typename acc_t, int log2_elements
 __global__ void scaled_upper_triang_masked_softmax_warp_backward(
     output_t *gradInput,
     input_t *grad,
-    const input_t *output,
+    input_t *output,
     acc_t scale,
     int micro_batch_size,
     int stride,
@@ -510,7 +510,7 @@ template<typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_upper_triang_masked_softmax_backward(
     output_t *grad_input,
     input_t *grad,
-    const input_t *output,
+    input_t *output,
     const acc_t scale,
     int softmax_elements,
     int softmax_elements_stride,
@@ -684,7 +684,7 @@ void scaled_upper_triang_masked_softmax_forward(
 
 void scaled_upper_triang_masked_softmax_backward(
     const Tensor output_grads,
-    const Tensor softmax_results,
+    Tensor softmax_results,
     float scale_factor,
     cudaStream_t stream)  {
 
@@ -696,7 +696,7 @@ void scaled_upper_triang_masked_softmax_backward(
         dispatch_scaled_upper_triang_masked_softmax_backward<softmax_type, softmax_type, float>(
             reinterpret_cast<softmax_type*>(output_grads.dptr),
             reinterpret_cast<softmax_type*>(output_grads.dptr),
-            reinterpret_cast<softmax_type const*>(softmax_results.dptr),
+            reinterpret_cast<softmax_type*>(softmax_results.dptr),
             scale_factor,
             seq_len,
             seq_len,
@@ -724,14 +724,14 @@ void nvte_scaled_upper_triang_masked_softmax_forward(
 
 void nvte_scaled_upper_triang_masked_softmax_backward(
     const NVTETensor output_grads,
-    const NVTETensor softmax_results,
+    NVTETensor softmax_results,
     float scale_factor,
     cudaStream_t stream
 ) {
     using namespace transformer_engine;
     scaled_upper_triang_masked_softmax_backward(
         *reinterpret_cast<const Tensor*>(output_grads),
-        *reinterpret_cast<const Tensor*>(softmax_results),
+        *reinterpret_cast<Tensor*>(softmax_results),
         scale_factor,
         stream);
 }
