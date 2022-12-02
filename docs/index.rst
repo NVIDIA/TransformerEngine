@@ -34,6 +34,7 @@ Transformer Engine documentation
    :caption: Examples and Tutorials
 
    examples/fp8_primer.ipynb
+   examples/advanced_optimizations.ipynb
 
 .. toctree::
    :hidden:
