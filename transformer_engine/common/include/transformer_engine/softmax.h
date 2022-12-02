@@ -33,7 +33,7 @@ void nvte_scaled_softmax_forward(
  *
  *  - `output_grads` is the input tensor containing the gradients received from the following layer.
  *  - `softmax_results` is the output tensor containing the computed gradients.
- * 
+ *
  *  \param[in]     output_grads    Input tensor for softmax.
  *  \param[out]    softmax_results Output tensor.
  *  \param[in]     scale_factor    Scalar for the output tensor.
@@ -66,7 +66,7 @@ void nvte_scaled_masked_softmax_forward(
  *
  *  - `output_grads` is the input tensor containing the gradients received from the following layer.
  *  - `softmax_results` is the output tensor containing the computed gradients.
- * 
+ *
  *  \param[in]     output_grads    Input tensor for softmax.
  *  \param[out]    softmax_results Output tensor.
  *  \param[in]     scale_factor    Scalar for the output tensor.
@@ -97,7 +97,7 @@ void nvte_scaled_upper_triang_masked_softmax_forward(
  *
  *  - `output_grads` is the input tensor containing the gradients received from the following layer.
  *  - `softmax_results` is the output tensor containing the computed gradients.
- * 
+ *
  *  \param[in]     output_grads    Input tensor for softmax.
  *  \param[out]    softmax_results Output tensor.
  *  \param[in]     scale_factor    Scalar for the output tensor.
