@@ -60,7 +60,6 @@ void performTest() {
 
   const DType itype = TypeInfo<InputType>::dtype;
   const DType otype = TypeInfo<OutputType>::dtype;
-  const DType ctype = DType::kFloat32;
   const std::vector<std::pair<size_t, size_t>> tensor_dims = {{1,1},
                                                               {1,768},
                                                               {768,1},
@@ -72,8 +71,7 @@ void performTest() {
   const size_t num_tensors = tensor_dims.size();
 
   // Buffers for Transformer Engine implementation
-  std::vector<Tensor> input_list, output_c_list, output_t_list,
-    scale_list, amax_list, scale_inv_list;
+  std::vector<Tensor> input_list, output_c_list, output_t_list;
 
   // Buffers for reference implementation
   std::vector<std::vector<InputType>> ref_input_list;
@@ -89,16 +87,13 @@ void performTest() {
     input_list.emplace_back(Tensor({ height, width }, itype));
     output_c_list.emplace_back(Tensor({ height, width }, otype));
     output_t_list.emplace_back(Tensor({ width, height }, otype));
-    scale_list.emplace_back(Tensor({ 1 }, ctype));
-    amax_list.emplace_back(Tensor({ 1 }, ctype));
-    scale_inv_list.emplace_back(Tensor({ 1 }, ctype));
 
     auto& input = input_list.back();
-    auto& scale = scale_list.back();
-    fillUniform(input);
-    fillUniform(scale);
-    *scale.cpu_dptr<float>() += 2.5;
-    scale.from_cpu();
+    auto& output_c = output_c_list.back();
+    auto& output_t = output_t_list.back();
+    fillUniform(&input);
+    setRandomScale(&output_c);
+    output_t.shareFP8Meta(output_c);
 
     ref_input_list.emplace_back(height*width);
     ref_output_c_list.emplace_back(height*width);
@@ -107,7 +102,7 @@ void performTest() {
     std::copy(input.cpu_dptr<InputType>(),
               input.cpu_dptr<InputType>() + height * width,
               ref_input_list.back().begin());
-    ref_scale_list[tensor_id] = *scale.cpu_dptr<float>();
+    ref_scale_list[tensor_id] = output_c.scale();
     ref_height_list[tensor_id] = height;
     ref_width_list[tensor_id] = width;
   }
@@ -123,11 +118,8 @@ void performTest() {
   };
   nvte_multi_cast_transpose(num_tensors,
                             make_nvte_vector(input_list).data(),
-                            make_nvte_vector(scale_list).data(),
                             make_nvte_vector(output_c_list).data(),
                             make_nvte_vector(output_t_list).data(),
-                            make_nvte_vector(amax_list).data(),
-                            make_nvte_vector(scale_inv_list).data(),
                             0);
 
   // Reference implementation
@@ -147,12 +139,12 @@ void performTest() {
   for (size_t tensor_id = 0; tensor_id < num_tensors; ++tensor_id) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax",
-                   amax_list[tensor_id],
-                   &ref_amax_list[tensor_id],
+                   output_c_list[tensor_id].amax(),
+                   ref_amax_list[tensor_id],
                    atol_amax, rtol_amax);
     compareResults("scale_inv",
-                   scale_inv_list[tensor_id],
-                   &ref_scale_inv_list[tensor_id],
+                   output_c_list[tensor_id].scale_inv(),
+                   ref_scale_inv_list[tensor_id],
                    atol_amax, rtol_amax);
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c",

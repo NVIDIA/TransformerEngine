@@ -23,7 +23,7 @@ namespace {
 
 template <typename IT, typename OT, typename CT>
 void compute_ref_cast_transpose_dbias(const IT *input_h,
-                                      const CT *scale_h,
+                                      const CT scale,
                                       OT *output_c_h,
                                       OT *output_t_h,
                                       CT *amax_h,
@@ -31,7 +31,6 @@ void compute_ref_cast_transpose_dbias(const IT *input_h,
                                       const size_t N,
                                       const size_t H) {
   CT amax  = 0.;
-  CT scale = *scale_h;
 
   std::vector<CT> acc_dbias(H, 0.);
 
@@ -67,17 +66,15 @@ void performTest(const size_t N, const size_t H) {
   DType ctype = TypeInfo<CType>::dtype;
 
   Tensor input({N, H}, itype);
-  Tensor scale({1},    ctype);
 
   Tensor output_c({N, H}, otype);
   Tensor output_t({ H, N}, otype);
-  Tensor amax({1}, ctype);
-  Tensor scale_inv({1}, ctype);
   // dbias has the same data type with "output grad"
   Tensor dbias({H}, itype);
 
-  fillUniform(input);
-  fillUniform(scale);
+  fillUniform(&input);
+  setRandomScale(&output_c);
+  output_t.shareFP8Meta(output_c);
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
   std::unique_ptr<OType[]> ref_output_t = std::make_unique<OType[]>(N*H);
@@ -85,7 +82,7 @@ void performTest(const size_t N, const size_t H) {
 
   CType ref_amax;
   compute_ref_cast_transpose_dbias(input.cpu_dptr<IType>(),
-                                   scale.cpu_dptr<CType>(),
+                                   output_c.scale(),
                                    ref_output_c.get(),
                                    ref_output_t.get(),
                                    &ref_amax,
@@ -95,12 +92,9 @@ void performTest(const size_t N, const size_t H) {
   Tensor workspace;
 
   nvte_cast_transpose_dbias(input.data(),
-                            scale.data(),
                             output_c.data(),
                             output_t.data(),
-                            amax.data(),
                             dbias.data(),
-                            scale_inv.data(),
                             workspace.data(),
                             0);
 
@@ -108,12 +102,9 @@ void performTest(const size_t N, const size_t H) {
 
 
   nvte_cast_transpose_dbias(input.data(),
-                            scale.data(),
                             output_c.data(),
                             output_t.data(),
-                            amax.data(),
                             dbias.data(),
-                            scale_inv.data(),
                             workspace.data(),
                             0);
 
@@ -122,9 +113,9 @@ void performTest(const size_t N, const size_t H) {
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-  compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
-  float ref_scale_inv = 1.f / (*scale.cpu_dptr<float>());
-  compareResults("scale_inv", scale_inv, &ref_scale_inv, atol_amax, rtol_amax);
+  compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
+  float ref_scale_inv = 1.f / output_c.scale();
+  compareResults("scale_inv", output_c.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
 
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);

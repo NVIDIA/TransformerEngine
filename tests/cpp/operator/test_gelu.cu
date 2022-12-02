@@ -23,16 +23,11 @@ using namespace transformer_engine;
 template <typename IT, typename OT, typename CT>
 void compute_ref_gelu_cast(const IT *input_h,
                            OT *output_h,
-                           const CT *scale_h,
+                           const CT scale,
                            CT *amax_h,
                            const size_t N,
                            const size_t H) {
   CT amax  = 0.;
-  CT scale = 1;
-  if (std::is_same<OT, test::fp8e4m3>::value ||
-      std::is_same<OT, test::fp8e5m2>::value) {
-    scale = *scale_h;
-  }
 
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
@@ -51,30 +46,28 @@ template <typename IType, typename OType>
 void performTestGelu(const size_t N, const size_t H) {
   using namespace test;
 
-  using CType = fp32;
-
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
-  DType ctype = TypeInfo<CType>::dtype;
 
   Tensor input({ N, H }, itype);
   Tensor output({ N, H }, otype);
-  Tensor scale({ 1 }, ctype);
-  Tensor amax({ 1 }, ctype);
-  Tensor scale_inv({ 1 }, ctype);
 
-  fillUniform(input);
-  fillUniform(scale);
+  fillUniform(&input);
+  setRandomScale(&output);
 
   std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(N*H);
 
-  nvte_gelu(input.data(), output.data(), scale.data(),
-            amax.data(), scale_inv.data(), 0);
+  nvte_gelu(input.data(), output.data(), 0);
 
   float ref_amax;
+  float scale;
+  if (isFp8Type(output.dtype())) {
+    scale = output.scale();
+  } else {
+    scale = 1;
+  }
   compute_ref_gelu_cast(input.cpu_dptr<IType>(), ref_output.get(),
-                        scale.cpu_dptr<float>(),
-                        &ref_amax, N, H);
+                        scale, &ref_amax, N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -82,9 +75,9 @@ void performTestGelu(const size_t N, const size_t H) {
 
   if (otype == DType::kFloat8E4M3 || otype == DType::kFloat8E5M2) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / (*scale.cpu_dptr<float>());
-    compareResults("scale_inv", scale_inv, &ref_scale_inv, atol_amax, rtol_amax);
+    compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+    float ref_scale_inv = 1.f / output.scale();
+    compareResults("scale_inv", output.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_gelu", output, ref_output.get(), atol, rtol);

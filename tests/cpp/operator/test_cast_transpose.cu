@@ -47,29 +47,26 @@ void performTest(const size_t N, const size_t H) {
   Tensor input({ N, H }, itype);
   Tensor output_c({ N, H }, otype);
   Tensor output_t({ H, N }, otype);
-  Tensor scale({ 1 }, DType::kFloat32);
-  Tensor amax({ 1 }, DType::kFloat32);
-  Tensor scale_inv({ 1 }, DType::kFloat32);
 
   std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(N * H);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(N * H);
 
-  fillUniform(input);
-  fillUniform(scale);
+  fillUniform(&input);
+  setRandomScale(&output_c);
+  output_t.shareFP8Meta(output_c);
 
-  nvte_cast_transpose(input.data(), scale.data(), output_c.data(), output_t.data(),
-                      amax.data(), scale_inv.data(), 0);
+  nvte_cast_transpose(input.data(), output_c.data(), output_t.data(), 0);
 
   float ref_amax;
   compute_ref<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output_c.get(),
                                      ref_output_t.get(), N, H, &ref_amax,
-                                     *(scale.cpu_dptr<float>()));
+                                     output_c.scale());
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-  compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
+  compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);
   compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
