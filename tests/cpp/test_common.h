@@ -131,18 +131,30 @@ class Tensor {
   }
 
   float amax() const {
-    NVTE_CHECK(amax_cpu_data_);
-    return *amax_cpu_data_;
+    if(amax_cpu_data_) {
+      to_cpu();
+      return *amax_cpu_data_;
+    } else {
+      return 0;
+    }
   }
 
   float scale() const {
-    NVTE_CHECK(scale_cpu_data_);
-    return *scale_cpu_data_;
+    if(scale_cpu_data_) {
+      to_cpu();
+      return *scale_cpu_data_;
+    } else {
+      return 1;
+    }
   }
 
   float scale_inv() const {
-    NVTE_CHECK(scale_inv_cpu_data_);
-    return *scale_inv_cpu_data_;
+    if(scale_inv_cpu_data_) {
+      to_cpu();
+      return *scale_inv_cpu_data_;
+    } else {
+      return 1;
+    }
   }
 
   void to_cpu() const;

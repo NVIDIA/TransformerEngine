@@ -278,9 +278,7 @@ void layernorm_bwd(const Tensor& dz,
     CheckInputTensor(gamma, "gamma");
     CheckOutputTensor(*dx, "dx");
     CheckOutputTensor(*dgamma, "dgamma");
-    CheckOutputTensor(*dgamma_part, "dgamma_part");
     CheckOutputTensor(*dbeta, "dbeta");
-    CheckOutputTensor(*dbeta_part, "dbeta_part");
 
     NVTE_CHECK(dz.data.dtype == otype);
     NVTE_CHECK(mu.data.dtype == ctype);

@@ -105,7 +105,7 @@ cast_transpose_kernel(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                          THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
 #pragma unroll
   for (unsigned int i = 0; i < nvec_out; ++i) {
     in[0][i].load_from(my_input_tile, current_stride + my_place + stride * i);
@@ -158,8 +158,8 @@ cast_transpose_kernel(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
+    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
@@ -222,7 +222,7 @@ cast_transpose_kernel_notaligned(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
   {
     const bool valid_load = my_place < tile_length &&
                             warp_id_in_tile * n_iterations < tile_height;
@@ -294,8 +294,8 @@ cast_transpose_kernel_notaligned(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
+    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 

@@ -162,7 +162,7 @@ cast_transpose_dbias_kernel(const Param param,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *param.scale_ptr;
+  const CType scale = param.scale_ptr != nullptr ? *param.scale_ptr : 1;
 
   partial_dbias.clear();
 
@@ -240,8 +240,8 @@ cast_transpose_dbias_kernel(const Param param,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(param.amax, max);
-    reciprocal<CType>(param.scale_inv, scale);
+    if (param.amax != nullptr) atomicMaxFloat(param.amax, max);
+    if (param.scale_inv != nullptr) reciprocal<CType>(param.scale_inv, scale);
   }
 }
 
@@ -310,7 +310,7 @@ cast_transpose_dbias_kernel_notaligned(const Param param,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *param.scale_ptr;
+  const CType scale = param.scale_ptr != nullptr ? *param.scale_ptr : 1;
 
   partial_dbias.clear();
 
@@ -409,8 +409,8 @@ cast_transpose_dbias_kernel_notaligned(const Param param,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(param.amax, max);
-    reciprocal<CType>(param.scale_inv, scale);
+    if (param.amax != nullptr) atomicMaxFloat(param.amax, max);
+    if (param.scale_inv != nullptr) reciprocal<CType>(param.scale_inv, scale);
   }
 }
 
@@ -671,7 +671,7 @@ cast_transpose_dbias_dgelu_kernel(const Param param,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *param.scale_ptr;
+  const CType scale = param.scale_ptr != nullptr ? *param.scale_ptr : 1;
 
   partial_dbias.clear();
 
@@ -762,8 +762,8 @@ cast_transpose_dbias_dgelu_kernel(const Param param,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(param.amax, max);
-    reciprocal<CType>(param.scale_inv, scale);
+    if (param.amax != nullptr) atomicMaxFloat(param.amax, max);
+    if (param.scale_inv != nullptr) reciprocal<CType>(param.scale_inv, scale);
   }
 }
 
@@ -839,7 +839,7 @@ cast_transpose_dbias_dgelu_kernel_notaligned(const Param param,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *param.scale_ptr;
+  const CType scale = param.scale_ptr != nullptr ? *param.scale_ptr : 1;
 
   partial_dbias.clear();
 
@@ -953,8 +953,8 @@ cast_transpose_dbias_dgelu_kernel_notaligned(const Param param,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(param.amax, max);
-    reciprocal<CType>(param.scale_inv, scale);
+    if (param.amax != nullptr) atomicMaxFloat(param.amax, max);
+    if (param.scale_inv != nullptr) reciprocal<CType>(param.scale_inv, scale);
   }
 }
 

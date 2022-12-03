@@ -60,14 +60,8 @@ void performTestGelu(const size_t N, const size_t H) {
   nvte_gelu(input.data(), output.data(), 0);
 
   float ref_amax;
-  float scale;
-  if (isFp8Type(output.dtype())) {
-    scale = output.scale();
-  } else {
-    scale = 1;
-  }
   compute_ref_gelu_cast(input.cpu_dptr<IType>(), ref_output.get(),
-                        scale, &ref_amax, N, H);
+                        output.scale(), &ref_amax, N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
