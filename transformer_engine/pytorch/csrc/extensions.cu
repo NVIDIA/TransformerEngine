@@ -537,8 +537,9 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
+    // Produce gradients in place.
     nvte_scaled_softmax_backward(
-          output_grads_cu.data(), softmax_results_cu.data(),
+          output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(),
           scale_factor, at::cuda::getCurrentCUDAStream());
 
     return output_grads;
@@ -608,8 +609,9 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
+    // Produce gradients in place.
     nvte_scaled_softmax_backward(
-          output_grads_cu.data(), softmax_results_cu.data(),
+          output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(),
           scale_factor, at::cuda::getCurrentCUDAStream());
 
     return output_grads;
@@ -671,8 +673,10 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
     auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
+    // Produce gradients in place.
     nvte_scaled_upper_triang_masked_softmax_backward(output_grads_cu.data(),
                                                      softmax_results_cu.data(),
+                                                     output_grads_cu.data(),
                                                      scale_factor,
                                                      at::cuda::getCurrentCUDAStream());
 
