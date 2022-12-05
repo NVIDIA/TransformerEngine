@@ -87,7 +87,8 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   const IType* input = reinterpret_cast<const IType*>(args.input_list[tensor_id]);
   OType* output_c = reinterpret_cast<OType*>(args.output_c_list[tensor_id]);
   OType* output_t = reinterpret_cast<OType*>(args.output_t_list[tensor_id]);
-  const CType scale = *reinterpret_cast<CType*>(args.scale_list[tensor_id]);
+  const CType* scale_ptr = reinterpret_cast<CType*>(args.scale_list[tensor_id]);
+  const CType scale = scale_ptr == nullptr ? 1 : *scale_ptr;
   CType* amax = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
   CType* scale_inv = reinterpret_cast<CType*>(args.scale_inv_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
@@ -190,10 +191,10 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   local_amax = reduce_max<n_warps_per_tile>(local_amax, tidy);
   if (tid == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, local_amax);
+    if (amax != nullptr) atomicMaxFloat(amax, local_amax);
   }
   if (tid == 0 && tile_id == 0) {
-    reciprocal<float>(scale_inv, scale);
+    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 

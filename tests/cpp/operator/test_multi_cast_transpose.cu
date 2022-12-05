@@ -137,15 +137,17 @@ void performTest() {
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   for (size_t tensor_id = 0; tensor_id < num_tensors; ++tensor_id) {
-    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax",
-                   output_c_list[tensor_id].amax(),
-                   ref_amax_list[tensor_id],
-                   atol_amax, rtol_amax);
-    compareResults("scale_inv",
-                   output_c_list[tensor_id].scale_inv(),
-                   ref_scale_inv_list[tensor_id],
-                   atol_amax, rtol_amax);
+    if (isFp8Type(otype)) {
+      auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
+      compareResults("amax",
+                     output_c_list[tensor_id].amax(),
+                     ref_amax_list[tensor_id],
+                     atol_amax, rtol_amax);
+      compareResults("scale_inv",
+                     output_c_list[tensor_id].scale_inv(),
+                     ref_scale_inv_list[tensor_id],
+                     atol_amax, rtol_amax);
+    }
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c",
                    output_c_list[tensor_id],
