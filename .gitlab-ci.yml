@@ -517,7 +517,7 @@ upload_logs:
     - /^.*-devel$/
     - /^main$/
 
-.H100_1GPU:
+.H100_1GPU: &H100_1GPU
     tags:
       - computelab_h100
     variables:
