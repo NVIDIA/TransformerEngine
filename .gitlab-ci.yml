@@ -517,6 +517,14 @@ upload_logs:
     - /^.*-devel$/
     - /^main$/
 
+.H100_1GPU:
+    tags:
+      - computelab_h100
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      CI_SLURM_TIME: 240
+
 ######################################################
 ##
 ## Test definitions.
@@ -566,6 +574,10 @@ L0_unittest--TU102_R445_1GPU:
     <<: *L0_TEST
     <<: *TU102_R445_1GPU
 
+L0_unittest--H100_1GPU:
+    <<: *L0_TEST
+    <<: *H100_1GPU
+
 L0_cppunittest--V100_1GPU:
     <<: *L0_TEST
     <<: *V100_1GPU
@@ -573,6 +585,10 @@ L0_cppunittest--V100_1GPU:
 L0_cppunittest--A100_1GPU:
     <<: *L0_TEST
     <<: *A100_1GPU
+
+L0_cppunittest--H100_1GPU:
+    <<: *L0_TEST
+    <<: *H100_1GPU
 
 docs:
     <<: *DOCS_BUILD
