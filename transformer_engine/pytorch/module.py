@@ -329,7 +329,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
-            return
+            return inp.contiguous()
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
 
@@ -370,6 +370,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and not in_fp8_activation_recompute_phase()
         ):
             copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+
+        return inp.contiguous()
 
     def post_forward(self) -> None:
         """This is needed because there isn't a way for a module to know
@@ -1089,7 +1091,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp)
+        inp = self.pre_forward(inp)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -1615,7 +1617,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp)
+        inp = self.pre_forward(inp)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -2418,7 +2420,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp, num_gemms=2)
+        inp = self.pre_forward(inp, num_gemms=2)
 
         out = _LayerNormMLP.apply(
             inp,
