@@ -441,8 +441,10 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
-    auto input_cu     = makeTransformerEngineTensor(input, amax, scale, scale_inv);
-    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype);
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
 
     nvte_fp8_quantize(input_cu.data(), output_cu.data(),
                       at::cuda::getCurrentCUDAStream());
