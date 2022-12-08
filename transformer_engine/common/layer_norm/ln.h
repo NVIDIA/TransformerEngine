@@ -141,10 +141,64 @@ extern BwdGeneralRegistry BWD_GENERAL_FUNCS;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template<typename T>
+struct TypeId{};
+
+template<>
+struct TypeId<fp16>{
+    constexpr static uint32_t Value = 0;
+};
+
+template<>
+struct TypeId<bf16>{
+    constexpr static uint32_t Value = 1;
+};
+
+template<>
+struct TypeId<fp32>{
+    constexpr static uint32_t Value = 2;
+};
+
+template<>
+struct TypeId<fp8e4m3>{
+    constexpr static uint32_t Value = 3;
+};
+
+template<typename T, int S>
+struct Type2Key{
+    constexpr static uint32_t Value = TypeId<T>::Value << S;
+};
+
+template<typename T>
+struct WeightType2Key : public Type2Key<T, 0>{};
+
+template<typename T>
+struct InputType2Key : public Type2Key<T, 2>{};
+
+template<typename T>
+struct OutputType2Key : public Type2Key<T, 4>{};
+
+template<typename T>
+struct ComputeType2Key : public Type2Key<T, 6>{};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename W, typename I, typename O, typename C>
+struct Types2Key{
+    constexpr static uint32_t Value = WeightType2Key<W>::Value | InputType2Key<I>::Value |
+                                      OutputType2Key<O>::Value | ComputeType2Key<C>::Value;
+    constexpr static inline uint64_t get(const uint64_t hidden_size){
+        constexpr uint64_t type_key = Value;
+        return (type_key << 32) | hidden_size;
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct FwdTunedRegistrar{
     explicit FwdTunedRegistrar(FwdFunction f){
-        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+        uint64_t key = Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
         FWD_TUNED_FUNCS.insert({ key, f });
     }
 };
@@ -154,7 +208,7 @@ struct FwdTunedRegistrar{
 template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct FwdGeneralRegistrar{
     explicit FwdGeneralRegistrar(FwdFunction f){
-        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(0);
+        uint64_t key = Types2Key<W, I, O, C>::get(0);
         FWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
     }
 };
@@ -164,7 +218,7 @@ struct FwdGeneralRegistrar{
 template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct BwdTunedRegistrar{
     explicit BwdTunedRegistrar(BwdFunction f){
-        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
+        uint64_t key = Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
         BWD_TUNED_FUNCS.insert({ key, f });
     }
 };
@@ -174,7 +228,7 @@ struct BwdTunedRegistrar{
 template<typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE>
 struct BwdGeneralRegistrar{
     explicit BwdGeneralRegistrar(BwdFunction f){
-        uint64_t key = transformer_engine::Types2Key<W, I, O, C>::get(0);
+        uint64_t key = Types2Key<W, I, O, C>::get(0);
         BWD_GENERAL_FUNCS[key].insert({ HIDDEN_SIZE, f });
     }
 };
@@ -186,6 +240,8 @@ layer_norm::BwdFunction & get_bwd_launcher(DType wtype,
                                            DType otype,
                                            DType ctype,
                                            uint32_t hidden_size);
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
 
 }  // namespace layer_norm
 }  // namespace transformer_engine

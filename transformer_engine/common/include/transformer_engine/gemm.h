@@ -25,12 +25,10 @@ extern "C" {
  *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
  *
  *  \param[in]     A                     The A matrix.
- *  \param[in]     A_scale_inverse       The inverse of A matrix' scaling factor.
  *  \param[in]     B                     The B matrix.
- *  \param[in]     B_scale_inverse       The inverse of B matrix' scaling factor.
- *  \param[out]    D                     Output matrix.
+ *  \param[in,out] D                     Output matrix.
  *  \param[in]     bias                  Bias tensor.
- *  \param[out]    pre_gelu_out          Output matrix before GELU activation.
+ *  \param[in,out] pre_gelu_out          Output matrix before GELU activation.
  *  \param[in]     transa                Whether A matrix is transposed.
  *  \param[in]     transb                Whether B matrix is transposed.
  *  \param[in]     grad                  Whether this operation is part of the
@@ -41,9 +39,7 @@ extern "C" {
  *  \param[in]     stream                CUDA stream used for the operation.
  */
 void nvte_cublas_gemm(const NVTETensor A,
-                      const NVTETensor A_scale_inverse,
                       const NVTETensor B,
-                      const NVTETensor B_scale_inverse,
                       NVTETensor D,
                       const NVTETensor bias,
                       NVTETensor pre_gelu_out,

@@ -102,7 +102,7 @@ __device__ __forceinline__ void warp_reduce(acc_t* sum) {
 /*
  * Extended softmax (from native aten pytorch) with following additional features
  * 1) input scaling
- */  
+ */
 template <typename input_t, typename output_t, typename acc_t, int log2_elements>
 __global__ void scaled_softmax_warp_forward(
     output_t *dst,
@@ -215,7 +215,7 @@ __global__ void scaled_softmax_warp_forward(
  * Extended softmax (from native aten pytorch) with following additional features
  * 1) input scaling
  * 2) Explicit masking
- */  
+ */
 template <typename input_t, typename output_t, typename acc_t, int log2_elements>
 __global__ void scaled_masked_softmax_warp_forward(
     output_t *dst,
@@ -950,15 +950,15 @@ void scaled_softmax_forward(
     float scale_factor,
     cudaStream_t stream) {
 
-    const int batches = input.shape[0];
-    const int attn_heads = input.shape[1];
-    const int query_seq_len = input.shape[2];
-    const int key_seq_len = input.shape[3];
+    const int batches = input.data.shape[0];
+    const int attn_heads = input.data.shape[1];
+    const int query_seq_len = input.data.shape[2];
+    const int key_seq_len = input.data.shape[3];
 
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.data.dtype, softmax_type,
         dispatch_scaled_softmax_forward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(softmax_results->dptr),
-            reinterpret_cast<const softmax_type*>(input.dptr),
+            reinterpret_cast<softmax_type*>(softmax_results->data.dptr),
+            reinterpret_cast<const softmax_type*>(input.data.dptr),
             scale_factor,
             query_seq_len,
             key_seq_len,
@@ -975,17 +975,17 @@ void scaled_softmax_backward(
     cudaStream_t stream) {
 
     // output grads is a 4d tensor with dimensions [batches, attn_heads, seq_len, seq_len]
-    const int batches = output_grads.shape[0];
-    const int attn_heads = output_grads.shape[1];
-    const int query_seq_len = output_grads.shape[2];
-    const int key_seq_len = output_grads.shape[3];
+    const int batches = output_grads.data.shape[0];
+    const int attn_heads = output_grads.data.shape[1];
+    const int query_seq_len = output_grads.data.shape[2];
+    const int key_seq_len = output_grads.data.shape[3];
 
     // Softmax Grad
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.data.dtype, softmax_type,
         dispatch_scaled_masked_softmax_backward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(output_grads.dptr),
-            reinterpret_cast<softmax_type const*>(incoming_grads.dptr),
-            reinterpret_cast<softmax_type const*>(softmax_results.dptr),
+            reinterpret_cast<softmax_type*>(output_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(incoming_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(softmax_results.data.dptr),
             scale_factor,
             query_seq_len,
             key_seq_len,
@@ -1002,17 +1002,17 @@ void scaled_masked_softmax_forward(
     float scale_factor,
     cudaStream_t stream) {
 
-    const int batches = input.shape[0];
-    const int pad_batches = mask.shape[0];
-    const int attn_heads = input.shape[1];
-    const int query_seq_len = input.shape[2];
-    const int key_seq_len = input.shape[3];
+    const int batches = input.data.shape[0];
+    const int pad_batches = mask.data.shape[0];
+    const int attn_heads = input.data.shape[1];
+    const int query_seq_len = input.data.shape[2];
+    const int key_seq_len = input.data.shape[3];
 
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.data.dtype, softmax_type,
         dispatch_scaled_masked_softmax_forward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(softmax_results->dptr),
-            reinterpret_cast<const softmax_type*>(input.dptr),
-            reinterpret_cast<const uint8_t*>(mask.dptr),
+            reinterpret_cast<softmax_type*>(softmax_results->data.dptr),
+            reinterpret_cast<const softmax_type*>(input.data.dptr),
+            reinterpret_cast<const uint8_t*>(mask.data.dptr),
             scale_factor,
             query_seq_len,
             key_seq_len,
@@ -1031,17 +1031,17 @@ void scaled_masked_softmax_backward(
     cudaStream_t stream
 )  {
     // output grads is a 4d tensor with dimensions [batches, attn_heads, seq_len, seq_len]
-    const int batches = output_grads.shape[0];
-    const int attn_heads = output_grads.shape[1];
-    const int query_seq_len = output_grads.shape[2];
-    const int key_seq_len = output_grads.shape[3];
+    const int batches = output_grads.data.shape[0];
+    const int attn_heads = output_grads.data.shape[1];
+    const int query_seq_len = output_grads.data.shape[2];
+    const int key_seq_len = output_grads.data.shape[3];
 
     // Softmax Grad
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.data.dtype, softmax_type,
         dispatch_scaled_masked_softmax_backward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(output_grads.dptr),
-            reinterpret_cast<softmax_type const*>(incoming_grads.dptr),
-            reinterpret_cast<softmax_type const*>(softmax_results.dptr),
+            reinterpret_cast<softmax_type*>(output_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(incoming_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(softmax_results.data.dptr),
             scale_factor,
             query_seq_len,
             key_seq_len,

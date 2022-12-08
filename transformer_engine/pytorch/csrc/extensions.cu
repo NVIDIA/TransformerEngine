@@ -29,17 +29,13 @@ void te_gemm(at::Tensor A,
   auto te_A = makeTransformerEngineTensor(A.data_ptr(),
                                           {static_cast<size_t>(A.size(0)),
                                            static_cast<size_t>(A.size(1))},
-                                          A_type);
-  auto te_A_scale_inverse = makeTransformerEngineTensor(A_scale_inverse.data_ptr(), {1},
-                                                        GetTransformerEngineDType(
-                                                            A_scale_inverse.scalar_type()));
+                                          A_type, nullptr, nullptr,
+                                          A_scale_inverse.data_ptr());
   auto te_B = makeTransformerEngineTensor(B.data_ptr(),
                                           {static_cast<size_t>(B.size(0)),
                                            static_cast<size_t>(B.size(1))},
-                                          B_type);
-  auto te_B_scale_inverse = makeTransformerEngineTensor(B_scale_inverse.data_ptr(), {1},
-                                                        GetTransformerEngineDType(
-                                                            B_scale_inverse.scalar_type()));
+                                          B_type, nullptr, nullptr,
+                                          B_scale_inverse.data_ptr());
   auto te_D = makeTransformerEngineTensor(D.data_ptr(),
                                           {static_cast<size_t>(D.size(0)),
                                            static_cast<size_t>(D.size(1))},
@@ -60,9 +56,7 @@ void te_gemm(at::Tensor A,
                                                   DType::kByte);
 
   nvte_cublas_gemm(te_A.data(),
-                   te_A_scale_inverse.data(),
                    te_B.data(),
-                   te_B_scale_inverse.data(),
                    te_D.data(),
                    te_bias.data(),
                    te_pre_gelu_out.data(),
@@ -448,13 +442,11 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
     auto input_cu     = makeTransformerEngineTensor(input);
-    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype);
-    auto scale_cu     = makeTransformerEngineTensor(scale.data_ptr(), {1}, DType::kFloat32);
-    auto amax_cu      = makeTransformerEngineTensor(amax.data_ptr(), {1}, DType::kFloat32);
-    auto scale_inv_cu = makeTransformerEngineTensor(scale_inv.data_ptr(), {1}, DType::kFloat32);
+    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
 
-    nvte_fp8_quantize(input_cu.data(), scale_cu.data(), output_cu.data(),
-                      amax_cu.data(), scale_inv_cu.data(),
+    nvte_fp8_quantize(input_cu.data(), output_cu.data(),
                       at::cuda::getCurrentCUDAStream());
 
     return output;
@@ -472,11 +464,12 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
-    auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype);
+    auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype,
+                                                    nullptr, nullptr, scale_inv.data_ptr());
     auto output_cu    = makeTransformerEngineTensor(output);
     auto scale_inv_cu = makeTransformerEngineTensor(scale_inv.data_ptr(), {1}, DType::kFloat32);
 
-    nvte_fp8_dequantize(input_cu.data(), scale_inv_cu.data(), output_cu.data(),
+    nvte_fp8_dequantize(input_cu.data(), output_cu.data(),
                         at::cuda::getCurrentCUDAStream());
 
     return output;

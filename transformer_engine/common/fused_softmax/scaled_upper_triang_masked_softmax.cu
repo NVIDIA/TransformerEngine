@@ -667,13 +667,13 @@ void scaled_upper_triang_masked_softmax_forward(
     float scale_factor,
     cudaStream_t stream) {
 
-    const int attn_batches = input.shape[0];
-    const int seq_len = input.shape[1];
+    const int attn_batches = input.data.shape[0];
+    const int seq_len = input.data.shape[1];
 
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(input.data.dtype, softmax_type,
         dispatch_scaled_upper_triang_masked_softmax_forward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(softmax_results->dptr),
-            reinterpret_cast<const softmax_type*>(input.dptr),
+            reinterpret_cast<softmax_type*>(softmax_results->data.dptr),
+            reinterpret_cast<const softmax_type*>(input.data.dptr),
             scale_factor,
             seq_len,
             seq_len,
@@ -689,15 +689,15 @@ void scaled_upper_triang_masked_softmax_backward(
     float scale_factor,
     cudaStream_t stream)  {
 
-    const int attn_batches = output_grads.shape[0];
-    const int seq_len = output_grads.shape[1];
+    const int attn_batches = output_grads.data.shape[0];
+    const int seq_len = output_grads.data.shape[1];
 
     // Softmax Grad
-    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.dtype, softmax_type,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(output_grads.data.dtype, softmax_type,
         dispatch_scaled_upper_triang_masked_softmax_backward<softmax_type, softmax_type, float>(
-            reinterpret_cast<softmax_type*>(output_grads.dptr),
-            reinterpret_cast<softmax_type const*>(incoming_grads.dptr),
-            reinterpret_cast<softmax_type const*>(softmax_results.dptr),
+            reinterpret_cast<softmax_type*>(output_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(incoming_grads.data.dptr),
+            reinterpret_cast<softmax_type const*>(softmax_results.data.dptr),
             scale_factor,
             seq_len,
             seq_len,
