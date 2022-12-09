@@ -219,11 +219,9 @@ def main():
 
     if args.save_model or args.use_fp8_infer:
         torch.save(model.state_dict(), "mnist_cnn.pt")
-        #print(model.state_dict())
         print('Eval with reloaded checkpoint : fp8='+str(args.use_fp8_infer))
         weights = torch.load("mnist_cnn.pt")
         model.load_state_dict(weights)
-        #for epoch in range(1, args.epochs + 1):
         test(model, device, test_loader, args.use_fp8_infer)
 
 
