@@ -1253,17 +1253,15 @@ class _Linear(torch.autograd.Function):
                 use_bias=use_bias,
             )
 
-        needs_fp8_wgrad = weight.requires_grad and fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
-        needs_fp8_dgrad = inputmat.requires_grad and fp8
+        fp8_wgrad = fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
         ctx.save_for_backward(
-            inputmat_no_fp8
-            if not fp8 or fp8_meta["recipe"].override_linear_precision.wgrad
+            inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad
             else None,
-            inputmat_t
-            if needs_fp8_wgrad
+            inputmat_t if weight.requires_grad and fp8_wgrad
             else None,
-            weight,
-            weight_t_fp8 if needs_fp8_dgrad
+            weight if inputmat.requires_grad and not fp8
+            else None,
+            weight_t_fp8 if inputmat.requires_grad and fp8
             else None,
             fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
         )
@@ -1278,7 +1276,8 @@ class _Linear(torch.autograd.Function):
         ctx.inp_shape = inp.shape
         ctx.parallel_mode = parallel_mode
         ctx.tp_group = tp_group
-
+        ctx.requires_dgrad = inputmat.requires_grad
+        ctx.requires_wgrad = weight.requires_grad
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -1333,12 +1332,6 @@ class _Linear(torch.autograd.Function):
         else:
             accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
-        requires_dgrad = True
-        if inputmat is not None:
-            requires_dgrad = inputmat.requires_grad
-        if inputmat_t is not None:
-            requires_dgrad = inputmat_t.requires_grad
- 
         if ctx.fp8:
             fp8_dtype_forward = get_fp8_te_dtype(
                 ctx.fp8_meta["recipe"], fprop_tensor=True
@@ -1347,7 +1340,7 @@ class _Linear(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
-        if requires_dgrad:
+        if ctx.requires_dgrad:
             # DGRAD
             if ctx.fp8:
                 dgrad = fp8_gemm(
@@ -1381,7 +1374,7 @@ class _Linear(torch.autograd.Function):
             elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                 dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-        if weight.requires_grad:
+        if ctx.requires_wgrad:
             if ctx.fp8:
                 # WGRAD
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
@@ -1440,10 +1433,10 @@ class _Linear(torch.autograd.Function):
         )
 
         return (
-            wgrad if weight.requires_grad else None,
+            wgrad if ctx.requires_wgrad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape) if requires_dgrad else None,
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
             None,
