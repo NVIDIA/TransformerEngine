@@ -10,9 +10,7 @@ def get_te_path():
 
     import os
 
-    te_info = (
-        os.popen("pip show transformer_engine").read().replace("\n", ":").split(":")
-    )
+    te_info = os.popen("pip show transformer_engine").read().replace("\n", ":").split(":")
     return te_info[te_info.index("Location") + 1].strip()
 
 

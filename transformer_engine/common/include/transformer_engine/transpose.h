@@ -28,10 +28,8 @@ extern "C" {
  *  \param[in,out] transposed_output   Result of the cast and transpose. Shape: [H, N].
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_cast_transpose(const NVTETensor input,
-                         NVTETensor cast_output,
-                         NVTETensor transposed_output,
-                         cudaStream_t stream);
+void nvte_cast_transpose(const NVTETensor input, NVTETensor cast_output,
+                         NVTETensor transposed_output, cudaStream_t stream);
 
 /*! \brief Transpose the input.
  *
@@ -39,9 +37,7 @@ void nvte_cast_transpose(const NVTETensor input,
  *  \param[out]    transposed_output   Result of the transpose. Shape: [H, N].
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_transpose(const NVTETensor input,
-                    NVTETensor transposed_output,
-                    cudaStream_t stream);
+void nvte_transpose(const NVTETensor input, NVTETensor transposed_output, cudaStream_t stream);
 
 /*! \brief Cast and transpose the input. Additionally, reduce the input along the first dimension.
  *
@@ -61,11 +57,8 @@ void nvte_transpose(const NVTETensor input,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_cast_transpose_dbias(const NVTETensor input,
-                               NVTETensor cast_output,
-                               NVTETensor transposed_output,
-                               NVTETensor dbias,
-                               NVTETensor workspace,
+void nvte_cast_transpose_dbias(const NVTETensor input, NVTETensor cast_output,
+                               NVTETensor transposed_output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
 /*! \brief Compute backward of GELU operation on the input, then cast and transpose. Additionally,
@@ -89,13 +82,9 @@ void nvte_cast_transpose_dbias(const NVTETensor input,
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
-                                     const NVTETensor gelu_input,
-                                     NVTETensor cast_output,
-                                     NVTETensor transposed_output,
-                                     NVTETensor dbias,
-                                     NVTETensor workspace,
-                                     cudaStream_t stream);
+void nvte_cast_transpose_dbias_dgelu(const NVTETensor input, const NVTETensor gelu_input,
+                                     NVTETensor cast_output, NVTETensor transposed_output,
+                                     NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Cast and transpose multiple tensors.
  *
@@ -112,10 +101,8 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
  *                                          of tensors in input_list.
  *  \param[in]     stream                   CUDA stream used for the operation.
  */
-void nvte_multi_cast_transpose(size_t num_tensors,
-                               const NVTETensor* input_list,
-                               NVTETensor* cast_output_list,
-                               NVTETensor* transposed_output_list,
+void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor *input_list,
+                               NVTETensor *cast_output_list, NVTETensor *transposed_output_list,
                                cudaStream_t stream);
 
 #ifdef __cplusplus

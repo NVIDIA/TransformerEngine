@@ -38,23 +38,13 @@ extern "C" {
  *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
  *  \param[in]     stream                CUDA stream used for the operation.
  */
-void nvte_cublas_gemm(const NVTETensor A,
-                      const NVTETensor B,
-                      NVTETensor D,
-                      const NVTETensor bias,
-                      NVTETensor pre_gelu_out,
-                      bool transa,
-                      bool transb,
-                      bool grad,
-                      NVTETensor workspace,
-                      bool accumulate,
-                      bool use_split_accumulator,
-                      cudaStream_t stream
-);
+void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+                      NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
+                      NVTETensor workspace, bool accumulate, bool use_split_accumulator,
+                      cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
 #endif
-
 
 #endif  // TRANSFORMER_ENGINE_GEMM_H_

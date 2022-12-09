@@ -116,16 +116,11 @@ def split_tensor_into_1d_equal_chunks(
     return data
 
 
-def gather_split_1d_tensor(
-    tensor: torch.Tensor, tp_group: dist_group_type
-) -> torch.Tensor:
+def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> torch.Tensor:
     """Opposite of above function, gather values from model parallel ranks."""
     numel_gathered = torch.numel(tensor) * get_distributed_world_size(tp_group)
     gathered = torch.empty(
-        numel_gathered,
-        dtype=tensor.dtype,
-        device=torch.cuda.current_device(),
-        requires_grad=False,
+        numel_gathered, dtype=tensor.dtype, device=torch.cuda.current_device(), requires_grad=False,
     )
     torch.distributed._all_gather_base(gathered, tensor, group=tp_group)
     return gathered
@@ -133,8 +128,7 @@ def gather_split_1d_tensor(
 
 @contextmanager
 def activation_recompute_forward(
-    activation_recompute: bool = False,
-    recompute_phase: bool = False,
+    activation_recompute: bool = False, recompute_phase: bool = False,
 ) -> None:
     """Context manager used to control the forward runtime behavior when executed
     under the `CheckpointFunction` function. For running FP8, the forward pass will
@@ -192,9 +186,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         with torch.no_grad():
-            with activation_recompute_forward(
-                activation_recompute=True, recompute_phase=False
-            ):
+            with activation_recompute_forward(activation_recompute=True, recompute_phase=False):
                 outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
@@ -202,10 +194,7 @@ class CheckpointFunction(torch.autograd.Function):
         if distribute_saved_activations:
             ctx.input_0_shape = args[0].data.shape
             safely_set_viewless_tensor_data(
-                args[0],
-                split_tensor_into_1d_equal_chunks(
-                    args[0].data, tp_group, new_buffer=True
-                ),
+                args[0], split_tensor_into_1d_equal_chunks(args[0].data, tp_group, new_buffer=True),
             )
 
         # Store everything.
@@ -232,9 +221,7 @@ class CheckpointFunction(torch.autograd.Function):
         if ctx.distribute_saved_activations:
             safely_set_viewless_tensor_data(
                 inputs[0],
-                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).view(
-                    ctx.input_0_shape
-                ),
+                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).view(ctx.input_0_shape),
             )
 
         # Store the current states.
@@ -250,9 +237,7 @@ class CheckpointFunction(torch.autograd.Function):
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad():
-            with activation_recompute_forward(
-                activation_recompute=True, recompute_phase=True
-            ):
+            with activation_recompute_forward(activation_recompute=True, recompute_phase=True):
                 outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.
@@ -263,10 +248,7 @@ class CheckpointFunction(torch.autograd.Function):
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
         torch.autograd.backward(outputs, args)
-        grads = tuple(
-            inp.grad if isinstance(inp, torch.Tensor) else inp
-            for inp in detached_inputs
-        )
+        grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else inp for inp in detached_inputs)
         return (None, None, None, None, None) + grads
 
 
@@ -318,12 +300,7 @@ def checkpoint(
     """
 
     return CheckpointFunction.apply(
-        function,
-        distribute_saved_activations,
-        get_cuda_rng_tracker,
-        tp_group,
-        kwargs,
-        *args,
+        function, distribute_saved_activations, get_cuda_rng_tracker, tp_group, kwargs, *args,
     )
 
 
@@ -343,9 +320,7 @@ def reduce_scatter_along_first_dim(
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     handle = torch.distributed._reduce_scatter_base(
         output, input_.contiguous(), group=tp_group, async_op=async_op
     )
@@ -365,9 +340,7 @@ def gather_along_first_dim(
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     handle = torch.distributed._all_gather_base(
         output, input_.contiguous(), group=tp_group, async_op=async_op
     )
@@ -388,9 +361,7 @@ def gather_along_last_dim(
     dim_size = list(input_.size())
     dim_size[-1] = dim_size[-1] * world_size
 
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     handle = torch.distributed._all_gather_base(
         output, input_.contiguous(), group=tp_group, async_op=async_op
     )
@@ -399,9 +370,7 @@ def gather_along_last_dim(
 
 
 def allreduce(
-    input_: torch.Tensor,
-    tp_group: Optional[dist_group_type] = None,
-    async_op: bool = False,
+    input_: torch.Tensor, tp_group: Optional[dist_group_type] = None, async_op: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """All-reduce the input tensor across model parallel group."""
 

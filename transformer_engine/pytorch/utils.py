@@ -66,9 +66,7 @@ def compare_tensors(a: torch.Tensor, b: torch.Tensor) -> None:
 
 def ensure_divisibility(numerator: int, denominator: int) -> None:
     """Ensure that numerator is divisible by the denominator."""
-    assert (
-        numerator % denominator == 0
-    ), f"{numerator} is not divisible by {denominator}"
+    assert numerator % denominator == 0, f"{numerator} is not divisible by {denominator}"
 
 
 def divide(numerator: int, denominator: int) -> int:
@@ -133,9 +131,7 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
     validate_ctx_manager(rng_tracker.fork)
 
 
-def assert_viewless_tensor(
-    tensor: torch.Tensor, extra_msg: Optional[str] = None
-) -> torch.Tensor:
+def assert_viewless_tensor(tensor: torch.Tensor, extra_msg: Optional[str] = None) -> torch.Tensor:
     """Assert that a tensor is not a view (i.e., its '._base' field is
     not set)."""
     if isinstance(tensor, list):
@@ -150,9 +146,7 @@ def assert_viewless_tensor(
     return tensor
 
 
-def safely_set_viewless_tensor_data(
-    tensor: torch.Tensor, new_data_tensor: torch.Tensor
-) -> None:
+def safely_set_viewless_tensor_data(tensor: torch.Tensor, new_data_tensor: torch.Tensor) -> None:
     """Safely set tensor's '.data' field.
 
     Check first that the tensor is viewless (i.e., '._base' not set). If not,

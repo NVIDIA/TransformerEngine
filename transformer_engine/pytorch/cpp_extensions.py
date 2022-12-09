@@ -153,9 +153,7 @@ def fp8_cast_transpose_fused(
     return_outputs = False
     if cast_out is None or transpose_out is None:
         cast_out = torch.empty_like(inp, dtype=torch.int8)
-        transpose_out = torch.empty(
-            inp.shape[1], inp.shape[0], device="cuda", dtype=torch.int8
-        )
+        transpose_out = torch.empty(inp.shape[1], inp.shape[0], device="cuda", dtype=torch.int8)
         return_outputs = True
 
     tex.fused_cast_transpose(
@@ -269,9 +267,4 @@ def cast_from_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input from FP8"""
-    return tex.cast_from_fp8(
-        inp,
-        fp8_meta_tensor.scale_inv[fp8_tensor],
-        itype,
-        otype,
-    )
+    return tex.cast_from_fp8(inp, fp8_meta_tensor.scale_inv[fp8_tensor], itype, otype,)
