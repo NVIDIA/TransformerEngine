@@ -68,21 +68,23 @@ def train(args, model, device, train_loader, optimizer, epoch, use_fp8):
                 break
 
 
-def test(model, device, test_loader, use_fp8, fp8_infer_only):
+def calibrate(model, device, test_loader, use_fp8):
+    """Calibration function."""
+    model.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            with te.fp8_autocast(enabled=False, calibrating=True):
+                output = model(data)
+
+def test(model, device, test_loader, use_fp8):
     """Testing function."""
     model.eval()
     test_loss = 0
     correct = 0
     with torch.no_grad():
-        if fp8_infer_only:
-            for data, target in test_loader:
-                data, target = data.to(device), target.to(device)
-                with te.fp8_autocast(enabled=False, calibrate=True):
-                    output = model(data)
-            for data, target in test_loader:
-                data, target = data.to(device), target.to(device)
-                with te.fp8_autocast(enabled=True, calibrate=False):
-                    output = model(data)
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             with te.fp8_autocast(enabled=use_fp8):
@@ -208,12 +210,21 @@ def main():
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
         train(args, model, device, train_loader, optimizer, epoch, args.use_fp8)
-        test(model, device, test_loader, args.use_fp8, args.use_fp8_infer)
+        test(model, device, test_loader, args.use_fp8)
         scheduler.step()
 
+    if args.use_fp8_infer:
+        for epoch in range(1, args.epochs + 1):
+            calibrate(model, device, test_loader, args.use_fp8)
 
-    if args.save_model:
+    if args.save_model or args.use_fp8_infer:
         torch.save(model.state_dict(), "mnist_cnn.pt")
+        #print(model.state_dict())
+        print('Eval with reloaded checkpoint : fp8='+str(args.use_fp8_infer))
+        weights = torch.load("mnist_cnn.pt")
+        model.load_state_dict(weights)
+        #for epoch in range(1, args.epochs + 1):
+        test(model, device, test_loader, args.use_fp8_infer)
 
 
 if __name__ == "__main__":

@@ -330,7 +330,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = False
             return
 
-    def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
+    def pre_forward(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None, num_gemms: int = 1) -> None:
         """Checks and prep for FWD."""
 
         # Activation recomputation is used and this is the second forward phase.
@@ -356,7 +356,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 amax_and_scale_update(self.fp8_meta, True)
 
-        if self.fp8 and self.training:
+        # Either we're in FP8 training or calibration for FP8 inference
+        needs_stats = (self.fp8 and self.training) or self.fp8_calibration
+
+        if needs_stats:
             # Setup for amax reduction
             if self.fp8_meta["recipe"].reduce_amax:
                 self.fp8_meta["first_module"] = is_first_fp8_module()
@@ -370,6 +373,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
 
+
+        if self.fp8_calibration:
+            # amax of input
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = torch.amax(inp).float()
+            # amax of weight
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = torch.amax(weight).float()
+           
         # Activation recomputation is used and this is the first forward phase.
         if (
             self.fp8
@@ -1323,6 +1333,12 @@ class _Linear(torch.autograd.Function):
         else:
             accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
+        requires_dgrad = True
+        if inputmat is not None:
+            requires_dgrad = inputmat.requires_grad
+        if inputmat_t is not None:
+            requires_dgrad = inputmat_t.requires_grad
+ 
         if ctx.fp8:
             fp8_dtype_forward = get_fp8_te_dtype(
                 ctx.fp8_meta["recipe"], fprop_tensor=True
@@ -1331,37 +1347,39 @@ class _Linear(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
+        if requires_dgrad:
             # DGRAD
-            dgrad = fp8_gemm(
-                weight_t_fp8,
-                fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
-                fp8_dtype_forward,
-                grad_output_c,
-                ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
-                fp8_dtype_backward,
-                ctx.activation_dtype,
-                get_workspace(),
-                use_split_accumulator=_2X_ACC_DGRAD,
-            )
-        else:
-            # DGRAD
-            dgrad, _, _ = gemm(
-                weight,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NN",
-                grad=True,
-            )
+            if ctx.fp8:
+                dgrad = fp8_gemm(
+                    weight_t_fp8,
+                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
+                    fp8_dtype_forward,
+                    grad_output_c,
+                    ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
+                    fp8_dtype_backward,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    use_split_accumulator=_2X_ACC_DGRAD,
+                )
+            else:
+                # DGRAD
+                dgrad, _, _ = gemm(
+                    weight,
+                    grad_output,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    layout="NN",
+                    grad=True,
+                )
 
-        # Overlap dgrad-RS/AR with wgrad
-        if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-            handle.wait()
-            dgrad, handle = reduce_scatter_along_first_dim(
-                dgrad, ctx.tp_group, async_op=True
-            )
-        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-            dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+            # Overlap dgrad-RS/AR with wgrad
+            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                handle.wait()
+                dgrad, handle = reduce_scatter_along_first_dim(
+                    dgrad, ctx.tp_group, async_op=True
+                )
+            elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+                dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
         if weight.requires_grad:
             if ctx.fp8:
@@ -1425,7 +1443,7 @@ class _Linear(torch.autograd.Function):
             wgrad if weight.requires_grad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape),
+            dgrad.view(ctx.inp_shape) if requires_dgrad else None,
             grad_bias,
             None,
             None,
@@ -1625,7 +1643,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp)
+        self.pre_forward(inp, weight if weight is not None else self.weight)
 
         bias_tensor = bias if bias is not None else self.bias
 
