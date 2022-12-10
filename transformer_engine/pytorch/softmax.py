@@ -27,17 +27,13 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledUpperTriangMaskedSoftmax fwd"""
         scale_t = torch.tensor([scale])
-        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(
-            inputs, scale_t[0]
-        )
+        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(inputs, scale_t[0])
 
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledUpperTriangMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
         input_grads = tex.scaled_upper_triang_masked_softmax_backward(
@@ -56,9 +52,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float
-    ) -> torch.Tensor:
+    def forward(ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledMaskedSoftmax fwd"""
         scale_t = torch.tensor([scale])
 
@@ -67,15 +61,11 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledMaskedSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = tex.scaled_masked_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
+        input_grads = tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
 
@@ -96,15 +86,11 @@ class ScaledSoftmax(torch.autograd.Function):
         return softmax_results
 
     @staticmethod
-    def backward(
-        ctx, output_grads: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledSoftmax bwd"""
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = tex.scaled_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
+        input_grads = tex.scaled_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
 
@@ -120,24 +106,16 @@ class FusedScaleMaskSoftmax(nn.Module):
     """
 
     def __init__(
-        self,
-        attn_mask_type: str,
-        mask_func: Callable,
-        softmax_in_fp32: bool,
-        scale: float,
+        self, attn_mask_type: str, mask_func: Callable, softmax_in_fp32: bool, scale: float,
     ) -> None:
         super().__init__()
         self.attn_mask_type = attn_mask_type
-        self.scaled_masked_softmax_fusion = bool(
-            int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1"))
-        )
+        self.scaled_masked_softmax_fusion = bool(int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1")))
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
         self.scale = scale
 
-        assert (
-            self.scale is None or softmax_in_fp32
-        ), "softmax should be in fp32 when scaled"
+        assert self.scale is None or softmax_in_fp32, "softmax should be in fp32 when scaled"
 
     def forward(self, inp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """FusedScaleMaskSoftmax fprop"""
@@ -173,9 +151,7 @@ class FusedScaleMaskSoftmax(nn.Module):
                         return True
         return False
 
-    def forward_fused_softmax(
-        self, inp: torch.Tensor, mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward_fused_softmax(self, inp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Fused masked softmax kernel"""
         b, np, sq, sk = inp.size()
         scale = self.scale if self.scale is not None else 1.0
@@ -192,9 +168,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
 
-    def forward_torch_softmax(
-        self, inp: torch.Tensor, mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward_torch_softmax(self, inp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Framework softmax"""
         if self.input_in_float16 and self.softmax_in_fp32:
             inp = inp.float()

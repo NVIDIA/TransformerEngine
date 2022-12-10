@@ -23,9 +23,7 @@ extern "C" {
  *  \param[in,out] output    Output tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_gelu(const NVTETensor input,
-               NVTETensor output,
-               cudaStream_t stream);
+void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

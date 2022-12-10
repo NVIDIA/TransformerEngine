@@ -103,9 +103,7 @@ def add_amax_to_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) ->
     if buffer_key not in _global_fp8_buffer:
         _global_fp8_buffer[buffer_key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
     else:
-        _global_fp8_buffer[buffer_key].append(
-            fp8_meta[fp8_meta_tensor_key].amax_history[0]
-        )
+        _global_fp8_buffer[buffer_key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
 
     if buffer_position_key not in fp8_meta:
         fp8_meta[buffer_position_key] = len(_global_fp8_buffer[buffer_key]) - 1
@@ -147,9 +145,7 @@ def get_old_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> None:
 
     # Retrieve stashed amaxes and scales from phase 1 pre forward.
     buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
-    stashed_fp8_meta = _fp8_tensors_recompute_buffer[
-        fp8_meta[buffer_position_key]
-    ].popleft()
+    stashed_fp8_meta = _fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
 
     # Replace amaxes and scales with stashed values for phase 2 forward
     fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
@@ -164,9 +160,7 @@ def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
     fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]
 
 
-def copy_amax_from_global_buffer(
-    fp8_meta: Dict[str, Any], forward: bool = True
-) -> None:
+def copy_amax_from_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) -> None:
     """Populate current amax with the correct location from buffer."""
     fp8_meta_tensor_key = get_meta_tensor_key(forward=forward)
     buffer_position_key = get_buffer_position_key(forward=forward)
@@ -178,9 +172,7 @@ def copy_amax_from_global_buffer(
     ]
 
 
-def set_amax_buffer_key_deletion(
-    fp8_meta: Dict[str, Any], forward: bool = True
-) -> None:
+def set_amax_buffer_key_deletion(fp8_meta: Dict[str, Any], forward: bool = True) -> None:
     """Delete this amax key from global buffer during autocast end."""
     if get_autocast_key(forward=forward) not in fp8_meta:
         return
@@ -311,8 +303,7 @@ def update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
 
 @torch.jit.script
 def _default_get_amax(
-    amax_history: torch.Tensor,
-    amax_compute_algo: str,
+    amax_history: torch.Tensor, amax_compute_algo: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Default function to obtain amax from history."""
     if amax_compute_algo == "max":
@@ -326,10 +317,7 @@ def _default_get_amax(
 
 @torch.jit.script
 def _default_sf_compute(
-    amax: torch.Tensor,
-    scale: torch.Tensor,
-    fp8_max: float,
-    margin: int,
+    amax: torch.Tensor, scale: torch.Tensor, fp8_max: float, margin: int,
 ) -> torch.Tensor:
     """Default function to convert amax to scaling factor."""
     exp = torch.floor(torch.log2(fp8_max / amax)) - margin
@@ -352,23 +340,14 @@ def fused_amax_and_scale_update(
     """Amax to scale conversion."""
 
     # Get amax from history.
-    amax_history, amax = _default_get_amax(
-        amax_history,
-        amax_compute_algo,
-    )
+    amax_history, amax = _default_get_amax(amax_history, amax_compute_algo,)
 
     # Calculate new scaling factor.
-    return amax_history, _default_sf_compute(
-        amax,
-        scale,
-        fp8_max,
-        margin,
-    )
+    return amax_history, _default_sf_compute(amax, scale, fp8_max, margin,)
 
 
 def _compute_amax(
-    amax_history: torch.Tensor,
-    recipe: DelayedScaling,
+    amax_history: torch.Tensor, recipe: DelayedScaling,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Obtain the amax from the history."""
 
@@ -376,34 +355,20 @@ def _compute_amax(
         amax = recipe.amax_compute_algo(amax_history)
         amax_history = update_amax_history(amax_history)
         return amax_history, amax
-    return _default_get_amax(
-        amax_history,
-        recipe.amax_compute_algo,
-    )
+    return _default_get_amax(amax_history, recipe.amax_compute_algo,)
 
 
 def _compute_scaling_factor(
-    amax: torch.Tensor,
-    scale: torch.Tensor,
-    fp8_max: float,
-    recipe: DelayedScaling,
+    amax: torch.Tensor, scale: torch.Tensor, fp8_max: float, recipe: DelayedScaling,
 ) -> torch.Tensor:
     """Convert amax to scaling factor."""
 
     if recipe.scaling_factor_compute_algo is None:
-        return _default_sf_compute(
-            amax,
-            scale,
-            fp8_max,
-            recipe.margin,
-        )
+        return _default_sf_compute(amax, scale, fp8_max, recipe.margin,)
     return recipe.scaling_factor_compute_algo(amax, scale, fp8_max, recipe)
 
 
-def amax_and_scale_update(
-    fp8_meta: Dict[str, Any],
-    fwd_update: bool,
-) -> None:
+def amax_and_scale_update(fp8_meta: Dict[str, Any], fwd_update: bool,) -> None:
     """Updates fp8 amaxes/scales for fwd | bwd."""
     amax_compute = fp8_meta["recipe"].amax_compute_algo
     sf_compute = fp8_meta["recipe"].scaling_factor_compute_algo
@@ -423,20 +388,14 @@ def amax_and_scale_update(
         )
     else:
         fp8_meta[fp8_meta_tensor_key].amax_history, amax = _compute_amax(
-            fp8_meta[fp8_meta_tensor_key].amax_history,
-            fp8_meta["recipe"],
+            fp8_meta[fp8_meta_tensor_key].amax_history, fp8_meta["recipe"],
         )
         fp8_meta[fp8_meta_tensor_key].scale = _compute_scaling_factor(
-            amax,
-            fp8_meta[fp8_meta_tensor_key].scale,
-            fp8_meta[fp8_max_key],
-            fp8_meta["recipe"],
+            amax, fp8_meta[fp8_meta_tensor_key].scale, fp8_meta[fp8_max_key], fp8_meta["recipe"],
         )
 
 
-def get_fp8_te_dtype(
-    fp8_recipe: DelayedScaling, fprop_tensor: bool = True
-) -> tex.DType:
+def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
     """Get fp8 data type according to recipe and tensor"""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -445,16 +404,11 @@ def get_fp8_te_dtype(
     return tex.DType.kFloat8E5M2
 
 
-def reduce_tensor_across_group_op_max(
-    tensor: torch.Tensor, group: dist_group_type
-) -> None:
+def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
     """Reduce tensor across given group."""
     if torch.distributed.is_initialized():
         torch.distributed.all_reduce(
-            tensor,
-            op=torch.distributed.ReduceOp.MAX,
-            group=group,
-            async_op=False,
+            tensor, op=torch.distributed.ReduceOp.MAX, group=group, async_op=False,
         )
 
 
@@ -487,14 +441,8 @@ def delete_key_from_amax_buffer(forward: bool = True) -> None:
 
     global _global_fp8_buffer, _buffer_delete_key_fwd, _buffer_delete_key_bwd
     if forward:
-        if (
-            _buffer_delete_key_fwd is not None
-            and _buffer_delete_key_fwd in _global_fp8_buffer
-        ):
+        if _buffer_delete_key_fwd is not None and _buffer_delete_key_fwd in _global_fp8_buffer:
             del _global_fp8_buffer[_buffer_delete_key_fwd]
     else:
-        if (
-            _buffer_delete_key_bwd is not None
-            and _buffer_delete_key_bwd in _global_fp8_buffer
-        ):
+        if _buffer_delete_key_bwd is not None and _buffer_delete_key_bwd in _global_fp8_buffer:
             del _global_fp8_buffer[_buffer_delete_key_bwd]

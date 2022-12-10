@@ -4,13 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transpose.h>
 #include <cuda_runtime.h>
-#include <iostream>
+#include <transformer_engine/transpose.h>
 #include <cfloat>
+#include <iostream>
 #include <vector>
-#include "../utils.cuh"
 #include "../common.h"
+#include "../utils.cuh"
 
 namespace transformer_engine {
 
@@ -25,38 +25,31 @@ constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
 
 struct MultiCastTransposeArgs {
   // (input) Data buffers for input tensors
-  void* input_list[kMaxTensorsPerKernel];
+  void *input_list[kMaxTensorsPerKernel];
   // (output) Data buffers for cast output tensors
-  void* output_c_list[kMaxTensorsPerKernel];
+  void *output_c_list[kMaxTensorsPerKernel];
   // (output) Data buffers for transpose output tensors
-  void* output_t_list[kMaxTensorsPerKernel];
+  void *output_t_list[kMaxTensorsPerKernel];
   // (input) Scaling factor for output tensors
-  void* scale_list[kMaxTensorsPerKernel];
+  void *scale_list[kMaxTensorsPerKernel];
   // (output) AMAX's of input tensors
-  void* amax_list[kMaxTensorsPerKernel];
+  void *amax_list[kMaxTensorsPerKernel];
   // (output) Reciprocal of scaling factors
-  void* scale_inv_list[kMaxTensorsPerKernel];
+  void *scale_inv_list[kMaxTensorsPerKernel];
   // Input matrix heights
   int num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
   int row_length_list[kMaxTensorsPerKernel];
   // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
-  int block_range[kMaxTensorsPerKernel+1];
+  int block_range[kMaxTensorsPerKernel + 1];
   // Number of tensors being processed by kernel
   int num_tensors;
 };
 
-template <
-  int nvec_in,
-  int nvec_out,
-  bool aligned,
-  typename CType,
-  typename IType,
-  typename OType>
-__global__ void
-__launch_bounds__(threads_per_block)
-multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
+template <int nvec_in, int nvec_out, bool aligned, typename CType, typename IType, typename OType>
+__global__ void __launch_bounds__(threads_per_block)
+    multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   using IVec = Vec<IType, nvec_in>;
   using OVecC = Vec<OType, nvec_in>;
   using OVecT = Vec<OType, nvec_out>;
@@ -81,16 +74,16 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
 
   // Find tensor corresponding to block
   int tensor_id = 0;
-  while (args.block_range[tensor_id+1] <= bid) {
+  while (args.block_range[tensor_id + 1] <= bid) {
     ++tensor_id;
   }
-  const IType* input = reinterpret_cast<const IType*>(args.input_list[tensor_id]);
-  OType* output_c = reinterpret_cast<OType*>(args.output_c_list[tensor_id]);
-  OType* output_t = reinterpret_cast<OType*>(args.output_t_list[tensor_id]);
-  const CType* scale_ptr = reinterpret_cast<CType*>(args.scale_list[tensor_id]);
+  const IType *input = reinterpret_cast<const IType *>(args.input_list[tensor_id]);
+  OType *output_c = reinterpret_cast<OType *>(args.output_c_list[tensor_id]);
+  OType *output_t = reinterpret_cast<OType *>(args.output_t_list[tensor_id]);
+  const CType *scale_ptr = reinterpret_cast<CType *>(args.scale_list[tensor_id]);
   const CType scale = scale_ptr == nullptr ? 1 : *scale_ptr;
-  CType* amax = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
-  CType* scale_inv = reinterpret_cast<CType*>(args.scale_inv_list[tensor_id]);
+  CType *amax = reinterpret_cast<CType *>(args.amax_list[tensor_id]);
+  CType *scale_inv = reinterpret_cast<CType *>(args.scale_inv_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
 
@@ -107,11 +100,11 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   // type, and transposes in registers.
   OVecT local_output_t[nvec_in][n_iterations];
   CType local_amax = 0;
-  #pragma unroll
+#pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
-    #pragma unroll
+#pragma unroll
     for (int i2 = 0; i2 < nvec_out; ++i2) {
       const int row = tile_row + i1 * nvec_out + i2;
       const int col = tile_col + j1 * nvec_in;
@@ -122,7 +115,7 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
       } else {
         local_input.clear();
         if (row < num_rows) {
-          #pragma unroll
+#pragma unroll
           for (int j2 = 0; j2 < nvec_in; ++j2) {
             if (col + j2 < row_length) {
               local_input.data.elt[j2] = input[row * row_length + col + j2];
@@ -130,7 +123,7 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
           }
         }
       }
-      #pragma unroll
+#pragma unroll
       for (int j2 = 0; j2 < nvec_in; ++j2) {
         const CType x = CType(local_input.data.elt[j2]);
         const OType y = OType(scale * x);
@@ -143,7 +136,7 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
         local_output_c.store_to(&output_c[row * row_length + col]);
       } else {
         if (row < num_rows) {
-          #pragma unroll
+#pragma unroll
           for (int j2 = 0; j2 < nvec_in; ++j2) {
             if (col + j2 < row_length) {
               output_c[row * row_length + col + j2] = local_output_c.data.elt[j2];
@@ -155,17 +148,17 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   }
 
   // Copy transposed output from registers to global memory
-  __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP+1];
-  #pragma unroll
+  __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
+#pragma unroll
   for (int j2 = 0; j2 < nvec_in; ++j2) {
-    #pragma unroll
+#pragma unroll
     for (int iter = 0; iter < n_iterations; ++iter) {
       const int i1 = tidy + iter * bdimy;
       const int j1 = tidx;
       shared_output_t[j1][i1] = local_output_t[j2][iter];
     }
     __syncthreads();
-    #pragma unroll
+#pragma unroll
     for (int iter = 0; iter < n_iterations; ++iter) {
       const int i1 = tidx;
       const int j1 = tidy + iter * bdimy;
@@ -175,7 +168,7 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
         shared_output_t[j1][i1].store_to(&output_t[col * num_rows + row]);
       } else {
         if (col < row_length) {
-          #pragma unroll
+#pragma unroll
           for (int i2 = 0; i2 < nvec_out; ++i2) {
             if (row + i2 < num_rows) {
               output_t[col * num_rows + row + i2] = shared_output_t[j1][i1].data.elt[i2];
@@ -200,10 +193,9 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
 
 }  // namespace
 
-void multi_cast_transpose(const std::vector<Tensor*> input_list,
-                          std::vector<Tensor*> cast_output_list,
-                          std::vector<Tensor*> transposed_output_list,
-                          cudaStream_t stream) {
+void multi_cast_transpose(const std::vector<Tensor *> input_list,
+                          std::vector<Tensor *> cast_output_list,
+                          std::vector<Tensor *> transposed_output_list, cudaStream_t stream) {
   // Check that number of tensors is valid
   NVTE_CHECK(cast_output_list.size() == input_list.size(),
              "Number of input and C output tensors must match");
@@ -217,22 +209,18 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
   DType itype = input_list[0]->data.dtype;
   DType otype = cast_output_list[0]->data.dtype;
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
-    const auto& input = *input_list[tensor_id];
-    const auto& cast_output = *cast_output_list[tensor_id];
-    const auto& transposed_output = *transposed_output_list[tensor_id];
+    const auto &input = *input_list[tensor_id];
+    const auto &cast_output = *cast_output_list[tensor_id];
+    const auto &transposed_output = *transposed_output_list[tensor_id];
     CheckInputTensor(input, "multi_cast_transpose_input_" + std::to_string(tensor_id));
     CheckInputTensor(cast_output, "multi_cast_output_" + std::to_string(tensor_id));
     CheckInputTensor(transposed_output, "multi_transpose_output_" + std::to_string(tensor_id));
 
-    NVTE_CHECK(input.data.dtype == itype,
-               "Input tensor types do not match.");
-    NVTE_CHECK(cast_output.data.dtype == otype,
-               "C output tensor types do not match.");
-    NVTE_CHECK(transposed_output.data.dtype == otype,
-               "T output tensor types do not match.");
+    NVTE_CHECK(input.data.dtype == itype, "Input tensor types do not match.");
+    NVTE_CHECK(cast_output.data.dtype == otype, "C output tensor types do not match.");
+    NVTE_CHECK(transposed_output.data.dtype == otype, "T output tensor types do not match.");
 
-    NVTE_CHECK(input.data.shape.size() == 2,
-               "Input tensor must have 2 dimensions.");
+    NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions.");
     NVTE_CHECK(cast_output.data.shape == input.data.shape,
                "C output tensor shape does not match input tensor.");
     NVTE_CHECK(transposed_output.data.shape.size() == 2,
@@ -257,27 +245,28 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     // Launch kernel if argument struct is full
     if (kernel_args_aligned.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(itype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(otype, OutputType,
-          constexpr int nvec_in = desired_load_size / sizeof(InputType);
-          constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-          const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-          multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned);
-        );  // NOLINT(*)
-      );  // NOLINT(*)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+          itype, InputType,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+              otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
+              constexpr int nvec_out = desired_store_size / sizeof(OutputType);
+              const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+              multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
+              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+      );                                                                            // NOLINT(*)
       kernel_args_aligned.num_tensors = 0;
     }
     if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
-      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(itype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(otype, OutputType,
-          constexpr int nvec_in = desired_load_size / sizeof(InputType);
-          constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-          const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-          multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned);
-        );  // NOLINT(*)
-      );  // NOLINT(*)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+          itype, InputType,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+              otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
+              constexpr int nvec_out = desired_store_size / sizeof(OutputType);
+              const int n_blocks =
+                  kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+              multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
+              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+      );                                                                              // NOLINT(*)
       kernel_args_unaligned.num_tensors = 0;
     }
 
@@ -289,13 +278,13 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     const int num_tiles = num_tiles_m * num_tiles_n;
 
     // Figure out whether to use aligned or unaligned kernel
-    const bool aligned = ((num_tiles_m * tile_dim_m == num_rows)
-                          && (num_tiles_n * tile_dim_n == row_length));
-    auto& kernel_args = aligned ? kernel_args_aligned : kernel_args_unaligned;
+    const bool aligned =
+        ((num_tiles_m * tile_dim_m == num_rows) && (num_tiles_n * tile_dim_n == row_length));
+    auto &kernel_args = aligned ? kernel_args_aligned : kernel_args_unaligned;
 
     // Add tensor to kernel argument struct
     const int pos = kernel_args.num_tensors;
-    kernel_args.input_list[pos] = const_cast<void*>(input_list[tensor_id]->data.dptr);
+    kernel_args.input_list[pos] = const_cast<void *>(input_list[tensor_id]->data.dptr);
     kernel_args.output_c_list[pos] = cast_output_list[tensor_id]->data.dptr;
     kernel_args.output_t_list[pos] = transposed_output_list[tensor_id]->data.dptr;
     kernel_args.scale_list[pos] = cast_output_list[tensor_id]->scale.dptr;
@@ -303,52 +292,47 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     kernel_args.scale_inv_list[pos] = cast_output_list[tensor_id]->scale_inv.dptr;
     kernel_args.num_rows_list[pos] = num_rows;
     kernel_args.row_length_list[pos] = row_length;
-    kernel_args.block_range[pos+1] = kernel_args.block_range[pos] + num_tiles;
+    kernel_args.block_range[pos + 1] = kernel_args.block_range[pos] + num_tiles;
     kernel_args.num_tensors++;
   }
 
   // Launch kernel
   if (kernel_args_aligned.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(itype, InputType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(otype, OutputType,
-        constexpr int nvec_in = desired_load_size / sizeof(InputType);
-        constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-        const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
-        multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
-          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned);
-      );  // NOLINT(*)
-    );  // NOLINT(*)
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+        itype, InputType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
+            constexpr int nvec_out = desired_store_size / sizeof(OutputType);
+            const int n_blocks = kernel_args_aligned.block_range[kernel_args_aligned.num_tensors];
+            multi_cast_transpose_kernel<nvec_in, nvec_out, true, fp32, InputType, OutputType>
+            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_aligned););  // NOLINT(*)
+    );                                                                            // NOLINT(*)
   }
   if (kernel_args_unaligned.num_tensors > 0) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(itype, InputType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(otype, OutputType,
-        constexpr int nvec_in = desired_load_size / sizeof(InputType);
-        constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-        const int n_blocks = kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
-        multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
-          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned);
-      );  // NOLINT(*)
-    );  // NOLINT(*)
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+        itype, InputType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
+            constexpr int nvec_out = desired_store_size / sizeof(OutputType);
+            const int n_blocks =
+                kernel_args_unaligned.block_range[kernel_args_unaligned.num_tensors];
+            multi_cast_transpose_kernel<nvec_in, nvec_out, false, fp32, InputType, OutputType>
+            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args_unaligned););  // NOLINT(*)
+    );                                                                              // NOLINT(*)
   }
 }
 
 }  // namespace transformer_engine
 
-void nvte_multi_cast_transpose(size_t num_tensors,
-                               const NVTETensor* input_list,
-                               NVTETensor* cast_output_list,
-                               NVTETensor* transposed_output_list,
+void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor *input_list,
+                               NVTETensor *cast_output_list, NVTETensor *transposed_output_list,
                                cudaStream_t stream) {
   using namespace transformer_engine;
-  std::vector<Tensor*> input_list_,
-    cast_output_list_, transposed_output_list_;
+  std::vector<Tensor *> input_list_, cast_output_list_, transposed_output_list_;
   for (size_t i = 0; i < num_tensors; ++i) {
-    input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
-    cast_output_list_.push_back(reinterpret_cast<Tensor*>(cast_output_list[i]));
-    transposed_output_list_.push_back(reinterpret_cast<Tensor*>(transposed_output_list[i]));
+    input_list_.push_back(reinterpret_cast<Tensor *>(const_cast<NVTETensor &>(input_list[i])));
+    cast_output_list_.push_back(reinterpret_cast<Tensor *>(cast_output_list[i]));
+    transposed_output_list_.push_back(reinterpret_cast<Tensor *>(transposed_output_list[i]));
   }
-  multi_cast_transpose(input_list_,
-                       cast_output_list_,
-                       transposed_output_list_,
-                       stream);
+  multi_cast_transpose(input_list_, cast_output_list_, transposed_output_list_, stream);
 }
