@@ -68,7 +68,7 @@ def train(args, model, device, train_loader, optimizer, epoch, use_fp8):
                 break
 
 
-def calibrate(model, device, test_loader, use_fp8):
+def calibrate(model, device, test_loader):
     """Calibration function."""
     model.eval()
     test_loss = 0
@@ -183,7 +183,7 @@ def main():
         args.use_te = True
 
     if args.use_fp8_infer:
-        assert not args.use_fp8, "fp8-infer path currently only supports calibration from a bfloast checkpoint"
+        assert not args.use_fp8, "fp8-infer path currently only supports calibration from a bfloat checkpoint"
 
     torch.manual_seed(args.seed)
 
@@ -214,8 +214,7 @@ def main():
         scheduler.step()
 
     if args.use_fp8_infer:
-        for epoch in range(1, args.epochs + 1):
-            calibrate(model, device, test_loader, args.use_fp8)
+        calibrate(model, device, test_loader)
 
     if args.save_model or args.use_fp8_infer:
         torch.save(model.state_dict(), "mnist_cnn.pt")
