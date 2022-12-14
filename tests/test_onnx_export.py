@@ -29,7 +29,7 @@ from transformer_engine.pytorch.utils import get_default_init_method
 ONNX_FILES_DIR = "./gen_onnx_models"
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = "./libcustom_ort_fp8_qdq_ops.so"
+ORT_CUSTOM_OPS_LIB = "./tests/libcustom_ort_fp8_qdq_ops.so"
 
 # ScaledUpperTriangMaskedSoftmax is exported via ONNX::Trilu which was introduced in opset 14.
 TRILU_OPSET = 14
