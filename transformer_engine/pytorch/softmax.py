@@ -128,7 +128,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         scaled = g.op("Mul", inputs, scale_input)
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
         inv_mask = g.op("Sub", one, mask)
-        # Todo: type is hard coded because softmax uses FP16 or BF16
+        # Note: type is hard coded because softmax uses FP16 or BF16
         neg_tenK = g.op("Constant", value_t=torch.tensor(-10000., dtype=torch.float16))
         softmax_mask = g.op("Mul", mask, neg_tenK)
         masked_scaled = g.op("Mul", inv_mask, scaled)
