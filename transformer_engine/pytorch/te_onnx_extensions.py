@@ -39,6 +39,7 @@ def make_op_name(op_name: str) -> str:
 @symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
 def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for cast_to_fp8"""
+    # pylint: disable=unused-argument
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     if inputs.type().scalarType() == "Half":
         # Q inputs are currently constrained to FP32 due to a similar limitation in ORT custom ops.
@@ -50,6 +51,7 @@ def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 @symbolic_helper.parse_args("v", "v", "i", "i", "i")
 def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
     """ONNX graph for cast_from_fp8"""
+    # pylint: disable=unused-argument
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     out = g.op(make_op_name("TRT_FP8DequantizeLinear"), inputs, scale_inv).setType(
         inputs.type().with_dtype(torch.float32).with_sizes(output_shape))
@@ -63,6 +65,7 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 @symbolic_helper.parse_args("v", "v", "v", "v", "i", "i")
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
+    # pylint: disable=unused-argument
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     gelu = torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
     if inputs.type().scalarType() == "Half":
@@ -98,6 +101,7 @@ def onnx_te_gemm(
     accumulate,
     use_split_accumulator):
     """ONNX graph for te_gemm"""
+    # pylint: disable=unused-argument
     is_fp16 = bias.type().scalarType() == "Half"
     if input_type == int(tex.DType.kFloat8E4M3):
         inputs = g.op(make_op_name("TRT_FP8DequantizeLinear"), inputs, input_scale_inverse)
@@ -130,6 +134,7 @@ def onnx_te_gemm(
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "v",  "i")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax, scale_inv, otype):
     """ONNX graph for layernorm_fwd_fp8"""
+    # pylint: disable=unused-argument
     ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps)
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     if inputs.type().scalarType() == "Half":
@@ -142,6 +147,7 @@ def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax, scale_inv,
 @symbolic_helper.parse_args("v", "v", "v", "f")
 def onnx_layernorm_fwd(g, inputs, weight, bias, eps):
     """ONNX graph for layernorm_fwd"""
+    # pylint: disable=unused-argument
     normalized_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     if normalized_shape is None:
         ndim = torch.onnx.symbolic_helper._get_tensor_rank(inputs)
