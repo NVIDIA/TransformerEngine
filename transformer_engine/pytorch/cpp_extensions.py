@@ -12,9 +12,11 @@ from .constants import TE_DType
 def fp8_gemm(
     A: torch.Tensor,
     A_scale_inv: torch.Tensor,
+    A_fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     A_dtype: tex.DType,
     B: torch.Tensor,
     B_scale_inv: torch.Tensor,
+    B_fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     B_dtype: tex.DType,
     out_dtype: torch.dtype,
     workspace: torch.Tensor,
@@ -41,19 +43,21 @@ def fp8_gemm(
 
     out_dtype = tex.DType.kFloat32 if fp32_output else TE_DType[out_dtype]
 
-    tex.te_gemm(
+    _ = torch.ops.tex_ts.te_gemm_ts(
         A,
         A_scale_inv,
+        A_fp8_tensor,
         A_dtype,
         True,  # transa
         B,
         B_scale_inv,
+        B_fp8_tensor,
         B_dtype,
         False,  # transb
         out,
         out_dtype,
         bias if use_bias else empty_tensor,
-        empty_tensor,
+        empty_tensor,  # this is pre_gelu_out
         False,  # grad
         workspace,
         workspace.shape[0],
@@ -87,6 +91,7 @@ def gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     empty_tensor = torch.Tensor()
+    fp8_index = -1 # dummy index
 
     input_dtype = TE_DType[dtype]
     output_dtype = tex.DType.kFloat32 if fp32_output else input_dtype
@@ -115,13 +120,15 @@ def gemm(
 
     bias = bias if use_bias else empty_tensor
 
-    tex.te_gemm(
+    _ = torch.ops.tex_ts.te_gemm_ts(
         A,
         empty_tensor,
+        fp8_index,
         input_dtype,
         transa,
         B,
         empty_tensor,
+        fp8_index,
         input_dtype,
         transb,
         out,
@@ -214,11 +221,12 @@ def fp8_gelu(
     otype: tex.DType,
 ) -> torch.Tensor:
     """GeLU with FP8 output"""
-    return tex.fp8_gelu(
+    return torch.ops.tex_ts.fp8_gelu_ts(
         inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        fp8_tensor,
         otype,
     )
 
@@ -245,6 +253,46 @@ def layernorm_fwd_fp8(
     )
 
 
+def layernorm_fwd_fp8_inf(
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    otype: tex.DType,
+) -> torch.Tensor:
+    """LayerNorm with FP8 output.
+
+    This version of layernorm_fwd_fp8 is specialized for inference, and returns
+    only the normalized output.
+    """
+    ret = torch.ops.tex_ts.layernorm_fwd_fp8_inf_ts(
+        inp,
+        weight,
+        bias,
+        eps,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        otype)
+    return ret
+
+
+def layernorm_fwd_inf(
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """LayerNorm with FP8 output"""
+    return torch.ops.tex_ts.layernorm_fwd_inf_ts(
+        inp,
+        weight,
+        bias,
+        eps,
+    )
+
+
 def cast_to_fp8(
     inp: torch.Tensor,
     fp8_meta_tensor: tex.FP8TensorMeta,
@@ -252,11 +300,12 @@ def cast_to_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input to FP8"""
-    return tex.cast_to_fp8(
+    return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
-        fp8_meta_tensor.scale[fp8_tensor],
-        fp8_meta_tensor.amax_history[0][fp8_tensor],
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        fp8_tensor,
         otype,
     )
 
@@ -269,9 +318,10 @@ def cast_from_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input from FP8"""
-    return tex.cast_from_fp8(
+    return torch.ops.tex_ts.cast_from_fp8_ts(
         inp,
-        fp8_meta_tensor.scale_inv[fp8_tensor],
+        fp8_meta_tensor.scale_inv,
+        fp8_tensor,
         itype,
         otype,
     )
