@@ -56,6 +56,8 @@ void cublas_gemm(const Tensor *inputA,
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
   void *D = outputD->data.dptr;
+  void *D_scale = outputD->scale.dptr;
+  void *D_amax = outputD->amax.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
@@ -87,7 +89,7 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
 
   cublasLtMatmulDesc_t       operationDesc = nullptr;
-  cublasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Ddesc = nullptr;
+  cublasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
   cublasLtMatmulPreference_t preference = nullptr;
   int                             returnedResults = 0;
   cublasLtMatmulHeuristicResult_t heuristicResult = {};
@@ -139,8 +141,8 @@ void cublas_gemm(const Tensor *inputA,
     if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
         NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                          CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
-                                                         &D_scale_inverse,
-                                                         sizeof(D_scale_inverse)));
+                                                         &D_scale,
+                                                         sizeof(D_scale)));
         NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                          CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
                                                          &D_amax,
@@ -240,8 +242,6 @@ void cublas_gemm(const Tensor *inputA,
 void nvte_cublas_gemm(const NVTETensor A,
                       const NVTETensor B,
                       NVTETensor D,
-                      const NVTETensor D_scale_inverse,
-                      const NVTETensor D_amax,
                       const NVTETensor bias,
                       NVTETensor pre_gelu_out,
                       bool transa,
@@ -256,8 +256,6 @@ void nvte_cublas_gemm(const NVTETensor A,
   const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
   const Tensor *inputB = reinterpret_cast<const Tensor*>(B);
   Tensor *outputD = reinterpret_cast<Tensor*>(D);
-  const Tensor *Dinvscale = reinterpret_cast<const Tensor*>(D_scale_inverse);
-  const Tensor *Damax = reinterpret_cast<const Tensor*>(D_amax);
   const Tensor *biasTensor = reinterpret_cast<const Tensor*>(bias);
   Tensor *outputGelu = reinterpret_cast<Tensor*>(pre_gelu_out);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);

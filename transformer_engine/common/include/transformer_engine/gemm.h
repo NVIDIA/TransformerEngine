@@ -41,8 +41,6 @@ extern "C" {
 void nvte_cublas_gemm(const NVTETensor A,
                       const NVTETensor B,
                       NVTETensor D,
-                      const NVTETensor D_scale_inverse,
-                      const NVTETensor D_amax,
                       const NVTETensor bias,
                       NVTETensor pre_gelu_out,
                       bool transa,

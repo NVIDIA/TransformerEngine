@@ -16,7 +16,7 @@ void te_gemm(at::Tensor A,
              transformer_engine::DType B_type,
              bool transb,
              at::Tensor D,
-             at::Tensor D_scale_inverse,
+             at::Tensor D_scale,
              transformer_engine::DType D_type,
              at::Tensor D_amax,
              at::Tensor bias,
@@ -42,11 +42,8 @@ void te_gemm(at::Tensor A,
   auto te_D = makeTransformerEngineTensor(D.data_ptr(),
                                           {static_cast<size_t>(D.size(0)),
                                            static_cast<size_t>(D.size(1))},
-                                          D_type);
-  auto te_D_scale_inverse = makeTransformerEngineTensor(D_scale_inverse.data_ptr(), {1},
-                                                        GetTransformerEngineDType(
-                                                            A_scale_inverse.scalar_type()));
-  auto te_D_amax = makeTransformerEngineTensor(D_amax.data_ptr(), {1}, DType::kFloat32);
+                                          D_type, D_amax.data_ptr(),
+                                          D_scale.data_ptr(), nullptr);
   auto te_bias = makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))},
                                              bias_type);
 
@@ -65,8 +62,6 @@ void te_gemm(at::Tensor A,
   nvte_cublas_gemm(te_A.data(),
                    te_B.data(),
                    te_D.data(),
-                   te_D_scale_inverse.data(),
-                   te_D_amax.data(),
                    te_bias.data(),
                    te_pre_gelu_out.data(),
                    transa,

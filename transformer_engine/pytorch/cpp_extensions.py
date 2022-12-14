@@ -28,13 +28,13 @@ def fp8_gemm(
     use_bias: bool = False,
     fp32_output: bool = False,
     use_split_accumulator: bool = False,
-    out_fp8_subtype: tex.DType = None,
+    D_dtype: tex.DType = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
     empty_tensor = torch.Tensor()
-    if out_index is not None:
-        assert fp8_meta_tensor is not None
+    if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
+        assert fp8_meta_tensor is not None and out_index is not None
 
     return_output = False
     if out is None:
@@ -47,8 +47,8 @@ def fp8_gemm(
         return_output = True
 
     out_dtype = tex.DType.kFloat32 if fp32_output else TE_DType[out_dtype]
-    bias_dtype = output_dtype if bias is None else TE_DType[bias.dtype]
-    out_dtype = out_fp8_subtype if out_fp8_subtype is not None else out_dtype
+    bias_dtype = out_dtype if bias is None else TE_DType[bias.dtype]
+    out_dtype = D_dtype if D_dtype is not None else out_dtype
 
     _ = torch.ops.tex_ts.te_gemm_ts(
         A,
