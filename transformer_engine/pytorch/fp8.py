@@ -315,7 +315,6 @@ def _default_get_amax(
     else:  # amax_compute_algo == "most_recent"
         amax = amax_history[0]
 
-    amax_history = update_amax_history(amax_history)
     return amax_history, amax
 
 
@@ -395,7 +394,6 @@ def _compute_amax(
 
     if callable(recipe.amax_compute_algo):
         amax = recipe.amax_compute_algo(amax_history)
-        amax_history = update_amax_history(amax_history)
         return amax_history, amax
     return _default_get_amax(
         amax_history,
@@ -464,6 +462,7 @@ def amax_and_scale_update(
             fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"],
             update_weight_scale_inv,
         )
+    fp8_meta[fp8_meta_tensor_key].amax_history[0].fill_(0.0)
 
 
 def get_fp8_te_dtype(
