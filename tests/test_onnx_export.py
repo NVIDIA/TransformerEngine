@@ -26,7 +26,8 @@ from transformer_engine.pytorch.utils import get_default_init_method
 
 
 # Directory where generated ONNX test models are stored.
-ONNX_FILES_DIR = "./gen_onnx_models"
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+ONNX_FILES_DIR = os.path.join(TESTS_DIR, "./gen_onnx_models")
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
 ORT_CUSTOM_OPS_LIB = "./tests/libcustom_ort_fp8_qdq_ops.so"
@@ -196,6 +197,16 @@ def as_te_type(dtype: torch.dtype):
     }[dtype]
 
 
+def get_attn_mask_str(use_mask, attn_mask_type):
+    # See FusedScaleMaskSoftmax::forward_fused_softmax for logic behind names.
+    if attn_mask_type is None:
+        return "_mask" if use_mask else "_no-mask"
+    attn_mask_str = "_padding-no-mask"
+    attn_mask_str = "_causal-mask" if attn_mask_type == "causal" else attn_mask_str
+    attn_mask_str = "_padding-mask" if use_mask and attn_mask_type == "padding" else attn_mask_str
+    return attn_mask_str
+
+
 @pytest.mark.parametrize("scale_factor, atol", [
     (1, 1e-7),
     (224, 1e-7)
@@ -230,16 +241,18 @@ def test_export_cast_ops(scale_factor: float, atol: float, precision: torch.dtyp
     hidden_size = 256
     inp = torch.randn(hidden_size, in_features, device="cuda", dtype=precision)
     high_prec_str = dtype2str(precision)
-    fname = f"te.cast_fp8.s_{scale_factor}{high_prec_str}.onnx"
+    fname = f"te.cast_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_QDQ()
     do_export(model, inp, fname)
     validate_result(fname, inp, model, atol=atol, is_fp8=True)
 
 
 @pytest.mark.parametrize("scale_factor", [448])
-@pytest.mark.parametrize("precision, atol", [
-    [torch.float32, 1e-7], [torch.float16, 2e-3]]
-)
+@pytest.mark.parametrize(
+    "precision,     atol", [
+    [torch.float32, 1e-7],
+    [torch.float16, 2e-3]
+])
 def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: float):
     class TestFP8_Gelu(nn.Module):
         def __init__(self):
@@ -268,13 +281,15 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     hidden_size = 256
     inp = torch.randn(hidden_size, in_features, device="cuda", dtype=precision)
     high_prec_str = dtype2str(precision)
-    fname = f"te.gelu_fp8{high_prec_str}.onnx"
+    fname = f"te.gelu_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_Gelu()
     do_export(model, inp, fname)
     validate_result(fname, inp, model, rtol=1e-1, atol=atol, is_fp8=True)
 
 
-@pytest.mark.parametrize("scale_factors", [(224, 224,), ])
+@pytest.mark.parametrize("scale_factors",
+    [(224, 224,),
+])
 @pytest.mark.parametrize(
     "precision,     use_fp8, use_bias, use_gelu", [
     (torch.float32, False,   False,    False),
@@ -463,17 +478,13 @@ def test_export_layernorm(
             return ret
 
     inp = torch.randn(*inp_shape, device="cuda", dtype=precision)
+    model = TestFP8_Layernorm() if use_fp8 else Test_Layernorm()
     high_prec_str = dtype2str(precision)
-    if use_fp8:
-        fname = f"te.layernorm_fwd_fp8{high_prec_str}.onnx"
-        model = TestFP8_Layernorm()
-    else:
-        fname = f"te.layernorm_fwd{high_prec_str}.onnx"
-        model = Test_Layernorm()
-
+    fp8_str = "_fp8" if use_fp8 else ""
+    fname = f"te.layernorm{fp8_str}_{scale_factor}{high_prec_str}.onnx"
     do_export(model, inp, fname)
     if precision not in (torch.bfloat16, ):
-        validate_result(fname, inp, model, atol=1e-5, is_fp8=use_fp8)
+        validate_result(fname, inp, model, atol=5e-4, is_fp8=use_fp8)
 
 
 @pytest.mark.parametrize("softmax_def", [
@@ -506,17 +517,17 @@ def test_export_softmax(softmax_def, precision):
     inp_shape = [hidden_size, in_features, in_features, in_features]
     if softmax_def == softmax_defs.ScaledUpperTriangMaskedSoftmax:
         inp_shape = [hidden_size, in_features, in_features]
-        kernel_str = "te.ScaledUpperTriangMaskedSoftmax"
+        kernel_str = "ScaledUpperTriangMaskedSoftmax"
         model = Test_Softmax(softmax_def)
     elif softmax_def == softmax_defs.ScaledMaskedSoftmax:
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(hidden_size, 1, in_features, in_features, device="cuda", dtype=precision)
         mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
         input_names.append("mask")
-        kernel_str = "te.ScaledMaskedSoftmax"
+        kernel_str = "ScaledMaskedSoftmax"
         model = Test_Softmax(softmax_def, mask_inp=True)
     elif softmax_def == softmax_defs.ScaledSoftmax:
-        kernel_str = "te.ScaledSoftmax"
+        kernel_str = "ScaledSoftmax"
         model = Test_Softmax(softmax_def)
     input_tensor = torch.randn(*inp_shape, device="cuda")
     input_tensor = input_tensor.to(torch.bfloat16) if precision == torch.bfloat16 else input_tensor.half()
@@ -530,7 +541,8 @@ def test_export_softmax(softmax_def, precision):
 
 @pytest.mark.parametrize("scale_factor", [1])
 @pytest.mark.parametrize("use_fp8", [False, True])
-@pytest.mark.parametrize("return_bias", [False, True])
+# Returning the bias is a TE fusion optimization we don't care about.
+@pytest.mark.parametrize("return_bias", [False])
 @pytest.mark.parametrize(
     "precision,     use_bias",[
     (torch.float32, False),
@@ -580,7 +592,7 @@ def test_export_linear(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-# Todo: handle case of True
+# Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
 @pytest.mark.parametrize("return_layernorm_output", [False])
 @pytest.mark.parametrize(
@@ -629,7 +641,7 @@ def test_export_layernorm_linear(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-# Todo: handle case of True
+# Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
 @pytest.mark.parametrize("return_layernorm_output", [False])
 # Todo: cannot handle FP16 for some reason
@@ -686,8 +698,10 @@ def test_export_layernorm_mlp(
     (torch.float16, True,     "padding"), # calls ScaledMaskedSoftmax
     (torch.float16, False,    "padding"), # calls ScaledSoftmax
 ])
-@pytest.mark.parametrize("attention_softmax_in_fp32", [True, False])
-@pytest.mark.parametrize("apply_query_key_layer_scaling", [True, False])
+@pytest.mark.parametrize("attention_softmax_in_fp32",
+    [True, False])
+@pytest.mark.parametrize("apply_query_key_layer_scaling",
+    [True, False])
 def test_export_core_attention(
     precision: torch.dtype,
     use_mask: bool,
@@ -695,9 +709,6 @@ def test_export_core_attention(
     attention_softmax_in_fp32: bool,
     apply_query_key_layer_scaling: bool,
 ):
-    if attn_mask_type is None:
-        attn_mask_type = 'causal'
-
     # Set dimensions (these are arbitrary).
     kv_channels = 64
     num_attention_heads = 1
@@ -715,14 +726,14 @@ def test_export_core_attention(
         input_names.append("attention_mask")
     inp = (query_layer, key_layer, value_layer, attention_mask)
 
-    sm_prec_str = "_fp32" if attention_softmax_in_fp32 else "_fp16"
-    qk_scaling_str = "_qk_scaling" if apply_query_key_layer_scaling else ""
-    mask_str = "_masked" if use_mask else \
-                "_upper_trian_masked" if attn_mask_type=="causal" and precision == torch.float16 else \
-                ""
+    sm_prec_str = "_sm-fp32" if attention_softmax_in_fp32 else "_sm-fp16"
+    qk_scaling_str = "_qk-scaling" if apply_query_key_layer_scaling else ""
+    mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
     fname = f"te.core_attention{mask_str}{qk_scaling_str}{sm_prec_str}{high_prec_str}.onnx"
 
+    if attn_mask_type is None:
+        attn_mask_type = 'causal'
     model = te.transformer.CoreAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
@@ -740,21 +751,24 @@ def test_export_core_attention(
 
 
 test_configs_multihead_attention = [
-    (False, "causal"),  # calls ScaledUpperTriangMaskedSoftmax
-    (True,  "padding"), # calls ScaledMaskedSoftmax
-    (False, "padding"), # calls ScaledSoftmax
+    #"use_mask, attn_mask_type"
+    (False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
+    (True,     "padding"), # calls ScaledMaskedSoftmax
+    (False,    "padding"), # calls ScaledSoftmax
 ]
 test_configs_attention_type = [
-    (True, "self", True),
-    (False, "self", True),
-    (True, "self", False),
-    (False, "self", False),
+    #"input_layernorm, attention_type, fuse_qkv_params"
+    (True,             "self",         True),
+    (False,            "self",         True),
+    (True,             "self",         False),
+    (False,            "self",         False),
     # disabled because query_bias (reqd for cross attention) is defined when fuse_qkv_params is False
-    # ("cross", True),
-    (True, "cross", False),
+    # (True,           "cross",        True),
+    # (False,          "cross",        True),
+    (True,             "cross",        False),
     # disabled because TypeError: cannot assign 'transformer_engine.pytorch.module.Linear'
     # as parameter 'query' (torch.nn.Parameter or None expected)
-    # (False, "cross", False),
+    # (False,          "cross",        False),
 ]
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
@@ -804,10 +818,11 @@ def test_export_multihead_attention(
 
     fp8_str = "_fp8" if use_fp8 else ""
     dtype_str = dtype2str(precision)
-    attn_type_str = "_self_attention" if attention_type == "self" else "_cross_attention"
-    fuse_qkv_str = "_fused" if fuse_qkv_params else ""
-    attn_mask_type_str = f"_{attn_mask_type}" if (use_mask and attn_mask_type != "") else ""
-    fname = f"te.multihead_attention{fp8_str}{attn_mask_type_str}{attn_type_str}{fuse_qkv_str}{dtype_str}.onnx"
+    attn_type_str = "_self-attention" if attention_type == "self" else "_cross-attention"
+    fuse_qkv_str = "_fused-qkv" if fuse_qkv_params else ""
+    attn_mask_str = get_attn_mask_str(use_mask, attn_mask_type)
+    input_ln_str = "_input-ln" if input_layernorm else ""
+    fname = f"te.multihead_attention{fp8_str}{attn_mask_str}{attn_type_str}{input_ln_str}{fuse_qkv_str}{dtype_str}.onnx"
 
     model = te.transformer.MultiHeadAttention(
         *attention_args,
@@ -861,11 +876,11 @@ def test_export_transformer_layer(
     inp = (input_tensor, attention_mask)
 
     fp8_str = "_fp8" if use_fp8 else ""
-    fuse_qkv_params_str = "_fuse-qkv" if fuse_qkv_params else ""
+    fuse_qkv_params_str = "_fused-qkv" if fuse_qkv_params else ""
     qk_scaling_str = "_qk-scaling" if apply_query_key_layer_scaling else ""
     high_prec_str = dtype2str(precision)
-    attn_mask_type_str = f"_{attn_mask_type}" if (use_mask and attn_mask_type != "") else ""
-    fname = f"te.transformer_layer{fp8_str}{attn_mask_type_str}{fuse_qkv_params_str}{qk_scaling_str}{high_prec_str}.onnx"
+    attn_mask_str = get_attn_mask_str(use_mask, attn_mask_type)
+    fname = f"te.transformer_layer{fp8_str}{attn_mask_str}{fuse_qkv_params_str}{qk_scaling_str}{high_prec_str}.onnx"
 
     model = te.TransformerLayer(
         hidden_size,
