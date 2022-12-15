@@ -133,10 +133,12 @@ def validate_result(
     def create_ort_input_dict(session, inps):
         inp_dict = {}
         if isinstance(inps, tuple) or isinstance(inps, list):
+            nonetype_inputs = 0
             for idx, inp in enumerate(inps):
                 if inp is None:
+                    nonetype_inputs += 1
                     continue
-                inp_dict[session.get_inputs()[idx].name] = to_numpy(inp)
+                inp_dict[session.get_inputs()[idx - nonetype_inputs].name] = to_numpy(inp)
         else:
             inp_dict[session.get_inputs()[0].name] = to_numpy(inps)
         return inp_dict
@@ -742,16 +744,23 @@ test_configs_multihead_attention = [
     (True,  "padding"), # calls ScaledMaskedSoftmax
     (False, "padding"), # calls ScaledSoftmax
 ]
+test_configs_attention_type = [
+    (True, "self", True),
+    (False, "self", True),
+    (True, "self", False),
+    (False, "self", False),
+    # disabled because query_bias (reqd for cross attention) is defined when fuse_qkv_params is False
+    # ("cross", True),
+    (True, "cross", False),
+    # disabled because TypeError: cannot assign 'transformer_engine.pytorch.module.Linear'
+    # as parameter 'query' (torch.nn.Parameter or None expected)
+    # (False, "cross", False),
+]
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
-@pytest.mark.parametrize("input_layernorm", [True, False])
 @pytest.mark.parametrize("return_layernorm_output", [False])
-@pytest.mark.parametrize("attention_type", [
-    "self",
-    #"cross" # TODO: handle this ORT error
-])
-@pytest.mark.parametrize("fuse_qkv_params", [False, True])
+@pytest.mark.parametrize("input_layernorm, attention_type, fuse_qkv_params", test_configs_attention_type)
 def test_export_multihead_attention(
     use_fp8: bool,
     use_mask: bool,
@@ -780,14 +789,18 @@ def test_export_multihead_attention(
         output_layer_init_method,
     )
     hidden_states = torch.randn(sequence_length, batch_size, hidden_size, dtype=precision, device="cuda")
-    input_names = ["hidden_states"]
+
     attention_mask = None
     if use_mask and attn_mask_type != "causal":
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(batch_size, 1, sequence_length, sequence_length, device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
-        input_names.append("attention_mask")
-    inp = (hidden_states, attention_mask)
+
+    encoder_output = None
+    if attention_type == "cross":
+        encoder_output = torch.randn(sequence_length, batch_size, hidden_size, dtype=precision, device="cuda")
+    inp = (hidden_states, attention_mask, encoder_output)
+    input_names = ["hidden_states", "attention_mask", "encoder_output"]
 
     fp8_str = "_fp8" if use_fp8 else ""
     dtype_str = dtype2str(precision)
