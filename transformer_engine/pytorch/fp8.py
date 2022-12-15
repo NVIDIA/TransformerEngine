@@ -4,7 +4,8 @@
 
 """FP8 utilies for TransformerEngine"""
 from contextlib import contextmanager
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from collections import deque
+from typing import Callable, List, Optional, Dict, Any, Tuple, Union, Deque
 
 import torch
 import transformer_engine_extensions as tex
@@ -20,6 +21,7 @@ _FP8_AUTOCAST_COUNTER = 0
 _FP8_CURRENT_CONTEXT_ID = 0
 _FP8_AUTOCAST_DEPTH = 0
 _global_fp8_buffer = {}
+_fp8_tensors_recompute_buffer = []
 _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
@@ -62,6 +64,22 @@ def set_global_fp8_buffer(buffer: Dict[str, List[torch.Tensor]]) -> None:
     _global_fp8_buffer = buffer
 
 
+def get_global_fp8_recompute_buffer() -> Dict[str, List[torch.Tensor]]:
+    """Returns global fp8 recompute buffer."""
+    return _fp8_tensors_recompute_buffer
+
+
+def set_global_fp8_recompute_buffer(buffer: List[Deque[List[torch.Tensor]]]) -> None:
+    """Sets global fp8 recompute buffer."""
+    global _fp8_tensors_recompute_buffer
+
+    # Map all tensors back to GPU.
+    for index, deck in enumerate(buffer):
+        buffer[index] = deque([[t.cuda() for t in tensors] for tensors in deck])
+
+    _fp8_tensors_recompute_buffer = buffer
+
+
 def setup_amax_forward_global_reduce_func(f: Callable) -> None:
     """Sets up the function to call during autocast exit."""
     global _amax_forward_global_reduce_func
@@ -91,6 +109,59 @@ def add_amax_to_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) ->
 
     if buffer_position_key not in fp8_meta:
         fp8_meta[buffer_position_key] = len(_global_fp8_buffer[buffer_key]) - 1
+
+
+def copy_forward_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> None:
+    """Copy the scaling factors and amaxes for recompute forward phase
+    to ensure both forward steps are numerically same.
+    """
+    global _fp8_tensors_recompute_buffer
+    buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
+
+    to_copy = [
+        fp8_meta["scaling_fwd"].amax_history.clone(),
+        fp8_meta["scaling_fwd"].scale.clone(),
+        fp8_meta["scaling_fwd"].scale_inv.clone(),
+    ]
+
+    if buffer_position_key in fp8_meta:
+        _fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].append(to_copy)
+    else:
+        if len(_fp8_tensors_recompute_buffer) == 0:
+            _fp8_tensors_recompute_buffer = [deque()]
+        else:
+            _fp8_tensors_recompute_buffer.append(deque())
+        _fp8_tensors_recompute_buffer[-1].append(to_copy)
+        fp8_meta[buffer_position_key] = len(_fp8_tensors_recompute_buffer) - 1
+
+
+def get_old_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> None:
+    """Switch to the copied scaling factors and amaxes from phase
+    1 forward for indentical numerical outputs.
+    """
+
+    # Store updated amaxes and scales from phase 1 post forward.
+    fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history
+    fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale
+    fp8_meta["updated_scale_inv_fwd"] = fp8_meta["scaling_fwd"].scale_inv
+
+    # Retrieve stashed amaxes and scales from phase 1 pre forward.
+    buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
+    stashed_fp8_meta = _fp8_tensors_recompute_buffer[
+        fp8_meta[buffer_position_key]
+    ].popleft()
+
+    # Replace amaxes and scales with stashed values for phase 2 forward
+    fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
+    fp8_meta["scaling_fwd"].scale = stashed_fp8_meta[1]
+    fp8_meta["scaling_fwd"].scale_inv = stashed_fp8_meta[2]
+
+
+def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
+    """Restore latest scaling factors and amaxes after recompute forward run."""
+    fp8_meta["scaling_fwd"].amax_history = fp8_meta["updated_amax_history_fwd"]
+    fp8_meta["scaling_fwd"].scale = fp8_meta["updated_scale_fwd"]
+    fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]
 
 
 def copy_amax_from_global_buffer(

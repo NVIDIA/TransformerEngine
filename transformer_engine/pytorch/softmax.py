@@ -9,6 +9,11 @@ from typing import Callable, Tuple, Union
 import torch
 from torch import nn
 
+import transformer_engine_extensions as tex
+
+THREADS_PER_WARP = 32
+THREADS_PER_BLOCK = 128
+
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
@@ -21,10 +26,8 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledUpperTriangMaskedSoftmax fwd"""
-        import scaled_upper_triang_masked_softmax_cuda
-
         scale_t = torch.tensor([scale])
-        softmax_results = scaled_upper_triang_masked_softmax_cuda.forward(
+        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(
             inputs, scale_t[0]
         )
 
@@ -36,10 +39,8 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledUpperTriangMaskedSoftmax bwd"""
-        import scaled_upper_triang_masked_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
-        input_grads = scaled_upper_triang_masked_softmax_cuda.backward(
+        input_grads = tex.scaled_upper_triang_masked_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
 
@@ -59,11 +60,9 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float
     ) -> torch.Tensor:
         """ScaledMaskedSoftmax fwd"""
-        import scaled_masked_softmax_cuda
-
         scale_t = torch.tensor([scale])
 
-        softmax_results = scaled_masked_softmax_cuda.forward(inputs, mask, scale_t[0])
+        softmax_results = tex.scaled_masked_softmax_forward(inputs, mask, scale_t[0])
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
@@ -72,11 +71,9 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledMaskedSoftmax bwd"""
-        import scaled_masked_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = scaled_masked_softmax_cuda.backward(
+        input_grads = tex.scaled_masked_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
         return input_grads, None, None
@@ -92,11 +89,9 @@ class ScaledSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledSoftmax fwd"""
-        import scaled_softmax_cuda
-
         scale_t = torch.tensor([scale])
 
-        softmax_results = scaled_softmax_cuda.forward(inputs, scale_t[0])
+        softmax_results = tex.scaled_softmax_forward(inputs, scale_t[0])
         ctx.save_for_backward(softmax_results, scale_t)
         return softmax_results
 
@@ -105,11 +100,9 @@ class ScaledSoftmax(torch.autograd.Function):
         ctx, output_grads: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """ScaledSoftmax bwd"""
-        import scaled_softmax_cuda
-
         softmax_results, scale_t = ctx.saved_tensors
 
-        input_grads = scaled_softmax_cuda.backward(
+        input_grads = tex.scaled_softmax_backward(
             output_grads, softmax_results, scale_t[0]
         )
         return input_grads, None, None
@@ -170,7 +163,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             and attn_batches % 4 == 0  # np * b must be divisor of 4
         ):
             if 0 <= sk <= 4096:
-                batch_per_block = self.get_batch_per_block(sq, sk, b, np)
+                batch_per_block = self.get_batch_per_block(sk)
 
                 if self.attn_mask_type == "causal":
                     if attn_batches % batch_per_block == 0:
@@ -220,8 +213,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         return probs
 
     @staticmethod
-    def get_batch_per_block(sq: int, sk: int, b: int, np: int) -> int:
+    def get_batch_per_block(key_seq_len: int) -> int:
         """Softmax utility"""
-        import scaled_masked_softmax_cuda
-
-        return scaled_masked_softmax_cuda.get_batch_per_block(sq, sk, b, np)
+        pow2 = 1 << (key_seq_len - 1).bit_length()
+        warp_size = pow2 if pow2 < THREADS_PER_WARP else THREADS_PER_WARP
+        batches_per_warp = 2 if pow2 <= 128 else 1
+        warps_per_block = THREADS_PER_BLOCK / warp_size
+        batches_per_block = warps_per_block * batches_per_warp
+        return batches_per_block

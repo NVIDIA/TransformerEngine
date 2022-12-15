@@ -1,0 +1,33 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger TE build on GitHub
+name: 'Test build'
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  pyTorch:
+    name: 'pyTorch build'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/pytorch:22.09-py3
+      options: --user root
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Build'
+        run: |
+          mkdir -p wheelhouse && \
+          pip wheel -w wheelhouse . -v
+      - name: 'Upload wheel'
+        uses: actions/upload-artifact@v3
+        with:
+          name: te_wheel
+          path: wheelhouse/*.whl
+          retention-days: 7
+      - name: 'Install'
+        run: pip install --no-cache-dir wheelhouse/*.whl
+      - name: 'Sanity check'
+        run: python tests/test_sanity_import.py

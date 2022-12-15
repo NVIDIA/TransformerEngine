@@ -60,29 +60,26 @@ void performTestQ(const size_t N) {
 
   Tensor input({ N }, itype);
   Tensor output({ N }, otype);
-  Tensor scale({ 1 }, DType::kFloat32);
-  Tensor amax({ 1 }, DType::kFloat32);
-  Tensor scale_inv({ 1 }, DType::kFloat32);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N);
 
-  fillUniform(input);
-  fillUniform(scale);
+  fillUniform(&input);
+  setRandomScale(&output);
 
-  nvte_fp8_quantize(input.data(), scale.data(), output.data(), amax.data(), scale_inv.data(), 0);
+  nvte_fp8_quantize(input.data(), output.data(), 0);
 
   float ref_amax;
   compute_ref_q<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
-                                       N, &ref_amax, *(scale.cpu_dptr<float>()));
+                                       N, &ref_amax, output.scale());
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-  compareResults("amax", amax, &ref_amax, atol_amax, rtol_amax);
-  float ref_scale_inv = 1.f / (*scale.cpu_dptr<float>());
-  compareResults("scale_inv", scale_inv, &ref_scale_inv, atol_amax, rtol_amax);
+  compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+  float ref_scale_inv = 1.f / output.scale();
+  compareResults("scale_inv", output.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_q", output, ref_output.get(), atol, rtol);
 }
@@ -96,17 +93,15 @@ void performTestDQ(const size_t N) {
 
   Tensor input({ N }, itype);
   Tensor output({ N }, otype);
-  Tensor scale_inv({ 1 }, DType::kFloat32);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N);
 
-  fillUniform(input);
-  fillUniform(scale_inv);
+  fillUniform(&input);
 
-  nvte_fp8_dequantize(input.data(), scale_inv.data(), output.data(), 0);
+  nvte_fp8_dequantize(input.data(), output.data(), 0);
 
   compute_ref_dq<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
-                                        N, *(scale_inv.cpu_dptr<float>()));
+                                        N, input.scale_inv());
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();

@@ -14,6 +14,7 @@
 #include <transformer_engine/logging.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/softmax.h>
 #include <ATen/ATen.h>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -108,6 +109,14 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const transformer_engine::DType type
 );
 
+transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
+                                                              const std::vector<size_t>& shape,
+                                                              const transformer_engine::DType type,
+                                                              void* amax_ptr,
+                                                              void* scale_ptr,
+                                                              void* scale_inv_ptr
+);
+
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
@@ -116,6 +125,11 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
+                                                              at::Tensor amax,
+                                                              const at::Tensor scale,
+                                                              at::Tensor scale_inv);
 
 
 size_t product(const std::vector<size_t> &shape);
@@ -165,8 +179,7 @@ void dispatch_layernorm(void* input,                                    // i
                         void* scale_inv,                                // o
                         const std::vector<size_t>& scale_inv_shape,
                         const transformer_engine::DType scale_inv_type,
-                        const int multiProcessorCount,
-                        const bool fp8_out
+                        const int multiProcessorCount
 );
 
 
@@ -267,6 +280,28 @@ void dispatch_bgrad_dgelu_cast_transpose_fusion(
         void* scale_inv,                                        // o
         const std::vector<size_t>& scale_inv_shape,
         const transformer_engine::DType scale_inv_type
+);
+
+
+void dispatch_multi_cast_transpose(
+        std::vector<void*> input_dptr_list,                     // i
+        const std::vector<std::vector<size_t>>& input_shape_list,
+        const std::vector<transformer_engine::DType>& input_type_list,
+        std::vector<void*> scale_dptr_list,                     // i
+        const std::vector<std::vector<size_t>>& scale_shape_list,
+        const std::vector<transformer_engine::DType>& scale_type_list,
+        std::vector<void*> cast_output_dptr_list,               // o
+        const std::vector<std::vector<size_t>>& cast_output_shape_list,
+        const std::vector<transformer_engine::DType>& cast_output_type_list,
+        std::vector<void*> transposed_output_dptr_list,         // o
+        const std::vector<std::vector<size_t>>& transposed_output_shape_list,
+        const std::vector<transformer_engine::DType>& transposed_output_type_list,
+        std::vector<void*> amax_dptr_list,                      // o
+        const std::vector<std::vector<size_t>>& amax_shape_list,
+        const std::vector<transformer_engine::DType>& amax_type_list,
+        std::vector<void*> scale_inv_dptr_list,                 // o
+        const std::vector<std::vector<size_t>>& scale_inv_shape_list,
+        const std::vector<transformer_engine::DType>& scale_inv_type_list
 );
 
 

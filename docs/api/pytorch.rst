@@ -27,3 +27,5 @@ Functions
 ---------
 
 .. autofunction:: transformer_engine.pytorch.fp8_autocast
+
+.. autofunction:: transformer_engine.pytorch.checkpoint

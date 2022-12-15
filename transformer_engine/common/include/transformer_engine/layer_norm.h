@@ -26,9 +26,8 @@ extern "C" {
  *  \param[in]     x                   Input tensor of shape [N, H].
  *  \param[in]     gamma               Gamma tensor of shape [H].
  *  \param[in]     beta                Beta tensor of shape [H].
- *  \param[in]     scale               Scaling factor used for output.
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
- *  \param[out]    z                   Output tensor of shape [N, H].
+ *  \param[in,out] z                   Output tensor of shape [N, H].
  *  \param[out]    mu                  Mean of the input calculated over the last dimension.
  *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
@@ -37,14 +36,10 @@ extern "C" {
  *  \param[in]     multiprocessorCount Number of SMs in the device.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
- *  \param[in,out] amax                AMAX value of the output tensor.
- *  \param[out]    scale_inv           Inverse of the output's scaling factor.
- *  \param[in]     fp8_out             Whether to output FP8.
  */
 void nvte_layernorm_fwd(const NVTETensor x,
                         const NVTETensor gamma,
                         const NVTETensor beta,
-                        const NVTETensor scale,
                         const float epsilon,
                         NVTETensor z,
                         NVTETensor mu,
@@ -52,10 +47,7 @@ void nvte_layernorm_fwd(const NVTETensor x,
                         cudaStream_t stream,
                         const int multiprocessorCount,
                         NVTETensor workspace,
-                        NVTETensor barrier,
-                        NVTETensor amax,
-                        NVTETensor scale_inv,
-                        bool fp8_out);
+                        NVTETensor barrier);
 
 
 /*! \brief Compute backward of LayerNorm.

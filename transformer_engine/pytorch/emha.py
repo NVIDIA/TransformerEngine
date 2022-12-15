@@ -10,9 +10,8 @@ from typing import Callable, Optional
 
 import torch
 import emha_C
-
-import scaled_upper_triang_masked_softmax_cuda
 import scaled_upper_triang_masked_softmax_dropout_cuda
+import transformer_engine_extensions as tex
 
 from transformer_engine.pytorch.utils import (
     divide,
@@ -30,7 +29,7 @@ class ScaledUpperTriangMaskedSoftmaxDropout(torch.autograd.Function):
     @staticmethod
     def forward(ctx, P_v, scale_pre_softmax, p_dropout, is_training):
         if not is_training:
-            S = scaled_upper_triang_masked_softmax_cuda.forward(P_v, scale_pre_softmax)
+            S = tex.scaled_upper_triang_masked_softmax_forward(P_v, scale_pre_softmax)
             return S
         S_dmask = scaled_upper_triang_masked_softmax_dropout_cuda.forward(
             P_v, scale_pre_softmax, p_dropout, None

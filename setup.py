@@ -140,38 +140,15 @@ if framework in ("all", "pytorch"):
 
     ext_modules.append(
         CUDAExtension(
-            name="scaled_upper_triang_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
-        )
-    )
-
-    ext_modules.append(
-        CUDAExtension(
             name="scaled_upper_triang_masked_softmax_dropout_cuda",
             sources=[
                 os.path.join(
                     path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_dropout.cpp",
+                    "transformer_engine/pytorch/csrc/emha/scaled_upper_triang_masked_softmax_dropout.cpp",
                 ),
                 os.path.join(
                     path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_upper_triang_masked_softmax_dropout_cuda.cu",
+                    "transformer_engine/pytorch/csrc/emha/scaled_upper_triang_masked_softmax_dropout_cuda.cu",
                 ),
             ],
             extra_compile_args={
@@ -179,54 +156,7 @@ if framework in ("all", "pytorch"):
                 "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
             },
             include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax"),
                 os.path.join(path, "transformer_engine/pytorch/csrc/emha"),
-            ],
-        )
-    )
-
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_masked_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_masked_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
-            ],
-        )
-    )
-
-    ext_modules.append(
-        CUDAExtension(
-            name="scaled_softmax_cuda",
-            sources=[
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax.cpp",
-                ),
-                os.path.join(
-                    path,
-                    "transformer_engine/pytorch/csrc/fused_softmax/scaled_softmax_cuda.cu",
-                ),
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=[
-                os.path.join(path, "transformer_engine/pytorch/csrc/fused_softmax")
             ],
         )
     )
@@ -447,7 +377,6 @@ setup(
     ),
     description="Transformer acceleration library",
     ext_modules=ext_modules,
-    setup_requires=["pytest-runner"],
     cmdclass={"build_ext": TEBuildExtension},
     license_files=("LICENSE",),
 )

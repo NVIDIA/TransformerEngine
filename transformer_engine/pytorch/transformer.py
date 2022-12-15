@@ -1048,6 +1048,8 @@ class TransformerLayer(torch.nn.Module):
                                   backprop.
         """
 
+        hidden_states = hidden_states.contiguous()
+
         # For AMP
         if torch.is_autocast_enabled():
             hidden_states = cast_if_needed(

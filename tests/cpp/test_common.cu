@@ -63,24 +63,87 @@ Tensor::Tensor(const NVTEShape &shape, const DType type) {
     size_t total_size = product(shape) * s;
     void *dptr = nullptr;
     cpu_data_ = nullptr;
+    amax_cpu_data_ = nullptr;
+    scale_cpu_data_ = nullptr;
+    scale_inv_cpu_data_ = nullptr;
+    float *amax = nullptr, *scale = nullptr, *scale_inv = nullptr;
     if (total_size != 0) {
         cudaMalloc((void**)&dptr, total_size);  // NOLINT(*)
         cudaMemset(dptr, 0, total_size);
         cpu_data_ = std::make_unique<unsigned char[]>(total_size);
+        for (size_t i = 0; i < total_size; ++i) {
+          cpu_data_[i] = 0;
+        }
     }
-    tensor_ = TensorWrapper(dptr, shape, type);
+    if (isFp8Type(type)) {
+      cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
+      cudaMemset(amax, 0, sizeof(float));
+      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+      cudaMemset(scale, 0, sizeof(float));
+      cudaMalloc((void**)&scale_inv, sizeof(float));  // NOLINT(*)
+      cudaMemset(scale_inv, 0, sizeof(float));
+      amax_cpu_data_ = std::make_shared<float>();
+      *amax_cpu_data_ = 0;
+      scale_cpu_data_ = std::make_shared<float>();
+      *scale_cpu_data_ = 0;
+      scale_inv_cpu_data_ = std::make_shared<float>();
+      *scale_inv_cpu_data_ = 0;
+    }
+    tensor_ = TensorWrapper(dptr, shape, type, amax, scale, scale_inv);
 }
 
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
   cudaMemcpy(cpu_data_.get(), tensor_.dptr(), size, cudaMemcpyDeviceToHost);
+  if (isFp8Type(dtype())) {
+  cudaMemcpy(amax_cpu_data_.get(), tensor_.amax(), sizeof(float),
+             cudaMemcpyDeviceToHost);
+  cudaMemcpy(scale_cpu_data_.get(), tensor_.scale(), sizeof(float),
+             cudaMemcpyDeviceToHost);
+  cudaMemcpy(scale_inv_cpu_data_.get(), tensor_.scale_inv(), sizeof(float),
+             cudaMemcpyDeviceToHost);
+  }
 }
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
   const size_t size = product(s) * typeToSize(tensor_.dtype());
   cudaMemcpy(tensor_.dptr(), cpu_data_.get(), size, cudaMemcpyHostToDevice);
+  if (isFp8Type(dtype())) {
+  cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
+             cudaMemcpyHostToDevice);
+  cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
+             cudaMemcpyHostToDevice);
+  cudaMemcpy(tensor_.scale_inv(), scale_inv_cpu_data_.get(), sizeof(float),
+             cudaMemcpyHostToDevice);
+  }
+}
+
+void Tensor::set_scale(float scale) {
+  if (isFp8Type(dtype())) {
+    NVTE_CHECK(scale_cpu_data_);
+    *scale_cpu_data_ = scale;
+    from_cpu();
+  }
+}
+
+void Tensor::set_scale_inv(float scale_inv) {
+  if (isFp8Type(dtype())) {
+    NVTE_CHECK(scale_inv_cpu_data_);
+    *scale_inv_cpu_data_ = scale_inv;
+    from_cpu();
+  }
+}
+
+void Tensor::shareFP8Meta(const Tensor &other) {
+  if(isFp8Type(dtype()) && isFp8Type(other.dtype())) {
+    tensor_ = TensorWrapper(dptr(), shape(), dtype(),
+                            other.tensor_.amax(),
+                            other.tensor_.scale(),
+                            other.tensor_.scale_inv());
+    to_cpu();
+  }
 }
 
 using std::to_string;
@@ -141,6 +204,16 @@ void compareResults(const std::string &name, const Tensor &test, const void *ref
   );
 }
 
+void compareResults(const std::string &name, const float test, const float ref,
+                    double atol, double rtol) {
+  double t = static_cast<double>(test);
+  double r = static_cast<double>(ref);
+  bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
+  ASSERT_FALSE(mismatch) << "Error in " << name << std::endl
+                         << "Mismatch: " << t << " vs " << r;
+
+}
+
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
     case DType::kFloat32:
@@ -158,17 +231,29 @@ std::pair<double, double> getTolerances(const DType type) {
   return {0, 0};
 }
 
-void fillUniform(const Tensor &t) {
-  const size_t size = product(t.shape());
+void fillUniform(Tensor *t) {
+  const size_t size = product(t->shape());
   static std::mt19937 gen(12345);
   std::uniform_real_distribution<> dis(-2.0, 1.0);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t.dtype(), T, {
-      T *data = t.cpu_dptr<T>();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T, {
+      T *data = t->cpu_dptr<T>();
       for (size_t i = 0; i < size; ++i) {
           data[i] = T(dis(gen));
       }
   });
-  t.from_cpu();
+  t->set_scale_inv(dis(gen));
+  t->from_cpu();
+}
+
+void setRandomScale(Tensor *t) {
+  static std::mt19937 gen(12345);
+  std::uniform_real_distribution<> dis(-2.0, 1.0);
+  const float scale = dis(gen);
+  t->set_scale(scale);
+}
+
+bool isFp8Type(DType type) {
+    return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2;
 }
 
 }  // namespace test

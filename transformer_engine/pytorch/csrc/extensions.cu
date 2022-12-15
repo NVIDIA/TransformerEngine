@@ -29,17 +29,13 @@ void te_gemm(at::Tensor A,
   auto te_A = makeTransformerEngineTensor(A.data_ptr(),
                                           {static_cast<size_t>(A.size(0)),
                                            static_cast<size_t>(A.size(1))},
-                                          A_type);
-  auto te_A_scale_inverse = makeTransformerEngineTensor(A_scale_inverse.data_ptr(), {1},
-                                                        GetTransformerEngineDType(
-                                                            A_scale_inverse.scalar_type()));
+                                          A_type, nullptr, nullptr,
+                                          A_scale_inverse.data_ptr());
   auto te_B = makeTransformerEngineTensor(B.data_ptr(),
                                           {static_cast<size_t>(B.size(0)),
                                            static_cast<size_t>(B.size(1))},
-                                          B_type);
-  auto te_B_scale_inverse = makeTransformerEngineTensor(B_scale_inverse.data_ptr(), {1},
-                                                        GetTransformerEngineDType(
-                                                            B_scale_inverse.scalar_type()));
+                                          B_type, nullptr, nullptr,
+                                          B_scale_inverse.data_ptr());
   auto te_D = makeTransformerEngineTensor(D.data_ptr(),
                                           {static_cast<size_t>(D.size(0)),
                                            static_cast<size_t>(D.size(1))},
@@ -60,9 +56,7 @@ void te_gemm(at::Tensor A,
                                                   DType::kByte);
 
   nvte_cublas_gemm(te_A.data(),
-                   te_A_scale_inverse.data(),
                    te_B.data(),
-                   te_B_scale_inverse.data(),
                    te_D.data(),
                    te_bias.data(),
                    te_pre_gelu_out.data(),
@@ -170,6 +164,96 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
           scale_inv.data_ptr(), {1}, DType::kFloat32);
 
   return {grad_bias, dgelu, dgelu_transpose};
+}
+
+
+void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
+                                std::vector<at::Tensor> scale_list,
+                                std::vector<at::Tensor> cast_output_list,
+                                std::vector<at::Tensor> transposed_output_list,
+                                std::vector<at::Tensor> amax_list,
+                                std::vector<at::Tensor> scale_inv_list,
+                                transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  // Extract properties from PyTorch tensors
+  std::vector<void*> input_dptr_list, scale_dptr_list,
+    cast_output_dptr_list, transposed_output_dptr_list,
+    amax_dptr_list, scale_inv_dptr_list;
+  std::vector<std::vector<size_t>> input_shape_list, scale_shape_list,
+    cast_output_shape_list, transposed_output_shape_list,
+    amax_shape_list, scale_inv_shape_list;
+  std::vector<transformer_engine::DType> input_type_list, scale_type_list,
+    cast_output_type_list, transposed_output_type_list,
+    amax_type_list, scale_inv_type_list;
+  auto extract_tensor_props_skip_dtype = [](at::Tensor& tensor,
+                                            std::vector<void*>& dptr_list,
+                                            std::vector<std::vector<size_t>>& shape_list) {
+    dptr_list.push_back(tensor.data_ptr());
+    shape_list.push_back({});
+    for (int d = 0; d < tensor.dim(); ++d) {
+      shape_list.back().push_back(tensor.size(d));
+    }
+  };
+  auto extract_tensor_props = [](at::Tensor& tensor,
+                                 std::vector<void*>& dptr_list,
+                                 std::vector<std::vector<size_t>>& shape_list,
+                                 std::vector<transformer_engine::DType>& type_list) {
+    dptr_list.push_back(tensor.data_ptr());
+    shape_list.push_back({});
+    for (int d = 0; d < tensor.dim(); ++d) {
+      shape_list.back().push_back(tensor.size(d));
+    }
+    type_list.push_back(GetTransformerEngineDType(tensor.scalar_type()));
+  };
+  for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
+    extract_tensor_props(input_list[tensor_id],
+                         input_dptr_list,
+                         input_shape_list,
+                         input_type_list);
+    extract_tensor_props(scale_list[tensor_id],
+                         scale_dptr_list,
+                         scale_shape_list,
+                         scale_type_list);
+    extract_tensor_props_skip_dtype(cast_output_list[tensor_id],
+                                    cast_output_dptr_list,
+                                    cast_output_shape_list);
+    cast_output_type_list.push_back(otype);
+    extract_tensor_props_skip_dtype(transposed_output_list[tensor_id],
+                                    transposed_output_dptr_list,
+                                    transposed_output_shape_list);
+    transposed_output_type_list.push_back(otype);
+    extract_tensor_props(amax_list[tensor_id],
+                         amax_dptr_list,
+                         amax_shape_list,
+                         amax_type_list);
+    extract_tensor_props(scale_inv_list[tensor_id],
+                         scale_inv_dptr_list,
+                         scale_inv_shape_list,
+                         scale_inv_type_list);
+  }
+
+  // Launch TE kernel
+  dispatch_multi_cast_transpose(
+          input_dptr_list,
+          input_shape_list,
+          input_type_list,
+          scale_dptr_list,
+          scale_shape_list,
+          scale_type_list,
+          cast_output_dptr_list,
+          cast_output_shape_list,
+          cast_output_type_list,
+          transposed_output_dptr_list,
+          transposed_output_shape_list,
+          transposed_output_type_list,
+          amax_dptr_list,
+          amax_shape_list,
+          amax_type_list,
+          scale_inv_dptr_list,
+          scale_inv_shape_list,
+          scale_inv_type_list);
 }
 
 
@@ -307,8 +391,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
             rsigma.data_ptr(), {N}, DType::kFloat32,
             amax.data_ptr(), {1}, DType::kFloat32,
             scale_inv.data_ptr(), {1}, DType::kFloat32,
-            at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
-            true);
+            at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
 
     return {ln_out, mu, rsigma};
 }
@@ -340,8 +423,7 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                        rsigma.data_ptr(), {N}, DType::kFloat32,
                        nullptr, {1}, DType::kFloat32,
                        nullptr, {1}, DType::kFloat32,
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
-                       false);
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
 
     return {ln_out, mu, rsigma};
 }
@@ -360,13 +442,11 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
     auto input_cu     = makeTransformerEngineTensor(input);
-    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype);
-    auto scale_cu     = makeTransformerEngineTensor(scale.data_ptr(), {1}, DType::kFloat32);
-    auto amax_cu      = makeTransformerEngineTensor(amax.data_ptr(), {1}, DType::kFloat32);
-    auto scale_inv_cu = makeTransformerEngineTensor(scale_inv.data_ptr(), {1}, DType::kFloat32);
+    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
 
-    nvte_fp8_quantize(input_cu.data(), scale_cu.data(), output_cu.data(),
-                      amax_cu.data(), scale_inv_cu.data(),
+    nvte_fp8_quantize(input_cu.data(), output_cu.data(),
                       at::cuda::getCurrentCUDAStream());
 
     return output;
@@ -384,19 +464,235 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
-    auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype);
+    auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype,
+                                                    nullptr, nullptr, scale_inv.data_ptr());
     auto output_cu    = makeTransformerEngineTensor(output);
     auto scale_inv_cu = makeTransformerEngineTensor(scale_inv.data_ptr(), {1}, DType::kFloat32);
 
-    nvte_fp8_dequantize(input_cu.data(), scale_inv_cu.data(), output_cu.data(),
+    nvte_fp8_dequantize(input_cu.data(), output_cu.data(),
                         at::cuda::getCurrentCUDAStream());
 
     return output;
 }
 
 
+at::Tensor scaled_softmax_forward(at::Tensor input,
+                                  float scale_factor
+) {
+    using namespace transformer_engine;
+    AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
+    AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
+               (input.scalar_type() == at::ScalarType::BFloat16),
+               "Only fp16 and bf16 are supported");
+
+    const int batches = input.size(0);
+    const int attn_heads = input.size(1);
+    const int query_seq_len = input.size(2);
+    const int key_seq_len = input.size(3);
+
+    TORCH_CHECK(key_seq_len <= 4096);
+    TORCH_CHECK(query_seq_len > 1);
+
+    // Output
+  auto act_options = input.options().requires_grad(false);
+  auto softmax_results =
+      torch::empty({batches, attn_heads, query_seq_len, key_seq_len}, act_options);
+
+  auto input_cu = makeTransformerEngineTensor(input);
+  auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+  nvte_scaled_softmax_forward(input_cu.data(), softmax_results_cu.data(), scale_factor,
+                              at::cuda::getCurrentCUDAStream());
+
+  return softmax_results;
+}
+
+
+at::Tensor scaled_softmax_backward(at::Tensor output_grad_,
+                                   at::Tensor softmax_results_,
+                                   float scale_factor
+) {
+    using namespace transformer_engine;
+
+    auto output_grads = output_grad_.contiguous();
+    auto softmax_results = softmax_results_.contiguous();
+
+    AT_ASSERTM(output_grads.dim() == 4, "expected 4D tensor");
+    AT_ASSERTM(softmax_results.dim() == 4, "expected 4D tensor");
+
+    AT_ASSERTM((output_grads.scalar_type() == at::ScalarType::Half) ||
+        (output_grads.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+    AT_ASSERTM((softmax_results.scalar_type() == at::ScalarType::Half) ||
+        (softmax_results.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+
+    auto output_grads_cu = makeTransformerEngineTensor(output_grads);
+    auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+    // Produce gradients in place.
+    nvte_scaled_softmax_backward(
+          output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(),
+          scale_factor, at::cuda::getCurrentCUDAStream());
+
+    return output_grads;
+}
+
+
+at::Tensor scaled_masked_softmax_forward(at::Tensor input,
+                                         at::Tensor mask,
+                                         float scale_factor
+) {
+    using namespace transformer_engine;
+
+    AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
+    AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
+               (input.scalar_type() == at::ScalarType::BFloat16),
+               "Only fp16 and bf16 are supported");
+    AT_ASSERTM(mask.dim() == 4, "expected 4D tensor");
+
+    const int batches = input.size(0);
+    const int pad_batches = mask.size(0);
+    const int attn_heads = input.size(1);
+    const int query_seq_len = input.size(2);
+    const int key_seq_len = input.size(3);
+    TORCH_CHECK(key_seq_len <= 4096);
+    TORCH_CHECK(query_seq_len > 1);
+    TORCH_CHECK(pad_batches == 1 || pad_batches == batches);
+    TORCH_CHECK(mask.size(1) == 1);
+    TORCH_CHECK(mask.size(2) == query_seq_len);
+    TORCH_CHECK(mask.size(3) == key_seq_len);
+
+    auto act_options = input.options().requires_grad(false);
+    auto softmax_results =
+        torch::empty({batches, attn_heads, query_seq_len, key_seq_len}, act_options);
+
+
+    auto input_cu = makeTransformerEngineTensor(input);
+    auto mask_cu = makeTransformerEngineTensor(mask);
+    auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+    nvte_scaled_masked_softmax_forward(
+          input_cu.data(), mask_cu.data(), softmax_results_cu.data(),
+          scale_factor, at::cuda::getCurrentCUDAStream());
+
+    return softmax_results;
+}
+
+
+at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
+                                          at::Tensor softmax_results_,
+                                          float scale_factor
+) {
+    using namespace transformer_engine;
+
+    auto output_grads = output_grad_.contiguous();
+    auto softmax_results = softmax_results_.contiguous();
+
+    AT_ASSERTM(output_grads.dim() == 4, "expected 3D tensor");
+    AT_ASSERTM(softmax_results.dim() == 4, "expected 3D tensor");
+
+    AT_ASSERTM((output_grads.scalar_type() == at::ScalarType::Half) ||
+        (output_grads.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+    AT_ASSERTM((softmax_results.scalar_type() == at::ScalarType::Half) ||
+        (softmax_results.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+
+    auto output_grads_cu = makeTransformerEngineTensor(output_grads);
+    auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+    // Produce gradients in place.
+    nvte_scaled_softmax_backward(
+          output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(),
+          scale_factor, at::cuda::getCurrentCUDAStream());
+
+    return output_grads;
+}
+
+
+at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
+                                                      float scale_factor
+) {
+    using namespace transformer_engine;
+
+    AT_ASSERTM(input.dim() == 3, "expected 3D tensor");
+    AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
+               (input.scalar_type() == at::ScalarType::BFloat16),
+               "Only fp16 and bf16 are supported");
+
+    const int attn_batches = input.size(0);
+    const int seq_len = input.size(1);
+    TORCH_CHECK(seq_len <= 2048);
+
+    // Output
+    auto act_options = input.options().requires_grad(false);
+    auto softmax_results =
+        torch::empty({attn_batches, seq_len, seq_len}, act_options);
+
+    auto input_cu = makeTransformerEngineTensor(input);
+    auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+    nvte_scaled_upper_triang_masked_softmax_forward(input_cu.data(),
+                                                    softmax_results_cu.data(),
+                                                    scale_factor,
+                                                    at::cuda::getCurrentCUDAStream());
+
+    return softmax_results;
+}
+
+
+at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
+                                                       at::Tensor softmax_results_,
+                                                       float scale_factor
+) {
+    using namespace transformer_engine;
+
+    auto output_grads = output_grads_.contiguous();
+    auto softmax_results = softmax_results_.contiguous();
+
+    AT_ASSERTM(output_grads.dim() == 3, "expected 3D tensor");
+    AT_ASSERTM(softmax_results.dim() == 3, "expected 3D tensor");
+
+    AT_ASSERTM((output_grads.scalar_type() == at::ScalarType::Half) ||
+        (output_grads.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+    AT_ASSERTM((softmax_results.scalar_type() == at::ScalarType::Half) ||
+        (softmax_results.scalar_type() == at::ScalarType::BFloat16),
+        "Only fp16 and bf16 are supported");
+
+    TORCH_CHECK(output_grads.size(1) == output_grads.size(2));
+
+    auto output_grads_cu = makeTransformerEngineTensor(output_grads);
+    auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+
+    // Produce gradients in place.
+    nvte_scaled_upper_triang_masked_softmax_backward(output_grads_cu.data(),
+                                                     softmax_results_cu.data(),
+                                                     output_grads_cu.data(),
+                                                     scale_factor,
+                                                     at::cuda::getCurrentCUDAStream());
+
+  return output_grads;
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  // Granular functions
+  // Softmax functions
+  m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
+  m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD");
+  m.def("scaled_masked_softmax_forward", &scaled_masked_softmax_forward,
+                                                    "Scaled Masked Softmax FWD");
+  m.def("scaled_masked_softmax_backward", &scaled_masked_softmax_backward,
+                                                    "Scaled Masked Softmax BWD");
+  m.def("scaled_upper_triang_masked_softmax_forward",
+            &scaled_upper_triang_masked_softmax_forward,
+            "Scaled Upper-Triangular Masked Softmax FWD");
+  m.def("scaled_upper_triang_masked_softmax_backward",
+            &scaled_upper_triang_masked_softmax_backward,
+            "Scaled Upper-Triangular Masked Softmax BWD");
+
+  // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
@@ -405,6 +701,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                               "Fused Cast + Transpose + BGRAD");
   m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
                                               "Fused Cast + Transpose + BGRAD + DGELU");
+  m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
+                                              "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");

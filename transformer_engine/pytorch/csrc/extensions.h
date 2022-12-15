@@ -54,6 +54,16 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
 );
 
 
+void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
+                                std::vector<at::Tensor> scale_list,
+                                std::vector<at::Tensor> cast_output_list,
+                                std::vector<at::Tensor> transposed_output_list,
+                                std::vector<at::Tensor> amax_output_list,
+                                std::vector<at::Tensor> scale_inv_output_list,
+                                transformer_engine::DType otype
+);
+
+
 at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 );
@@ -105,4 +115,38 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          const at::Tensor &scale_inv,
                          transformer_engine::DType itype,
                          transformer_engine::DType otype
+);
+
+
+at::Tensor scaled_softmax_forward(at::Tensor input,
+                                  float scale_factor
+);
+
+
+at::Tensor scaled_softmax_backward(at::Tensor output_grad_,
+                                   at::Tensor softmax_results_,
+                                   float scale_factor
+);
+
+
+at::Tensor scaled_masked_softmax_forward(at::Tensor input,
+                                         at::Tensor mask,
+                                         float scale_factor
+);
+
+
+at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_,
+                                          at::Tensor softmax_results_,
+                                          float scale_factor
+);
+
+
+at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
+                                                      float scale_factor
+);
+
+
+at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
+                                                       at::Tensor softmax_results_,
+                                                       float scale_factor
 );

@@ -130,12 +130,45 @@ class Tensor {
     return reinterpret_cast<T *>(cpu_data_.get());
   }
 
+  float amax() const {
+    if(amax_cpu_data_) {
+      to_cpu();
+      return *amax_cpu_data_;
+    } else {
+      return 0;
+    }
+  }
+
+  float scale() const {
+    if(scale_cpu_data_) {
+      to_cpu();
+      return *scale_cpu_data_;
+    } else {
+      return 1;
+    }
+  }
+
+  float scale_inv() const {
+    if(scale_inv_cpu_data_) {
+      to_cpu();
+      return *scale_inv_cpu_data_;
+    } else {
+      return 1;
+    }
+  }
+
   void to_cpu() const;
   void from_cpu() const;
+  void set_scale(float scale);
+  void set_scale_inv(float scale_inv);
+  void shareFP8Meta(const Tensor &other);
 
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_;
+  std::shared_ptr<float> amax_cpu_data_;
+  std::shared_ptr<float> scale_cpu_data_;
+  std::shared_ptr<float> scale_inv_cpu_data_;
 };
 
 size_t typeToSize(DType type);
@@ -145,16 +178,21 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
                     double atol = 1e-5, double rtol = 1e-8);
+void compareResults(const std::string &name, const float test, const float ref,
+                    double atol = 1e-5, double rtol = 1e-8);
 
 std::pair<double, double> getTolerances(const DType type);
 
-void fillUniform(const Tensor &t);
+void fillUniform(Tensor *t);
+void setRandomScale(Tensor *t);
 
 constexpr int THREADS_PER_WARP = 32;
 
 const std::string &typeName(DType type);
 
 extern std::vector<DType> all_fp_types;
+
+bool isFp8Type(DType type);
 
 }  // namespace test
 

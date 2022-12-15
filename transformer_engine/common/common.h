@@ -23,12 +23,26 @@
 
 namespace transformer_engine {
 
-struct Tensor {
-    void* dptr;
-    std::vector<size_t> shape;
-    DType dtype;
+struct SimpleTensor {
+  void *dptr;
+  std::vector<size_t> shape;
+  DType dtype;
 
-    Tensor() : dptr(nullptr), shape(), dtype(DType::kFloat32) {}
+  SimpleTensor(void *dptr, const std::vector<size_t> &shape, DType dtype) :
+    dptr(dptr), shape(shape), dtype(dtype) {}
+  SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
+};
+
+struct Tensor {
+  SimpleTensor data;
+  SimpleTensor amax;
+  SimpleTensor scale;
+  SimpleTensor scale_inv;
+
+  Tensor() : data(),
+             amax(nullptr, {1}, DType::kFloat32),
+             scale(nullptr, {1}, DType::kFloat32),
+             scale_inv(nullptr, {1}, DType::kFloat32) {}
 };
 
 template <typename T>
@@ -219,61 +233,27 @@ struct TypeInfo{
             NVTE_ERROR("Invalid type."); \
     }
 
-template<typename T>
-struct TypeId{};
-
-template<>
-struct TypeId<fp16>{
-    constexpr static uint32_t Value = 0;
-};
-
-template<>
-struct TypeId<bf16>{
-    constexpr static uint32_t Value = 1;
-};
-
-template<>
-struct TypeId<fp32>{
-    constexpr static uint32_t Value = 2;
-};
-
-template<>
-struct TypeId<fp8e4m3>{
-    constexpr static uint32_t Value = 3;
-};
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                 \
+  switch (dtype)                                                               \
+    {                                                                          \
+    using namespace transformer_engine;                                        \
+    case DType::kFloat16:                                                      \
+      {                                                                        \
+          using type = fp16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    case DType::kBFloat16:                                                     \
+      {                                                                        \
+          using type = bf16;                                                   \
+          __VA_ARGS__;                                                         \
+          break;                                                               \
+      }                                                                        \
+    default:                                                                   \
+          NVTE_ERROR("Invalid type for 16 bit.");                              \
+      }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T, int S>
-struct Type2Key{
-    constexpr static uint32_t Value = TypeId<T>::Value << S;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T>
-struct WeightType2Key : public Type2Key<T, 0>{};
-
-template<typename T>
-struct InputType2Key : public Type2Key<T, 2>{};
-
-template<typename T>
-struct OutputType2Key : public Type2Key<T, 4>{};
-
-template<typename T>
-struct ComputeType2Key : public Type2Key<T, 6>{};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename W, typename I, typename O, typename C>
-struct Types2Key{
-    constexpr static uint32_t Value = WeightType2Key<W>::Value | InputType2Key<I>::Value |
-                                      OutputType2Key<O>::Value | ComputeType2Key<C>::Value;
-    constexpr static inline uint64_t get(const uint64_t hidden_size){
-        constexpr uint64_t type_key = Value;
-        return (type_key << 32) | hidden_size;
-    }
-};
 
 inline size_t product(const std::vector<size_t> &shape) {
     size_t ret = 1;
@@ -281,6 +261,12 @@ inline size_t product(const std::vector<size_t> &shape) {
         ret *= elem;
     }
     return ret;
+}
+
+inline int log2_ceil(int value) {
+    int log2_value = 0;
+    while ((1 << log2_value) < value) ++log2_value;
+    return log2_value;
 }
 
 template <typename T>
@@ -293,6 +279,11 @@ template <>
 struct is_fp8<fp8e5m2> : std::true_type {};
 
 size_t typeToSize(const DType type);
+
+void CheckInputTensor(const Tensor &t, const std::string &name);
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+
+bool is_fp8_dtype(const DType t);
 
 }  // namespace transformer_engine
 
