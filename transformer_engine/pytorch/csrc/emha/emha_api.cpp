@@ -15,7 +15,7 @@
 
 // Relu(A) + BMM
 void bmm_nt(const at::Tensor &A, const at::Tensor &B, at::Tensor C);
-void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C);
+void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C, float alpha);
 
 // Masked Softmax + Dropout_draw/encode
 
@@ -47,9 +47,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .export_values();
 
   m.def("relu_bmm_nn", &bmm_nn, "CUDA implementation of bmm(relu(A), B)",
-        py::arg("A"), py::arg("B"), py::arg("C"));
+        py::arg("A"), py::arg("B"), py::arg("C"), py::arg("D"));
   m.def("relu_bmm_nt", &bmm_nt, "CUDA implementation of bmm(relu(A).T, B)",
         py::arg("A"), py::arg("B"), py::arg("C"));
-
-  // m.def("bmm_tn", &bmm_tn, "CUDA implementation of bmm(A,B.T)");
 }

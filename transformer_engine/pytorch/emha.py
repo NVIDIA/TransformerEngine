@@ -55,7 +55,7 @@ class BMM2(torch.autograd.Function):
     """Implementation of BMM2 for MHA"""
 
     @staticmethod
-    def forward(ctx, S_dmask, V):
+    def forward(ctx, S_dmask, V, p_dropout):
         # S: b*h, s, s
         # V: s, b, h, d
 
@@ -63,8 +63,7 @@ class BMM2(torch.autograd.Function):
         Vv = V.view(s, -1, d).transpose(0, 1)
         C = torch.empty((s, b, h, d), dtype=V.dtype, device=V.device)
         Cv = C.view(s, -1, d).transpose(0, 1)
-
-        emha_C.relu_bmm_nn(S_dmask, Vv, Cv)
+        emha_C.relu_bmm_nn(S_dmask, Vv, Cv, 1.0 / (1.0 - p_dropout))
         ctx.save_for_backward(S_dmask, V)
 
         return C.view(s, b, h * d)
@@ -89,7 +88,7 @@ class BMM2(torch.autograd.Function):
 
         emha_C.relu_bmm_nt(S_dmask.view(-1, s, s).transpose(1, 2), dC_v, dVv)
 
-        return dS_v, dV
+        return dS_v, dV, None
 
 
 class EMHA(torch.nn.Module):
@@ -213,6 +212,6 @@ class EMHA(torch.nn.Module):
                 attention_scores.view(-1, sq, sk), alpha, self.p_dropout, self.training
             )
 
-        context_layer = BMM2.apply(attention_probs, value_layer)
+        context_layer = BMM2.apply(attention_probs, value_layer, self.p_dropout)
 
         return context_layer

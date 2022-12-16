@@ -199,7 +199,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void softmax_fwd_kernel(
       // as 1.0 / (params.p_keep * rp_keep). This problem goes away when rp_keep
       // = 1.0.  This small difference seems to accumulate, since the GEMM
       // reduction dimension is 2048. Cast to output type.
-      output_t y_ij = output_t(x_ij) * rp_keep;
+      output_t y_ij = output_t(x_ij);
       z[it].data.elt[jt] = y_ij;
     }
     // Global store.

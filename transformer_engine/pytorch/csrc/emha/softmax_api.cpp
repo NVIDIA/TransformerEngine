@@ -139,6 +139,7 @@ at::Tensor softmax_fwd(const at::Tensor &x,           // BxHxSqxSk
   params.x = x.data_ptr();
   params.z = z.data_ptr();
   params.p_keep = 1.f - p_dropout;
+  params.p_keep_inv = 1.f / (1.f - p_dropout);
   params.scale_pre_softmax = scale_pre_softmax;
 
   if (mask_mode == softmax::SELF) {
@@ -211,6 +212,7 @@ at::Tensor softmax_bwd(const at::Tensor &dz,          // BxHxSqxSk
   params.dz = dz.data_ptr();
   params.smat_dmask = smat_dmask.data_ptr();
   params.p_keep = (1.f - p_dropout);
+  params.p_keep_inv = 1.f /(1.f - p_dropout);
   params.scale_pre_softmax = scale_pre_softmax;
 
   // Launch the kernel.

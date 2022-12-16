@@ -98,12 +98,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void softmax_bwd_kernel(
       static_assert(sizeof(compute_t) == 4);
       const bool drop = reinterpret_cast<const uint32_t &>(sd_ij) & 0x80000000;
 
-      // sd <- s
       sd_ij = fabsf(sd_ij);
-      // dz <- ds * s
-      dz_ij = drop ? compute_t(0) : dz_ij * sd_ij;
-
-      sd_ij *= params.p_keep;
+      dz_ij = drop ? compute_t(0) : dz_ij * sd_ij * params.p_keep_inv;
       Z_local = sum(dz_ij, Z_local);
     }
   }

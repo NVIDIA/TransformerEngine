@@ -36,7 +36,7 @@ void cuda_bmm_nt(int m, int n, int k, float alpha, nv_bfloat16 const *A,
                  int64_t batch_stride_C, float beta, int batch_count,
                  cudaStream_t stream);
 
-void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C) {
+void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C, float alpha) {
   TORCH_CHECK(A.is_cuda() && B.is_cuda() && C.is_cuda());
   const auto sizeA = A.sizes();
   const auto sizeB = B.sizes();
@@ -94,7 +94,7 @@ void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C) {
     const half *ptr_B = static_cast<const half *>(A.data_ptr());
     half *ptr_C = static_cast<half *>(C.data_ptr());
 
-    cuda_bmm_nn(m, n, k, 1.f, ptr_A, lda, batch_stride_A, ptr_B, ldb,
+    cuda_bmm_nn(m, n, k, alpha, ptr_A, lda, batch_stride_A, ptr_B, ldb,
                 batch_stride_B, ptr_C, ldc, batch_stride_C, 0.f, batch_count,
                 stream);
 
@@ -103,7 +103,7 @@ void bmm_nn(const at::Tensor &A, const at::Tensor &B, at::Tensor C) {
     const nv_bfloat16 *ptr_B = static_cast<const nv_bfloat16 *>(A.data_ptr());
     nv_bfloat16 *ptr_C = static_cast<nv_bfloat16 *>(C.data_ptr());
 
-    cuda_bmm_nn(m, n, k, 1.f, ptr_A, lda, batch_stride_A, ptr_B, ldb,
+    cuda_bmm_nn(m, n, k, alpha, ptr_A, lda, batch_stride_A, ptr_B, ldb,
                 batch_stride_B, ptr_C, ldc, batch_stride_C, 0.f, batch_count,
                 stream);
   }
