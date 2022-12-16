@@ -6,7 +6,7 @@
 import os
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Optional, Callable, Tuple, Dict, List, Any
+from typing import Union, Optional, Callable, Tuple, Dict, List, Any, Mapping
 from functools import partial
 
 import torch
@@ -336,7 +336,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
-            return
+            return inp.contiguous()
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
 
@@ -387,6 +387,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and not in_fp8_activation_recompute_phase()
         ):
             copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+
+        return inp.contiguous()
 
     def post_forward(self) -> None:
         """This is needed because there isn't a way for a module to know
@@ -1106,7 +1108,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp)
+        inp = self.pre_forward(inp)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -1636,7 +1638,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp, weight if weight is not None else self.weight)
+        inp = self.pre_forward(inp, weight if weight is not None else self.weight)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -2439,7 +2441,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                produced)
         """
 
-        self.pre_forward(inp, num_gemms=2)
+        inp = self.pre_forward(inp, num_gemms=2)
 
         out = _LayerNormMLP.apply(
             inp,
@@ -2554,32 +2556,53 @@ class LayerNorm(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.eps = eps
-        self.layer_norm_weight = Parameter(
+        self.weight = Parameter(
             torch.empty(
                 hidden_size,
                 device=torch.cuda.current_device(),
                 dtype=params_dtype,
             )
         )
-        self.layer_norm_bias = Parameter(
+        self.bias = Parameter(
             torch.empty(
                 hidden_size,
                 device=torch.cuda.current_device(),
                 dtype=params_dtype,
             )
         )
-        setattr(self.layer_norm_weight, "sequence_parallel", sequence_parallel)
-        setattr(self.layer_norm_bias, "sequence_parallel", sequence_parallel)
+        setattr(self.weight, "sequence_parallel", sequence_parallel)
+        setattr(self.bias, "sequence_parallel", sequence_parallel)
         self.reset_layer_norm_parameters()
+
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+    ) -> None:
+        """Override PyTorch loader to maintain backward compatibility
+        with previous version of LayerNorm parameter names.
+        """
+        if "layer_norm_weight" in state_dict:
+            state_dict["weight"] = state_dict["layer_norm_weight"]
+            del state_dict["layer_norm_weight"]
+        if "layer_norm_bias" in state_dict:
+            state_dict["bias"] = state_dict["layer_norm_bias"]
+            del state_dict["layer_norm_bias"]
+
+        super().load_state_dict(state_dict, strict)
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
-        init.ones_(self.layer_norm_weight)
-        init.zeros_(self.layer_norm_bias)
+        init.ones_(self.weight)
+        init.zeros_(self.bias)
 
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
-        return _LayerNorm.apply(
-            inp, self.layer_norm_weight, self.layer_norm_bias, self.eps
-        )
+        # Maintain backward compatibility.
+        if hasattr(self, "layer_norm_weight"):
+            setattr(self, "weight", self.layer_norm_weight)
+        if hasattr(self, "layer_norm_bias"):
+            setattr(self, "bias", self.layer_norm_bias)
+
+        return _LayerNorm.apply(inp, self.weight, self.bias, self.eps)

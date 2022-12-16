@@ -31,7 +31,9 @@ add_library(transformer_engine SHARED
                                layer_norm/ln_api.cpp
                                layer_norm/ln_bwd_semi_cuda_kernel.cu
                                layer_norm/ln_fwd_cuda_kernel.cu
-                               util/cast.cu)
+                               util/cast.cu
+                               fused_softmax/scaled_masked_softmax.cu
+                               fused_softmax/scaled_upper_triang_masked_softmax.cu)
 
 target_include_directories(transformer_engine PUBLIC "${PROJECT_SOURCE_DIR}/include")
 
@@ -41,3 +43,10 @@ list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 
 target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+
+set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
+                            fused_softmax/scaled_upper_triang_masked_softmax.cu
+                            PROPERTIES
+                            COMPILE_OPTIONS "--use_fast_math")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")

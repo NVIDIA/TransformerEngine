@@ -105,7 +105,7 @@ cast_transpose_kernel(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                          THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
 #pragma unroll
   for (unsigned int i = 0; i < nvec_out; ++i) {
     in[0][i].load_from(my_input_tile, current_stride + my_place + stride * i);
@@ -158,8 +158,8 @@ cast_transpose_kernel(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
+    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
@@ -222,7 +222,7 @@ cast_transpose_kernel_notaligned(const IType * const input,
                            warp_id_in_tile * n_iterations) %
                           THREADS_PER_WARP;
   CType max = 0;
-  const CType scale = *scale_ptr;
+  const CType scale = scale_ptr != nullptr ? *scale_ptr : 1;
   {
     const bool valid_load = my_place < tile_length &&
                             warp_id_in_tile * n_iterations < tile_height;
@@ -294,48 +294,41 @@ cast_transpose_kernel_notaligned(const IType * const input,
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
-    atomicMaxFloat(amax, max);
-    reciprocal<float>(scale_inv, scale);
+    if (amax != nullptr) atomicMaxFloat(amax, max);
+    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
 void cast_transpose(const Tensor &input,
-                    const Tensor &scale,
                     Tensor *cast_output,
                     Tensor *transposed_output,
-                    Tensor *amax,
-                    Tensor *scale_inv,
                     cudaStream_t stream) {
-  NVTE_CHECK(input.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(cast_output->shape.size() == 2, "C output must have 2 dimensions.");
-  NVTE_CHECK(transposed_output->shape.size() == 2, "T output must have 2 dimensions.");
-  NVTE_CHECK(input.shape == cast_output->shape, "Input and C output must have the same shape.");
-  const size_t row_length = input.shape[1];
-  const size_t num_rows = input.shape[0];
+  CheckInputTensor(input, "cast_transpose_input");
+  CheckOutputTensor(*cast_output, "cast_output");
+  CheckOutputTensor(*transposed_output, "transposed_output");
 
-  NVTE_CHECK(transposed_output->shape[0] == row_length, "Wrong dimension of T output.");
-  NVTE_CHECK(transposed_output->shape[1] == num_rows, "Wrong dimension of T output.");
+  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
+  NVTE_CHECK(cast_output->data.shape.size() == 2, "C output must have 2 dimensions.");
+  NVTE_CHECK(transposed_output->data.shape.size() == 2, "T output must have 2 dimensions.");
+  NVTE_CHECK(input.data.shape == cast_output->data.shape,
+             "Input and C output must have the same shape.");
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
 
-  NVTE_CHECK(cast_output->dtype == transposed_output->dtype,
-        "Both C and T outputs need to have the same type.");
+  NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
+  NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
-  NVTE_CHECK(amax->shape == std::vector<size_t>{ 1 }, "AMAX tensor must have 1 element.");
-  NVTE_CHECK(amax->dtype == DType::kFloat32, "AMAX tensor must have Float32 type.");
-  NVTE_CHECK(scale_inv->shape == std::vector<size_t>{ 1 },
-                                                    "scale_inv tensor must have 1 element.");
-  NVTE_CHECK(scale_inv->dtype == DType::kFloat32, "scale_inv tensor must have Float32 type.");
-  NVTE_CHECK(scale.shape == std::vector<size_t>{ 1 }, "Scale tensor must have 1 element.");
-  NVTE_CHECK(scale.dtype == DType::kFloat32, "Scale tensor must have Float32 type.");
+  NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
+             "C and T outputs need to have the same type.");
+  NVTE_CHECK(cast_output->amax.dptr == transposed_output->amax.dptr,
+             "C and T outputs need to share amax tensor.");
+  NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
+             "C and T outputs need to share scale tensor.");
+  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
+             "C and T outputs need to share scale inverse tensor.");
 
-  NVTE_CHECK(input.dptr != nullptr, "Input is not allocated.");
-  NVTE_CHECK(scale.dptr != nullptr, "Scale is not allocated.");
-  NVTE_CHECK(transposed_output->dptr != nullptr, "T output is not allocated.");
-  NVTE_CHECK(cast_output->dptr != nullptr, "C output is not allocated.");
-  NVTE_CHECK(amax->dptr != nullptr, "AMAX output is not allocated.");
-  NVTE_CHECK(scale_inv->dptr != nullptr, "scale_inv output is not allocated.");
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.dtype, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->dtype, OutputType,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
       constexpr int itype_size = sizeof(InputType);
       constexpr int otype_size = sizeof(OutputType);
       constexpr int nvec_in = desired_load_size / itype_size;
@@ -363,12 +356,12 @@ void cast_transpose(const Tensor &input,
                cast_transpose_num_threads / n_warps_per_tile *
                (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
                stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
+                reinterpret_cast<const InputType *>(input.data.dptr),
+                reinterpret_cast<OutputType *>(cast_output->data.dptr),
+                reinterpret_cast<OutputType *>(transposed_output->data.dptr),
+                reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
+                reinterpret_cast<fp32 *>(cast_output->amax.dptr),
+                reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
                 row_length, num_rows, n_tiles);
       } else {
         cudaFuncSetAttribute(cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32,
@@ -381,12 +374,12 @@ void cast_transpose(const Tensor &input,
                cast_transpose_num_threads / n_warps_per_tile *
                (THREADS_PER_WARP + 1) * sizeof(Vec<OutputType, nvec_out>),
                stream>>>(
-                reinterpret_cast<const InputType *>(input.dptr),
-                reinterpret_cast<OutputType *>(cast_output->dptr),
-                reinterpret_cast<OutputType *>(transposed_output->dptr),
-                reinterpret_cast<const fp32 *>(scale.dptr),
-                reinterpret_cast<fp32 *>(amax->dptr),
-                reinterpret_cast<fp32 *>(scale_inv->dptr),
+                reinterpret_cast<const InputType *>(input.data.dptr),
+                reinterpret_cast<OutputType *>(cast_output->data.dptr),
+                reinterpret_cast<OutputType *>(transposed_output->data.dptr),
+                reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
+                reinterpret_cast<fp32 *>(cast_output->amax.dptr),
+                reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
                 row_length, num_rows, n_tiles);
       }
     );  // NOLINT(*)
@@ -396,18 +389,12 @@ void cast_transpose(const Tensor &input,
 }  // namespace transformer_engine
 
 void nvte_cast_transpose(const NVTETensor input,
-                         const NVTETensor scale,
                          NVTETensor cast_output,
                          NVTETensor transposed_output,
-                         NVTETensor amax,
-                         NVTETensor scale_inv,
                          cudaStream_t stream) {
   using namespace transformer_engine;
   cast_transpose(*reinterpret_cast<const Tensor*>(input),
-                 *reinterpret_cast<const Tensor*>(scale),
                  reinterpret_cast<Tensor*>(cast_output),
                  reinterpret_cast<Tensor*>(transposed_output),
-                 reinterpret_cast<Tensor*>(amax),
-                 reinterpret_cast<Tensor*>(scale_inv),
                  stream);
 }

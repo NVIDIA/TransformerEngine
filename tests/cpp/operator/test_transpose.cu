@@ -41,7 +41,7 @@ void performTest(const size_t N, const size_t H) {
 
   std::unique_ptr<Type[]> ref_output = std::make_unique<Type[]>(N * H);
 
-  fillUniform(input);
+  fillUniform(&input);
 
   nvte_transpose(input.data(), output.data(), 0);
 

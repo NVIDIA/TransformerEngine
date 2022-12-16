@@ -244,19 +244,20 @@ transpose_kernel_notaligned(const IType * const input,
 void transpose(const Tensor &input,
                Tensor *transposed_output,
                cudaStream_t stream) {
-  NVTE_CHECK(input.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(transposed_output->shape.size() == 2, "Output must have 2 dimensions.");
-  const size_t row_length = input.shape[1];
-  const size_t num_rows = input.shape[0];
+  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
+  NVTE_CHECK(transposed_output->data.shape.size() == 2, "Output must have 2 dimensions.");
+  const size_t row_length = input.data.shape[1];
+  const size_t num_rows = input.data.shape[0];
 
-  NVTE_CHECK(transposed_output->shape[0] == row_length, "Wrong dimension of output.");
-  NVTE_CHECK(transposed_output->shape[1] == num_rows, "Wrong dimension of output.");
+  NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of output.");
+  NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of output.");
 
-  NVTE_CHECK(input.dptr != nullptr, "Input is not allocated.");
-  NVTE_CHECK(transposed_output->dptr != nullptr, "Output is not allocated.");
-  NVTE_CHECK(input.dtype == transposed_output->dtype, "Input and output type must match.");
+  NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
+  NVTE_CHECK(transposed_output->data.dptr != nullptr, "Output is not allocated.");
+  NVTE_CHECK(input.data.dtype == transposed_output->data.dtype,
+             "Input and output type must match.");
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.dtype, Type,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.data.dtype, Type,
     constexpr int type_size = sizeof(Type);
     constexpr int nvec_in = desired_load_size / type_size;
     constexpr int nvec_out = desired_store_size / type_size;
@@ -282,8 +283,8 @@ void transpose(const Tensor &input,
            cast_transpose_num_threads / n_warps_per_tile *
              (THREADS_PER_WARP + 1) * sizeof(Vec<Type, nvec_out>),
            stream>>>(
-            reinterpret_cast<const Type *>(input.dptr),
-            reinterpret_cast<Type *>(transposed_output->dptr),
+            reinterpret_cast<const Type *>(input.data.dptr),
+            reinterpret_cast<Type *>(transposed_output->data.dptr),
             row_length, num_rows, n_tiles);
     } else {
       cudaFuncSetAttribute(transpose_kernel_notaligned<nvec_in, nvec_out, fp32, Type, Type>,
@@ -295,8 +296,8 @@ void transpose(const Tensor &input,
            cast_transpose_num_threads / n_warps_per_tile *
              (THREADS_PER_WARP + 1) * sizeof(Vec<Type, nvec_out>),
            stream>>>(
-            reinterpret_cast<const Type *>(input.dptr),
-            reinterpret_cast<Type *>(transposed_output->dptr),
+            reinterpret_cast<const Type *>(input.data.dptr),
+            reinterpret_cast<Type *>(transposed_output->data.dptr),
             row_length, num_rows, n_tiles);
     }
   );  // NOLINT(*)
