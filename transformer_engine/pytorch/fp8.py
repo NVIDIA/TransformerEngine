@@ -205,7 +205,6 @@ def fp8_autocast(
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_group: Optional[dist_group_type] = None,
-    
 ) -> None:
     """
     Context manager for FP8 usage.

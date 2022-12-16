@@ -330,7 +330,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = False
             return
 
-    def pre_forward(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None, num_gemms: int = 1) -> None:
+    def pre_forward(
+        self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None, num_gemms: int = 1
+    ) -> None:
         """Checks and prep for FWD."""
 
         # Activation recomputation is used and this is the second forward phase.
@@ -357,7 +359,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 amax_and_scale_update(self.fp8_meta, True)
 
         # Either we're in FP8 training or calibration for FP8 inference
-        needs_stats = (self.fp8 and self.training) or self.fp8_calibration
+        needs_stats = (self.training if self.fp8 else self.fp8_calibration)
 
         if needs_stats:
             # Setup for amax reduction
@@ -376,10 +378,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8_calibration:
             # amax of input
-            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = torch.amax(inp).float()
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
+                torch.amax(inp).float()
             # amax of weight
-            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = torch.amax(weight).float()
-           
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                torch.amax(weight).float()
+
         # Activation recomputation is used and this is the first forward phase.
         if (
             self.fp8
