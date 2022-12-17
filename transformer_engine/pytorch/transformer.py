@@ -332,7 +332,7 @@ class MultiHeadAttention(torch.nn.Module):
                     **common_gemm_kwargs,
                 )
             else:
-                self.query = Linear(
+                self.query_layer = Linear(
                     hidden_size,
                     hidden_size,
                     init_method=init_method,
@@ -632,7 +632,7 @@ class MultiHeadAttention(torch.nn.Module):
                 else:
                     query_layer = layernorm_query_outputs
             else:
-                query_layer = self.query(
+                query_layer = self.query_layer(
                     hidden_states,
                     weight=self.query,
                     bias=self.query_bias,
