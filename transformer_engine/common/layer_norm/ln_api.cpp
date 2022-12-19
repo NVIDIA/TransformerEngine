@@ -429,21 +429,17 @@ void layernorm_bwd(const Tensor& dz,
 
 void rmsnorm_fwd(const Tensor& x,
                  const Tensor& gamma,
-                 const Tensor& scale,
                  const float epsilon,
                  Tensor* z,
                  Tensor* rsigma,
                  cudaStream_t stream,
                  const int multiprocessorCount,
                  Tensor* workspace,
-                 Tensor* barrier,
-                 Tensor* amax,
-                 Tensor *scale_inv,
-                 bool fp8_out
-) {
+                 Tensor* barrier) {
     auto itype = x.data.dtype;
     auto wtype = gamma.data.dtype;
     auto otype = z->data.dtype;
+    const bool fp8_out = is_fp8_dtype(otype);
     auto ctype = layer_norm::DType::kFloat32;
 
     CheckInputTensor(x, "x");
@@ -486,9 +482,9 @@ void rmsnorm_fwd(const Tensor& x,
     params.beta = nullptr;
     params.z = z->data.dptr;
     params.epsilon = epsilon;
-    params.amax = amax->data.dptr;
-    params.scale = scale.data.dptr;
-    params.scale_inv = scale_inv->data.dptr;
+    params.amax = z->amax.dptr;
+    params.scale = z->scale.dptr;
+    params.scale_inv = z->scale_inv.dptr;
     params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.
@@ -515,8 +511,8 @@ void rmsnorm_fwd(const Tensor& x,
     // Clear buffers
     if ( params.fp8_out ) {
         cudaMemsetAsync(params.amax, 0,
-                        layer_norm::product(amax->data.shape) *
-                        typeToSize(amax->data.dtype), stream);
+                        layer_norm::product(z->amax.shape) *
+                        typeToSize(z->amax.dtype), stream);
     }
     if ( launch_params.barrier_size > 0 ) {
         cudaMemsetAsync(params.barrier, 0,
@@ -686,31 +682,23 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
 
 void nvte_rmsnorm_fwd(const NVTETensor x,       // Nxhidden_size
                       const NVTETensor gamma,   // hidden_size
-                      const NVTETensor scale,   // 1
                       const float epsilon,
                       NVTETensor z,
                       NVTETensor rsigma,
                       cudaStream_t stream,
                       const int multiprocessorCount,
                       NVTETensor workspace,
-                      NVTETensor barrier,
-                      NVTETensor amax,
-                      NVTETensor scale_inv,
-                      bool fp8_out) {
+                      NVTETensor barrier) {
   using namespace transformer_engine;
   rmsnorm_fwd(*reinterpret_cast<const Tensor*>(x),
                 *reinterpret_cast<const Tensor*>(gamma),
-                *reinterpret_cast<const Tensor*>(scale),
                 epsilon,
                 reinterpret_cast<Tensor*>(z),
                 reinterpret_cast<Tensor*>(rsigma),
                 stream,
                 multiprocessorCount,
                 reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier),
-                reinterpret_cast<Tensor*>(amax),
-                reinterpret_cast<Tensor*>(scale_inv),
-                fp8_out);
+                reinterpret_cast<Tensor*>(barrier));
 }
 
 void nvte_rmsnorm_bwd(const NVTETensor dz,       // Nxhidden_size
