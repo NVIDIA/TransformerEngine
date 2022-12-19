@@ -125,10 +125,10 @@ void performTest(const size_t N, const size_t H) {
   Tensor dgamma({H}, wtype);
   Tensor workspace, barrier, dgamma_part;
 
-  fillUniform(input);
-  fillUniform(gamma);
-  fillUniform(scale);
-  fillUniform(dz);
+  fillUniform(&input);
+  fillUniform(&gamma);
+  fillUniform(&scale);
+  fillUniform(&dz);
 
   std::unique_ptr<OutputType[]> ref_output =
       std::make_unique<OutputType[]>(N * H);
