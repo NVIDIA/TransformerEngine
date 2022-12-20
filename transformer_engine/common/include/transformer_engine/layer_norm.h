@@ -88,8 +88,26 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
                         NVTETensor workspace,
                         NVTETensor barrier);
 
-void nvte_rmsnorm_fwd(const NVTETensor x,         // Nxhidden_size
-                      const NVTETensor gamma,     // hidden_size
+
+/*! \brief Compute RMSNorm on the input.
+ *
+ * Calling this function with workspace and barrier set to empty tensor will not
+ * perform the operation, but instead set the shape and type of the workspace
+ * and barrier tensors to the required values.
+ *
+ *  \param[in]     x                   Input tensor of shape [N, H].
+ *  \param[in]     gamma               Gamma tensor of shape [H].
+ *  \param[in]     epsilon             Value added to denominator for numerical stability.
+ *  \param[in,out] z                   Output tensor of shape [N, H].
+ *  \param[out]    rsigma              Reciprocal of the root mean square of the input
+ *                                     calculated over the last dimension. Shape: [N].
+ *  \param[in]     stream              CUDA stream used for the operation.
+ *  \param[in]     multiprocessorCount Number of SMs in the device.
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[out]    barrier             Barrier tensor.
+ */
+void nvte_rmsnorm_fwd(const NVTETensor x,
+                      const NVTETensor gamma,
                       const float epsilon,
                       NVTETensor z,
                       NVTETensor rsigma,
@@ -98,10 +116,29 @@ void nvte_rmsnorm_fwd(const NVTETensor x,         // Nxhidden_size
                       NVTETensor workspace,
                       NVTETensor barrier);
 
-void nvte_rmsnorm_bwd(const NVTETensor dz,        // Nxhidden_size
-                      const NVTETensor x,         // Nxhidden_size
-                      const NVTETensor rsigma,    // N, FP32!
-                      const NVTETensor gamma,     // hidden_size
+/*! \brief Compute backward of RMSNorm.
+ *
+ * Calling this function with workspace, barrier, dgamma_part set
+ * to empty tensor will not perform the operation, but instead set the shape and type
+ * of these tensors to the required values.
+ *
+ *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
+ *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     rsigma              Reciprocal of the root mean square of the input
+ *                                     calculated over the last dimension. Shape: [N].
+ *  \param[in]     gamma               Gamma tensor of shape [H].
+ *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
+ *  \param[out]    dgamma_part         Storage for partial gamma gradient.
+ *  \param[in]     stream              CUDA stream used for the operation.
+ *  \param[in]     multiprocessorCount Number of SMs in the device.
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[out]    barrier             Barrier tensor.
+ */
+void nvte_rmsnorm_bwd(const NVTETensor dz,
+                      const NVTETensor x,
+                      const NVTETensor rsigma,
+                      const NVTETensor gamma,
                       NVTETensor dx,
                       NVTETensor dgamma,
                       NVTETensor dgamma_part,
