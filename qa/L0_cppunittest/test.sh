@@ -11,4 +11,4 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild .
 cmake --build build
-cd build && ctest
+ctest --test-dir build -j4
