@@ -259,6 +259,7 @@ def layernorm_fwd_fp8_inf(
     bias: torch.Tensor,
     eps: float,
     fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
 ) -> torch.Tensor:
     """LayerNorm with FP8 output.
@@ -274,6 +275,7 @@ def layernorm_fwd_fp8_inf(
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
+        fp8_tensor,
         otype)
     return ret
 

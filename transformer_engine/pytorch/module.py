@@ -636,6 +636,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_bias,
                         eps,
                         fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                     )
             else:
@@ -1815,6 +1816,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ln_bias,
                         eps,
                         fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                     )
             else:

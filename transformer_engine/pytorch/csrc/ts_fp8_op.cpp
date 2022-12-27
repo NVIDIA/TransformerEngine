@@ -138,6 +138,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                     at::Tensor scale,
                                     at::Tensor amax,
                                     at::Tensor scale_inv,
+                                    int64_t fp8_tensor,
                                     int64_t otype) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
   float eps_float = static_cast<float>(eps);

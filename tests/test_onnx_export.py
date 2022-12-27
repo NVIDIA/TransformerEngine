@@ -418,7 +418,7 @@ def test_export_gemm(
     else:
         model = Test_GEMM(precision, use_bias, use_gelu)
         do_export(model, (inp, weight), fname, use_fp8)
-        validate_result(fname, (inp, weight), model, rtol=1e-2, atol=1e-2)
+        validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
@@ -467,6 +467,7 @@ def test_export_layernorm(
                 self.bias,
                 self.eps,
                 self.meta,
+                self.fp8_tensor,
                 self.fp8_type)
 
             ret = cast_from_fp8(
@@ -480,11 +481,12 @@ def test_export_layernorm(
     inp = torch.randn(*inp_shape, device="cuda", dtype=precision)
     model = TestFP8_Layernorm() if use_fp8 else Test_Layernorm()
     high_prec_str = dtype2str(precision)
-    fp8_str = "_fp8" if use_fp8 else ""
-    fname = f"te.layernorm{fp8_str}_{scale_factor}{high_prec_str}.onnx"
+    fp8_str = f"_fp8-{scale_factor}" if use_fp8 else ""
+    fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname)
     if precision not in (torch.bfloat16, ):
-        validate_result(fname, inp, model, atol=5e-4, is_fp8=use_fp8)
+        # TODO: FP32 has a small threshold (1e-5)
+        validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
 
 
 @pytest.mark.parametrize("softmax_def", [
@@ -567,21 +569,43 @@ def test_export_linear(
     out_features = 256
     hidden_size = 256
 
+    class Test_Linear(nn.Module):
+        def __init__(self,
+                in_features,
+                out_features,
+                use_bias,
+                return_bias,
+                precision
+            ):
+            super().__init__()
+            self.linear = te.Linear(
+                in_features,
+                out_features,
+                bias=use_bias,
+                return_bias=return_bias,
+                params_dtype=precision
+            )
+
+        def forward(self, inp):
+            ret = self.linear(inp)
+            return ret
+
+
     inp = torch.randn(hidden_size, in_features, device="cuda", dtype=precision)
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.linear{fp8_str}{bias_str}{high_prec_str}.onnx"
     with te.fp8_autocast(enabled=use_fp8):
-        model = te.Linear(
+        model = Test_Linear(
             in_features,
             out_features,
-            bias=use_bias,
-            return_bias=return_bias,
-            params_dtype=precision
+            use_bias,
+            return_bias,
+            precision
         ).to(device='cuda')
         if use_fp8:
-            set_layer_scale(model, scale_factor)
+            set_layer_scale(model.linear, scale_factor)
         do_export(model, inp, fname, use_fp8)
 
         if not use_fp8:
@@ -687,7 +711,7 @@ def test_export_layernorm_mlp(
         if not use_fp8:
             validate_result(fname, inp, model, atol=1e-3)
         else:
-            validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8)
+            validate_result(fname, inp, model, atol=2e-2, is_fp8=use_fp8)
 
 
 @pytest.mark.parametrize(
