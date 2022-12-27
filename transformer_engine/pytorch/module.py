@@ -7,7 +7,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Optional, Callable, Tuple, Dict, Any
+from typing import Union, Optional, Callable, Tuple, Dict, List, Any, Mapping
 from functools import partial
 from contextlib import contextmanager
 
