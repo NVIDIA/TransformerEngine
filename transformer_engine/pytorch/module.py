@@ -1103,7 +1103,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if self.parallel_mode == "column":
                     set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
             else:
-                self.register_buffer("bias", torch.Tensor(), persistent=False)
+                self.register_buffer("bias", torch.Tensor().type(params_dtype), persistent=False)
 
             with torch.no_grad():
                 self.bias.zero_()
@@ -1659,7 +1659,7 @@ class Linear(TransformerEngineBaseModule):
                 if self.parallel_mode == "column":
                     set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
             else:
-                self.register_buffer("bias", torch.Tensor(), persistent=False)
+                self.register_buffer("bias", torch.Tensor().type(params_dtype), persistent=False)
 
             with torch.no_grad():
                 self.bias.zero_()
@@ -2507,7 +2507,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 )
             )
         else:
-            self.register_buffer("fc2_bias", torch.Tensor(), persistent=False)
+            self.register_buffer("fc2_bias", torch.Tensor().type(params_dtype), persistent=False)
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

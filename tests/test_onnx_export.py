@@ -549,11 +549,10 @@ def test_export_softmax(softmax_def, precision):
     "precision,     use_bias",[
     (torch.float32, False),
     (torch.float32, True),
-    # Todo: cannot configure FP16/BF16 when bias is disabled -
-    # AssertionError: Data type for activations and buffers must match when outside of autocasted region
-    # (torch.float16, False),
+    (torch.float16, False),
     (torch.float16, True),
-    #(torch.bfloat16, False),
+    # Todo: cannot configure BF16 when bias is disabled (ORT issue?)
+    (torch.bfloat16, False),
     # Todo: cannot configure BF16 when bias is enabled (ORT issue?)
     # (torch.bfloat16, True),
 ])
@@ -608,9 +607,11 @@ def test_export_linear(
             set_layer_scale(model.linear, scale_factor)
         do_export(model, inp, fname, use_fp8)
 
+        if precision in (torch.bfloat16, ):
+            return
         if not use_fp8:
             validate_result(fname, inp, model, atol=1e-3)
-        elif precision not in (torch.bfloat16, ):
+        else:
             validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
 
 
@@ -624,8 +625,7 @@ def test_export_linear(
     (torch.float32, False),
     (torch.float32, True),
     (torch.float16, True),
-    # Todo: cannot configure FP16 when bias is disabled
-    #(torch.float16, False),
+    (torch.float16, False),
 ])
 def test_export_layernorm_linear(
     scale_factor: float,
@@ -668,14 +668,12 @@ def test_export_layernorm_linear(
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
 @pytest.mark.parametrize("return_layernorm_output", [False])
-# Todo: cannot handle FP16 for some reason
 @pytest.mark.parametrize(
     "precision,     use_bias",[
     (torch.float32, False),
     (torch.float32, True),
     (torch.float16, True),
-    # Todo: cannot configure FP16 when bias is disabled
-    #(torch.float16, False),
+    (torch.float16, False),
 ])
 def test_export_layernorm_mlp(
     scale_factor: float,
