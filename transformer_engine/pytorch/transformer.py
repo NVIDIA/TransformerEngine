@@ -520,6 +520,10 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
+        assert (
+            attention_mask.dtype == torch.bool
+        ), "Attention mask must be a boolean tensor"
+
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -1005,6 +1009,10 @@ class TransformerLayer(torch.nn.Module):
         """
 
         hidden_states = hidden_states.contiguous()
+
+        assert (
+            attention_mask.dtype == torch.bool
+        ), "Attention mask must be a boolean tensor"
 
         # For AMP
         if torch.is_autocast_enabled():
