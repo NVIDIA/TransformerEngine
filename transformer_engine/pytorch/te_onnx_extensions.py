@@ -44,6 +44,7 @@ def make_op_name(op_name: str) -> str:
 
 
 def quantize(g, inputs, scale_inv, fp8_tensor):
+    """Helper Function for Quantization"""
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
 
     # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
@@ -59,6 +60,7 @@ def quantize(g, inputs, scale_inv, fp8_tensor):
 
 
 def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
+    """Helper Function for Dequantization"""
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
 
     scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
@@ -90,7 +92,6 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
-    output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     gelu = torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
     out = quantize(g, gelu, scale_inv, fp8_tensor)
     return out
@@ -157,7 +158,6 @@ def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax, scale_inv,
     """ONNX graph for layernorm_fwd_fp8"""
     # pylint: disable=unused-argument
     ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps)
-    output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
     return fp8_ln
 
