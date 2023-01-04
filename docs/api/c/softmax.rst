@@ -4,6 +4,6 @@
     See LICENSE for license information.
 
 softmax.h
-======
+=========
 
 .. doxygenfile:: softmax.h
