@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,6 +14,7 @@ add_executable(test_operator
                ../test_common.cu)
 
 target_link_libraries(test_operator PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB})
+target_compile_options(test_operator PRIVATE -O2)
 
 include(GoogleTest)
 gtest_discover_tests(test_operator)

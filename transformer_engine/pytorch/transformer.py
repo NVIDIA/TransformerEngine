@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -370,7 +370,7 @@ class MultiHeadAttention(torch.nn.Module):
                     **common_gemm_kwargs,
                 )
             else:
-                self.query = Linear(
+                self.query_layer = Linear(
                     hidden_size,
                     hidden_size,
                     init_method=init_method,
@@ -559,6 +559,11 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
+        if attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
+
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -671,7 +676,7 @@ class MultiHeadAttention(torch.nn.Module):
                 else:
                     query_layer = layernorm_query_outputs
             else:
-                query_layer = self.query(
+                query_layer = self.query_layer(
                     hidden_states,
                     weight=self.query,
                     bias=self.query_bias,
@@ -1049,6 +1054,11 @@ class TransformerLayer(torch.nn.Module):
         """
 
         hidden_states = hidden_states.contiguous()
+
+        if attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
 
         # For AMP
         if torch.is_autocast_enabled():
