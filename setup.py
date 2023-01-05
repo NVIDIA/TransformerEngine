@@ -21,6 +21,7 @@ path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
 
+
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
         [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
@@ -135,6 +136,71 @@ if framework in ("all", "pytorch"):
             },
             include_dirs=include_dirs,
         )
+    )
+
+    ext_modules.append(
+        CUDAExtension(
+            name="scaled_upper_triang_masked_softmax_dropout_cuda",
+            sources=[
+                os.path.join(
+                    path,
+                    "transformer_engine/pytorch/csrc/emha/scaled_upper_triang_masked_softmax_dropout.cpp",
+                ),
+                os.path.join(
+                    path,
+                    "transformer_engine/pytorch/csrc/emha/scaled_upper_triang_masked_softmax_dropout_cuda.cu",
+                ),
+            ],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
+            },
+            include_dirs=[
+                os.path.join(path, "transformer_engine/pytorch/csrc/emha"),
+            ],
+        )
+    )
+
+    # EMHA cannot be compiled for sm70 as it requires hardware support of bfloat16.
+    ext_modules.append(
+        CUDAExtension(
+            "emha_C",
+            sources=[
+                os.path.join(path, f)
+                for f in (
+                    "transformer_engine/pytorch/csrc/emha/bmm_api.cpp",
+                    "transformer_engine/pytorch/csrc/emha/emha_api.cpp",
+                    "transformer_engine/pytorch/csrc/emha/softmax_api.cpp",
+                    "transformer_engine/pytorch/csrc/emha/bmm_nn.cu",
+                    "transformer_engine/pytorch/csrc/emha/bmm_nt.cu",
+                    "transformer_engine/pytorch/csrc/emha/softmax_bwd_kernel.cu",
+                    "transformer_engine/pytorch/csrc/emha/softmax_fwd_kernel.cu",
+                )
+            ],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "nvcc": [
+                    "-O3",
+                    "-U__CUDA_NO_HALF_OPERATORS__",
+                    "-U__CUDA_NO_HALF_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                    "--expt-relaxed-constexpr",
+                    "--expt-extended-lambda",
+                    "--use_fast_math",
+                    "-gencode",
+                    "arch=compute_80,code=sm_80",
+                    "-gencode",
+                    "arch=compute_90,code=sm_90",
+                ],
+            },
+            include_dirs=[
+                os.path.join(path, "3rdparty/cutlass/include"),
+                os.path.join(path, "3rdparty/cutlass/tools/util/include"),
+            ],
+        ),
     )
 
 
