@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../utils.cuh"
 #include "rmsnorm.h"
 #include "rmsnorm_fwd_kernels.cuh"
 #include "rmsnorm_kernel_traits.h"
@@ -102,6 +101,36 @@ void launch_general_(LaunchParams<FwdParams> &launch_params, const bool configur
                                     reinterpret_cast<void **>(&params_), 0, stream);
     }
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define REGISTER_FWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                       \
+                              CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG)                       \
+    void rmsnorm_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                  \
+            LaunchParams<FwdParams> &launch_params,                                                \
+            const bool configure_params) {                                                         \
+        launch_tuned_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, CTAS_PER_ROW,             \
+        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
+            launch_params, configure_params);                                                      \
+    }                                                                                              \
+    static FwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                              \
+           reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                        \
+        rmsnorm_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+#define REGISTER_FWD_GENERAL_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                     \
+                              WARPS_M, WARPS_N, BYTES_PER_LDG)                                     \
+    void rmsnorm_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                \
+            LaunchParams<FwdParams> &launch_params,                                                \
+            const bool configure_params) {                                                         \
+        launch_general_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                         \
+        WARPS_M, WARPS_N, BYTES_PER_LDG>(                                                          \
+            launch_params, configure_params);                                                      \
+    }                                                                                              \
+    static FwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                            \
+           reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                      \
+        rmsnorm_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Create rmsnorm tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG
