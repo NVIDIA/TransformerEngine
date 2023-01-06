@@ -15,7 +15,7 @@ namespace {
       NVTE_ERROR("Type not supported.");
     }
   }
-}
+} //namespace
 
 
 at::Tensor cast_to_fp8_ts(const at::Tensor &input,
