@@ -307,7 +307,7 @@ py3-devel:
     - docker build --progress=plain
                    -t ${DOCS_IMAGE_NAME}
                    --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
-                   --build-arg "GIT_SHA=${CI_COMMIT_SHORT_SHA}"
+                   --build-arg "GIT_SHA=${GIT_SHA}"
                    -f Dockerfile.docs .
     - echo ${JOB_START_STRING}
     - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
