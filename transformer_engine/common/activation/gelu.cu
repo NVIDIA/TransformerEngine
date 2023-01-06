@@ -59,9 +59,10 @@ void geglu_cast(const Tensor &input,
   CheckOutputTensor(*output, "geglu_output");
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
-  NVTE_CHECK(input.data.shape[0] == output->data.shape[0] &&
-             input.data.shape[1] == output->data.shape[1] * 2,
-             "Input shape must be twice than output shape.");
+  NVTE_CHECK(input.data.shape[0] == output->data.shape[0],
+             "Input shape[0] must be equal to output shape[0].");
+  NVTE_CHECK(input.data.shape[1] == output->data.shape[1] * 2,
+             "Input shape[1] must be twice than output shape[1].");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
@@ -89,11 +90,11 @@ void dgeglu(const Tensor &grad,
   NVTE_CHECK(grad.data.shape.size() == 2, "Grad must have 2 dimensions.");
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
-  NVTE_CHECK(grad.data.shape[0] == output->data.shape[0] &&
-             grad.data.shape[1] * 2 == output->data.shape[1],
-             "Grad shape must be twice than input shape");
-  NVTE_CHECK(input.data.shape[0] == output->data.shape[0] &&
-             input.data.shape[1] == output->data.shape[1],
+  NVTE_CHECK(output->data.shape[0] == grad.data.shape[0],
+             "Output shape[0] must be equal to grad shape[0].");
+  NVTE_CHECK(output->data.shape[1] == grad.data.shape[1] * 2,
+             "Output shape[1] must be twice than grad shape[1].");
+  NVTE_CHECK(input.data.shape == output->data.shape,
              "Input and output shapes must match.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
