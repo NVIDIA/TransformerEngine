@@ -7,24 +7,13 @@
 #include <torch/script.h>
 #include "extensions.h"
 
-transformer_engine::DType reverse_map_dtype(int64_t dtype) {
-  switch (dtype) {
-    case static_cast<int64_t>(transformer_engine::DType::kByte):
-        return transformer_engine::DType::kByte;
-    case static_cast<int64_t>(transformer_engine::DType::kInt32):
-        return transformer_engine::DType::kInt32;
-    case static_cast<int64_t>(transformer_engine::DType::kFloat32):
-        return transformer_engine::DType::kFloat32;
-    case static_cast<int64_t>(transformer_engine::DType::kFloat16):
-        return transformer_engine::DType::kFloat16;
-    case static_cast<int64_t>(transformer_engine::DType::kBFloat16):
-        return transformer_engine::DType::kBFloat16;
-    case static_cast<int64_t>(transformer_engine::DType::kFloat8E4M3):
-        return transformer_engine::DType::kFloat8E4M3;
-    case static_cast<int64_t>(transformer_engine::DType::kFloat8E5M2):
-        return transformer_engine::DType::kFloat8E5M2;
-    default:
-        NVTE_ERROR("Type not supported.");
+namespace {
+  transformer_engine::DType reverse_map_dtype(int64_t dtype) {
+    if (dtype >= 0 && dtype < static_cast<int64_t>(transformer_engine::DType::kNumTypes)) {
+      return static_cast<transformer_engine::DType>(dtype);
+    } else {
+      NVTE_ERROR("Type not supported.");
+    }
   }
 }
 

@@ -7,7 +7,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Optional, Callable, Tuple, Dict, List, Any, Mapping
+from typing import Union, Optional, Callable, Tuple, Dict, Any, Mapping
 from functools import partial
 from contextlib import contextmanager
 
@@ -216,7 +216,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["extra_fp8_variables"] = extra
 
         state_serialized = pickle.dumps(state)
-        state_tensor = torch.tensor(np.frombuffer(state_serialized, dtype=np.uint8), device='cuda')
+        state_tensor = torch.tensor(np.frombuffer(state_serialized, dtype=np.uint8))
 
         return state_tensor
 
@@ -260,7 +260,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         if isinstance(state, torch.Tensor):
-            state = pickle.loads(state.cpu().detach().numpy().tobytes())
+            state = pickle.loads(state.detach().numpy().tobytes())
             if state is None:
                 return
 
