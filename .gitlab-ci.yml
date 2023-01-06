@@ -576,8 +576,9 @@ L0_unittest--TU102_R445_1GPU:
     <<: *TU102_R445_1GPU
 
 L0_unittest--H100_1GPU:
-    <<: *L0_TEST
-    <<: .H100_1GPU
+  extends:
+    - .L0_test
+    - .H100_1GPU
 
 L0_cppunittest--V100_1GPU:
     <<: *L0_TEST
@@ -588,8 +589,9 @@ L0_cppunittest--A100_1GPU:
     <<: *A100_1GPU
 
 L0_cppunittest--H100_1GPU:
-    <<: *L0_TEST
-    <<: .H100_1GPU
+  extends:
+    - .L0_test
+    - .H100_1GPU
 
 docs:
     <<: *DOCS_BUILD
