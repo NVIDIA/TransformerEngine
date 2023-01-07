@@ -97,6 +97,42 @@ def get_workspace() -> torch.Tensor:
         )
     return _cublas_workspace
 
+@contextmanager
+def _prepare_backward(fp8: bool,
+                      fp8_meta: Dict[str, Any],
+                      reduce_amax_across_tp_group: bool,
+                      tp_group: Union[dist_group_type, None]):
+    """Checks and prep for BWD."""
+    if fp8:
+        # Update amax and scale; Skip all setup for global amax reduction
+        if not fp8_meta["recipe"].reduce_amax:
+            amax_and_scale_update(fp8_meta, False)
+        else:
+            # From previous iteration
+            copy_amax_from_global_buffer(fp8_meta, forward=False)
+            amax_and_scale_update(fp8_meta, False)
+            set_amax_buffer_key_deletion(fp8_meta, forward=False)
+
+            # Get new backward key.
+            if "autocast_id_bwd" not in fp8_meta:
+                fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd"]
+            else:
+                fp8_meta["autocast_id_bwd"] += 1
+
+            add_amax_to_global_buffer(fp8_meta, forward=False)
+
+    with torch.cuda.nvtx.range(self.__class__.__name__ + " backward"):
+        yield
+
+    if not fp8 or not fp8_meta["recipe"].reduce_amax:
+        return
+
+    if fp8_meta["first_module"]:
+        global_amax_reduction(
+            fp8_meta, reduce_amax_across_tp_group, tp_group, forward=False
+        )
+        delete_key_from_amax_buffer(forward=False)
+
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
@@ -396,43 +432,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
             setup_amax_forward_global_reduce_func(reduce_func)
 
-    @classmethod
-    @contextmanager
-    def prepare_backward(fp8: bool,
-                         fp8_meta: Dict[str, Any],
-                         reduce_amax_across_tp_group: bool,
-                         tp_group: Union[dist_group_type, None]):
-        """Checks and prep for BWD."""
-        if fp8:
-            # Update amax and scale; Skip all setup for global amax reduction
-            if not fp8_meta["recipe"].reduce_amax:
-                amax_and_scale_update(fp8_meta, False)
-            else:
-                # From previous iteration
-                copy_amax_from_global_buffer(fp8_meta, forward=False)
-                amax_and_scale_update(fp8_meta, False)
-                set_amax_buffer_key_deletion(fp8_meta, forward=False)
-
-                # Get new backward key.
-                if "autocast_id_bwd" not in fp8_meta:
-                    fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd"]
-                else:
-                    fp8_meta["autocast_id_bwd"] += 1
-
-                add_amax_to_global_buffer(fp8_meta, forward=False)
-
-        with torch.cuda.nvtx.range(self.__class__.__name__ + " backward"):
-            yield
-
-        if not fp8 or not fp8_meta["recipe"].reduce_amax:
-            return
-
-        if fp8_meta["first_module"]:
-            global_amax_reduction(
-                fp8_meta, reduce_amax_across_tp_group, tp_group, forward=False
-            )
-            delete_key_from_amax_buffer(forward=False)
-
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
         before the GEMM for there to be a guaranteed overlap. From the
@@ -696,8 +695,7 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
-                                                          ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 ln_weight,
@@ -1084,7 +1082,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        with self.prepare_forward(inp) as inp:
+        with self.prepare_forward(inp) as inp:  # pylint
             bias_tensor = bias if bias is not None else self.bias
 
             out = _LayerNormLinear.apply(
@@ -1264,8 +1262,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
-                                                          ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 inputmat_t,
@@ -1854,8 +1851,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
-                                                          ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 ln_weight,
