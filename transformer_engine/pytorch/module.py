@@ -396,6 +396,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
             setup_amax_forward_global_reduce_func(reduce_func)
 
+    @classmethod
     @contextmanager
     def prepare_backward(fp8: bool,
                          fp8_meta: Dict[str, Any],
@@ -695,7 +696,8 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with self.prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
+                                                          ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 ln_weight,
@@ -1262,7 +1264,8 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with self.prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
+                                                          ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 inputmat_t,
@@ -1851,7 +1854,8 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with self.prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with TransformerEngineBaseModule.prepare_backward(ctx.fp8, ctx.fp8_meta,
+                                                          ctx.sequence_parallel, ctx.tp_group):
             (
                 inputmat,
                 ln_weight,
