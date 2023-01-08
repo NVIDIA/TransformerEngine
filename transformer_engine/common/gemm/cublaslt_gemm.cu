@@ -55,6 +55,7 @@ void cublas_gemm(const Tensor *inputA,
   void *A_scale_inverse = inputA->scale_inv.dptr;
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
+  void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
   void *D_scale = outputD->scale.dptr;
   void *D_amax = outputD->amax.dptr;
@@ -79,6 +80,10 @@ void cublas_gemm(const Tensor *inputA,
   // fp8 + gelu fusion is unavailable right now.
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
+  }
+  if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
+    NVTE_CHECK(!accumulate,
+             "Accumulation mode not supported with FP8 GEMM output!");
   }
 
   float one = 1.0;
@@ -111,7 +116,6 @@ void cublas_gemm(const Tensor *inputA,
                                                transb == CUBLAS_OP_N ? k : n,
                                                transb == CUBLAS_OP_N ? n : k,
                                                ldb));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, gemm_compute_type, CUDA_R_32F));
@@ -139,21 +143,29 @@ void cublas_gemm(const Tensor *inputA,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
     if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
-        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                         CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
-                                                         &D_scale,
-                                                         sizeof(D_scale)));
-        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                         CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
-                                                         &D_amax,
-                                                         sizeof(D_amax)));
-        NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
+      // Accumulation mode not supported for FP8 output
+      C = nullptr;
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
+                                                       &D_scale,
+                                                       sizeof(D_scale)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+                                                       &D_amax,
+                                                       sizeof(D_amax)));
+      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
+    }
+    else {
+      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
     }
     if (bias) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
+  }
+  else {
+    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
 
   if (bias && gelu) {
@@ -219,7 +231,7 @@ void cublas_gemm(const Tensor *inputA,
                                    B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
-                                   nullptr,                                /* C */
+                                   C,                                      /* C */
                                    Cdesc,
                                    D,                                      /* D */
                                    Ddesc,
