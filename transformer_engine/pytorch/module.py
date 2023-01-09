@@ -16,6 +16,7 @@ from torch.nn import init
 import transformer_engine_extensions as tex
 from .fp8 import (
     is_fp8_enabled,
+    is_fp8_calibration,
     get_fp8_recipe,
     get_fp8_group,
     get_default_fp8_recipe,
@@ -103,7 +104,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        self.fp8_initialized = False
         self.fp8 = False
+        self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = get_default_fp8_recipe()
@@ -146,7 +149,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def get_extra_state(self) -> Union[List[Any], None]:
         """Save before checkpointing."""
-        if self.fp8:
+        if self.fp8 or self.fp8_calibration:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
             state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
@@ -299,31 +302,37 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.tp_group = tp_group
         self.tp_group_initialized = True
 
+    # This routine is shared across FP8 and FP8_calibration paths so should not actually
+    # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        # If fp8 isn't enabled, turn off and return.
-        if not is_fp8_enabled():
-            self.fp8 = False
+        if is_fp8_enabled() or is_fp8_calibration():
+            # FP8 init has already been run and recipe is the same, don't do anything.
+            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+                return
+
+            # Set FP8, recipe, and other FP8 metadata
+            self.fp8 = is_fp8_enabled()
+            self.fp8_calibration = is_fp8_calibration()
+            self.fp8_meta["recipe"] = get_fp8_recipe()
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.fp8_meta["fp8_group"] = get_fp8_group()
+
+            # Set FP8_MAX per tensor according to recipe
+            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+
+            # Allocate scales and amaxes
+            self.init_fp8_meta_tensors()
+            self.fp8_initialized = True
+        else:
+            # If fp8 isn't enabled, turn off and return.
+            self.fp8_initialized = False
             return
 
-        # FP8 is already enabled and recipe is the same, don't do anything.
-        if self.fp8 and get_fp8_recipe() == self.fp8_meta["recipe"]:
-            return
-
-        # Set FP8, recipe, and other FP8 metadata
-        self.fp8 = True
-        self.fp8_meta["recipe"] = get_fp8_recipe()
-        self.fp8_meta["num_gemms"] = num_gemms
-        self.fp8_meta["fp8_group"] = get_fp8_group()
-
-        # Set FP8_MAX per tensor according to recipe
-        self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-        self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
-
-        # Allocate scales and amaxes
-        self.init_fp8_meta_tensors()
-
-    def pre_forward(self, inp: torch.Tensor, num_gemms: int = 1) -> None:
+    def pre_forward(
+        self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None, num_gemms: int = 1
+    ) -> None:
         """Checks and prep for FWD."""
 
         # Activation recomputation is used and this is the second forward phase.
@@ -349,7 +358,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 amax_and_scale_update(self.fp8_meta, True)
 
-        if self.fp8 and self.training:
+        # Either we're in FP8 training or calibration for FP8 inference
+        needs_stats = (self.training if self.fp8 else self.fp8_calibration)
+
+        if needs_stats:
             # Setup for amax reduction
             if self.fp8_meta["recipe"].reduce_amax:
                 self.fp8_meta["first_module"] = is_first_fp8_module()
@@ -362,6 +374,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+
+        if self.fp8_calibration:
+            # amax of input
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
+                torch.amax(inp).float()
+            # amax of weight
+            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                torch.amax(weight).float()
 
         # Activation recomputation is used and this is the first forward phase.
         if (
@@ -1238,15 +1259,16 @@ class _Linear(torch.autograd.Function):
                 use_bias=use_bias,
             )
 
+        fp8_wgrad = fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
         ctx.save_for_backward(
-            inputmat_no_fp8
-            if not fp8 or fp8_meta["recipe"].override_linear_precision.wgrad
+            inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad
             else None,
-            inputmat_t
-            if fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
+            inputmat_t if weight.requires_grad and fp8_wgrad
             else None,
-            weight,
-            weight_t_fp8,
+            weight if inputmat.requires_grad and not fp8
+            else None,
+            weight_t_fp8 if inputmat.requires_grad and fp8
+            else None,
             fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
         )
         ctx.activation_dtype = activation_dtype
@@ -1260,7 +1282,8 @@ class _Linear(torch.autograd.Function):
         ctx.inp_shape = inp.shape
         ctx.parallel_mode = parallel_mode
         ctx.tp_group = tp_group
-
+        ctx.requires_dgrad = inputmat.requires_grad
+        ctx.requires_wgrad = weight.requires_grad
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -1323,39 +1346,41 @@ class _Linear(torch.autograd.Function):
                 ctx.fp8_meta["recipe"], fprop_tensor=False
             )
 
+        if ctx.requires_dgrad:
             # DGRAD
-            dgrad = fp8_gemm(
-                weight_t_fp8,
-                fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
-                fp8_dtype_forward,
-                grad_output_c,
-                ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
-                fp8_dtype_backward,
-                ctx.activation_dtype,
-                get_workspace(),
-                use_split_accumulator=_2X_ACC_DGRAD,
-            )
-        else:
-            # DGRAD
-            dgrad, _, _ = gemm(
-                weight,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NN",
-                grad=True,
-            )
+            if ctx.fp8:
+                dgrad = fp8_gemm(
+                    weight_t_fp8,
+                    fwd_scale_inverses[tex.FP8FwdTensors.GEMM1_WEIGHT],
+                    fp8_dtype_forward,
+                    grad_output_c,
+                    ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1],
+                    fp8_dtype_backward,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    use_split_accumulator=_2X_ACC_DGRAD,
+                )
+            else:
+                # DGRAD
+                dgrad, _, _ = gemm(
+                    weight,
+                    grad_output,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    layout="NN",
+                    grad=True,
+                )
 
-        # Overlap dgrad-RS/AR with wgrad
-        if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-            handle.wait()
-            dgrad, handle = reduce_scatter_along_first_dim(
-                dgrad, ctx.tp_group, async_op=True
-            )
-        elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-            dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+            # Overlap dgrad-RS/AR with wgrad
+            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                handle.wait()
+                dgrad, handle = reduce_scatter_along_first_dim(
+                    dgrad, ctx.tp_group, async_op=True
+                )
+            elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+                dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-        if weight.requires_grad:
+        if ctx.requires_wgrad:
             if ctx.fp8:
                 # WGRAD
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
@@ -1414,10 +1439,10 @@ class _Linear(torch.autograd.Function):
         )
 
         return (
-            wgrad if weight.requires_grad else None,
+            wgrad if ctx.requires_wgrad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape),
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
             None,
@@ -1617,7 +1642,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        inp = self.pre_forward(inp)
+        inp = self.pre_forward(inp, weight if weight is not None else self.weight)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -2574,6 +2599,7 @@ class LayerNorm(torch.nn.Module):
         """Init LN params"""
         init.ones_(self.weight)
         init.zeros_(self.bias)
+
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
