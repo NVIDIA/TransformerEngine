@@ -159,7 +159,6 @@ cast_transpose_kernel(const IType * const input,
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
     if (amax != nullptr) atomicMaxFloat(amax, max);
-    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
@@ -295,7 +294,6 @@ cast_transpose_kernel_notaligned(const IType * const input,
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
     if (amax != nullptr) atomicMaxFloat(amax, max);
-    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 

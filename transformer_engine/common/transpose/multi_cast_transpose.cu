@@ -193,9 +193,6 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
     static_assert(std::is_same<CType, float>::value);
     if (amax != nullptr) atomicMaxFloat(amax, local_amax);
   }
-  if (tid == 0 && tile_id == 0) {
-    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
-  }
 }
 
 }  // namespace

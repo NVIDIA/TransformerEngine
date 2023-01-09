@@ -196,9 +196,6 @@ __global__ void unary_kernel(const InputType *input,
   ComputeType s = 0;
   if constexpr (is_fp8<OutputType>::value) {
       if (scale != nullptr) s = *scale;
-      if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
-        reciprocal<ComputeType>(scale_inv, s);
-      }
   }
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
