@@ -101,7 +101,8 @@ def get_workspace() -> torch.Tensor:
 def _prepare_backward(fp8: bool,
                       fp8_meta: Dict[str, Any],
                       reduce_amax_across_tp_group: bool,
-                      tp_group: Union[dist_group_type, None]):
+                      tp_group: Union[dist_group_type, None],
+                      name: str = ""):
     """Checks and prep for BWD."""
     if fp8:
         # Update amax and scale; Skip all setup for global amax reduction
@@ -121,7 +122,7 @@ def _prepare_backward(fp8: bool,
 
             add_amax_to_global_buffer(fp8_meta, forward=False)
 
-    with torch.cuda.nvtx.range(self.__class__.__name__ + " backward"):
+    with torch.cuda.nvtx.range(name + " backward"):
         yield
 
     if not fp8 or not fp8_meta["recipe"].reduce_amax:
@@ -695,7 +696,8 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group,
+                               name="_LayerNormLinear"):
             (
                 inputmat,
                 ln_weight,
@@ -1262,7 +1264,8 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group,
+                               name="_Linear"):
             (
                 inputmat,
                 inputmat_t,
@@ -1851,7 +1854,8 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.sequence_parallel, ctx.tp_group,
+                               name="_LayerNormMLP"):
             (
                 inputmat,
                 ln_weight,
