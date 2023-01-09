@@ -82,7 +82,6 @@ struct CTDBiasParam {
     OType *output_t;
     const CType *scale_ptr;
     CType *amax;
-    CType *scale_inv;
     CType *workspace;
 };
 
@@ -98,7 +97,6 @@ struct CTDBiasDGeluParam {
     OType *output_t;
     const CType *scale_ptr;
     CType *amax;
-    CType *scale_inv;
     CType *workspace;
 };
 
@@ -521,8 +519,6 @@ void cast_transpose_dbias(const Tensor &input,
              "C and T outputs need to share amax tensor.");
   NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
              "C and T outputs need to share scale tensor.");
-  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
-             "C and T outputs need to share scale inverse tensor.");
 
   NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
   NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
@@ -563,7 +559,6 @@ void cast_transpose_dbias(const Tensor &input,
       param.output_t  = reinterpret_cast<OutputType *>(transposed_output->data.dptr);
       param.scale_ptr = reinterpret_cast<const ComputeType *>(cast_output->scale.dptr);
       param.amax      = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
-      param.scale_inv = reinterpret_cast<ComputeType *>(cast_output->scale_inv.dptr);
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
       if (full_tile) {
@@ -985,8 +980,6 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
              "C and T outputs need to share amax tensor.");
   NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
              "C and T outputs need to share scale tensor.");
-  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
-             "C and T outputs need to share scale inverse tensor.");
 
   NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
   NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
@@ -1035,7 +1028,6 @@ void cast_transpose_dbias_dgelu(const Tensor &input,
       param.output_t = reinterpret_cast<OutputType *>(transposed_output->data.dptr);
       param.scale_ptr = reinterpret_cast<const ComputeType *>(cast_output->scale.dptr);
       param.amax = reinterpret_cast<ComputeType *>(cast_output->amax.dptr);
-      param.scale_inv = reinterpret_cast<ComputeType *>(cast_output->scale_inv.dptr);
       param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
       if (full_tile) {
         cudaFuncSetAttribute(cast_transpose_dbias_dgelu_kernel<nvec_in, nvec_out, Param>,

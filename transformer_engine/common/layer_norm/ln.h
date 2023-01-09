@@ -87,10 +87,6 @@ struct FwdParams : public ParamsBase {
     // Scaling factor
     void *scale;
 
-    // Scaling factor inverse,
-    // needed for cublasLt fp8 gemm
-    void *scale_inv;
-
     // AMax output
     void *amax;
 

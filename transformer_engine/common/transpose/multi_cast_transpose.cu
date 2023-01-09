@@ -34,8 +34,6 @@ struct MultiCastTransposeArgs {
   void* scale_list[kMaxTensorsPerKernel];
   // (output) AMAX's of input tensors
   void* amax_list[kMaxTensorsPerKernel];
-  // (output) Reciprocal of scaling factors
-  void* scale_inv_list[kMaxTensorsPerKernel];
   // Input matrix heights
   int num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
@@ -90,7 +88,6 @@ multi_cast_transpose_kernel(MultiCastTransposeArgs args) {
   const CType* scale_ptr = reinterpret_cast<CType*>(args.scale_list[tensor_id]);
   const CType scale = scale_ptr == nullptr ? 1 : *scale_ptr;
   CType* amax = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
-  CType* scale_inv = reinterpret_cast<CType*>(args.scale_inv_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
 
@@ -297,7 +294,6 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     kernel_args.output_t_list[pos] = transposed_output_list[tensor_id]->data.dptr;
     kernel_args.scale_list[pos] = cast_output_list[tensor_id]->scale.dptr;
     kernel_args.amax_list[pos] = cast_output_list[tensor_id]->amax.dptr;
-    kernel_args.scale_inv_list[pos] = cast_output_list[tensor_id]->scale_inv.dptr;
     kernel_args.num_rows_list[pos] = num_rows;
     kernel_args.row_length_list[pos] = row_length;
     kernel_args.block_range[pos+1] = kernel_args.block_range[pos] + num_tiles;
