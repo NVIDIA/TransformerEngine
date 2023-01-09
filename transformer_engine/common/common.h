@@ -20,6 +20,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "nvtx.h"
 
 namespace transformer_engine {
 
@@ -284,6 +285,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
 bool is_fp8_dtype(const DType t);
+
+#define NVTE_API_CALL(api_name) \
+  transformer_engine::nvtx::NVTXWrapper _ ## api_name ## _nvtx_wrapper(#api_name);
 
 }  // namespace transformer_engine
 
