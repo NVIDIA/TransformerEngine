@@ -56,6 +56,7 @@ void gelu_cast(const Tensor &input,
 void nvte_gelu(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_gelu);
   using namespace transformer_engine;
   gelu_cast(*reinterpret_cast<const Tensor*>(input),
             reinterpret_cast<Tensor*>(output),
