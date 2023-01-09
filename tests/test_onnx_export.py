@@ -38,6 +38,10 @@ TRILU_OPSET = 14
 OPSET = 15
 assert OPSET >= TRILU_OPSET
 
+skip_FP8 = pytest.mark.skipif(
+    torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9,
+    reason="Device compute capability 9.x required for FP8 execution.",
+)
 
 def create_fp8_recipe():
     return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
@@ -207,6 +211,7 @@ def get_attn_mask_str(use_mask, attn_mask_type):
     return attn_mask_str
 
 
+@skip_FP8
 @pytest.mark.parametrize("scale_factor, atol", [
     (1, 1e-7),
     (224, 1e-7)
@@ -247,6 +252,7 @@ def test_export_cast_ops(scale_factor: float, atol: float, precision: torch.dtyp
     validate_result(fname, inp, model, atol=atol, is_fp8=True)
 
 
+@skip_FP8
 @pytest.mark.parametrize("scale_factor", [448])
 @pytest.mark.parametrize(
     "precision,     atol", [
@@ -313,6 +319,10 @@ def test_export_gemm(
     use_gelu,
     scale_factors
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     class TestFP8_GEMM(nn.Module):
         def __init__(self, precision, use_bias, gelu, scale_factors):
             super().__init__()
@@ -429,6 +439,10 @@ def test_export_layernorm(
     scale_factor: float,
     precision: torch.dtype
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     # Set dimensions (these are arbitrary).
     inp_shape = [64, 32]
 
@@ -483,12 +497,13 @@ def test_export_layernorm(
     high_prec_str = dtype2str(precision)
     fp8_str = f"_fp8-{scale_factor}" if use_fp8 else ""
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
-    do_export(model, inp, fname)
+    do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
         # TODO: FP32 has a small threshold (1e-5)
         validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
 
 
+@skip_FP8
 @pytest.mark.parametrize("softmax_def", [
     softmax_defs.ScaledUpperTriangMaskedSoftmax,
     softmax_defs.ScaledMaskedSoftmax,
@@ -563,6 +578,10 @@ def test_export_linear(
     return_bias: bool,
     precision: torch.dtype
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     # Set dimensions (these are arbitrary).
     in_features = 64
     out_features = 256
@@ -635,6 +654,10 @@ def test_export_layernorm_linear(
     return_layernorm_output: bool,
     precision: torch.dtype
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     # Set dimensions (these are arbitrary).
     in_features = 64
     out_features = 256
@@ -683,6 +706,10 @@ def test_export_layernorm_mlp(
     return_layernorm_output: bool,
     precision: torch.dtype
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     # Set dimensions (these are arbitrary).
     in_features = 64
     out_features = 256
@@ -711,7 +738,7 @@ def test_export_layernorm_mlp(
         else:
             validate_result(fname, inp, model, atol=2e-2, is_fp8=use_fp8)
 
-
+@skip_FP8
 @pytest.mark.parametrize(
     "precision,     use_mask, attn_mask_type", [
     (torch.float32, False,    None),      # calls forward_torch_softmax
@@ -807,6 +834,10 @@ def test_export_multihead_attention(
     attention_type: str,
     fuse_qkv_params: bool
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     hidden_size = 256
     sequence_length = 128
     batch_size = 4
@@ -880,6 +911,10 @@ def test_export_transformer_layer(
     fuse_qkv_params: bool,
     apply_query_key_layer_scaling: bool
 ):
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+
     # Layer configuration
     hidden_size = 64
     sequence_length = 128
