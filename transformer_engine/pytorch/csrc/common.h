@@ -48,15 +48,19 @@ class FP8TensorMeta {
 enum FP8FwdTensors {
     GEMM1_INPUT  = 0,
     GEMM1_WEIGHT = 1,
-    GEMM2_INPUT  = 2,
-    GEMM2_WEIGHT = 3
+    GEMM1_OUTPUT = 2,
+    GEMM2_INPUT  = 3,
+    GEMM2_WEIGHT = 4,
+    GEMM2_OUTPUT = 5
 };
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
 enum FP8BwdTensors {
     GRAD_OUTPUT1 = 0,
-    GRAD_OUTPUT2 = 1
+    GRAD_INPUT1 = 1,
+    GRAD_OUTPUT2 = 2,
+    GRAD_INPUT2 = 3
 };
 
 
