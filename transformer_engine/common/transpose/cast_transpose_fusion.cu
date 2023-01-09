@@ -1485,8 +1485,6 @@ void dgeglu_cast_transpose(const Tensor &input,
   NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
   NVTE_CHECK(input.data.dtype == geglu_input.data.dtype, "Types of both inputs must match.");
-  NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
-             "Both C and T outputs need to have the same type.");
 
   NVTE_CHECK(cast_output->data.dtype == transposed_output->data.dtype,
              "C and T outputs need to have the same type.");

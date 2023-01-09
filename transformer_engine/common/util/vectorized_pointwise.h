@@ -369,11 +369,10 @@ __global__ void gated_act_kernel(const InputType *input,
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
       const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
       ComputeType temp = static_cast<ComputeType>(Activation(val) * val2);
-      ComputeType tempC = static_cast<ComputeType>(temp);
       if constexpr (is_fp8<OutputType>::value) {
         __builtin_assume(max >= 0);
-        max = fmaxf(fabsf(tempC), max);
-        temp = tempC * s;
+        max = fmaxf(fabsf(temp), max);
+        temp = temp * s;
       }
       storer.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(temp));
     }
@@ -468,8 +467,8 @@ __global__ void dgated_act_kernel(const InputType *grad,
       ComputeType after_dgelu = Dactivation(gelu_in) * grad_val * gate_in;
       ComputeType after_dgate = grad_val * Activation(gelu_in);
 
-      storer0.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(after_dgelu));
-      storer1.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(after_dgate));
+      storer0.separate()[i] = static_cast<OutputType>(after_dgelu);
+      storer1.separate()[i] = static_cast<OutputType>(after_dgate);
     }
     storer0.store(id_x, n);
     storer1.store(id_x, n);
