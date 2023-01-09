@@ -13,7 +13,7 @@
 namespace transformer_engine::nvtx {
 
 struct NVTXWrapper {
-  NVTXWrapper(const std::string &name) {
+  explicit NVTXWrapper(const std::string &name) {
     nvtxRangePush(name.c_str());
   }
 
