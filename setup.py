@@ -14,7 +14,7 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 from distutils.file_util import copy_file
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
 
 path = os.path.dirname(os.path.realpath(__file__))
 
@@ -85,6 +85,7 @@ include_dirs = make_abs_path(include_dirs)
 pytorch_sources = [
     "transformer_engine/pytorch/csrc/extensions.cu",
     "transformer_engine/pytorch/csrc/common.cu",
+    "transformer_engine/pytorch/csrc/ts_fp8_op.cpp",
 ]
 pytorch_sources = make_abs_path(pytorch_sources)
 

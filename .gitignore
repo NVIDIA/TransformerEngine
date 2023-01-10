@@ -8,6 +8,7 @@
 *.nsys-rep
 *.ncu-rep
 *.sqlite
+*.onnx
 .eggs
 build/
 *.so
