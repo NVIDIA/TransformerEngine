@@ -40,9 +40,9 @@ add_library(transformer_engine SHARED
 
 target_include_directories(transformer_engine PUBLIC "${PROJECT_SOURCE_DIR}/include")
 
-find_package(CUDAToolkit REQUIRED cublas)
+find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
 
-list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart)
+list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart CUDA::nvToolsExt)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 
 target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
