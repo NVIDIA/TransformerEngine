@@ -207,7 +207,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     params.epsilon = epsilon;
     params.amax = z->amax.dptr;
     params.scale = z->scale.dptr;
-    params.scale_inv = z->scale_inv.dptr;
     params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.
