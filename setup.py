@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import abc
 import atexit
 import os
 import sys
@@ -14,12 +15,12 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 from distutils.file_util import copy_file
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
+
 
 path = os.path.dirname(os.path.realpath(__file__))
-
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
+CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
@@ -94,9 +95,10 @@ all_sources = pytorch_sources
 supported_frameworks = {
     "all": all_sources,
     "pytorch": pytorch_sources,
+    "jax": None, # JAX use transformer_engine/CMakeLists.txt
 }
 
-framework = "all"
+framework = os.environ.get("FRAMEWORK", "all")
 
 args = sys.argv.copy()
 for s in args:
@@ -113,19 +115,77 @@ class CMakeExtension(Extension):
         super(CMakeExtension, self).__init__(name, sources=sources, **kwargs)
         self.cmake_path = cmake_path
 
+class FrameworkBuilder(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def cmake_flags(self):
+        return NotImplemented
+
+    @abc.abstractmethod
+    def initialize_options(self):
+        return NotImplemented
+
+    @abc.abstractmethod
+    def finalize_options(self):
+        return NotImplemented
+
+    @abc.abstractmethod
+    def run(self, extensions):
+        return NotImplemented
+
+class PyTorchBuilder(FrameworkBuilder):
+    def __init__(self, *args, **kwargs) -> None:
+        pytorch_args = copy.deepcopy(args)
+        pytorch_kwargs = copy.deepcopy(kwargs)
+        from torch.utils.cpp_extension import BuildExtension
+        self.pytorch_build_extensions = BuildExtension(*pytorch_args, **pytorch_kwargs)
+
+    def cmake_flags(self):
+        return []
+
+    def initialize_options(self):
+        self.pytorch_build_extensions.initialize_options()
+
+    def finalize_options(self):
+        self.pytorch_build_extensions.finalize_options()
+
+    def run(self, extensions):
+        other_ext = [
+            ext for ext in extensions if not isinstance(ext, CMakeExtension)
+        ]
+        self.pytorch_build_extensions.extensions = other_ext
+        print("Building pyTorch extensions!")
+        self.pytorch_build_extensions.run()
+
+class JaxBuilder(FrameworkBuilder):
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def cmake_flags(self):
+        return ["-DENABLE_JAX=ON"]
+
+    def initialize_options(self):
+        pass
+
+    def finalize_options(self):
+        pass
+
+    def run(self, extensions):
+        print("Building jax extensions!")
 
 ext_modules = []
+dlfw_builder_funcs = []
 
 ext_modules.append(
     CMakeExtension(
         name="transformer_engine",
-        cmake_path=os.path.join(path, "transformer_engine/common"),
+        cmake_path=os.path.join(path, "transformer_engine"),
         sources=[],
         include_dirs=include_dirs,
     )
 )
 
 if framework in ("all", "pytorch"):
+    from torch.utils.cpp_extension import CUDAExtension
     ext_modules.append(
         CUDAExtension(
             name="transformer_engine_extensions",
@@ -137,7 +197,10 @@ if framework in ("all", "pytorch"):
             include_dirs=include_dirs,
         )
     )
+    dlfw_builder_funcs.append(PyTorchBuilder)
 
+if framework in ("all", "jax"):
+    dlfw_builder_funcs.append(JaxBuilder)
 
 def get_cmake_bin():
     cmake_bin = "cmake"
@@ -179,6 +242,7 @@ def get_cmake_bin():
 
 class CMakeBuildExtension(build_ext, object):
     def __init__(self, *args, **kwargs) -> None:
+        self.dlfw_flags = kwargs["dlfw_flags"]
         super(CMakeBuildExtension, self).__init__(*args, **kwargs)
 
     def build_extensions(self) -> None:
@@ -198,6 +262,7 @@ class CMakeBuildExtension(build_ext, object):
             "-DCMAKE_BUILD_TYPE=" + config,
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
+        cmake_args = cmake_args + self.dlfw_flags
 
         cmake_build_args = ["--config", config]
 
@@ -223,26 +288,35 @@ class CMakeBuildExtension(build_ext, object):
         except OSError as e:
             raise RuntimeError("CMake failed: {}".format(str(e)))
 
-
 class TEBuildExtension(build_ext, object):
     def __init__(self, *args, **kwargs) -> None:
+
+        self.dlfw_builder = []
+        for functor in dlfw_builder_funcs:
+            self.dlfw_builder.append(functor(*args, **kwargs))
+
+        flags = []
+        for builder in self.dlfw_builder:
+            flags = flags + builder.cmake_flags()
+
         cmake_args = copy.deepcopy(args)
         cmake_kwargs = copy.deepcopy(kwargs)
-        pytorch_args = copy.deepcopy(args)
-        pytorch_kwargs = copy.deepcopy(kwargs)
+        cmake_kwargs["dlfw_flags"] = flags
         self.cmake_build_extensions = CMakeBuildExtension(*cmake_args, **cmake_kwargs)
-        self.pytorch_build_extensions = BuildExtension(*pytorch_args, **pytorch_kwargs)
+
         self.all_outputs = None
         super(TEBuildExtension, self).__init__(*args, **kwargs)
 
     def initialize_options(self):
         self.cmake_build_extensions.initialize_options()
-        self.pytorch_build_extensions.initialize_options()
+        for builder in self.dlfw_builder:
+            builder.initialize_options()
         super(TEBuildExtension, self).initialize_options()
 
     def finalize_options(self):
         self.cmake_build_extensions.finalize_options()
-        self.pytorch_build_extensions.finalize_options()
+        for builder in self.dlfw_builder:
+            builder.finalize_options()
         super(TEBuildExtension, self).finalize_options()
 
     def run(self) -> None:
@@ -250,12 +324,9 @@ class TEBuildExtension(build_ext, object):
         cmake_ext = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
         self.cmake_build_extensions.extensions = cmake_ext
         self.cmake_build_extensions.run()
-        other_ext = [
-            ext for ext in self.extensions if not isinstance(ext, CMakeExtension)
-        ]
-        self.pytorch_build_extensions.extensions = other_ext
-        print("Building pyTorch extensions!")
-        self.pytorch_build_extensions.run()
+
+        for builder in self.dlfw_builder:
+            builder.run(self.extensions)
 
         self.all_outputs = []
         for f in os.scandir(self.build_lib):
