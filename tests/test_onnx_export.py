@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -30,7 +30,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ONNX_FILES_DIR = os.path.join(TESTS_DIR, "./gen_onnx_models")
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = "./tests/libcustom_ort_fp8_qdq_ops.so"
+ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 
 # ScaledUpperTriangMaskedSoftmax is exported via ONNX::Trilu which was introduced in opset 14.
 TRILU_OPSET = 14
