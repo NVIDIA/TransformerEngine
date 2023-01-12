@@ -126,6 +126,7 @@ void nvte_gelu(const NVTETensor input,
 void nvte_geglu(const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
+  NVTE_API_CALL(nvte_geglu);
   using namespace transformer_engine;
   geglu_cast(*reinterpret_cast<const Tensor*>(input),
              reinterpret_cast<Tensor*>(output),
@@ -136,6 +137,7 @@ void nvte_dgeglu(const NVTETensor grad,
                  const NVTETensor input,
                  NVTETensor output,
                  cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dgeglu);
   using namespace transformer_engine;
   dgeglu(*reinterpret_cast<const Tensor*>(grad),
          *reinterpret_cast<const Tensor*>(input),
