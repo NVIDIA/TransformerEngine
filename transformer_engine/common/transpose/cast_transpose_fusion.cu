@@ -1566,6 +1566,7 @@ void nvte_cast_transpose_dbias(const NVTETensor input,
                                NVTETensor dbias,
                                NVTETensor workspace,
                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cast_transpose_dbias);
   using namespace transformer_engine;
   cast_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
                        reinterpret_cast<Tensor*>(cast_output),
@@ -1582,6 +1583,7 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input,
                                      NVTETensor dbias,
                                      NVTETensor workspace,
                                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cast_transpose_dbias_dgelu);
   using namespace transformer_engine;
   cast_transpose_dbias_dgelu(*reinterpret_cast<const Tensor*>(input),
                              *reinterpret_cast<const Tensor*>(gelu_input),
@@ -1597,6 +1599,7 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input,
                                 NVTETensor cast_output,
                                 NVTETensor transposed_output,
                                 cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dgeglu_cast_transpose);
   using namespace transformer_engine;
   dgeglu_cast_transpose(*reinterpret_cast<const Tensor*>(input),
                         *reinterpret_cast<const Tensor*>(geglu_input),
