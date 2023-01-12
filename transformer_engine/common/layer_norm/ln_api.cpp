@@ -375,6 +375,7 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                         const int multiprocessorCount,
                         NVTETensor workspace,
                         NVTETensor barrier) {
+  NVTE_API_CALL(nvte_layernorm_fwd);
   using namespace transformer_engine;
   layernorm_fwd(*reinterpret_cast<const Tensor*>(x),
                 *reinterpret_cast<const Tensor*>(gamma),
@@ -403,6 +404,7 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
                         const int multiprocessorCount,
                         NVTETensor workspace,
                         NVTETensor barrier) {
+  NVTE_API_CALL(nvte_layernorm_fwd);
   using namespace transformer_engine;
   layernorm_bwd(*reinterpret_cast<const Tensor*>(dz),
                 *reinterpret_cast<const Tensor*>(x),
