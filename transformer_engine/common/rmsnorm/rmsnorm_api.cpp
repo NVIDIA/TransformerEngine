@@ -154,7 +154,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     params.epsilon = epsilon;
     params.amax = z->amax.dptr;
     params.scale = z->scale.dptr;
-    params.scale_inv = z->scale_inv.dptr;
     params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.

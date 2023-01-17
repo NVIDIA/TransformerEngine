@@ -62,7 +62,6 @@ cast_transpose_kernel(const IType * const input,
                       OType * const output_t,
                       const CType * const scale_ptr,
                       CType * const amax,
-                      CType * const scale_inv,
                       const size_t row_length,
                       const size_t num_rows,
                       const size_t num_tiles) {
@@ -159,7 +158,6 @@ cast_transpose_kernel(const IType * const input,
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
     if (amax != nullptr) atomicMaxFloat(amax, max);
-    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
@@ -171,7 +169,6 @@ cast_transpose_kernel_notaligned(const IType * const input,
                                  OType * const output_t,
                                  const CType * const scale_ptr,
                                  CType * const amax,
-                                 CType * const scale_inv,
                                  const size_t row_length,
                                  const size_t num_rows,
                                  const size_t num_tiles) {
@@ -295,7 +292,6 @@ cast_transpose_kernel_notaligned(const IType * const input,
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
     if (amax != nullptr) atomicMaxFloat(amax, max);
-    if (scale_inv != nullptr) reciprocal<float>(scale_inv, scale);
   }
 }
 
@@ -324,8 +320,6 @@ void cast_transpose(const Tensor &input,
              "C and T outputs need to share amax tensor.");
   NVTE_CHECK(cast_output->scale.dptr == transposed_output->scale.dptr,
              "C and T outputs need to share scale tensor.");
-  NVTE_CHECK(cast_output->scale_inv.dptr == transposed_output->scale_inv.dptr,
-             "C and T outputs need to share scale inverse tensor.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
@@ -361,7 +355,6 @@ void cast_transpose(const Tensor &input,
                 reinterpret_cast<OutputType *>(transposed_output->data.dptr),
                 reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
                 reinterpret_cast<fp32 *>(cast_output->amax.dptr),
-                reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
                 row_length, num_rows, n_tiles);
       } else {
         cudaFuncSetAttribute(cast_transpose_kernel_notaligned<nvec_in, nvec_out, fp32,
@@ -379,7 +372,6 @@ void cast_transpose(const Tensor &input,
                 reinterpret_cast<OutputType *>(transposed_output->data.dptr),
                 reinterpret_cast<const fp32 *>(cast_output->scale.dptr),
                 reinterpret_cast<fp32 *>(cast_output->amax.dptr),
-                reinterpret_cast<fp32 *>(cast_output->scale_inv.dptr),
                 row_length, num_rows, n_tiles);
       }
     );  // NOLINT(*)

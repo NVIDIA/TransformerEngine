@@ -185,7 +185,6 @@ __launch_bounds__(unary_kernel_threads)
 __global__ void unary_kernel(const InputType *input,
                              OutputType *output,
                              const ComputeType *scale,
-                             ComputeType *scale_inv,
                              ComputeType *amax,
                              Param p,
                              const size_t N,
@@ -196,9 +195,6 @@ __global__ void unary_kernel(const InputType *input,
   ComputeType s = 0;
   if constexpr (is_fp8<OutputType>::value) {
       if (scale != nullptr) s = *scale;
-      if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
-        reciprocal<ComputeType>(scale_inv, s);
-      }
   }
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
@@ -295,7 +291,6 @@ template <int nvec, typename Param,
 void VectorizedUnaryKernelLauncher(const InputType *input,
                                    OutputType *output,
                                    const fp32 *scale,
-                                   fp32 *scale_inv,
                                    fp32 *amax,
                                    const size_t N,
                                    const Param params,
@@ -313,16 +308,16 @@ void VectorizedUnaryKernelLauncher(const InputType *input,
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, num_aligned_elements);
+            input, output, scale, amax, params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, num_aligned_elements);
+            input, output, scale, amax, params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, params, N, N);
+            input, output, scale, amax, params, N, N);
         break;
       }
     }
@@ -338,7 +333,6 @@ __launch_bounds__(unary_kernel_threads)
 __global__ void gated_act_kernel(const InputType *input,
                                  OutputType *output,
                                  const ComputeType *scale,
-                                 ComputeType *scale_inv,
                                  ComputeType *amax,
                                  const size_t m,
                                  const size_t n,
@@ -356,9 +350,6 @@ __global__ void gated_act_kernel(const InputType *input,
     ComputeType s = 0;
     if constexpr (is_fp8<OutputType>::value) {
         if (scale != nullptr) s = *scale;
-        if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
-          reciprocal<ComputeType>(scale_inv, s);
-        }
     }
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
@@ -398,7 +389,6 @@ template <int nvec,
 void GatedActivationKernelLauncher(const InputType *input,
                                    OutputType *output,
                                    const fp32 *scale,
-                                   fp32 *scale_inv,
                                    fp32 *amax,
                                    const size_t m,
                                    const size_t n,
@@ -413,16 +403,16 @@ void GatedActivationKernelLauncher(const InputType *input,
     switch (auto align = CheckAlignment(n, nvec, input, input + n, output)) {
       case Alignment::SAME_ALIGNED:
         gated_act_kernel<nvec, true, ComputeType, Activation><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, m, n, num_aligned_elements);
+            input, output, scale, amax, m, n, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
         gated_act_kernel<nvec, false, ComputeType, Activation><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, m, n, num_aligned_elements);
+            input, output, scale, amax, m, n, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         gated_act_kernel<1, true, ComputeType, Activation><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, scale_inv, amax, m, n, n);
+            input, output, scale, amax, m, n, n);
         break;
       }
     }
