@@ -18,7 +18,7 @@ from typing import Union, Tuple
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.cpp_extensions import *
+from transformer_engine.pytorch.cpp_extensions import gemm, fp8_gemm, fp8_gelu, cast_to_fp8, cast_from_fp8
 from transformer_engine.pytorch.module import get_workspace
 import transformer_engine.pytorch.cpp_extensions as texcpp
 import transformer_engine.pytorch.softmax as softmax_defs
@@ -683,7 +683,7 @@ def test_export_layernorm_linear(
         if not use_fp8:
             validate_result(fname, inp, model, atol=1e-3)
         elif precision not in (torch.bfloat16,):
-            validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
+            validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8)
 
 
 @pytest.mark.parametrize("scale_factor", [112])

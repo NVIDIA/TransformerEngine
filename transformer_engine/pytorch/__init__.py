@@ -11,4 +11,11 @@ from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
 from .distributed import checkpoint
 # Register custom op symbolic ONNX functions
-from .te_onnx_extensions import *
+from .te_onnx_extensions import (
+    onnx_cast_to_fp8,
+    onnx_cast_from_fp8,
+    onnx_fp8_gelu,
+    onnx_te_gemm,
+    onnx_layernorm_fwd_fp8,
+    onnx_layernorm_fwd,
+)
