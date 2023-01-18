@@ -375,15 +375,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
 
-
-        if self.fp8_calibration:
-            # amax of input
-            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                torch.amax(inp).float()
-            # amax of weight
-            self.fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                torch.amax(weight).float()
-
         # Activation recomputation is used and this is the first forward phase.
         if (
             self.fp8
@@ -577,6 +568,7 @@ class _LayerNormLinear(torch.autograd.Function):
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
+        fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
@@ -669,6 +661,14 @@ class _LayerNormLinear(torch.autograd.Function):
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
+
+            if fp8_calibration:
+                # amax of input
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
+                    torch.amax(ln_out_total).float()
+                # amax of weight
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                    torch.amax(weight).float()
 
             out, _, _ = gemm(
                 weight,
@@ -883,6 +883,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1128,6 +1129,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.eps,
             is_first_microbatch,
             self.fp8,
+            self.fp8_calibration,
             self.fp8_meta,
             self.fuse_wgrad_accumulation,
             self.tp_group,
@@ -1171,6 +1173,7 @@ class _Linear(torch.autograd.Function):
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
+        fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
@@ -1249,6 +1252,13 @@ class _Linear(torch.autograd.Function):
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
+
+            if fp8_calibration:
+                # amax of input
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
+                    torch.amax(inputmat_total).float()
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                    torch.amax(weight).float()
 
             out, _, _ = gemm(
                 weight,
@@ -1444,6 +1454,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -1655,6 +1666,7 @@ class Linear(TransformerEngineBaseModule):
             self.use_bias,
             is_first_microbatch,
             self.fp8,
+            self.fp8_calibration,
             self.fp8_meta,
             self.fuse_wgrad_accumulation,
             self.tp_group,
@@ -1697,6 +1709,7 @@ class _LayerNormMLP(torch.autograd.Function):
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
+        fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
         tp_group: Union[dist_group_type, None],
@@ -1825,6 +1838,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 cast_if_needed(fc2_bias, activation_dtype) if use_bias else fc2_bias
             )
 
+            if fp8_calibration:
+                # amax of fc1 input
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
+                    torch.amax(ln_out_total).float()
+                # amax of fc1 weight
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                    torch.amax(fc1_weight).float()
+
             fc1_outputs = gemm(
                 fc1_weight,
                 ln_out_total,
@@ -1840,6 +1861,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
             else:
                 gelu_out, _, fc1_out = fc1_outputs
+
+            if fp8_calibration:
+                 # amax of fc2 input
+                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
+                     torch.amax(gelu_out).float()
+                 # amax of fc2 weight
+                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT] = \
+                     torch.amax(fc2_weight).float()
 
             fc2_out, _, _ = gemm(
                 fc2_weight,
@@ -2201,6 +2230,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2463,6 +2493,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.eps,
             is_first_microbatch,
             self.fp8,
+            self.fp8_calibration,
             self.fp8_meta,
             self.fuse_wgrad_accumulation,
             self.tp_group,
