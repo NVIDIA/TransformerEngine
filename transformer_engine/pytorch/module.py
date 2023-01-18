@@ -331,7 +331,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
     def pre_forward(
-        self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None, num_gemms: int = 1
+        self, inp: torch.Tensor, num_gemms: int = 1
     ) -> None:
         """Checks and prep for FWD."""
 
@@ -1653,7 +1653,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        inp = self.pre_forward(inp, weight if weight is not None else self.weight)
+        inp = self.pre_forward(inp)
 
         bias_tensor = bias if bias is not None else self.bias
 
@@ -1863,12 +1863,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 gelu_out, _, fc1_out = fc1_outputs
 
             if fp8_calibration:
-                 # amax of fc2 input
-                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
-                     torch.amax(gelu_out).float()
-                 # amax of fc2 weight
-                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT] = \
-                     torch.amax(fc2_weight).float()
+                # amax of fc2 input
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
+                    torch.amax(gelu_out).float()
+                # amax of fc2 weight
+                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT] = \
+                    torch.amax(fc2_weight).float()
 
             fc2_out, _, _ = gemm(
                 fc2_weight,
