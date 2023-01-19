@@ -383,7 +383,6 @@ void LayerNormForwardImpl(NormalFwdParameter& p, cudaStream_t stream) {
         dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
   }
 
-
   size_t workspace_size = dummy_workspace_tensor.shape().data[0] *
     typeToSize(dummy_workspace_tensor.dtype()) +
     dummy_barrier_tensor.shape().data[0] *
@@ -421,45 +420,81 @@ void LayerNormForwardImpl(NormalFwdParameter& p, cudaStream_t stream) {
   }
 }
 
-void LayerNormBackwardImpl(void *grad_output, void *mu, void *rsigma, void *x,
-                           void *weight, std::uint64_t n, std::uint64_t hidden,
-                           float eps, DType x_dtype, DType w_dtype,
-                           cudaStream_t stream, void *xgrad, void *dgamma,
-                           void *dbeta) {
+struct NormalBwdParameter {
+    void *ograd;
+    void *mu;
+    void *rsigma;
+    TensorAddr x;
+    TensorAddr w;
+    uint64_t n;
+    uint64_t hidden;
+    float eps;
+    void *xgrad;
+    void *wgrad; // dgamma
+    void *dbeta;
+};
+
+void LayerNormBackwardImpl(NormalBwdParameter& p, cudaStream_t stream) {
+  auto n = p.n;
+  auto hidden = p.hidden;
   auto input_shape = std::vector<size_t>{n, hidden};
   auto weight_shape = std::vector<size_t>{hidden};
   auto intermediates_shape = std::vector<size_t>{n};
   auto intermediates_dtype = DType::kFloat32;
+  auto is_apex_norm = (p.dbeta) ? true:false;
 
   // assume input type = output type
+  auto *grad_output = p.ograd;
+  auto x_dtype = p.x.dtype;
   auto dz_tensor = TensorWrapper(grad_output, input_shape, x_dtype);
 
-  auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
-
+  auto *rsigma = p.rsigma;
   auto rsigma_tensor =
       TensorWrapper(rsigma, intermediates_shape, intermediates_dtype);
 
+  auto *x = p.x.ptr;
   auto x_tensor = TensorWrapper(x, input_shape, x_dtype);
 
+  auto *weight = p.w.ptr;
+  auto w_dtype = p.w.dtype;
   auto gamma_tensor = TensorWrapper(weight, weight_shape, w_dtype);
 
+  auto *xgrad = p.xgrad;
   auto xgrad_tensor = TensorWrapper(xgrad, input_shape, x_dtype);
 
-  auto dgamma_tensor = TensorWrapper(dgamma, weight_shape, w_dtype);
-
-  auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
+  auto *wgrad = p.wgrad;
+  auto wgrad_tensor = TensorWrapper(wgrad, weight_shape, w_dtype);
 
   TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
   TensorWrapper dummy_dgamma_part_tensor, dummy_dbeta_part_tensor;
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+  size_t dbeta_part_size{};
 
   // The first call is to query the workspace
-  nvte_layernorm_bwd(
-      dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
-      gamma_tensor.data(), xgrad_tensor.data(), dgamma_tensor.data(),
-      dbeta_tensor.data(), dummy_dgamma_part_tensor.data(),
-      dummy_dbeta_part_tensor.data(), stream,
-      cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  if (is_apex_norm) {
+      auto *mu = p.mu;
+      auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
+      auto *dbeta = p.dbeta;
+      auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
+
+      nvte_layernorm_bwd(
+          dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+          gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
+          dbeta_tensor.data(), dummy_dgamma_part_tensor.data(),
+          dummy_dbeta_part_tensor.data(), stream, num_sm,
+          dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+
+      dbeta_part_size = dummy_dbeta_part_tensor.shape().data[0] *
+                        dummy_dbeta_part_tensor.shape().data[1] *
+                        typeToSize(dummy_dbeta_part_tensor.dtype());
+  }
+  else {
+      nvte_rmsnorm_bwd(
+          dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(),
+          gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
+          dummy_dgamma_part_tensor.data(), stream, num_sm,
+          dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  }
 
   size_t workspace_size = dummy_workspace_tensor.shape().data[0] *
                           typeToSize(dummy_workspace_tensor.dtype());
@@ -468,18 +503,14 @@ void LayerNormBackwardImpl(void *grad_output, void *mu, void *rsigma, void *x,
   size_t dgamma_part_size = dummy_dgamma_part_tensor.shape().data[0] *
                             dummy_dgamma_part_tensor.shape().data[1] *
                             typeToSize(dummy_dgamma_part_tensor.dtype());
-  size_t dbeta_part_size = dummy_dbeta_part_tensor.shape().data[0] *
-                           dummy_dbeta_part_tensor.shape().data[1] *
-                           typeToSize(dummy_dbeta_part_tensor.dtype());
-
   size_t total_workspace_size =
-      workspace_size + barrier_size + dgamma_part_size + dbeta_part_size;
+      (workspace_size + barrier_size + dgamma_part_size + dbeta_part_size);
 
   void *workspace =
       cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
-  void *dgamma_part = static_cast<char *>(workspace) + workspace_size;
+  void *barrier = static_cast<char *>(workspace) + workspace_size;
+  void *dgamma_part = static_cast<char *>(barrier) + barrier_size;
   void *dbeta_part = static_cast<char *>(dgamma_part) + dgamma_part_size;
-  void *barrier = static_cast<char *>(dbeta_part) + dbeta_part_size;
 
   auto workspace_tensor =
       TensorWrapper(workspace, dummy_workspace_tensor.shape(),
@@ -492,16 +523,31 @@ void LayerNormBackwardImpl(void *grad_output, void *mu, void *rsigma, void *x,
       TensorWrapper(dgamma_part, dummy_dgamma_part_tensor.shape(),
                     dummy_dgamma_part_tensor.dtype());
 
-  auto dbeta_part_tensor =
-      TensorWrapper(dbeta_part, dummy_dbeta_part_tensor.shape(),
-                    dummy_dbeta_part_tensor.dtype());
+  if (is_apex_norm) {
+      auto *mu = p.mu;
+      auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
 
-  nvte_layernorm_bwd(
-      dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
-      gamma_tensor.data(), xgrad_tensor.data(), dgamma_tensor.data(),
-      dbeta_tensor.data(), dgamma_part_tensor.data(), dbeta_part_tensor.data(),
-      stream, cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      workspace_tensor.data(), barrier_tensor.data());
+      auto *dbeta = p.dbeta;
+      auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
+
+      auto dbeta_part_tensor =
+          TensorWrapper(dbeta_part, dummy_dbeta_part_tensor.shape(),
+          dummy_dbeta_part_tensor.dtype());
+
+      nvte_layernorm_bwd(
+          dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+          gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
+          dbeta_tensor.data(), dgamma_part_tensor.data(), dbeta_part_tensor.data(),
+          stream, num_sm,
+          workspace_tensor.data(), barrier_tensor.data());
+  }
+  else {
+      nvte_rmsnorm_bwd(
+          dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(),
+          gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
+          dgamma_part_tensor.data(), stream, num_sm,
+          workspace_tensor.data(), barrier_tensor.data());
+  }
 }
 
 void TELayerNormForwardFP8(cudaStream_t stream, void **buffers,
@@ -560,99 +606,26 @@ void TELayerNormBackward(cudaStream_t stream, void **buffers,
   const LayerNormDescriptor &descriptor =
       *UnpackDescriptor<LayerNormDescriptor>(opaque, opaque_len);
 
-  // input
-  void *grad_output = buffers[0];
-  void *mu = buffers[1];
-  void *rsigma = buffers[2];
-  void *x = buffers[3];
-  void *weight = buffers[4];
+  NormalBwdParameter p{};
 
-  // output
-  void *xgrad = buffers[5];
-  void *dgamma = buffers[6];
-  void *dbeta = buffers[7];
+  // input
+  p.ograd = buffers[0];
+  p.mu = buffers[1];
+  p.rsigma = buffers[2];
+  p.x = {buffers[3], static_cast<DType>(descriptor.x_dtype)};
+  p.w = {buffers[4], static_cast<DType>(descriptor.w_dtype)};
 
   // attributes
-  auto n = descriptor.n;
-  auto hidden = descriptor.hidden;
-  auto eps = descriptor.eps;
-  auto x_dtype = descriptor.x_dtype;
-  auto w_dtype = descriptor.w_dtype;
+  p.n = descriptor.n;
+  p.hidden = descriptor.hidden;
+  p.eps = descriptor.eps;
 
-  LayerNormBackwardImpl(grad_output, mu, rsigma, x, weight, n, hidden, eps,
-                        static_cast<DType>(x_dtype),
-                        static_cast<DType>(w_dtype), stream, xgrad, dgamma,
-                        dbeta);
-}
+  // output
+  p.xgrad = buffers[5];
+  p.wgrad = buffers[6];
+  p.dbeta = buffers[7];
 
-
-void RMSNormBackwardImpl(void *grad_output, void *rsigma, void *x, void *weight,
-                         std::uint64_t n, std::uint64_t hidden, float eps,
-                         DType x_dtype, DType w_dtype, cudaStream_t stream,
-                         void *xgrad, void *wgrad) {
-  auto input_shape = std::vector<size_t>{n, hidden};
-  auto weight_shape = std::vector<size_t>{hidden};
-  auto intermediates_shape = std::vector<size_t>{n};
-  auto intermediates_dtype = DType::kFloat32;
-
-  // assume input type = output type
-  auto dz_tensor = TensorWrapper(grad_output, input_shape, x_dtype);
-
-  auto rsigma_tensor =
-      TensorWrapper(rsigma, intermediates_shape, intermediates_dtype);
-
-  auto x_tensor = TensorWrapper(x, input_shape, x_dtype);
-
-  auto gamma_tensor = TensorWrapper(weight, weight_shape, w_dtype);
-
-  auto xgrad_tensor = TensorWrapper(xgrad, input_shape, x_dtype);
-
-  auto wgrad_tensor = TensorWrapper(wgrad, weight_shape, w_dtype);
-
-  TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
-  TensorWrapper dummy_dgamma_part_tensor;
-
-  // The first call is to query the workspace
-  nvte_rmsnorm_bwd(
-      dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(),
-      gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-      dummy_dgamma_part_tensor.data(), stream,
-      cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
-
-  size_t workspace_size = dummy_workspace_tensor.shape().data[0] *
-                          typeToSize(dummy_workspace_tensor.dtype());
-  size_t barrier_size = dummy_barrier_tensor.shape().data[0] *
-                        typeToSize(dummy_barrier_tensor.dtype());
-  size_t dgamma_part_size = dummy_dgamma_part_tensor.shape().data[0] *
-                            dummy_dgamma_part_tensor.shape().data[1] *
-                            typeToSize(dummy_dgamma_part_tensor.dtype());
-
-  size_t total_workspace_size =
-      workspace_size + barrier_size + dgamma_part_size;
-
-  void *workspace =
-      cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
-  void *dgamma_part = reinterpret_cast<char *>(workspace) + workspace_size;
-  void *barrier = reinterpret_cast<char *>(dgamma_part) + dgamma_part_size;
-
-  auto workspace_tensor =
-      TensorWrapper(workspace, dummy_workspace_tensor.shape(),
-                    dummy_workspace_tensor.dtype());
-
-  auto barrier_tensor = TensorWrapper(barrier, dummy_barrier_tensor.shape(),
-                                      dummy_barrier_tensor.dtype());
-
-  auto dgamma_part_tensor =
-      TensorWrapper(dgamma_part, dummy_dgamma_part_tensor.shape(),
-                    dummy_dgamma_part_tensor.dtype());
-
-  nvte_rmsnorm_bwd(
-      dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(),
-      gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-      dgamma_part_tensor.data(), stream,
-      cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      workspace_tensor.data(), barrier_tensor.data());
+  LayerNormBackwardImpl(p, stream);
 }
 
 void TERMSNormForwardFP8(cudaStream_t stream, void **buffers,
@@ -707,26 +680,24 @@ void TERMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque,
   const LayerNormDescriptor &descriptor =
       *UnpackDescriptor<LayerNormDescriptor>(opaque, opaque_len);
 
-  // input
-  void *grad_output = buffers[0];
-  void *rsigma = buffers[1];
-  void *x = buffers[2];
-  void *weight = buffers[3];
+  NormalBwdParameter p{};
 
-  // output
-  void *xgrad = buffers[4];
-  void *wgrad = buffers[5];
+  // input
+  p.ograd = buffers[0];
+  p.rsigma = buffers[1];
+  p.x = {buffers[2], static_cast<DType>(descriptor.x_dtype)};
+  p.w = {buffers[3], static_cast<DType>(descriptor.w_dtype)};
 
   // attributes
-  auto n = descriptor.n;
-  auto hidden = descriptor.hidden;
-  auto eps = descriptor.eps;
-  auto x_dtype = descriptor.x_dtype;
-  auto w_dtype = descriptor.w_dtype;
+  p.n = descriptor.n;
+  p.hidden = descriptor.hidden;
+  p.eps = descriptor.eps;
 
-  RMSNormBackwardImpl(grad_output, rsigma, x, weight, n, hidden, eps,
-                      static_cast<DType>(x_dtype), static_cast<DType>(w_dtype),
-                      stream, xgrad, wgrad);
+  // output
+  p.xgrad = buffers[4];
+  p.wgrad = buffers[5];
+
+  LayerNormBackwardImpl(p, stream);
 }
 
 }  // namespace jax
