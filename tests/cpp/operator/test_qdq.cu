@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -78,8 +78,6 @@ void performTestQ(const size_t N) {
 
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
-  float ref_scale_inv = 1.f / output.scale();
-  compareResults("scale_inv", output.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_q", output, ref_output.get(), atol, rtol);
 }

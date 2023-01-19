@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -27,7 +27,6 @@ void compute_ref(const std::vector<std::vector<InputType>>& input_list,
                  std::vector<std::vector<OutputType>>& output_t_list,
                  const std::vector<float>& scale_list,
                  std::vector<float>& amax_list,
-                 std::vector<float>& scale_inv_list,
                  const std::vector<size_t>& height_list,
                  const std::vector<size_t>& width_list) {
   using compute_t = float;
@@ -37,10 +36,8 @@ void compute_ref(const std::vector<std::vector<InputType>>& input_list,
     auto& output_t = output_t_list[tensor_id];
     const compute_t scale = scale_list[tensor_id];
     compute_t& amax = amax_list[tensor_id];
-    compute_t& scale_inv = scale_inv_list[tensor_id];
     const size_t height = height_list[tensor_id];
     const size_t width = width_list[tensor_id];
-    scale_inv = 1. / scale;
     amax = -1e100;
     for (size_t i = 0; i < height; ++i) {
       for (size_t j = 0; j < width; ++j) {
@@ -76,8 +73,7 @@ void performTest() {
   // Buffers for reference implementation
   std::vector<std::vector<InputType>> ref_input_list;
   std::vector<std::vector<OutputType>> ref_output_c_list, ref_output_t_list;
-  std::vector<float> ref_scale_list(num_tensors), ref_amax_list(num_tensors),
-    ref_scale_inv_list(num_tensors);
+  std::vector<float> ref_scale_list(num_tensors), ref_amax_list(num_tensors);
   std::vector<size_t> ref_height_list(num_tensors), ref_width_list(num_tensors);
 
   // Initialize buffers
@@ -128,7 +124,6 @@ void performTest() {
                                      ref_output_t_list,
                                      ref_scale_list,
                                      ref_amax_list,
-                                     ref_scale_inv_list,
                                      ref_height_list,
                                      ref_width_list);
 
@@ -142,10 +137,6 @@ void performTest() {
       compareResults("amax",
                      output_c_list[tensor_id].amax(),
                      ref_amax_list[tensor_id],
-                     atol_amax, rtol_amax);
-      compareResults("scale_inv",
-                     output_c_list[tensor_id].scale_inv(),
-                     ref_scale_inv_list[tensor_id],
                      atol_amax, rtol_amax);
     }
     auto [atol, rtol] = getTolerances(otype);

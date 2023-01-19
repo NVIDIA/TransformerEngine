@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -95,6 +95,15 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           transformer_engine::DType otype
 );
 
+at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
+                                 const at::Tensor &weight,
+                                 const at::Tensor &bias,
+                                 float eps,
+                                 at::Tensor scale,
+                                 at::Tensor amax,
+                                 at::Tensor scale_inv,
+                                 transformer_engine::DType otype
+);
 
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &weight,
@@ -102,6 +111,11 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       float eps
 );
 
+at::Tensor layernorm_fwd_inf(const at::Tensor &input,
+                             const at::Tensor &weight,
+                             const at::Tensor &bias,
+                             float eps
+);
 
 at::Tensor cast_to_fp8(const at::Tensor &input,
                        const at::Tensor &scale,

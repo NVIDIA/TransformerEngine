@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -308,6 +308,7 @@ void transpose(const Tensor &input,
 void nvte_transpose(const NVTETensor input,
                     NVTETensor transposed_output,
                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_transpose);
   using namespace transformer_engine;
   transpose(*reinterpret_cast<const Tensor*>(input),
             reinterpret_cast<Tensor*>(transposed_output),

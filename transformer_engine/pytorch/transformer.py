@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -520,6 +520,11 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
+        if attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
+
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -1005,6 +1010,11 @@ class TransformerLayer(torch.nn.Module):
         """
 
         hidden_states = hidden_states.contiguous()
+
+        if attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
 
         # For AMP
         if torch.is_autocast_enabled():

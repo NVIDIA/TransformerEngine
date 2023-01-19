@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -26,6 +26,28 @@ extern "C" {
 void nvte_gelu(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream);
+
+/*! \brief Compute GeGLU of the input.
+ *
+ *  \param[in]     input     Input tensor of shape [N, H * 2].
+ *                           It computes GELU([N, :H]) x [N, H:]
+ *  \param[in,out] output    Output tensor of shape [N, H].
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_geglu(const NVTETensor input,
+                      NVTETensor output,
+                      cudaStream_t stream);
+
+/*! \brief Compute GeGLU gradient.
+ *  \param[in]     grad      Input tensor of shape [N, H].
+ *  \param[in]     input     Input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Output tensor of shape [N, H * 2].
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dgeglu(const NVTETensor grad,
+                 const NVTETensor input,
+                 NVTETensor output,
+                 cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

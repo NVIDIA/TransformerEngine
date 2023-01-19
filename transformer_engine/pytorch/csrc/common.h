@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -94,6 +94,8 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
             return transformer_engine::DType::kFloat32;
         case at::kBFloat16:
             return transformer_engine::DType::kBFloat16;
+        case at::kBool:
+            return transformer_engine::DType::kByte;
         default:
             NVTE_ERROR("Invalid type");
     }

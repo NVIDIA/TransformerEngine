@@ -1,11 +1,10 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "ln.h"
-#include "../utils.cuh"
 #include "ln_kernel_traits.h"
 #include "ln_bwd_kernels.cuh"
 
@@ -186,6 +185,55 @@ void launch_general_(LaunchParams<BwdParams> &launch_params, const bool configur
     dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
     kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define REGISTER_BWD_TUNED_LAUNCHER(                                                               \
+    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG,        \
+                                                                BYTES_PER_LDG_FINALIZE)            \
+    void ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                       \
+            LaunchParams<BwdParams>                                                                \
+            &launch_params,                                                                        \
+            const bool configure_params) {                                                         \
+        launch_tuned_<WTYPE,                                                                       \
+                ITYPE,                                                                             \
+                OTYPE,                                                                             \
+                CTYPE,                                                                             \
+                uint32_t,                                                                          \
+                HIDDEN_SIZE,                                                                       \
+                CTAS_PER_ROW,                                                                      \
+                WARPS_M,                                                                           \
+                WARPS_N,                                                                           \
+                BYTES_PER_LDG,                                                                     \
+                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
+    }                                                                                              \
+    static BwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                              \
+                reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                   \
+                ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+#define REGISTER_BWD_GENERAL_LAUNCHER(                                                             \
+    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, BYTES_PER_LDG,                      \
+                                                                BYTES_PER_LDG_FINALIZE)            \
+    void ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                     \
+            LaunchParams<BwdParams>                                                                \
+            &launch_params,                                                                        \
+            const bool configure_params) {                                                         \
+        launch_general_<WTYPE,                                                                     \
+                ITYPE,                                                                             \
+                OTYPE,                                                                             \
+                CTYPE,                                                                             \
+                uint32_t,                                                                          \
+                HIDDEN_SIZE,                                                                       \
+                WARPS_M,                                                                           \
+                WARPS_N,                                                                           \
+                BYTES_PER_LDG,                                                                     \
+                BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);                          \
+    }                                                                                              \
+    static BwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                            \
+                reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                 \
+                ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Create tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...

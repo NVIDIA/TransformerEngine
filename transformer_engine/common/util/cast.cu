@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -50,7 +50,6 @@ void fp8_quantize(const Tensor &input,
           reinterpret_cast<const IType*>(input.data.dptr),
           reinterpret_cast<OType*>(output->data.dptr),
           reinterpret_cast<const fp32*>(output->scale.dptr),
-          reinterpret_cast<fp32*>(output->scale_inv.dptr),
           reinterpret_cast<fp32*>(output->amax.dptr),
           N,
           {},
@@ -82,7 +81,6 @@ void fp8_dequantize(const Tensor &input,
           reinterpret_cast<OType*>(output->data.dptr),
           nullptr,
           nullptr,
-          nullptr,
           N,
           p,
           stream);
@@ -95,6 +93,7 @@ void fp8_dequantize(const Tensor &input,
 void nvte_fp8_quantize(const NVTETensor input,
                        NVTETensor output,
                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fp8_quantize);
   using namespace transformer_engine;
   fp8_quantize(*reinterpret_cast<const Tensor*>(input),
                reinterpret_cast<Tensor*>(output),
@@ -104,6 +103,7 @@ void nvte_fp8_quantize(const NVTETensor input,
 void nvte_fp8_dequantize(const NVTETensor input,
                          NVTETensor output,
                          cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fp8_dequantize);
   using namespace transformer_engine;
   fp8_dequantize(*reinterpret_cast<const Tensor*>(input),
                  reinterpret_cast<Tensor*>(output),

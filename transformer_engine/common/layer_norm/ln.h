@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -86,10 +86,6 @@ struct FwdParams : public ParamsBase {
 
     // Scaling factor
     void *scale;
-
-    // Scaling factor inverse,
-    // needed for cublasLt fp8 gemm
-    void *scale_inv;
 
     // AMax output
     void *amax;

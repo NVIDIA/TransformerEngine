@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -236,6 +236,7 @@ void nvte_cublas_gemm(const NVTETensor A,
                       bool accumulate,
                       bool use_split_accumulator,
                       cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cublas_gemm);
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
   const Tensor *inputB = reinterpret_cast<const Tensor*>(B);

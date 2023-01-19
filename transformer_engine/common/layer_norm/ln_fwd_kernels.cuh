@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -133,7 +133,6 @@ void ln_fwd_tuned_kernel(FwdParams params) {
         if (threadIdx.x == 0 && threadIdx.y == 0) {
             static_assert(std::is_same<compute_t, float>::value);
             atomicMaxFloat(reinterpret_cast<compute_t*>(params.amax), amax);
-            reciprocal<compute_t>(reinterpret_cast<compute_t*>(params.scale_inv), scale);
         }
     }
 }
@@ -302,7 +301,6 @@ void ln_fwd_general_kernel(FwdParams params) {
         if ( threadIdx.x == 0 ) {
             static_assert(std::is_same<compute_t, float>::value);
             atomicMaxFloat(reinterpret_cast<compute_t*>(params.amax), amax);
-            reciprocal<compute_t>(reinterpret_cast<compute_t*>(params.scale_inv), scale);
         }
     }
 }

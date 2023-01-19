@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -215,8 +215,6 @@ void performTest(const size_t N, const size_t H) {
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(otype)) {
     compareResults("amax", z.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / z.scale();
-    compareResults("scale_inv", z.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 
   auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
