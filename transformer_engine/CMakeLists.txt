@@ -20,7 +20,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-find_package(CUDAToolkit REQUIRED cublas)
+find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR})
