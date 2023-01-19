@@ -1439,7 +1439,7 @@ class _Linear(torch.autograd.Function):
                 )
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
-            
+
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
                     ctx.fp8_meta["recipe"], fprop_tensor=True
@@ -1484,7 +1484,7 @@ class _Linear(torch.autograd.Function):
             elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                 dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-            if ctx.requires_wgrad::
+            if ctx.requires_wgrad:
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
