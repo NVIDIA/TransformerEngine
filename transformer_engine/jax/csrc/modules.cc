@@ -293,69 +293,132 @@ void TEGemm(cudaStream_t stream, void **buffers, const char *opaque,
                    wk_tensor.data(), false, d.use_split_accumulator, stream);
 }
 
-void LayerNormForwardImpl(void *input, void *weight, void *bias,
-                          std::uint64_t n, std::uint64_t hidden, float eps,
-                          DType x_dtype, DType w_dtype, float *scale,
-                          float *scale_inverse, float *amax,
-                          cudaStream_t stream, void *output, void *mu,
-                          void *rsigma, bool fp8_out) {
+struct TensorAddr {
+    void *ptr;
+    DType dtype;
+};
+
+struct FP8Meta {
+    float *amax{nullptr};
+    float *scale{nullptr};
+    float *scale_inv{nullptr};
+    FP8Meta() {}
+    FP8Meta(void *amax_, void *scale_,
+        void *scale_inv_, void *out) {
+
+        assert(amax_ == out);
+        amax = reinterpret_cast<float*>(amax_);
+        scale = reinterpret_cast<float*>(scale_);
+        scale_inv = reinterpret_cast<float*>(scale_inv_);
+    }
+};
+
+struct NormalFwdParameter {
+    TensorAddr x;
+    TensorAddr w;
+    void *bias;
+    uint64_t n;
+    uint64_t hidden;
+    float eps;
+    FP8Meta meta;
+    TensorAddr y;
+    void *mu;
+    void *rsigma;
+};
+
+void LayerNormForwardImpl(NormalFwdParameter& p, cudaStream_t stream) {
+
+  auto n = p.n;
+  auto hidden = p.hidden;
   auto input_shape = std::vector<size_t>{n, hidden};
   auto weight_shape = std::vector<size_t>{hidden};
   auto intermediates_shape = std::vector<size_t>{n};
+  auto eps = p.eps;
+  auto is_apex_norm = (p.bias) ? true:false;
 
-  auto input_tensor = TensorWrapper(input, input_shape, x_dtype);
+  auto *input = p.x.ptr;
+  auto in_dtype = p.x.dtype;
+  auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
 
+  auto *weight = p.w.ptr;
+  auto w_dtype = p.w.dtype;
   auto gamma_tensor = TensorWrapper(weight, weight_shape, w_dtype);
 
-  auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
-
-  auto output_dtype = fp8_out ? DType::kFloat8E4M3 : x_dtype;
   // assume output dtype = input dtype
   // If we need mixed I/O precision in the future, we need an additional
   // parameter for output type
-  auto output_tensor = TensorWrapper(output, input_shape, output_dtype,
-                                     amax, scale, scale_inverse);
+  auto *output = p.y.ptr;
+  auto out_dtype = p.y.dtype;
+  auto *amax = p.meta.amax;
+  auto *scale = p.meta.scale;
+  auto *scale_inv = p.meta.scale_inv;
+  auto output_tensor = TensorWrapper(output, input_shape, out_dtype,
+    amax, scale, scale_inv);
 
-  auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
-
+  auto *rsigma = p.rsigma;
   auto rsigma_tensor =
       TensorWrapper(rsigma, intermediates_shape, DType::kFloat32);
 
   // Create uninitialized workspace, barrier and init them on the first
-  // nvte_rmsnorm_fwd
   TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
   // The first call is to query the required workspace
-  nvte_layernorm_fwd(
-      input_tensor.data(), gamma_tensor.data(), beta_tensor.data(),
-      eps, output_tensor.data(), mu_tensor.data(),
-      rsigma_tensor.data(), stream,
-      cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  if (is_apex_norm) {
+    auto *bias = p.bias;
+    auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
+    auto *mu = p.mu;
+    auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
+
+    nvte_layernorm_fwd(
+        input_tensor.data(), gamma_tensor.data(), beta_tensor.data(),
+        eps, output_tensor.data(), mu_tensor.data(),
+        rsigma_tensor.data(), stream, num_sm,
+        dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  }
+  else {
+    nvte_rmsnorm_fwd(
+        input_tensor.data(), gamma_tensor.data(), eps,
+        output_tensor.data(), rsigma_tensor.data(), stream, num_sm,
+        dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  }
+
 
   size_t workspace_size = dummy_workspace_tensor.shape().data[0] *
-                              typeToSize(dummy_workspace_tensor.dtype()) +
-                          dummy_barrier_tensor.shape().data[0] *
-                              typeToSize(dummy_barrier_tensor.dtype());
+    typeToSize(dummy_workspace_tensor.dtype()) +
+    dummy_barrier_tensor.shape().data[0] *
+    typeToSize(dummy_barrier_tensor.dtype());
 
   void *workspace =
       cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
 
   auto workspace_tensor =
       TensorWrapper(workspace, dummy_workspace_tensor.shape(),
-                    dummy_workspace_tensor.dtype());
+      dummy_workspace_tensor.dtype());
 
   auto barrier_tensor =
       TensorWrapper(reinterpret_cast<char *>(workspace) +
-                        dummy_workspace_tensor.shape().data[0],
-                    dummy_barrier_tensor.shape(), dummy_barrier_tensor.dtype());
+      dummy_workspace_tensor.shape().data[0],
+      dummy_barrier_tensor.shape(), dummy_barrier_tensor.dtype());
 
-  nvte_layernorm_fwd(
-      input_tensor.data(), gamma_tensor.data(), beta_tensor.data(),
-      eps, output_tensor.data(), mu_tensor.data(),
-      rsigma_tensor.data(), stream,
-      cudaDevicePropertiesManager::Instance().GetMultiProcessorCount(),
-      workspace_tensor.data(), barrier_tensor.data());
+  if (is_apex_norm) {
+      auto *bias = p.bias;
+      auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
+      auto *mu = p.mu;
+      auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
+
+      nvte_layernorm_fwd(
+          input_tensor.data(), gamma_tensor.data(), beta_tensor.data(),
+          eps, output_tensor.data(), mu_tensor.data(),
+          rsigma_tensor.data(), stream, num_sm,
+          workspace_tensor.data(), barrier_tensor.data());
+  }
+  else {
+      nvte_rmsnorm_fwd(
+          input_tensor.data(), gamma_tensor.data(), eps,
+          output_tensor.data(), rsigma_tensor.data(), stream, num_sm,
+          dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
+  }
 }
 
 void LayerNormBackwardImpl(void *grad_output, void *mu, void *rsigma, void *x,
@@ -446,33 +509,26 @@ void TELayerNormForwardFP8(cudaStream_t stream, void **buffers,
   const LayerNormDescriptor &descriptor =
       *UnpackDescriptor<LayerNormDescriptor>(opaque, opaque_len);
 
+  NormalFwdParameter p{};
   // input
-  void *input = buffers[0];
-  void *weight = buffers[1];
-  void *bias = buffers[2];
-  void *amax = buffers[3];
-  float *scale = static_cast<float *>(buffers[4]);
-  float *scale_inverse = static_cast<float *>(buffers[5]);
-
-  // output
-  void *output = buffers[6];
-  void *mu = buffers[7];
-  void *rsigma = buffers[8];
-  float *amax_out = static_cast<float *>(buffers[9]);
+  p.x = {buffers[0], static_cast<DType>(descriptor.x_dtype)};
+  p.w = {buffers[1], static_cast<DType>(descriptor.w_dtype)};
+  p.bias = buffers[2];
 
   // attributes
-  auto n = descriptor.n;
-  auto hidden = descriptor.hidden;
-  auto eps = descriptor.eps;
-  auto x_dtype = descriptor.x_dtype;
-  auto w_dtype = descriptor.w_dtype;
+  p.n = descriptor.n;
+  p.hidden = descriptor.hidden;
+  p.eps = descriptor.eps;
 
-  assert(amax == amax_out);
+  // fp8 meta
+  p.meta = FP8Meta{buffers[3], buffers[4], buffers[5], buffers[9]};
 
-  LayerNormForwardImpl(input, weight, bias, n, hidden, eps,
-                       static_cast<DType>(x_dtype), static_cast<DType>(w_dtype),
-                       scale, scale_inverse, amax_out, stream, output, mu,
-                       rsigma, true);
+  // output
+  p.y = {buffers[6], DType::kFloat8E4M3};
+  p.mu = buffers[7];
+  p.rsigma = buffers[8];
+
+  LayerNormForwardImpl(p, stream);
 }
 
 void TELayerNormForward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -480,27 +536,23 @@ void TELayerNormForward(cudaStream_t stream, void **buffers, const char *opaque,
   const LayerNormDescriptor &descriptor =
       *UnpackDescriptor<LayerNormDescriptor>(opaque, opaque_len);
 
+  NormalFwdParameter p{};
   // input
-  void *input = buffers[0];
-  void *weight = buffers[1];
-  void *bias = buffers[2];
-
-  // output
-  void *output = buffers[3];
-  void *mu = buffers[4];
-  void *rsigma = buffers[5];
+  p.x = {buffers[0], static_cast<DType>(descriptor.x_dtype)};
+  p.w = {buffers[1], static_cast<DType>(descriptor.w_dtype)};
+  p.bias = buffers[2];
 
   // attributes
-  auto n = descriptor.n;
-  auto hidden = descriptor.hidden;
-  auto eps = descriptor.eps;
-  auto x_dtype = descriptor.x_dtype;
-  auto w_dtype = descriptor.w_dtype;
+  p.n = descriptor.n;
+  p.hidden = descriptor.hidden;
+  p.eps = descriptor.eps;
 
-  LayerNormForwardImpl(input, weight, bias, n, hidden, eps,
-                       static_cast<DType>(x_dtype), static_cast<DType>(w_dtype),
-                       nullptr, nullptr, nullptr, stream, output, mu, rsigma,
-                       false);
+  // output
+  p.y = {buffers[3], p.x.dtype};
+  p.mu = buffers[4];
+  p.rsigma = buffers[5];
+
+  LayerNormForwardImpl(p, stream);
 }
 
 void TELayerNormBackward(cudaStream_t stream, void **buffers,
