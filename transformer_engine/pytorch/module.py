@@ -201,7 +201,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
-
+        state = None
         if self.fp8 or self.fp8_calibration:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
@@ -1347,6 +1347,7 @@ class _Linear(torch.autograd.Function):
                 # amax of input
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
                     torch.amax(inputmat_total).float()
+                # amax of weight
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
                     torch.amax(weight).float()
 
