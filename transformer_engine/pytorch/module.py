@@ -1159,12 +1159,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
         # kernels from using all SMs in the device. This is useful for cases such as
         # communication overlap with LN.
-        self.fwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
-        )
-        self.bwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
-        )
+        self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -2628,12 +2624,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
         # kernels from using all SMs in the device. This is useful for cases such as
         # communication overlap with LN.
-        self.fwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
-        )
-        self.bwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
-        )
+        self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -2814,12 +2806,8 @@ class LayerNorm(torch.nn.Module):
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
         # kernels from using all SMs in the device. This is useful for cases such as
         # communication overlap with LN.
-        self.fwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
-        )
-        self.bwd_ln_sm_margin = bool(
-            int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
-        )
+        self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
     def load_state_dict(
         self,
