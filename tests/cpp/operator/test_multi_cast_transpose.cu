@@ -172,7 +172,6 @@ TEST_P(MultiCastTransposeTestSuite, TestMultiCastTranspose) {
 }
 
 
-
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
   MultiCastTransposeTestSuite,
