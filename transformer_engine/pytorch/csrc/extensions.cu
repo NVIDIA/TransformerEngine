@@ -373,7 +373,8 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &x,
                                       const at::Tensor &mu,
                                       const at::Tensor &rsigma,
-                                      const at::Tensor &gamma
+                                      const at::Tensor &gamma,
+                                      const int sm_margin
 ) {
     auto dx = at::empty_like(x);
     auto dgamma = at::empty_like(gamma);
@@ -393,7 +394,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
                        dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
                        dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     // Alloc space for Tensors.
@@ -418,7 +419,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
                        dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
                        dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     return { dx, dgamma, dbeta };
@@ -432,7 +433,8 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor scale,
                                           at::Tensor amax,
                                           at::Tensor scale_inv,
-                                          transformer_engine::DType otype
+                                          transformer_engine::DType otype,
+                                          const int sm_margin
 ) {
     using namespace transformer_engine;
 
@@ -457,7 +459,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
     // This call populates workspace and barrier tensors with the required config
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
                        mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     // Fill workspace and barrier
@@ -476,7 +478,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
     // Actual call to fwd kernel
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
                        mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     return {ln_out, mu, rsigma};
@@ -495,7 +497,7 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
     // This is a specialized version of layernorm_fwd_fp8, optimized for inference,
     // which only returns the normalized output.
     std::vector<at::Tensor> out = layernorm_fwd_fp8(
-      input, weight, bias, eps, scale, amax, scale_inv, otype);
+      input, weight, bias, eps, scale, amax, scale_inv, otype, 0);
     return out[0];
 }
 
@@ -503,7 +505,8 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &weight,
                                       const at::Tensor &bias,
-                                      float eps
+                                      float eps,
+                                      const int sm_margin
 ) {
     using namespace transformer_engine;
 
@@ -526,7 +529,7 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
     // This call populates workspace and barrier tensors with the required config
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
                        mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     // Fill workspace and barrier
@@ -545,7 +548,7 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
     // Actual call to fwd kernel
     nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
                        mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount,
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                        workspace.data(), barrier.data());
 
     return {ln_out, mu, rsigma};
@@ -559,7 +562,7 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
 ) {
     // This is a specialized version of layernorm_fwd, optimized for inference,
     // which only returns the normalized output.
-    std::vector<at::Tensor> out = layernorm_fwd(input, weight, bias, eps);
+    std::vector<at::Tensor> out = layernorm_fwd(input, weight, bias, eps, 0);
     return out[0];
 }
 
