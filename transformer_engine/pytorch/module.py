@@ -417,48 +417,46 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_init(num_gemms=num_gemms)
             self.set_fp8_weights()
 
-            update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
+            # Either we're in FP8 training or calibration for FP8 inference
+            needs_stats = (self.training if self.fp8 else self.fp8_calibration)
 
-        # Previous iteration was grad_enabled
-        if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            if self.fp8_meta["recipe"].reduce_amax:
-                copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-                amax_and_scale_update(
-                    self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
-                )
-                set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
-            else:
-                amax_and_scale_update(
-                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
-                )
-
-        # Either we're in FP8 training or calibration for FP8 inference
-        needs_stats = (self.training if self.fp8 else self.fp8_calibration)
-
-        if needs_stats:
-            # Setup for amax reduction
-            if self.fp8_meta["recipe"].reduce_amax:
-                self.fp8_meta["first_module"] = is_first_fp8_module()
-                if self.fp8_meta["first_module"]:
-                    self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-                    set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+            if needs_stats:
+                update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
+                # Previous iteration was grad_enabled
+                if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+                    if self.fp8_meta["recipe"].reduce_amax:
+                        copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                        amax_and_scale_update(
+                            self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        )
+                        set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+                    else:
+                        amax_and_scale_update(
+                             self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                        )
+                # Setup for amax reduction
+                if self.fp8_meta["recipe"].reduce_amax:
+                    self.fp8_meta["first_module"] = is_first_fp8_module()
+                    if self.fp8_meta["first_module"]:
+                        self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
+                        set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                    else:
+                        self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                    self.fp8_meta["autocast_id_fwd_stack"].append(
+                        self.fp8_meta["autocast_id_fwd"]
+                    )
+                    add_amax_to_global_buffer(self.fp8_meta, forward=True)
+                    self.fp8_meta["update_amax_and_scale_fwd"] = True
                 else:
-                    self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
-                self.fp8_meta["autocast_id_fwd_stack"].append(
-                    self.fp8_meta["autocast_id_fwd"]
-                )
-                add_amax_to_global_buffer(self.fp8_meta, forward=True)
-                self.fp8_meta["update_amax_and_scale_fwd"] = True
-            else:
-                self.fp8_meta["update_amax_and_scale_fwd"] = False
+                    self.fp8_meta["update_amax_and_scale_fwd"] = False
 
-            # Activation recomputation is used and this is the first forward phase.
-            if (
-                self.fp8
-                and is_fp8_activation_recompute_enabled()
-                and not in_fp8_activation_recompute_phase()
-            ):
-                copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                # Activation recomputation is used and this is the first forward phase.
+                if (
+                    self.fp8
+                    and is_fp8_activation_recompute_enabled()
+                    and not in_fp8_activation_recompute_phase()
+                ):
+                    copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
             yield inp.contiguous()
