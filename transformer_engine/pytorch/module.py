@@ -967,6 +967,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1377,14 +1378,10 @@ class _Linear(torch.autograd.Function):
         if is_training:
             fp8_wgrad = fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
             ctx.save_for_backward(
-                inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad
-                else None,
-                inputmat_t if weight.requires_grad and fp8_wgrad
-                else None,
-                weight if inputmat.requires_grad and not fp8
-                else None,
-                weight_t_fp8 if inputmat.requires_grad and fp8
-                else None,
+                inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad else None,
+                inputmat_t if weight.requires_grad and fp8_wgrad else None,
+                weight,
+                weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
             ctx.activation_dtype = activation_dtype
@@ -2373,6 +2370,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             fc2_bias_grad,
+            None,
             None,
             None,
             None,
