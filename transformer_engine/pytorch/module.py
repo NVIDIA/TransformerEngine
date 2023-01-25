@@ -967,6 +967,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2373,6 +2374,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             fc2_bias_grad,
+            None,
             None,
             None,
             None,
