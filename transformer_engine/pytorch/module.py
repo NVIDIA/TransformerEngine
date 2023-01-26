@@ -417,23 +417,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_init(num_gemms=num_gemms)
             self.set_fp8_weights()
 
-            # Either we're in FP8 training or calibration for FP8 inference
-            needs_stats = (self.training if self.fp8 else self.fp8_calibration)
+            update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
 
-            if needs_stats:
-                update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
-                # Previous iteration was grad_enabled
-                if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-                    if self.fp8_meta["recipe"].reduce_amax:
-                        copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-                        amax_and_scale_update(
-                            self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
-                        )
-                        set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
-                    else:
-                        amax_and_scale_update(
-                             self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
-                        )
+            # Previous iteration was grad_enabled
+            if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+                if self.fp8_meta["recipe"].reduce_amax:
+                    copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                    amax_and_scale_update(
+                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                    )
+                    set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+                else:
+                    amax_and_scale_update(
+                        self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
+                    )
+
+            if self.fp8 and self.training:
                 # Setup for amax reduction
                 if self.fp8_meta["recipe"].reduce_amax:
                     self.fp8_meta["first_module"] = is_first_fp8_module()
@@ -446,17 +445,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         self.fp8_meta["autocast_id_fwd"]
                     )
                     add_amax_to_global_buffer(self.fp8_meta, forward=True)
-                    self.fp8_meta["update_amax_and_scale_fwd"] = True
-                else:
-                    self.fp8_meta["update_amax_and_scale_fwd"] = False
+                self.fp8_meta["update_amax_and_scale_fwd"] = True
+            else:
+                self.fp8_meta["update_amax_and_scale_fwd"] = False
 
-                # Activation recomputation is used and this is the first forward phase.
-                if (
-                    self.fp8
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            # Activation recomputation is used and this is the first forward phase.
+            if (
+                self.fp8
+                and is_fp8_activation_recompute_enabled()
+                and not in_fp8_activation_recompute_phase()
+            ):
+                copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
             yield inp.contiguous()
@@ -1395,7 +1394,6 @@ class _Linear(torch.autograd.Function):
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
-            ctx.requires_dgrad = inputmat.requires_grad
             ctx.requires_wgrad = weight.requires_grad
 
         # Row Parallel Linear
@@ -1461,32 +1459,30 @@ class _Linear(torch.autograd.Function):
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
 
-            if ctx.requires_dgrad:
                 # DGRAD
-                if ctx.fp8:
-                    dgrad = fp8_gemm(
-                        weight_t_fp8,
-                        fwd_scale_inverses,
-                        tex.FP8FwdTensors.GEMM1_WEIGHT,
-                        fp8_dtype_forward,
-                        grad_output_c,
-                        ctx.fp8_meta["scaling_bwd"].scale_inv,
-                        tex.FP8BwdTensors.GRAD_OUTPUT1,
-                        fp8_dtype_backward,
-                        ctx.activation_dtype,
-                        get_workspace(),
-                        use_split_accumulator=_2X_ACC_DGRAD,
-                    )
-                else:
-                    # DGRAD
-                    dgrad, _, _ = gemm(
-                        weight,
-                        grad_output,
-                        ctx.activation_dtype,
-                        get_workspace(),
-                        layout="NN",
-                        grad=True,
-                    )
+                dgrad = fp8_gemm(
+                    weight_t_fp8,
+                    fwd_scale_inverses,
+                    tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    fp8_dtype_forward,
+                    grad_output_c,
+                    ctx.fp8_meta["scaling_bwd"].scale_inv,
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    fp8_dtype_backward,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    use_split_accumulator=_2X_ACC_DGRAD,
+                )
+            else:
+                # DGRAD
+                dgrad, _, _ = gemm(
+                    weight,
+                    grad_output,
+                    ctx.activation_dtype,
+                    get_workspace(),
+                    layout="NN",
+                    grad=True,
+                )
 
             # Overlap dgrad-RS/AR with wgrad
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
@@ -1555,7 +1551,7 @@ class _Linear(torch.autograd.Function):
             wgrad if ctx.requires_wgrad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.view(ctx.inp_shape),
             grad_bias,
             None,
             None,
