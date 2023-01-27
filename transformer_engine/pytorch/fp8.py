@@ -224,6 +224,11 @@ def fp8_autocast(
     ----------
     enabled: bool, default = `False`
              whether or not to enable fp8
+    calibrating: bool, default = `False`
+                 calibration mode allows collecting statistics such as amax and scale
+                 data of fp8 tensors even when executing without fp8 enabled. This is
+                 useful for saving an inference ready fp8 checkpoint while training
+                 using a higher precision.
     fp8_recipe: recipe.DelayedScaling, default = `None`
                 recipe used for FP8 training.
     fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
