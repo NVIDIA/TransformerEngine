@@ -121,8 +121,9 @@ __global__ void scaled_softmax_warp_forward(
 
     // blockDim/threadIdx = (WARP_SIZE, WARPS_PER_BLOCK, )
     // gridDim/blockIdx = (seq_len, attn_heads, batches)
-    int first_batch = (blockDim.y * (blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z))
-                                                                        + threadIdx.y) * WARP_BATCH;
+    size_t first_batch = (blockDim.y * (blockIdx.x + gridDim.x *
+                                        (blockIdx.y + gridDim.y * blockIdx.z))
+                          + threadIdx.y) * WARP_BATCH;
 
     // micro_batch_size might not be a multiple of WARP_BATCH. Check how
     // many batches have to computed within this WARP.
@@ -133,8 +134,9 @@ __global__ void scaled_softmax_warp_forward(
     // there might be multiple batches per warp. compute the index within the batch
     int local_idx = threadIdx.x;
 
-    src += first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
-    dst += first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    size_t thread_offset = first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    src += thread_offset;
+    dst += thread_offset;
 
     // load data from global memory
     acc_t elements[WARP_BATCH][WARP_ITERATIONS];
@@ -236,9 +238,10 @@ __global__ void scaled_masked_softmax_warp_forward(
 
     // blockDim/threadIdx = (WARP_SIZE, WARPS_PER_BLOCK, )
     // gridDim/blockIdx = (seq_len, attn_heads, batches)
-    int first_batch = (blockDim.y * (blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z))
-                                                                        + threadIdx.y) * WARP_BATCH;
-    int pad_first_batch = 0;
+    size_t first_batch = (blockDim.y * (blockIdx.x + gridDim.x *
+                                        (blockIdx.y + gridDim.y * blockIdx.z))
+                          + threadIdx.y) * WARP_BATCH;
+    size_t pad_first_batch = 0;
     if (pad_batches != 1) {  // bert style
         pad_first_batch = (blockDim.y * (blockIdx.x + gridDim.x * blockIdx.z) + threadIdx.y)
                                                                                * WARP_BATCH;
@@ -255,9 +258,11 @@ __global__ void scaled_masked_softmax_warp_forward(
     // there might be multiple batches per warp. compute the index within the batch
     int local_idx = threadIdx.x;
 
-    src += first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
-    dst += first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
-    mask += pad_first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    size_t thread_offset_src_dst = first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    size_t thread_offset_mask = pad_first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    src += thread_offset_src_dst;
+    dst += thread_offset_src_dst;
+    mask += thread_offset_mask;
 
     // load data from global memory
     acc_t elements[WARP_BATCH][WARP_ITERATIONS];
@@ -365,7 +370,7 @@ __global__ void scaled_masked_softmax_warp_backward(
 
     // blockDim/threadIdx = (WARP_SIZE, WARPS_PER_BLOCK, )
     // gridDim/blockIdx = (seq_len, attn_heads, batches)
-    int first_batch = (blockDim.y * blockIdx.x + threadIdx.y) * WARP_BATCH;
+    size_t first_batch = (blockDim.y * blockIdx.x + threadIdx.y) * WARP_BATCH;
 
     // micro_batch_size might not be a multiple of WARP_BATCH. Check how
     // many batches have to computed within this WARP.
@@ -377,7 +382,7 @@ __global__ void scaled_masked_softmax_warp_backward(
     int local_idx = threadIdx.x;
 
     // the first element to process by the current thread
-    int thread_offset = first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
+    size_t thread_offset = first_batch * element_count + ELEMENTS_PER_LDG_STG * local_idx;
     grad += thread_offset;
     output += thread_offset;
     gradInput += thread_offset;

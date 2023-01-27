@@ -687,6 +687,10 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input,
                (input.scalar_type() == at::ScalarType::BFloat16),
                "Only fp16 and bf16 are supported");
     AT_ASSERTM(mask.dim() == 4, "expected 4D tensor");
+    if (!input.is_contiguous())
+        input = input.contiguous();
+    if (!mask.is_contiguous())
+        mask = mask.contiguous();
 
     const int batches = input.size(0);
     const int pad_batches = mask.size(0);
