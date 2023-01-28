@@ -47,7 +47,8 @@ def fp8_gemm(
         return_output = True
 
     out_dtype = tex.DType.kFloat32 if fp32_output else TE_DType[out_dtype]
-    bias_dtype = out_dtype if bias is None else TE_DType[bias.dtype]
+    # Use bfloat16 as default bias_dtype
+    bias_dtype = tex.DType.kBFloat16 if bias is None else TE_DType[bias.dtype]
     out_dtype = D_dtype if D_dtype is not None else out_dtype
 
     _ = torch.ops.tex_ts.te_gemm_ts(
@@ -74,8 +75,6 @@ def fp8_gemm(
         accumulate,
         use_split_accumulator,
     )
-    if out_index is not None:
-        fp8_meta_tensor.scale_inv[out_index] = 1./fp8_meta_tensor.scale[out_index]
 
     if return_output:
         return out

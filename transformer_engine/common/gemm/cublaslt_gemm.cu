@@ -81,7 +81,7 @@ void cublas_gemm(const Tensor *inputA,
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
-  if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
+  if (is_fp8_dtype(D_type)) {
     NVTE_CHECK(!accumulate,
              "Accumulation mode not supported with FP8 GEMM output!");
   }
@@ -142,7 +142,7 @@ void cublas_gemm(const Tensor *inputA,
                                                      CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
-    if (D_type == CUDA_R_8F_E4M3 || D_type == CUDA_R_8F_E5M2) {
+    if (is_fp8_dtype(D_type)) {
       // Accumulation mode not supported for FP8 output
       C = nullptr;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -153,6 +153,7 @@ void cublas_gemm(const Tensor *inputA,
                                                        CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
                                                        &D_amax,
                                                        sizeof(D_amax)));
+      // For FP8 output, cuBLAS requires C_type to be same as bias_type
       NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
     }
     else {
