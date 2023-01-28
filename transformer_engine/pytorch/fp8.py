@@ -314,6 +314,7 @@ def _default_get_amax(
         amax = torch.max(amax_history, dim=0).values
     else:  # amax_compute_algo == "most_recent"
         amax = amax_history[0]
+
     amax_history = update_amax_history(amax_history)
     return amax_history, amax
 
