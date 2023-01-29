@@ -73,8 +73,11 @@ at::Tensor te_gemm_ts(at::Tensor A,
                       int64_t B_type,
                       int64_t transb,
                       at::Tensor D,
+                      at::Tensor D_scale,
                       int64_t D_type,
+                      at::Tensor D_amax,
                       at::Tensor bias,
+                      int64_t bias_type,
                       at::Tensor pre_gelu_out,
                       int64_t grad,
                       at::Tensor workspace,
@@ -87,6 +90,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
   transformer_engine::DType B_type_arg = reverse_map_dtype(B_type);
   bool transb_arg = static_cast<bool>(transb);
   transformer_engine::DType D_type_arg = reverse_map_dtype(D_type);
+  transformer_engine::DType bias_type_arg = reverse_map_dtype(bias_type);
   bool grad_arg = static_cast<bool>(grad);
   size_t workspaceSize_arg = static_cast<size_t>(workspaceSize);
   bool accumulate_arg = static_cast<bool>(accumulate);
@@ -100,6 +104,9 @@ at::Tensor te_gemm_ts(at::Tensor A,
   if (B_scale_inverse.numel())
     B_scale_inverse_arg = B_scale_inverse[B_fp8_tensor];
 
+  at::Tensor D_scale_arg = D_scale.clone();
+  at::Tensor D_amax_arg = D_amax.clone();
+
   te_gemm(A,
           A_scale_inverse_arg,
           A_type_arg,
@@ -109,8 +116,11 @@ at::Tensor te_gemm_ts(at::Tensor A,
           B_type_arg,
           transb_arg,
           D,
+          D_scale_arg,
           D_type_arg,
+          D_amax_arg,
           bias,
+          bias_type_arg,
           pre_gelu_out,
           grad_arg,
           workspace,
