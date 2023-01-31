@@ -5,7 +5,7 @@
 """FP8 utilies for TransformerEngine"""
 from contextlib import contextmanager
 from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union, Deque
+from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_extensions as tex
@@ -62,22 +62,6 @@ def set_global_fp8_buffer(buffer: Dict[str, List[torch.Tensor]]) -> None:
         buffer[k] = [tensor.cuda() for tensor in v]
 
     _global_fp8_buffer = buffer
-
-
-def get_global_fp8_recompute_buffer() -> Dict[str, List[torch.Tensor]]:
-    """Returns global fp8 recompute buffer."""
-    return _fp8_tensors_recompute_buffer
-
-
-def set_global_fp8_recompute_buffer(buffer: List[Deque[List[torch.Tensor]]]) -> None:
-    """Sets global fp8 recompute buffer."""
-    global _fp8_tensors_recompute_buffer
-
-    # Map all tensors back to GPU.
-    for index, deck in enumerate(buffer):
-        buffer[index] = deque([[t.cuda() for t in tensors] for tensors in deck])
-
-    _fp8_tensors_recompute_buffer = buffer
 
 
 def setup_amax_forward_global_reduce_func(f: Callable) -> None:
