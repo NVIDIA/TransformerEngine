@@ -35,8 +35,6 @@ from .fp8 import (
     amax_and_scale_update,
     get_global_fp8_buffer,
     set_global_fp8_buffer,
-    get_global_fp8_recompute_buffer,
-    set_global_fp8_recompute_buffer,
     set_amax_buffer_key_deletion,
     delete_key_from_amax_buffer,
     copy_forward_fp8_meta_tensors_for_recompute,
@@ -209,7 +207,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
             state["global_fp8_buffer"] = get_global_fp8_buffer()
-            state["global_fp8_recompute_buffer"] = get_global_fp8_recompute_buffer()
 
             # Store other pickelable values.
             extra = {}
@@ -269,11 +266,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Restore global FP8 buffer states.
         set_global_fp8_buffer(state["global_fp8_buffer"])
-        set_global_fp8_recompute_buffer(state["global_fp8_recompute_buffer"])
-
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+        if "global_fp8_buffer_pos_fwd_recompute" in self.fp8_meta:
+            del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
         # Initialize before loading.
         self.init_fp8_meta_tensors()
@@ -452,6 +449,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Activation recomputation is used and this is the first forward phase.
             if (
                 self.fp8
+                and self.training
                 and is_fp8_activation_recompute_enabled()
                 and not in_fp8_activation_recompute_phase()
             ):
