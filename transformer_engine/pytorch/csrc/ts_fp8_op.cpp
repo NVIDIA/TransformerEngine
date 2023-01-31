@@ -104,9 +104,6 @@ at::Tensor te_gemm_ts(at::Tensor A,
   if (B_scale_inverse.numel())
     B_scale_inverse_arg = B_scale_inverse[B_fp8_tensor];
 
-  at::Tensor D_scale_arg = D_scale.clone();
-  at::Tensor D_amax_arg = D_amax.clone();
-
   te_gemm(A,
           A_scale_inverse_arg,
           A_type_arg,
@@ -116,9 +113,9 @@ at::Tensor te_gemm_ts(at::Tensor A,
           B_type_arg,
           transb_arg,
           D,
-          D_scale_arg,
+          D_scale,
           D_type_arg,
-          D_amax_arg,
+          D_amax,
           bias,
           bias_type_arg,
           pre_gelu_out,
