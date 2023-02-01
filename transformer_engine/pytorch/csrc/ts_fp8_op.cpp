@@ -30,7 +30,7 @@ at::Tensor cast_to_fp8_ts(const at::Tensor &input,
                                    amax[0][fp8_tensor],
                                    scale_inv[fp8_tensor],
                                    otype_arg);
-  return output.clone();
+  return output;
 }
 
 at::Tensor cast_from_fp8_ts(const at::Tensor &input,
@@ -44,7 +44,7 @@ at::Tensor cast_from_fp8_ts(const at::Tensor &input,
                                     scale_inv[fp8_tensor],
                                     itype_arg,
                                     otype_arg);
-  return output.clone();
+  return output;
 }
 
 at::Tensor fp8_gelu_ts(at::Tensor input,
@@ -59,7 +59,7 @@ at::Tensor fp8_gelu_ts(at::Tensor input,
                                amax[0][fp8_tensor],
                                scale_inv[fp8_tensor],
                                otype_arg);
-  return output.clone();
+  return output;
 }
 
 at::Tensor te_gemm_ts(at::Tensor A,
@@ -92,11 +92,11 @@ at::Tensor te_gemm_ts(at::Tensor A,
   bool accumulate_arg = static_cast<bool>(accumulate);
   bool use_split_accumulator_arg = static_cast<bool>(use_split_accumulator);
 
-  at::Tensor A_scale_inverse_arg = A_scale_inverse.clone();
+  at::Tensor A_scale_inverse_arg = A_scale_inverse;
   if (A_scale_inverse.numel())
     A_scale_inverse_arg = A_scale_inverse[A_fp8_tensor];
 
-  at::Tensor B_scale_inverse_arg = B_scale_inverse.clone();
+  at::Tensor B_scale_inverse_arg = B_scale_inverse;
   if (B_scale_inverse.numel())
     B_scale_inverse_arg = B_scale_inverse[B_fp8_tensor];
 
@@ -141,7 +141,7 @@ at::Tensor layernorm_fwd_fp8_inf_ts(const at::Tensor &input,
                                             scale_inv,
                                             otype_arg);
 
-  return output.clone();
+  return output;
 }
 
 at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
@@ -155,7 +155,7 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
                                         bias,
                                         eps_float);
 
-  return output.clone();
+  return output;
 }
 
 TORCH_LIBRARY(tex_ts, m) {
