@@ -98,7 +98,7 @@ supported_frameworks = {
     "jax": None, # JAX use transformer_engine/CMakeLists.txt
 }
 
-framework = os.environ.get("FRAMEWORK", "all")
+framework = os.environ.get("FRAMEWORK", "pytorch")
 
 args = sys.argv.copy()
 for s in args:
