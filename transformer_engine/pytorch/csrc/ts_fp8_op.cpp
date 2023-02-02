@@ -92,20 +92,18 @@ at::Tensor te_gemm_ts(at::Tensor A,
   bool accumulate_arg = static_cast<bool>(accumulate);
   bool use_split_accumulator_arg = static_cast<bool>(use_split_accumulator);
 
-  at::Tensor A_scale_inverse_arg = A_scale_inverse;
   if (A_scale_inverse.numel())
-    A_scale_inverse_arg = A_scale_inverse[A_fp8_tensor];
+    A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
-  at::Tensor B_scale_inverse_arg = B_scale_inverse;
   if (B_scale_inverse.numel())
-    B_scale_inverse_arg = B_scale_inverse[B_fp8_tensor];
+    B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
   te_gemm(A,
-          A_scale_inverse_arg,
+          A_scale_inverse,
           A_type_arg,
           transa_arg,
           B,
-          B_scale_inverse_arg,
+          B_scale_inverse,
           B_type_arg,
           transb_arg,
           D,
