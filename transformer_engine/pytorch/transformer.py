@@ -408,7 +408,7 @@ class MultiHeadAttention(torch.nn.Module):
                 bias=True,
             )
 
-        self.use_flash_attn = True if os.environ['NVTE_FLASH_ATTN'] == '1' else False
+        self.use_flash_attn = int(os.getenv("NVTE_FLASH_ATTN", "0"))
         if self.use_flash_attn:
             if rearrange is None:
                 raise ImportError('Einops is not installed. Please install with pip install einops.')
