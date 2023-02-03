@@ -299,7 +299,8 @@ def get_fp8_group() -> Union[dist_group_type, None]:
 
 def update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     """Update amax history and set next amax to zero."""
-    amax_history = torch.roll(amax_history, -1, 0)
+    if amax_history.shape[0] > 1:
+        amax_history = torch.roll(amax_history, -1, 0)
     amax_history[0].fill_(0.0)
     return amax_history
 

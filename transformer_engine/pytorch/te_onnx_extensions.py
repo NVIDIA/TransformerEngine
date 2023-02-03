@@ -99,7 +99,7 @@ def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 
 @symbolic_helper.parse_args("v", "fs", "i", "i", "i",
                             "v", "fs", "i", "i", "i",
-                            "v", "i", "v", "v", "i",
+                            "v", "fs", "i", "fs", "v", "i", "v", "i",
                             "v", "i", "i", "i")
 def onnx_te_gemm(
     g,
@@ -114,8 +114,11 @@ def onnx_te_gemm(
     input_type,
     trans_input,
     out,
+    out_scale,
     out_type,
+    out_amax,
     bias,
+    bias_type,
     pre_gelu_out,
     grad,
     workspace,

@@ -55,7 +55,10 @@ void cublas_gemm(const Tensor *inputA,
   void *A_scale_inverse = inputA->scale_inv.dptr;
   void *B = inputB->data.dptr;
   void *B_scale_inverse = inputB->scale_inv.dptr;
+  void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
+  void *D_scale = outputD->scale.dptr;
+  void *D_amax = outputD->amax.dptr;
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
@@ -78,6 +81,10 @@ void cublas_gemm(const Tensor *inputA,
   if (use_fp8) {
     NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
   }
+  if (is_fp8_dtype(outputD->data.dtype)) {
+    NVTE_CHECK(!accumulate,
+             "Accumulation mode not supported with FP8 GEMM output!");
+  }
 
   float one = 1.0;
   float zero = 0.0;
@@ -87,7 +94,7 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
 
   cublasLtMatmulDesc_t       operationDesc = nullptr;
-  cublasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Ddesc = nullptr;
+  cublasLtMatrixLayout_t     Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
   cublasLtMatmulPreference_t preference = nullptr;
   int                             returnedResults = 0;
   cublasLtMatmulHeuristicResult_t heuristicResult = {};
@@ -135,11 +142,29 @@ void cublas_gemm(const Tensor *inputA,
                                                      CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                      &B_scale_inverse,
                                                      sizeof(B_scale_inverse)));
+    if (is_fp8_dtype(outputD->data.dtype)) {
+      // Accumulation mode not supported for FP8 output
+      C = nullptr;
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
+                                                       &D_scale,
+                                                       sizeof(D_scale)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+                                                       &D_amax,
+                                                       sizeof(D_amax)));
+      // For FP8 output, cuBLAS requires C_type to be same as bias_type
+      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
+    } else {
+      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
+    }
     if (bias) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
+  } else {
+    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
 
   if (bias && gelu) {
@@ -190,7 +215,7 @@ void cublas_gemm(const Tensor *inputA,
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
 
-  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
                                                    Ddesc, preference, 1, &heuristicResult,
                                                    &returnedResults));
 
@@ -205,8 +230,8 @@ void cublas_gemm(const Tensor *inputA,
                                    B,                                      /* B */
                                    Bdesc,
                                    static_cast<const void*>(&beta),        /* beta */
-                                   D,                                      /* C */
-                                   Ddesc,
+                                   C,                                      /* C */
+                                   Cdesc,
                                    D,                                      /* D */
                                    Ddesc,
                                    &heuristicResult.algo,                  /* algo */
@@ -217,6 +242,7 @@ void cublas_gemm(const Tensor *inputA,
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Cdesc));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
