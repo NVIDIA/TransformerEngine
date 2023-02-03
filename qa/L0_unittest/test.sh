@@ -9,3 +9,4 @@ set -e
 pip install pytest==6.2.5 onnxruntime==1.13.1
 pytest -v -s $TE_PATH/tests/test_transformerengine.py
 pytest -v -s $TE_PATH/tests/test_onnx_export.py
+pytest -v -s $TE_PATH/tests/test_fp8.py
