@@ -16,8 +16,11 @@ void te_gemm(at::Tensor A,
              transformer_engine::DType B_type,
              bool transb,
              at::Tensor D,
+             at::Tensor D_scale,
              transformer_engine::DType D_type,
+             at::Tensor D_amax,
              at::Tensor bias,
+             transformer_engine::DType bias_type,
              at::Tensor pre_gelu_out,
              bool grad,
              at::Tensor workspace,
@@ -39,9 +42,10 @@ void te_gemm(at::Tensor A,
   auto te_D = makeTransformerEngineTensor(D.data_ptr(),
                                           {static_cast<size_t>(D.size(0)),
                                            static_cast<size_t>(D.size(1))},
-                                          D_type);
+                                          D_type, D_amax.data_ptr(),
+                                          D_scale.data_ptr(), nullptr);
   auto te_bias = makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))},
-                                             GetTransformerEngineDType(bias.scalar_type()));
+                                             bias_type);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                           ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
@@ -869,10 +873,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
     .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
     .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
+    .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
     .value("GEMM2_INPUT", transformer_engine::FP8FwdTensors::GEMM2_INPUT)
-    .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT);
+    .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT)
+    .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT);
 
   py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
     .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
-    .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2);
+    .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
+    .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
+    .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2);
 }
