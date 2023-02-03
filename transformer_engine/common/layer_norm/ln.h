@@ -77,7 +77,8 @@ struct FwdParams : public ParamsBase {
         , z(nullptr)
         , beta(nullptr)
         , epsilon(0.f)
-        , fp8_out(false) {}
+        , fp8_out(false)
+        , zero_centered_gamma(false) {}
 
     // Output of LN FWD.
     void *z;
@@ -92,6 +93,9 @@ struct FwdParams : public ParamsBase {
 
     // Whether to compute scale and amax
     bool fp8_out;
+
+    // Whether gamma is centered around 0
+    bool zero_centered_gamma;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

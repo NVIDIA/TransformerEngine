@@ -151,7 +151,8 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
                    cudaStream_t stream,
                    const int multiprocessorCount,
                    Tensor* workspace,
-                   Tensor* barrier) {
+                   Tensor* barrier,
+                   const bool zero_centered_gamma) {
     const auto itype = x.data.dtype;
     const auto wtype = gamma.data.dtype;
     const auto otype = z->data.dtype;
@@ -208,6 +209,7 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     params.amax = z->amax.dptr;
     params.scale = z->scale.dptr;
     params.fp8_out = fp8_out;
+    params.zero_centered_gamma = zero_centered_gamma;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -386,7 +388,8 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                 stream,
                 multiprocessorCount,
                 reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier));
+                reinterpret_cast<Tensor*>(barrier),
+                false);
 }
 
 void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
@@ -419,4 +422,31 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
                 multiprocessorCount,
                 reinterpret_cast<Tensor*>(workspace),
                 reinterpret_cast<Tensor*>(barrier));
+}
+
+void nvte_layernorm1p_fwd(const NVTETensor x,       // BxSxhidden_size
+                          const NVTETensor gamma,   // hidden_size
+                          const NVTETensor beta,    // hidden_size
+                          const float epsilon,
+                          NVTETensor z,
+                          NVTETensor mu,
+                          NVTETensor rsigma,
+                          cudaStream_t stream,
+                          const int multiprocessorCount,
+                          NVTETensor workspace,
+                          NVTETensor barrier) {
+  NVTE_API_CALL(nvte_layernorm1p_fwd);
+  using namespace transformer_engine;
+  layernorm_fwd(*reinterpret_cast<const Tensor*>(x),
+                *reinterpret_cast<const Tensor*>(gamma),
+                *reinterpret_cast<const Tensor*>(beta),
+                epsilon,
+                reinterpret_cast<Tensor*>(z),
+                reinterpret_cast<Tensor*>(mu),
+                reinterpret_cast<Tensor*>(rsigma),
+                stream,
+                multiprocessorCount,
+                reinterpret_cast<Tensor*>(workspace),
+                reinterpret_cast<Tensor*>(barrier),
+                true);
 }
