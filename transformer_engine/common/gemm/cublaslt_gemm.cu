@@ -155,8 +155,7 @@ void cublas_gemm(const Tensor *inputA,
                                                        sizeof(D_amax)));
       // For FP8 output, cuBLAS requires C_type to be same as bias_type
       NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, bias_type, m, n, ldd));
-    }
-    else {
+    } else {
       NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
     }
     if (bias) {
@@ -164,8 +163,7 @@ void cublas_gemm(const Tensor *inputA,
                                                        CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
                                                        &bias_type, sizeof(bias_type)));
     }
-  }
-  else {
+  } else {
     NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
 
