@@ -510,7 +510,6 @@ class MultiHeadAttention(torch.nn.Module):
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
-                    bias=self.query_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
                 if self.return_layernorm_output:
@@ -520,7 +519,6 @@ class MultiHeadAttention(torch.nn.Module):
             else:
                 query_layer = self.query_layer(
                     hidden_states,
-                    bias=self.query_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
 
