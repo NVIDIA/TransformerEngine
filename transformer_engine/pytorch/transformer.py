@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
 
 from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
@@ -36,8 +35,6 @@ from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
-    initialize_affine_weight_gpu,
-    set_tensor_model_parallel_attributes,
 )
 
 

@@ -1191,7 +1191,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             for i, pname in enumerate(wandb_param_split):
                 wname = pname + "weight"
                 bname = pname + "bias"
-                
+
                 self.register_parameter(
                     wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
                 )
@@ -1818,7 +1818,7 @@ class Linear(TransformerEngineBaseModule):
             for i, pname in enumerate(wandb_param_split):
                 wname = pname + "weight"
                 bname = pname + "bias"
-                
+
                 self.register_parameter(
                     wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
                 )
