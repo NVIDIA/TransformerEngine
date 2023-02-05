@@ -1099,6 +1099,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.use_bias = bias
         self.return_bias = return_bias
         self.return_layernorm_output = return_layernorm_output
+        self.wandb_param_split = wandb_param_split
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1275,10 +1276,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
-                bias if bias is not None else NoopCat.apply(self.bias_tensor, *self.biases)
+                bias if bias is not None
+                else self.bias if self.wandb_param_split is None
+                else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
-                weight if weight is not None else NoopCat.apply(self.weight_tensor, *self.weights)
+                weight if weight is not None
+                else self.weight if self.wandb_param_split is None
+                else NoopCat.apply(self.weight_tensor, *self.weights)
             )
 
             if self.training:
@@ -1740,6 +1745,7 @@ class Linear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.wandb_param_split = wandb_param_split
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1885,10 +1891,14 @@ class Linear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
-                bias if bias is not None else NoopCat.apply(self.bias_tensor, *self.biases)
+                bias if bias is not None
+                else self.bias if self.wandb_param_split is None
+                else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
-                weight if weight is not None else NoopCat.apply(self.weight_tensor, *self.weights)
+                weight if weight is not None
+                else self.weight if self.wandb_param_split is None
+                else NoopCat.apply(self.weight_tensor, *self.weights)
             )
 
             if self.training:
