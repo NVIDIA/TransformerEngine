@@ -135,6 +135,44 @@ def _prepare_backward(fp8: bool,
         delete_key_from_amax_buffer(forward=False)
 
 
+class NoopCat(torch.autograd.Function):
+    """This class is a no-op replacement for `torch.cat`."""
+
+    @staticmethod
+    def forward(ctx, full_param_buffer, *params_split):
+        assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
+        assert (
+            full_param_buffer.shape[0] % len(params_split) == 0
+        ), "Dimensions not compatible for concatenation"
+
+        split_size = full_param_buffer.shape[0] // len(params_split)
+        for i, p in enumerate(params_split):
+            p.data = full_param_buffer[i * split_size : (i+1) * split_size]
+
+        param_temp = full_param_buffer.new()
+        param_temp.set_(full_param_buffer.storage(),
+                        full_param_buffer.storage_offset(),
+                        full_param_buffer.size(),
+                        full_param_buffer.stride())
+        param_temp.requires_grad = True
+
+        ctx.save_for_backward(full_param_buffer, *params_split)
+        return param_temp
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        full_param_buffer, *params_split = ctx.saved_tensors
+
+        split_size = full_param_buffer.shape[0] // len(params_split)
+        grads = []
+
+        for i, p in enumerate(params_split):
+            p.data = full_param_buffer[i * split_size : (i+1) * split_size]
+            grads.append(grad_output[i * split_size : (i+1) * split_size])
+
+        return None, *grads
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -993,6 +1031,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
+    wandb_param_split : Tuple[str, ...], default = None
+                       if a tuple of strings is provided, the weight and bias parameters of the
+                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
+                       split along the first dimension, where `N` is the length of the argument
+                       and the strings contained are the names of the split parameters.
 
     Parallelism parameters
     ----------------------
@@ -1047,6 +1090,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
         skip_weight_param_allocation: bool = False,
+        wandb_param_split: Optional[Tuple[str, ...]] = None,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1055,7 +1099,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.use_bias = bias
         self.return_bias = return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.skip_weight_param_allocation = skip_weight_param_allocation
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1101,17 +1144,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.reset_layer_norm_parameters()
 
         if not skip_weight_param_allocation:
-            self.weight = Parameter(
-                torch.empty(
-                    self.out_features,
-                    self.in_features,
-                    device=torch.cuda.current_device(),
-                    dtype=params_dtype,
-                )
-            )
+            self.register_buffer("weight_tensor",
+                                 torch.empty(
+                                    self.out_features,
+                                    self.in_features,
+                                    device=torch.cuda.current_device(),
+                                    dtype=params_dtype),
+                                 persistent=False)
 
             initialize_affine_weight_gpu(
-                self.weight,
+                self.weight_tensor,
                 init_method,
                 get_rng_state_tracker,
                 partition_dim=1 if self.parallel_mode == "row" else 0,
@@ -1119,20 +1161,59 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             if self.use_bias or self.return_bias:
-                self.bias = Parameter(
-                    torch.empty(
-                        self.out_features,
-                        device=torch.cuda.current_device(),
-                        dtype=params_dtype,
-                    )
-                )
-                if self.parallel_mode == "column":
-                    set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
+                self.register_buffer("bias_tensor",
+                                     torch.empty(
+                                         self.out_features,
+                                         device=torch.cuda.current_device(),
+                                         dtype=params_dtype),
+                                     persistent=False)
             else:
-                self.register_buffer("bias", torch.Tensor().type(params_dtype), persistent=False)
+                self.register_buffer(
+                    "bias_tensor", torch.Tensor().type(params_dtype), persistent=False
+                )
 
             with torch.no_grad():
-                self.bias.zero_()
+                self.bias_tensor.zero_()
+
+            if wandb_param_split is None:
+                wandb_param_split = ("",)
+
+            assert (
+                self.out_features % len(wandb_param_split) == 0,
+            ), f"Weight and bias params cannot be split into {len(wandb_param_split)} parts"
+
+            split_size = self.out_features // len(wandb_param_split)
+
+            self.weights = []
+            self.biases = []
+
+            for i, pname in enumerate(wandb_param_split):
+                wname = pname + "weight"
+                bname = pname + "bias"
+                
+                self.register_parameter(
+                    wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                )
+
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, wname),
+                    is_parallel=True,
+                    dim=1 if parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+                if self.use_bias or self.return_bias:
+                    self.register_parameter(
+                        bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    )
+                else:
+                    self.register_buffer(bname, torch.Tensor(), persistent=False)
+
+                if parallel_mode == "column":
+                    set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
+
+                self.weights.append(getattr(self, wname))
+                self.biases.append(getattr(self, bname))
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -1193,7 +1274,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
-            bias_tensor = bias if bias is not None else self.bias
+            bias_tensor = (
+                bias if bias is not None else NoopCat.apply(self.bias_tensor, *self.biases)
+            )
+            weight_tensor = (
+                weight if weight is not None else NoopCat.apply(self.weight_tensor, *self.weights)
+            )
 
             if self.training:
                 fwd_fn = _LayerNormLinear.apply
@@ -1205,7 +1291,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
-                weight if weight is not None else self.weight,
+                weight_tensor,
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 bias_tensor,
@@ -1586,6 +1672,11 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    wandb_param_split : Tuple[str, ...], default = None
+                       if a tuple of strings is provided, the weight and bias parameters of the
+                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
+                       split along the first dimension, where `N` is the length of the argument
+                       and the strings contained are the names of the split parameters.
 
     Parallelism parameters
     ----------------------
@@ -1641,6 +1732,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: torch.dtype = torch.float32,
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
+        wandb_param_split: Optional[Tuple[str, ...]] = None,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1648,7 +1740,6 @@ class Linear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
-        self.skip_weight_param_allocation = skip_weight_param_allocation
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1675,17 +1766,16 @@ class Linear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         if not skip_weight_param_allocation:
-            self.weight = Parameter(
-                torch.empty(
-                    self.out_features,
-                    self.in_features,
-                    device=torch.cuda.current_device(),
-                    dtype=params_dtype,
-                )
-            )
+            self.register_buffer("weight_tensor",
+                                 torch.empty(
+                                    self.out_features,
+                                    self.in_features,
+                                    device=torch.cuda.current_device(),
+                                    dtype=params_dtype),
+                                 persistent=False)
 
             initialize_affine_weight_gpu(
-                self.weight,
+                self.weight_tensor,
                 init_method,
                 get_rng_state_tracker,
                 partition_dim=1 if self.parallel_mode == "row" else 0,
@@ -1693,20 +1783,59 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if self.use_bias or self.return_bias:
-                self.bias = Parameter(
-                    torch.empty(
-                        self.out_features,
-                        device=torch.cuda.current_device(),
-                        dtype=params_dtype,
-                    )
-                )
-                if self.parallel_mode == "column":
-                    set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
+                self.register_buffer("bias_tensor",
+                                     torch.empty(
+                                         self.out_features,
+                                         device=torch.cuda.current_device(),
+                                         dtype=params_dtype),
+                                     persistent=False)
             else:
-                self.register_buffer("bias", torch.Tensor().type(params_dtype), persistent=False)
+                self.register_buffer(
+                    "bias_tensor", torch.Tensor().type(params_dtype), persistent=False
+                )
 
             with torch.no_grad():
-                self.bias.zero_()
+                self.bias_tensor.zero_()
+
+            if wandb_param_split is None:
+                wandb_param_split = ("",)
+
+            assert (
+                self.out_features % len(wandb_param_split) == 0,
+            ), f"Weight and bias params cannot be split into {len(wandb_param_split)} parts"
+
+            split_size = self.out_features // len(wandb_param_split)
+
+            self.weights = []
+            self.biases = []
+
+            for i, pname in enumerate(wandb_param_split):
+                wname = pname + "weight"
+                bname = pname + "bias"
+                
+                self.register_parameter(
+                    wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                )
+
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, wname),
+                    is_parallel=True,
+                    dim=1 if parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+                if self.use_bias or self.return_bias:
+                    self.register_parameter(
+                        bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    )
+                else:
+                    self.register_buffer(bname, torch.Tensor(), persistent=False)
+
+                if parallel_mode == "column":
+                    set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
+
+                self.weights.append(getattr(self, wname))
+                self.biases.append(getattr(self, bname))
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -1755,7 +1884,12 @@ class Linear(TransformerEngineBaseModule):
         """
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
-            bias_tensor = bias if bias is not None else self.bias
+            bias_tensor = (
+                bias if bias is not None else NoopCat.apply(self.bias_tensor, *self.biases)
+            )
+            weight_tensor = (
+                weight if weight is not None else NoopCat.apply(self.weight_tensor, *self.weights)
+            )
 
             if self.training:
                 linear_fn = _Linear.apply
@@ -1764,7 +1898,7 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 args = [None]
             args += (
-                weight if weight is not None else self.weight,
+                weight_tensor,
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 inp,
