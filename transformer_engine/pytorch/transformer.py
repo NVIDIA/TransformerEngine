@@ -251,6 +251,7 @@ class MultiHeadAttention(torch.nn.Module):
         attention_type: str = "self",
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        zero_centered_gamma:bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -304,6 +305,7 @@ class MultiHeadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
                     skip_weight_param_allocation=not fuse_qkv_params,
+                    zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
             else:
@@ -329,6 +331,7 @@ class MultiHeadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
                     skip_weight_param_allocation=not fuse_qkv_params,
+                    zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
             else:
@@ -754,6 +757,13 @@ class TransformerLayer(torch.nn.Module):
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     self_attn_mask_type: {'causal', 'padding'}, default = `causal`
                         type of attention mask passed into softmax operation.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
 
     Parallelism parameters
     ----------------------
@@ -828,6 +838,7 @@ class TransformerLayer(torch.nn.Module):
         drop_path_rate: float = 0.0,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
 
@@ -884,6 +895,7 @@ class TransformerLayer(torch.nn.Module):
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "set_parallel_mode": set_parallel_mode,
             "fuse_qkv_params": fuse_qkv_params,
+            "zero_centered_gamma": zero_centered_gamma
         }
 
         self.self_attention = MultiHeadAttention(
@@ -924,6 +936,7 @@ class TransformerLayer(torch.nn.Module):
             seq_length=seq_length,
             micro_batch_size=micro_batch_size,
             set_parallel_mode=set_parallel_mode,
+            zero_centered_gamma=zero_centered_gamma,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -953,6 +966,7 @@ class TransformerLayer(torch.nn.Module):
                 eps=layernorm_epsilon,
                 sequence_parallel=self.sequence_parallel,
                 params_dtype=params_dtype,
+                zero_centered_gamma=zero_centered_gamma
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
