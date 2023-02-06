@@ -970,6 +970,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2402,6 +2403,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2758,7 +2760,7 @@ class _LayerNorm(torch.autograd.Function):
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
             d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
