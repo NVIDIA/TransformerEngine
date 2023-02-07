@@ -1208,7 +1208,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
                 else:
-                    self.register_buffer(bname, torch.Tensor(), persistent=False)
+                    self.register_buffer(bname, torch.Tensor().type(params_dtype), persistent=False)
 
                 if parallel_mode == "column":
                     set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
@@ -1278,11 +1278,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
             bias_tensor = (
                 bias if bias is not None
                 else self.bias if self.wandb_param_split is None
+                else self.bias_tensor if not self.training
                 else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.wandb_param_split is None
+                else self.weight_tensor if not self.training
                 else NoopCat.apply(self.weight_tensor, *self.weights)
             )
 
@@ -1835,7 +1837,7 @@ class Linear(TransformerEngineBaseModule):
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
                 else:
-                    self.register_buffer(bname, torch.Tensor(), persistent=False)
+                    self.register_buffer(bname, torch.Tensor().type(params_dtype), persistent=False)
 
                 if parallel_mode == "column":
                     set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
@@ -1893,11 +1895,13 @@ class Linear(TransformerEngineBaseModule):
             bias_tensor = (
                 bias if bias is not None
                 else self.bias if self.wandb_param_split is None
+                else self.bias_tensor if not self.training
                 else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.wandb_param_split is None
+                else self.weight_tensor if not self.training
                 else NoopCat.apply(self.weight_tensor, *self.weights)
             )
 
