@@ -179,7 +179,8 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        weight = weight + 1
+        one = g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64, device="cuda"))
+        weight = g.op("Add", weight, one)
     ln = torch.onnx.symbolic_opset9.layer_norm(
         g,
         inputs,

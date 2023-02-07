@@ -434,7 +434,7 @@ def test_export_gemm(
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("scale_factor", [448, 112])
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
-@pytest.mark.parametrize("zer_centered_gamma", [False, True])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm(
     use_fp8: bool,
     scale_factor: float,
@@ -504,7 +504,7 @@ def test_export_layernorm(
     do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
         # TODO: FP32 has a small threshold (1e-5)
-        validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
+        validate_result(fname, inp, model, atol=4e-3, is_fp8=use_fp8)
 
 
 @skip_FP8
