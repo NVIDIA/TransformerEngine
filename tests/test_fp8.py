@@ -18,6 +18,10 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.common import recipe
 
+# Only run FP8 tests on H100.
+if torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
+    pytest.skip(allow_module_level=True)
+
 
 def custom_amax_to_scale(
     amax: torch.Tensor,
