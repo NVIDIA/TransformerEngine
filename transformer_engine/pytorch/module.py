@@ -181,13 +181,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Needed for calculation of scale inverses to
         # preserve scale_inv when caching FP8 weights
         if fwd:
-            # [True, False]: -> [input, weight]
+            # [True, False, True]: -> [input, weight, output]
             self.fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] = torch.BoolTensor(
-                [True, False] * self.fp8_meta["num_gemms"]
+                [True, False, True] * self.fp8_meta["num_gemms"]
             ).cuda()
         else:
+            # [True, True]: -> [grad_output, grad_input]
             self.fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] = torch.BoolTensor(
-                [True] * self.fp8_meta["num_gemms"]
+                [True, True] * self.fp8_meta["num_gemms"]
             ).cuda()
 
     def init_fp8_meta_tensors(self) -> None:
