@@ -976,7 +976,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
 
 class LayerNormLinear(TransformerEngineBaseModule):
-    """
+    r"""
     Applies layer normalization followed by linear transformation to the incoming data.
 
     Parameters
@@ -2409,7 +2409,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
 
 class LayerNormMLP(TransformerEngineBaseModule):
-    """
+    r"""
     Applies layer normalization on the input followed by the MLP module, consisting of
     2 successive linear transformations, separated by the GeLU activation.
 

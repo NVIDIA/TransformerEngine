@@ -23,7 +23,8 @@ disable=too-many-locals,
         global-statement,
         too-many-branches,
         global-variable-not-assigned,
-        redefined-argument-from-local
+        redefined-argument-from-local,
+        too-many-function-args
 
 [TYPECHECK]
 ignored-modules=torch

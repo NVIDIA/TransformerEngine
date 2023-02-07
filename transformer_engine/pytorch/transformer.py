@@ -704,7 +704,7 @@ class MultiHeadAttention(torch.nn.Module):
 
 
 class TransformerLayer(torch.nn.Module):
-    """
+    r"""
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
 
