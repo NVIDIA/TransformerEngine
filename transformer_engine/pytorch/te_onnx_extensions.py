@@ -156,17 +156,18 @@ def onnx_te_gemm(
     return output
 
 
-@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i")
-def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax, scale_inv, fp8_tensor, otype):
+@symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "b")
+def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
+                           scale_inv, fp8_tensor, otype, zero_centered_gamma):
     """ONNX graph for layernorm_fwd_fp8"""
     # pylint: disable=unused-argument
-    ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps)
+    ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma)
     fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
     return fp8_ln
 
 
-@symbolic_helper.parse_args("v", "v", "v", "f")
-def onnx_layernorm_fwd(g, inputs, weight, bias, eps):
+@symbolic_helper.parse_args("v", "v", "v", "f", "b")
+def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     """ONNX graph for layernorm_fwd"""
     # pylint: disable=unused-argument
     normalized_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
@@ -177,6 +178,8 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps):
     # Normalization axis = 0, so normalized_shape uses all dims except dim = 0
     normalized_shape = normalized_shape[1:]
 
+    if zero_centered_gamma:
+        weight = weight + 1
     ln = torch.onnx.symbolic_opset9.layer_norm(
         g,
         inputs,
