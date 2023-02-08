@@ -162,7 +162,7 @@ class NoopCat(torch.autograd.Function):
         split_size = full_param_buffer.shape[0] // len(params_split)
         grads = []
 
-        for i, p in enumerate(params_split):
+        for i, _ in enumerate(params_split):
             grads.append(grad_output[i * split_size : (i+1) * split_size])
 
         return None, *grads
