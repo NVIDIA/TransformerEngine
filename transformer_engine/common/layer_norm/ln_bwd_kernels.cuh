@@ -103,6 +103,9 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
                 compute_t x_tmp = x[it].data.elt[jt];
                 compute_t y_tmp = rs_r * (x_tmp - mu_r);
                 compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]);
+                if (params.zero_centered_gamma) {
+                  dy_tmp += static_cast<compute_t>(1);
+                }
                 dy_tmp *= compute_t(dz[it].data.elt[jt]);
                 compute_t dz_tmp = dz[it].data.elt[jt];
 
@@ -414,6 +417,9 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
                 compute_t x_ij = x.data.elt[jt];
                 compute_t y_ij = rs * (x_ij - mu);
                 compute_t g_ij = gamma[it].data.elt[jt];
+                if (params.zero_centered_gamma) {
+                  g_ij += static_cast<compute_t>(1);
+                }
                 compute_t dz_ij = dz.data.elt[jt];
                 compute_t dy_ij = g_ij * dz_ij;
 

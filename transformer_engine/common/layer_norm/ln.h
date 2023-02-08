@@ -44,7 +44,8 @@ struct ParamsBase {
         , rs(nullptr)
         , gamma(nullptr)
         , workspace(nullptr)
-        , barrier(nullptr) {}
+        , barrier(nullptr)
+        , zero_centered_gamma(false) {}
 
 
     // For Multi-CTA, number of different CTA groups. Otherwise same as gridDim.x.
@@ -67,6 +68,9 @@ struct ParamsBase {
 
     // Multi-CTA sync barriers in gmem.
     int *barrier;
+
+    // Whether gamma is centered around 0
+    bool zero_centered_gamma;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -77,8 +81,7 @@ struct FwdParams : public ParamsBase {
         , z(nullptr)
         , beta(nullptr)
         , epsilon(0.f)
-        , fp8_out(false)
-        , zero_centered_gamma(false) {}
+        , fp8_out(false) {}
 
     // Output of LN FWD.
     void *z;
@@ -93,9 +96,6 @@ struct FwdParams : public ParamsBase {
 
     // Whether to compute scale and amax
     bool fp8_out;
-
-    // Whether gamma is centered around 0
-    bool zero_centered_gamma;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

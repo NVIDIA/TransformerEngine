@@ -73,7 +73,8 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
                           const InputType *gamma,
                           InputType *data_grad,
                           InputType *gamma_grad, InputType *beta_grad,
-                          const size_t N, const size_t H) {
+                          const size_t N, const size_t H,
+                          const bool zero_centered_gamma) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
   std::vector<compute_t> dbeta(H, 0.f);
@@ -84,7 +85,10 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - mu[i]) * rsigma[i];
-      const compute_t g = static_cast<compute_t>(gamma[j]);
+      compute_t g = static_cast<compute_t>(gamma[j]);
+      if (zero_centered_gamma) {
+        g += 1;
+      }
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -99,7 +103,10 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - mu[i]) * rsigma[i];
-      const compute_t g = static_cast<compute_t>(gamma[j]);
+      compute_t g = static_cast<compute_t>(gamma[j]);
+      if (zero_centered_gamma) {
+        g += 1;
+      }
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
@@ -172,22 +179,23 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                workspace.data(), barrier.data());
 
   // Backward kernel
-  nvte_layernorm_bwd(dz.data(), input.data(),
-                     mu.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(), dbeta.data(),
-                     dgamma_part.data(), dbeta_part.data(),
-                     0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data());
+  auto bwd_function = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+  bwd_function(dz.data(), input.data(),
+               mu.data(), rsigma.data(), gamma.data(),
+               dx.data(), dgamma.data(), dbeta.data(),
+               dgamma_part.data(), dbeta_part.data(),
+               0, prop.multiProcessorCount,
+               workspace.data(), barrier.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   dgamma_part = Tensor(dgamma_part.shape(), dgamma_part.dtype());
   dbeta_part = Tensor(dbeta_part.shape(), dbeta_part.dtype());
-  nvte_layernorm_bwd(dz.data(), input.data(),
-                     mu.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(), dbeta.data(),
-                     dgamma_part.data(), dbeta_part.data(),
-                     0, prop.multiProcessorCount,
-                     workspace.data(), barrier.data());
+  bwd_function(dz.data(), input.data(),
+               mu.data(), rsigma.data(), gamma.data(),
+               dx.data(), dgamma.data(), dbeta.data(),
+               dgamma_part.data(), dbeta_part.data(),
+               0, prop.multiProcessorCount,
+               workspace.data(), barrier.data());
 
   // Reference implementations
   // use the GPU stats to tighten the tolerances
@@ -211,7 +219,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                        mu.cpu_dptr<float>(), rsigma.cpu_dptr<float>(),
                        gamma.cpu_dptr<WeightType>(),
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(),
-                       N, H);
+                       N, H, zero_centered_gamma);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
