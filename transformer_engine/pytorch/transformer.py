@@ -863,7 +863,7 @@ class MultiHeadAttention(torch.nn.Module):
                     query_layer, key_layer, value_layer, attention_mask
                 )
         else:
-            query_layer, key_layer, value_layer = [rearrange(x, 'sq b ... -> b sq ...').contiguous()
+            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                        for x in (query_layer, key_layer, value_layer)]
             if checkpoint_core_attention:
                 context_layer = self._checkpointed_core_attention_flash_forward(
