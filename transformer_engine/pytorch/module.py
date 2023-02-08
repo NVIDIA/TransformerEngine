@@ -145,6 +145,12 @@ class NoopCat(torch.autograd.Function):
             full_param_buffer.shape[0] % len(params_split) == 0
         ), "Dimensions not compatible for concatenation"
 
+        split_size = full_param_buffer.shape[0] // len(params_split)
+        for i, p in enumerate(params_split):
+            assert (
+                p.data.data_ptr() == full_param_buffer[i*split_size : (i+1)*split_size].data_ptr()
+            ), "Split parameters and full buffer must share the same memory"
+
         param_temp = full_param_buffer.new()
         param_temp.set_(full_param_buffer.storage(),
                         full_param_buffer.storage_offset(),
