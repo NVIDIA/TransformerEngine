@@ -292,7 +292,7 @@ class MultiHeadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
-                    wandb_param_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
+                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     **common_gemm_kwargs,
                 )
             else:
@@ -303,7 +303,7 @@ class MultiHeadAttention(torch.nn.Module):
                     bias=True,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    wandb_param_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
+                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     **common_gemm_kwargs,
                 )
         else:
@@ -336,7 +336,7 @@ class MultiHeadAttention(torch.nn.Module):
                 bias=True,
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
-                wandb_param_split=("key_", "value_") if not fuse_qkv_params else None,
+                parameters_split=("key_", "value_") if not fuse_qkv_params else None,
                 **common_gemm_kwargs,
             )
 

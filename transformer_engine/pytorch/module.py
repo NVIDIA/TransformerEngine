@@ -1031,11 +1031,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    wandb_param_split : Tuple[str, ...], default = None
-                       if a tuple of strings is provided, the weight and bias parameters of the
-                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                       split along the first dimension, where `N` is the length of the argument
-                       and the strings contained are the names of the split parameters.
+    parameters_split : Tuple[str, ...], default = None
+                      if a tuple of strings is provided, the weight and bias parameters of the
+                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
+                      split along the first dimension, where `N` is the length of the argument
+                      and the strings contained are the names of the split parameters.
 
     Parallelism parameters
     ----------------------
@@ -1090,7 +1090,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
         skip_weight_param_allocation: bool = False,
-        wandb_param_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Tuple[str, ...]] = None,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1099,7 +1099,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.use_bias = bias
         self.return_bias = return_bias
         self.return_layernorm_output = return_layernorm_output
-        self.wandb_param_split = wandb_param_split
+        self.parameters_split = parameters_split
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1176,19 +1176,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
             with torch.no_grad():
                 self.bias_tensor.zero_()
 
-            if wandb_param_split is None:
-                wandb_param_split = ("",)
+            if parameters_split is None:
+                parameters_split = ("",)
 
             assert (
-                self.out_features % len(wandb_param_split) == 0,
-            ), f"Weight and bias params cannot be split into {len(wandb_param_split)} parts"
+                self.out_features % len(parameters_split) == 0,
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
 
-            split_size = self.out_features // len(wandb_param_split)
+            split_size = self.out_features // len(parameters_split)
 
             self.weights = []
             self.biases = []
 
-            for i, pname in enumerate(wandb_param_split):
+            for i, pname in enumerate(parameters_split):
                 wname = pname + "weight"
                 bname = pname + "bias"
 
@@ -1277,13 +1277,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
                 bias if bias is not None
-                else self.bias if self.wandb_param_split is None
+                else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
                 else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
-                else self.weight if self.wandb_param_split is None
+                else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
                 else NoopCat.apply(self.weight_tensor, *self.weights)
             )
@@ -1679,11 +1679,11 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    wandb_param_split : Tuple[str, ...], default = None
-                       if a tuple of strings is provided, the weight and bias parameters of the
-                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                       split along the first dimension, where `N` is the length of the argument
-                       and the strings contained are the names of the split parameters.
+    parameters_split : Tuple[str, ...], default = None
+                      if a tuple of strings is provided, the weight and bias parameters of the
+                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
+                      split along the first dimension, where `N` is the length of the argument
+                      and the strings contained are the names of the split parameters.
 
     Parallelism parameters
     ----------------------
@@ -1739,7 +1739,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: torch.dtype = torch.float32,
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
-        wandb_param_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Tuple[str, ...]] = None,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1747,7 +1747,7 @@ class Linear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
-        self.wandb_param_split = wandb_param_split
+        self.parameters_split = parameters_split
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1805,19 +1805,19 @@ class Linear(TransformerEngineBaseModule):
             with torch.no_grad():
                 self.bias_tensor.zero_()
 
-            if wandb_param_split is None:
-                wandb_param_split = ("",)
+            if parameters_split is None:
+                parameters_split = ("",)
 
             assert (
-                self.out_features % len(wandb_param_split) == 0,
-            ), f"Weight and bias params cannot be split into {len(wandb_param_split)} parts"
+                self.out_features % len(parameters_split) == 0,
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
 
-            split_size = self.out_features // len(wandb_param_split)
+            split_size = self.out_features // len(parameters_split)
 
             self.weights = []
             self.biases = []
 
-            for i, pname in enumerate(wandb_param_split):
+            for i, pname in enumerate(parameters_split):
                 wname = pname + "weight"
                 bname = pname + "bias"
 
@@ -1894,13 +1894,13 @@ class Linear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
                 bias if bias is not None
-                else self.bias if self.wandb_param_split is None
+                else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
                 else NoopCat.apply(self.bias_tensor, *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
-                else self.weight if self.wandb_param_split is None
+                else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
                 else NoopCat.apply(self.weight_tensor, *self.weights)
             )
