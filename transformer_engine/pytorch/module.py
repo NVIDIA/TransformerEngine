@@ -775,6 +775,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.return_layernorm_output = return_layernorm_output
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -941,7 +942,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+                d_ln_out, inputmat, mu, rsigma, ln_weight,
+                ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
 
             if not ctx.use_bias:
@@ -2076,6 +2078,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.return_layernorm_output = return_layernorm_output
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
 
         # Row Parallel Linear
         if set_parallel_mode and sequence_parallel:
@@ -2369,7 +2372,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+                d_ln_out, inputmat, mu, rsigma, ln_weight,
+                ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
 
             if not ctx.use_bias:
@@ -2749,6 +2753,7 @@ class _LayerNorm(torch.autograd.Function):
         ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
         ctx.inp_shape = inp.shape
         ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+        ctx.zero_centered_gamma = zero_centered_gamma
         return ln_out.view_as(inp)
 
     @staticmethod
@@ -2759,7 +2764,8 @@ class _LayerNorm(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
-            d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+            d_ln_out, inputmat, mu, rsigma, ln_weight,
+            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
         return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None
 

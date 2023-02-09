@@ -378,7 +378,8 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &mu,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
-                                      const int sm_margin
+                                      const int sm_margin,
+                                      const bool zero_centered_gamma
 ) {
     auto dx = at::empty_like(x);
     auto dgamma = at::empty_like(gamma);
@@ -395,11 +396,12 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dbeta_cu   = makeTransformerEngineTensor(dbeta);
 
     // This call populates tensors with the required config.
-    nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
-                       dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
-                       dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       workspace.data(), barrier.data());
+    const auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+    bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+            dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
+            dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
+            at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+            workspace.data(), barrier.data());
 
     // Alloc space for Tensors.
     auto workspace_data     = allocateSpace(workspace.shape(), workspace.dtype());
@@ -420,11 +422,11 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                               dbeta_part.dtype());
 
     // Actual call to bwd kernel.
-    nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
-                       dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
-                       dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       workspace.data(), barrier.data());
+    bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+            dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
+            dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
+            at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+            workspace.data(), barrier.data());
 
     return { dx, dgamma, dbeta };
 }

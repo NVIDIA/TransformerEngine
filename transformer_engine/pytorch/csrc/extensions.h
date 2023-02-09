@@ -85,7 +85,8 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &mu,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
-                                      const int sm_margin
+                                      const int sm_margin,
+                                      const bool zero_centered_gamma
 );
 
 
