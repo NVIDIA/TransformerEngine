@@ -255,6 +255,7 @@ def layernorm_fwd_fp8(
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
     sm_margin: int,
+    zero_centered_gamma: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm with FP8 output"""
     return tex.layernorm_fwd_fp8(
@@ -267,6 +268,7 @@ def layernorm_fwd_fp8(
         fp8_meta_tensor.scale_inv[fp8_tensor],
         otype,
         sm_margin,
+        zero_centered_gamma
     )
 
 
