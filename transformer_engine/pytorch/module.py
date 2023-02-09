@@ -135,21 +135,18 @@ def _prepare_backward(fp8: bool,
         delete_key_from_amax_buffer(forward=False)
 
 
-class NoopCat(torch.autograd.Function):
+class _NoopCat(torch.autograd.Function):
     """This class is a no-op replacement for `torch.cat`."""
 
     @staticmethod
-    def forward(ctx, full_param_buffer, *params_split):
+    def forward(ctx,
+                full_param_buffer: torch.Tensor,
+                *params_split: Tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
         assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
         assert (
             full_param_buffer.shape[0] % len(params_split) == 0
         ), "Dimensions not compatible for concatenation"
-
-        split_size = full_param_buffer.shape[0] // len(params_split)
-        for i, p in enumerate(params_split):
-            assert (
-                p.data.data_ptr() == full_param_buffer[i*split_size : (i+1)*split_size].data_ptr()
-            ), "Split parameters and full buffer must share the same memory"
 
         param_temp = full_param_buffer.new()
         param_temp.set_(full_param_buffer.storage(),
@@ -162,7 +159,7 @@ class NoopCat(torch.autograd.Function):
         return param_temp
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         full_param_buffer, *params_split = ctx.saved_tensors
 
         split_size = full_param_buffer.shape[0] // len(params_split)
@@ -610,6 +607,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             grad_bias = None
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
+
+    def noop_cat(self, buffer_name: str, *params_split: Tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
+           the same memory region. If this is not the case, then the split parameters
+           are concatenated and the buffer is overwritten.
+        """
+
+        assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
+        full_param_buffer = getattr(self, buffer_name)
+        split_size = full_param_buffer.shape[0] // len(params_split)
+        for i, p in enumerate(params_split):
+            if p.data.data_ptr() != full_param_buffer[i*split_size : (i+1)*split_size].data_ptr():
+                with torch.no_grad():
+                    setattr(self, buffer_name, torch.cat(params_split))
+                break
+
+        return _NoopCat.apply(getattr(self, buffer_name), *params_split)
 
     @abstractmethod
     def forward(self):
@@ -1280,13 +1294,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias if bias is not None
                 else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
-                else NoopCat.apply(self.bias_tensor, *self.biases)
+                else self.noop_cat("bias_tensor", *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
-                else NoopCat.apply(self.weight_tensor, *self.weights)
+                else self.noop_cat("weight_tensor", *self.weights)
             )
 
             if self.training:
@@ -1897,13 +1911,13 @@ class Linear(TransformerEngineBaseModule):
                 bias if bias is not None
                 else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
-                else NoopCat.apply(self.bias_tensor, *self.biases)
+                else self.noop_cat("bias_tensor", *self.biases)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
-                else NoopCat.apply(self.weight_tensor, *self.weights)
+                else self.noop_cat("weight_tensor", *self.weights)
             )
 
             if self.training:
