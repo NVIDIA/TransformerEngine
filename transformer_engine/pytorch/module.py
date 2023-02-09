@@ -1195,7 +1195,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 parameters_split = ("",)
 
             assert (
-                self.out_features % len(parameters_split) == 0,
+                self.out_features % len(parameters_split) == 0
             ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
 
             split_size = self.out_features // len(parameters_split)
@@ -1824,7 +1824,7 @@ class Linear(TransformerEngineBaseModule):
                 parameters_split = ("",)
 
             assert (
-                self.out_features % len(parameters_split) == 0,
+                self.out_features % len(parameters_split) == 0
             ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
 
             split_size = self.out_features // len(parameters_split)
