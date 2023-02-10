@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
 
 from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
@@ -36,8 +35,6 @@ from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
-    initialize_affine_weight_gpu,
-    set_tensor_model_parallel_attributes,
 )
 
 
@@ -262,7 +259,6 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
-        self.fuse_qkv_params = fuse_qkv_params
 
         assert (
             attention_type in AttnTypes
@@ -285,13 +281,6 @@ class MultiHeadAttention(torch.nn.Module):
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
-        if not fuse_qkv_params:
-            self.set_qkv_params(
-                hidden_size,
-                3 * hidden_size,
-                parallel_mode=qkv_parallel_mode,
-                bias=True,
-            )
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -304,7 +293,7 @@ class MultiHeadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
-                    skip_weight_param_allocation=not fuse_qkv_params,
+                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
@@ -316,7 +305,7 @@ class MultiHeadAttention(torch.nn.Module):
                     bias=True,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    skip_weight_param_allocation=not fuse_qkv_params,
+                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     **common_gemm_kwargs,
                 )
         else:
@@ -330,7 +319,6 @@ class MultiHeadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
-                    skip_weight_param_allocation=not fuse_qkv_params,
                     zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
@@ -342,7 +330,6 @@ class MultiHeadAttention(torch.nn.Module):
                     bias=True,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    skip_weight_param_allocation=not fuse_qkv_params,
                     **common_gemm_kwargs,
                 )
             self.key_value = Linear(
@@ -352,7 +339,7 @@ class MultiHeadAttention(torch.nn.Module):
                 bias=True,
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
-                skip_weight_param_allocation=not fuse_qkv_params,
+                parameters_split=("key_", "value_") if not fuse_qkv_params else None,
                 **common_gemm_kwargs,
             )
 
@@ -380,88 +367,6 @@ class MultiHeadAttention(torch.nn.Module):
             parallel_mode="row" if set_parallel_mode else None,
             **common_gemm_kwargs,
         )
-
-    def set_qkv_params(
-        self,
-        in_features: torch.Tensor,
-        out_features: torch.Tensor,
-        parallel_mode: Optional[bool] = None,
-        bias: bool = False,
-    ) -> None:
-        """Initialize separate Parameters for query, key, and value tensors."""
-
-        if parallel_mode == "column":
-            out_features = divide(out_features, self.tp_size)
-        elif parallel_mode == "row":
-            in_features = divide(in_features, self.tp_size)
-
-        assert (
-            out_features % 3 == 0
-        ), f"3 way QKV split with dimension {out_features} not possible."
-
-        weight_tensor = torch.empty(
-            out_features,
-            in_features,
-            device=torch.cuda.current_device(),
-            dtype=self.params_dtype,
-        )
-
-        initialize_affine_weight_gpu(
-            weight_tensor,
-            self.init_method,
-            self.get_rng_state_tracker,
-            partition_dim=1 if parallel_mode == "row" else 0,
-            stride=1,
-        )
-
-        qkv_first_dim = out_features // 3
-        self.query = Parameter(weight_tensor[0:qkv_first_dim, :])
-        self.key = Parameter(weight_tensor[qkv_first_dim : 2 * qkv_first_dim, :])
-        self.value = Parameter(weight_tensor[2 * qkv_first_dim : 3 * qkv_first_dim, :])
-        set_tensor_model_parallel_attributes(
-            tensor=self.query,
-            is_parallel=True,
-            dim=1 if parallel_mode == "row" else 0,
-            stride=1,
-        )
-        set_tensor_model_parallel_attributes(
-            tensor=self.key,
-            is_parallel=True,
-            dim=1 if parallel_mode == "row" else 0,
-            stride=1,
-        )
-        set_tensor_model_parallel_attributes(
-            tensor=self.value,
-            is_parallel=True,
-            dim=1 if parallel_mode == "row" else 0,
-            stride=1,
-        )
-
-        if bias:
-            bias_tensor = torch.empty(
-                out_features,
-                device=torch.cuda.current_device(),
-                dtype=self.params_dtype,
-            )
-            self.query_bias = Parameter(bias_tensor[0:qkv_first_dim])
-            self.key_bias = Parameter(bias_tensor[qkv_first_dim : 2 * qkv_first_dim])
-            self.value_bias = Parameter(
-                bias_tensor[2 * qkv_first_dim : 3 * qkv_first_dim]
-            )
-
-            if parallel_mode == "column":
-                set_tensor_model_parallel_attributes(self.query_bias, True, 0, 1)
-                set_tensor_model_parallel_attributes(self.key_bias, True, 0, 1)
-                set_tensor_model_parallel_attributes(self.value_bias, True, 0, 1)
-        else:
-            self.register_buffer("query_bias", torch.Tensor(), persistent=False)
-            self.register_buffer("key_bias", torch.Tensor(), persistent=False)
-            self.register_buffer("value_bias", torch.Tensor(), persistent=False)
-
-        with torch.no_grad():
-            self.query_bias.zero_()
-            self.key_bias.zero_()
-            self.value_bias.zero_()
 
     def _checkpointed_core_attention_forward(
         self,
@@ -557,23 +462,10 @@ class MultiHeadAttention(torch.nn.Module):
         # =====================
 
         if self.attention_type == "self":
-            qkv_weight = (
-                torch.cat((self.query, self.key, self.value))
-                if not self.fuse_qkv_params
-                else None
-            )
-            qkv_bias = (
-                torch.cat((self.query_bias, self.key_bias, self.value_bias))
-                if not self.fuse_qkv_params
-                else None
-            )
-
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             if self.input_layernorm:
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
-                    weight=qkv_weight,
-                    bias=qkv_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
                 if self.return_layernorm_output:
@@ -583,8 +475,6 @@ class MultiHeadAttention(torch.nn.Module):
             else:
                 mixed_x_layer = self.qkv(
                     hidden_states,
-                    weight=qkv_weight,
-                    bias=qkv_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
 
@@ -600,20 +490,9 @@ class MultiHeadAttention(torch.nn.Module):
                 mixed_x_layer, 3
             )
         else:
-            kv_weight = (
-                torch.cat((self.key, self.value)) if not self.fuse_qkv_params else None
-            )
-            kv_bias = (
-                torch.cat((self.key_bias, self.value_bias))
-                if not self.fuse_qkv_params
-                else None
-            )
-
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer = self.key_value(
                 encoder_output,
-                weight=kv_weight,
-                bias=kv_bias,
                 is_first_microbatch=is_first_microbatch,
             )
 
@@ -631,8 +510,6 @@ class MultiHeadAttention(torch.nn.Module):
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
-                    weight=self.query,
-                    bias=self.query_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
                 if self.return_layernorm_output:
@@ -642,8 +519,6 @@ class MultiHeadAttention(torch.nn.Module):
             else:
                 query_layer = self.query_layer(
                     hidden_states,
-                    weight=self.query,
-                    bias=self.query_bias,
                     is_first_microbatch=is_first_microbatch,
                 )
 
