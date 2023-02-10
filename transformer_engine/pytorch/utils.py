@@ -169,4 +169,5 @@ def safely_set_viewless_tensor_data(
 
 def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Cast tensor to dtype"""
-    return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
+    with torch.enable_grad():
+        return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
