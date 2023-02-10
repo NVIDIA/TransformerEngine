@@ -7,7 +7,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Optional, Callable, Tuple, Dict, Any, Mapping
+from typing import Union, Optional, Callable, Tuple, Dict, Any, Mapping, List
 from functools import partial
 from contextlib import contextmanager
 
@@ -608,22 +608,28 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self, buffer_name: str, *params_split: Tuple[torch.Tensor, ...]) -> torch.Tensor:
+    def noop_cat(self, buffer_name: str, pnames: List[str]) -> torch.Tensor:
         """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
            the same memory region. If this is not the case, then the split parameters
-           are concatenated and the buffer is overwritten.
+           are concatenated and the buffer is overwritten. The parameters' memory is then
+           re-assigned to point to the buffer to avoid subsequent concatenations.
         """
 
         assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
         full_param_buffer = getattr(self, buffer_name)
-        split_size = full_param_buffer.shape[0] // len(params_split)
-        for i, p in enumerate(params_split):
+        split_size = full_param_buffer.shape[0] // len(pnames)
+        params = [getattr(self, name) for name in pnames]
+        for i, p in enumerate(params):
             if p.data.data_ptr() != full_param_buffer[i*split_size : (i+1)*split_size].data_ptr():
                 with torch.no_grad():
-                    setattr(self, buffer_name, torch.cat(params_split))
+                    setattr(self, buffer_name, torch.cat(params))
+                    for j, pname in enumerate(pnames):
+                        full_param_buffer = getattr(self, buffer_name)
+                        setattr(self, pname,
+                                Parameter(full_param_buffer[j*split_size : (j+1)*split_size]))
                 break
 
-        return _NoopCat.apply(getattr(self, buffer_name), *params_split)
+        return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
     @abstractmethod
     def forward(self):
@@ -1200,8 +1206,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             split_size = self.out_features // len(parameters_split)
 
-            self.weights = []
-            self.biases = []
+            self.weight_names = []
+            self.bias_names = []
 
             for i, pname in enumerate(parameters_split):
                 wname = pname + "weight"
@@ -1228,8 +1234,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if parallel_mode == "column":
                     set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
 
-                self.weights.append(getattr(self, wname))
-                self.biases.append(getattr(self, bname))
+                self.weight_names.append(wname)
+                self.bias_names.append(bname)
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -1294,13 +1300,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias if bias is not None
                 else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
-                else self.noop_cat("bias_tensor", *self.biases)
+                else self.noop_cat("bias_tensor", self.bias_names)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
-                else self.noop_cat("weight_tensor", *self.weights)
+                else self.noop_cat("weight_tensor", self.weight_names)
             )
 
             if self.training:
@@ -1829,8 +1835,8 @@ class Linear(TransformerEngineBaseModule):
 
             split_size = self.out_features // len(parameters_split)
 
-            self.weights = []
-            self.biases = []
+            self.weight_names = []
+            self.bias_names = []
 
             for i, pname in enumerate(parameters_split):
                 wname = pname + "weight"
@@ -1857,8 +1863,8 @@ class Linear(TransformerEngineBaseModule):
                 if parallel_mode == "column":
                     set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
 
-                self.weights.append(getattr(self, wname))
-                self.biases.append(getattr(self, bname))
+                self.weight_names.append(wname)
+                self.bias_names.append(bname)
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -1911,13 +1917,13 @@ class Linear(TransformerEngineBaseModule):
                 bias if bias is not None
                 else self.bias if self.parameters_split is None
                 else self.bias_tensor if not self.training
-                else self.noop_cat("bias_tensor", *self.biases)
+                else self.noop_cat("bias_tensor", self.bias_names)
             )
             weight_tensor = (
                 weight if weight is not None
                 else self.weight if self.parameters_split is None
                 else self.weight_tensor if not self.training
-                else self.noop_cat("weight_tensor", *self.weights)
+                else self.noop_cat("weight_tensor", self.weight_names)
             )
 
             if self.training:
