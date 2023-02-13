@@ -6,6 +6,7 @@ add_library(transformer_engine SHARED
                                transpose/cast_transpose.cu
                                transpose/transpose.cu
                                transpose/cast_transpose_fusion.cu
+                               transpose/transpose_fusion.cu
                                transpose/multi_cast_transpose.cu
                                activation/gelu.cu
                                gemm/cublaslt_gemm.cu
