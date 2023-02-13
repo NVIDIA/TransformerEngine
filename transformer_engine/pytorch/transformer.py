@@ -262,7 +262,7 @@ class CoreAttention_FlashAttn(torch.nn.Module):
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
 
-        self.attn_causal_mask = True if attn_mask_type == "causal" else False
+        self.attn_causal_mask = attn_mask_type == "causal"
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
 
         if layer_number is None:
