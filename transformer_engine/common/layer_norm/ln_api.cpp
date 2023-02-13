@@ -468,7 +468,7 @@ void nvte_layernorm1p_bwd(const NVTETensor dz,       // BxSxhidden_size
                           const int multiprocessorCount,
                           NVTETensor workspace,
                           NVTETensor barrier) {
-  NVTE_API_CALL(nvte_layernorm_bwd);
+  NVTE_API_CALL(nvte_layernorm1p_bwd);
   using namespace transformer_engine;
   layernorm_bwd(*reinterpret_cast<const Tensor*>(dz),
                 *reinterpret_cast<const Tensor*>(x),
