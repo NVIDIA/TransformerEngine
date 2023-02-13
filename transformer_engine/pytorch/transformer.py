@@ -252,16 +252,17 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         if rearrange is None:
             raise ImportError('Einops is not installed. Please install with pip install einops.')
         if flash_attn_unpadded_func is None:
-            raise ImportError('FlashAttention is not installed. Please install with pip install flash-attn. '
+            raise ImportError('FlashAttention is not installed. ' \
+                              'Please install with pip install flash-attn. ' \
                               'If running on Hopper, please install from source with compute capability 9.0.')
         assert (
             attention_type == "self"
-            ), f'FlashAttention currently only supports self attention.'
+            ), 'FlashAttention currently only supports self attention.'
         assert (
             attn_mask_type == "causal"
-            ), f'FlashAttention currently only supports causal attention mask.'
+            ), 'FlashAttention currently only supports causal attention mask.'
 
-        self.attn_causal_mask=True if attn_mask_type == "causal" else False 
+        self.attn_causal_mask = True if attn_mask_type == "causal" else False
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
 
         if layer_number is None:
@@ -299,27 +300,27 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         """core attention fprop"""
 
         assert (
-            (query_layer.dtype in [torch.float16, torch.bfloat16]) 
-            and (key_layer.dtype in [torch.float16, torch.bfloat16]) 
-            and (value_layer.dtype in [torch.float16, torch.bfloat16]) 
-            ), f'FlashAttention currently only supports FP16 and BF16.'
+            (query_layer.dtype in [torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.float16, torch.bfloat16])
+            ), 'FlashAttention currently only supports FP16 and BF16.'
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), f'FlashAttention currently only supports CUDA tensors.'
+            ), 'FlashAttention currently only supports CUDA tensors.'
 
         batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
 
         # [b, sq, np, hn]
         query_layer, key_layer, value_layer = [
-                rearrange(x, 'b sq ... -> (b sq) ...') for x in [query_layer, key_layer, value_layer]
-                ]
+            rearrange(x, 'b sq ... -> (b sq) ...') for x in [query_layer, key_layer, value_layer]
+            ]
 
         max_seqlen = seqlen
         cu_seqlens = torch.arange(
-            0, 
-            (batch_size + 1) * seqlen, 
-            step=seqlen, 
-            dtype=torch.int32, 
+            0,
+            (batch_size + 1) * seqlen,
+            step=seqlen,
+            dtype=torch.int32,
             device=query_layer.device)
 
         with self.attention_dropout_ctx():
@@ -400,16 +401,18 @@ class MultiHeadAttention(torch.nn.Module):
         self.use_flash_attn = int(os.getenv("NVTE_FLASH_ATTN", "0"))
         if self.use_flash_attn:
             if rearrange is None:
-                raise ImportError('Einops is not installed. Please install with pip install einops.')
+                raise ImportError('Einops is not installed. ' \
+                                  'Please install with pip install einops.')
             if flash_attn_unpadded_func is None:
-                raise ImportError('FlashAttention is not installed. Please install with pip install flash-attn. '
+                raise ImportError('FlashAttention is not installed. ' \
+                                  'Please install with pip install flash-attn. ' \
                                   'If running on Hopper, please install from source with compute capability 9.0.')
             assert (
                 attention_type == "self"
-                ), f'FlashAttention currently only supports self attention.'
+                ), 'FlashAttention currently only supports self attention.'
             assert (
                 attn_mask_type == "causal"
-                ), f'FlashAttention currently only supports causal attention mask.'
+                ), 'FlashAttention currently only supports causal attention mask.'
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -742,7 +745,7 @@ class MultiHeadAttention(torch.nn.Module):
                        for x in (query_layer, key_layer, value_layer)]
             if checkpoint_core_attention:
                 context_layer = self._checkpointed_core_attention_flash_forward(
-                    query_layer, key_layer, value_layer 
+                    query_layer, key_layer, value_layer
                 )
             else:
                 context_layer = self.core_attention_flash(
