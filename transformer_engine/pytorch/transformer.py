@@ -240,7 +240,6 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         attention_dropout: float = 0.0,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = True,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
@@ -254,7 +253,8 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         if flash_attn_unpadded_func is None:
             raise ImportError('FlashAttention is not installed. ' \
                               'Please install with pip install flash-attn. ' \
-                              'If running on Hopper, please install from source with compute capability 9.0.')
+                              'If running on Hopper, ' \
+                              'please install from source with compute capability 9.0.')
         assert (
             attention_type == "self"
             ), 'FlashAttention currently only supports self attention.'
@@ -406,7 +406,8 @@ class MultiHeadAttention(torch.nn.Module):
             if flash_attn_unpadded_func is None:
                 raise ImportError('FlashAttention is not installed. ' \
                                   'Please install with pip install flash-attn. ' \
-                                  'If running on Hopper, please install from source with compute capability 9.0.')
+                                  'If running on Hopper, ' \
+                                  'please install from source with compute capability 9.0.')
             assert (
                 attention_type == "self"
                 ), 'FlashAttention currently only supports self attention.'
@@ -495,7 +496,6 @@ class MultiHeadAttention(torch.nn.Module):
             attention_dropout,
             layer_number=layer_number,
             apply_query_key_layer_scaling=apply_query_key_layer_scaling,
-            attention_softmax_in_fp32=attention_softmax_in_fp32,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             sequence_parallel=sequence_parallel,
