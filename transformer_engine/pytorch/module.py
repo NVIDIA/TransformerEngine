@@ -109,7 +109,7 @@ def _prepare_backward(fp8: bool,
     """Checks and prep for BWD."""
     if fp8:
         # Update amax and scale; Skip all setup for global amax reduction
-        if not fp8_meta["recipe"].reduce_amax:
+        if not (fp8_meta["recipe"].reduce_amax or reduce_amax_across_tp_group):
             amax_and_scale_update(fp8_meta, False)
         else:
             # From previous iteration
@@ -125,14 +125,16 @@ def _prepare_backward(fp8: bool,
     with torch.cuda.nvtx.range(name + " backward"):
         yield
 
-    if not fp8 or not fp8_meta["recipe"].reduce_amax:
-        return
-
-    if fp8_meta["first_module"]:
-        global_amax_reduction(
-            fp8_meta, reduce_amax_across_tp_group, tp_group, forward=False
-        )
-        delete_key_from_amax_buffer(forward=False)
+    if fp8 and (fp8_meta["recipe"].reduce_amax or reduce_amax_across_tp_group):
+        if fp8_meta["first_module"]:
+            global_amax_reduction(
+                fp8_meta,
+                fp8_meta["recipe"].reduce_amax,
+                reduce_amax_across_tp_group,
+                tp_group,
+                forward=False,
+            )
+            delete_key_from_amax_buffer(forward=False)
 
 
 class _NoopCat(torch.autograd.Function):
@@ -457,7 +459,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-                if self.fp8_meta["recipe"].reduce_amax:
+                if self.fp8_meta["recipe"].reduce_amax or self.sequence_parallel:
                     copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -470,7 +472,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             if self.fp8 and self.training:
                 # Setup for amax reduction
-                if self.fp8_meta["recipe"].reduce_amax:
+                if self.fp8_meta["recipe"].reduce_amax or self.sequence_parallel:
                     self.fp8_meta["first_module"] = is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
                         self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
@@ -501,11 +503,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             restore_fp8_meta_tensors(self.fp8_meta)
             return
 
-        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
+        if (
+            self.fp8
+            and self.training
+            and (self.fp8_meta["recipe"].reduce_amax or self.sequence_parallel)
+        ):
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 global_amax_reduction,
                 self.fp8_meta,
+                self.fp8_meta["recipe"].reduce_amax,
                 self.sequence_parallel,
                 self.tp_group,
                 forward=True,
