@@ -61,7 +61,7 @@ void ln_fwd_tuned_kernel(FwdParams params) {
     Wvec beta[LDGS];
     index_t idx = c;
     #pragma unroll
-    for ( int it = 0; it < LDGS; it++ ) {
+    for ( int it = 0; it < LDGS; ++it ) {
         gamma[it].load_from(params.gamma, idx);
         beta[it].load_from(params.beta, idx);
         idx += VEC_COLS_PER_LDG;
@@ -113,6 +113,9 @@ void ln_fwd_tuned_kernel(FwdParams params) {
             for ( int jt = 0; jt < NUM_ELTS; jt++ ) {
                 compute_t y_ij = rs * (xf[it * NUM_ELTS + jt] - mu);
                 compute_t g_ij = gamma[it].data.elt[jt];
+                if (params.zero_centered_gamma) {
+                  g_ij += 1;
+                }
                 compute_t b_ij = beta[it].data.elt[jt];
                 compute_t temp_output = g_ij * y_ij + b_ij;
 
@@ -187,7 +190,7 @@ void ln_fwd_general_kernel(FwdParams params) {
     #pragma unroll
     for ( int it = 0, col = gidn * NUM_ELTS;
           it < LDGS && col < params.cols;
-          it++, col += gdimn * NUM_ELTS ) {
+          ++it, col += gdimn * NUM_ELTS ) {
         Wvec gamma_in, beta_in;
         gamma_in.load_from_elts(params.gamma, col, params.cols - col);
         beta_in.load_from_elts(params.beta, col, params.cols - col);
@@ -269,6 +272,9 @@ void ln_fwd_general_kernel(FwdParams params) {
             for ( int jt = 0; jt < NUM_ELTS; jt++ ) {
                 compute_t y_ij = rs * (x[it].data.elt[jt] - mu);
                 compute_t g_ij = gamma[it].data.elt[jt];
+                if (params.zero_centered_gamma) {
+                  g_ij += 1;
+                }
                 compute_t b_ij = beta[it].data.elt[jt];
                 z.data.elt[jt] = g_ij * y_ij + b_ij;
             }
