@@ -44,7 +44,8 @@ struct ParamsBase {
         , rs(nullptr)
         , gamma(nullptr)
         , workspace(nullptr)
-        , barrier(nullptr) {}
+        , barrier(nullptr)
+        , zero_centered_gamma(false) {}
 
 
     // For Multi-CTA, number of different CTA groups. Otherwise same as gridDim.x.
@@ -67,6 +68,9 @@ struct ParamsBase {
 
     // Multi-CTA sync barriers in gmem.
     int *barrier;
+
+    // Whether gamma is centered around 0
+    bool zero_centered_gamma;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

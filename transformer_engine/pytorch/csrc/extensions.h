@@ -85,7 +85,8 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &mu,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
-                                      const int sm_margin
+                                      const int sm_margin,
+                                      const bool zero_centered_gamma
 );
 
 
@@ -97,7 +98,8 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           at::Tensor amax,
                                           at::Tensor scale_inv,
                                           transformer_engine::DType otype,
-                                          const int sm_margin
+                                          const int sm_margin,
+                                          const bool zero_centered_gamma
 );
 
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
@@ -107,20 +109,23 @@ at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  at::Tensor scale,
                                  at::Tensor amax,
                                  at::Tensor scale_inv,
-                                 transformer_engine::DType otype
+                                 transformer_engine::DType otype,
+                                 const bool zero_centered_gamma
 );
 
 std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const at::Tensor &weight,
                                       const at::Tensor &bias,
                                       float eps,
-                                      const int sm_margin
+                                      const int sm_margin,
+                                      const bool zero_centered_gamma
 );
 
 at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const at::Tensor &weight,
                              const at::Tensor &bias,
-                             float eps
+                             float eps,
+                             const bool zero_centered_gamma
 );
 
 at::Tensor cast_to_fp8(const at::Tensor &input,

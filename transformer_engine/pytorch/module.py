@@ -668,6 +668,7 @@ class _LayerNormLinear(torch.autograd.Function):
         is_grad_enabled: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
+        zero_centered_gamma: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -698,6 +699,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                         fwd_ln_sm_margin,
+                        zero_centered_gamma,
                     )
                 else:
                     mu = rsigma = None
@@ -709,15 +711,16 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        zero_centered_gamma,
                     )
             else:
                 if is_grad_enabled:
                     ln_out_return, mu, rsigma = tex.layernorm_fwd(
-                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin
+                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
                     )
                 else:
                     ln_out_return, mu, rsigma = layernorm_fwd_inf(
-                        inputmat, ln_weight, ln_bias, eps
+                        inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
                     ), None, None
 
                 ln_out = cast_to_fp8(
@@ -729,11 +732,11 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             if is_grad_enabled:
                 ln_out, mu, rsigma = tex.layernorm_fwd(
-                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin
+                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
                 )
             else:
                 ln_out, mu, rsigma = layernorm_fwd_inf(
-                        inputmat, ln_weight, ln_bias, eps
+                        inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
                 ), None, None
             ln_out_return = ln_out
 
@@ -831,6 +834,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.return_layernorm_output = return_layernorm_output
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -997,7 +1001,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+                d_ln_out, inputmat, mu, rsigma, ln_weight,
+                ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
 
             if not ctx.use_bias:
@@ -1027,11 +1032,12 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
 class LayerNormLinear(TransformerEngineBaseModule):
-    """
+    r"""
     Applies layer normalization followed by linear transformation to the incoming data.
 
     Parameters
@@ -1057,6 +1063,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
                       split along the first dimension, where `N` is the length of the argument
                       and the strings contained are the names of the split parameters.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
 
     Parallelism parameters
     ----------------------
@@ -1112,6 +1125,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         return_layernorm_output: bool = False,
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1121,6 +1135,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
+        self.zero_centered_gamma = zero_centered_gamma
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1256,7 +1271,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
-        init.ones_(self.layer_norm_weight)
+        if not self.zero_centered_gamma:
+            init.ones_(self.layer_norm_weight)
+        else:
+            init.zeros_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
     def forward(
@@ -1339,6 +1357,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
+                self.zero_centered_gamma,
             )
             out = fwd_fn(*args)
 
@@ -1997,6 +2016,7 @@ class _LayerNormMLP(torch.autograd.Function):
         is_grad_enabled: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
+        zero_centered_gamma: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -2026,6 +2046,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                         fwd_ln_sm_margin,
+                        zero_centered_gamma,
                     )
                 else:
                     ln_out = layernorm_fwd_fp8_inf(
@@ -2036,10 +2057,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        zero_centered_gamma,
                     )
             else:
                 ln_out_return, mu, rsigma = tex.layernorm_fwd(
-                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin
+                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
                 )
                 ln_out = cast_to_fp8(
                     ln_out_return,
@@ -2050,11 +2072,11 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             if is_grad_enabled:
                 ln_out, mu, rsigma = tex.layernorm_fwd(
-                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin
+                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
                 )
             else:
                 ln_out, mu, rsigma = layernorm_fwd_inf(
-                        inputmat, ln_weight, ln_bias, eps
+                        inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
                         ), None, None
 
             ln_out_return = ln_out
@@ -2225,6 +2247,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.return_layernorm_output = return_layernorm_output
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
 
         # Row Parallel Linear
         if set_parallel_mode and sequence_parallel:
@@ -2518,7 +2541,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+                d_ln_out, inputmat, mu, rsigma, ln_weight,
+                ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
 
             if not ctx.use_bias:
@@ -2553,11 +2577,12 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
 class LayerNormMLP(TransformerEngineBaseModule):
-    """
+    r"""
     Applies layer normalization on the input followed by the MLP module, consisting of
     2 successive linear transformations, separated by the GeLU activation.
 
@@ -2583,6 +2608,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module
                              is taken post layernorm.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
 
     Parallelism parameters
     ----------------------
@@ -2643,6 +2675,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2652,6 +2685,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.return_layernorm_output = return_layernorm_output
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
+        self.zero_centered_gamma = zero_centered_gamma
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -2776,7 +2810,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
-        init.ones_(self.layer_norm_weight)
+        if not self.zero_centered_gamma:
+            init.ones_(self.layer_norm_weight)
+        else:
+            init.zeros_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
     def forward(
@@ -2840,6 +2877,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
+                self.zero_centered_gamma,
             )
             out = fwd_fn(*args)
 
@@ -2870,6 +2908,7 @@ class _LayerNorm(torch.autograd.Function):
         eps: float,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
+        zero_centered_gamma: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -2877,10 +2916,13 @@ class _LayerNorm(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.view((-1, in_features))
 
-        ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin)
+        ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
+                                               ln_bias, eps, fwd_ln_sm_margin,
+                                               zero_centered_gamma)
         ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
         ctx.inp_shape = inp.shape
         ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+        ctx.zero_centered_gamma = zero_centered_gamma
         return ln_out.view_as(inp)
 
     @staticmethod
@@ -2891,9 +2933,10 @@ class _LayerNorm(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
-            d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin
+            d_ln_out, inputmat, mu, rsigma, ln_weight,
+            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
@@ -2902,7 +2945,7 @@ class LayerNorm(torch.nn.Module):
     the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__
 
     .. math::
-        y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} * \gamma + \beta
+        y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma + \beta
 
     :math:`\gamma` and :math:`\beta` are learnable affine transform parameters of
     size :attr:`hidden_size`
@@ -2919,6 +2962,13 @@ class LayerNorm(torch.nn.Module):
                     it controls the type used to allocate the initial parameters. Useful when
                     the model is trained with lower precision and the original FP32 parameters
                     would not fit in GPU memory.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
     """
 
     def __init__(
@@ -2927,9 +2977,11 @@ class LayerNorm(torch.nn.Module):
         eps: float = 1e-5,
         sequence_parallel: bool = False,
         params_dtype: torch.dtype = torch.float32,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
         self.eps = eps
+        self.zero_centered_gamma = zero_centered_gamma
         self.weight = Parameter(
             torch.empty(
                 hidden_size,
@@ -2974,7 +3026,10 @@ class LayerNorm(torch.nn.Module):
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
-        init.ones_(self.weight)
+        if not self.zero_centered_gamma:
+            init.ones_(self.weight)
+        else:
+            init.zeros_(self.weight)
         init.zeros_(self.bias)
 
 
@@ -2993,4 +3048,5 @@ class LayerNorm(torch.nn.Module):
             self.eps,
             self.fwd_ln_sm_margin,
             self.bwd_ln_sm_margin,
+            self.zero_centered_gamma
         )
