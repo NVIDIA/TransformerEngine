@@ -87,7 +87,8 @@ def do_export(
                           opset_version=opset,
                           input_names=input_names,
                           output_names=output_names,
-                          do_constant_folding=True,
+                          # Keep this False otherwise torch will remove the gamma zero-centering on export.
+                          do_constant_folding=False,
                           operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
