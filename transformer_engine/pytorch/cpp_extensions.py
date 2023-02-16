@@ -26,7 +26,6 @@ def fp8_gemm(
     fp8_meta_tensor: tex.FP8TensorMeta = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
-    fp32_output: bool = False, # Deprecated
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
 ) -> torch.Tensor:
@@ -41,7 +40,7 @@ def fp8_gemm(
         out = torch.empty(
             B.shape[0],
             A.shape[0],
-            dtype=torch.float32 if fp32_output else out_dtype,
+            dtype=out_dtype,
             device="cuda",
         )
         return_output = True
@@ -93,7 +92,6 @@ def gemm(
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
-    fp32_output: bool = False, # Deprecated
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
@@ -108,7 +106,7 @@ def gemm(
         out = torch.empty(
             B.shape[1] if transb else B.shape[0],
             A.shape[0] if transa else A.shape[1],
-            dtype=torch.float32 if fp32_output else dtype,
+            dtype=dtype,
             device="cuda",
         )
         return_output = True
