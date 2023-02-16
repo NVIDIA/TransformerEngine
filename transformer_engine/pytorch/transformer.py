@@ -4,6 +4,7 @@
 
 """Transformer."""
 import os
+import re
 import math
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
@@ -44,8 +45,9 @@ except ImportError:
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+    flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
 except ImportError:
-    flash_attn_unpadded_func = None
+    flash_attn_version = None
 
 
 class DropPath(torch.nn.Module):
@@ -250,9 +252,9 @@ class FlashAttention(torch.nn.Module):
 
         if rearrange is None:
             raise ImportError('Einops is not installed. Please install with pip install einops.')
-        if flash_attn_unpadded_func is None:
+        if flash_attn_version is None or "hopper" not in flash_attn_version:
             raise ImportError(
-                'FlashAttention is not installed. Please install with ' \
+                'Please install correct version of flash-attn with ' \
                 'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
                 'If running on Hopper, ' \
                 'please install from source with compute capability 9.0.')
