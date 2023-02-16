@@ -12,6 +12,8 @@ from typing import Any, Callable, Optional, Tuple, Union
 import torch
 from einops import rearrange
 
+from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+
 from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
@@ -39,7 +41,6 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
-from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 _flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
 
 
@@ -83,7 +84,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout: float,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -351,9 +352,9 @@ class DotProductAttention(torch.nn.Module):
     apply_query_key_layer_scaling: bool, default = `True`
                                   apply query-key layer scaling during BMM1
                                   by a factor of `layer_number`
-    attention_softmax_in_fp32: bool, default = `False`
-                              if set to `True`, softmax is executed in
-                              torch.float32 dtype (single precision)
+    attention_softmax_in_fp32: bool, default = `True`
+                              if set to `False`, softmax is executed in
+                              the dtype of activation tensors.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
 
@@ -372,7 +373,7 @@ class DotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
@@ -480,7 +481,7 @@ class MultiHeadAttention(torch.nn.Module):
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
@@ -845,9 +846,9 @@ class TransformerLayer(torch.nn.Module):
                      if set to `True`, layer normalization is applied on the output side,
                      after the final dropout-add. default behavior is to apply layer
                      normalization on the input side, before the QKV transformation.
-    attention_softmax_in_fp32: bool, default = `False`
-                              if set to `True`, softmax is executed in
-                              torch.float32 dtype (single precision)
+    attention_softmax_in_fp32: bool, default = `True`
+                              if set to `False`, softmax is executed in
+                              the dtype of activation tensors.
     layer_type: {'encoder', 'decoder'}, default = `encoder`
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
@@ -928,7 +929,7 @@ class TransformerLayer(torch.nn.Module):
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
         apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        attention_softmax_in_fp32: bool = True,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         sequence_parallel: bool = False,
