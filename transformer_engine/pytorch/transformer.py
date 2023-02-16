@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
+from einops import rearrange
 
 from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
@@ -38,16 +39,11 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
-try:
-    from einops import rearrange
-except ImportError:
-    rearrange = None
+from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+_flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
 
-try:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func
-    flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
-except ImportError:
-    flash_attn_version = None
+
+__all__ = ["DotProductAttention", "TransformerLayer"]
 
 
 class DropPath(torch.nn.Module):
@@ -75,7 +71,7 @@ class DropPath(torch.nn.Module):
         return output
 
 
-class CoreAttention(torch.nn.Module):
+class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
     """
@@ -232,7 +228,7 @@ class CoreAttention(torch.nn.Module):
 
 
 class FlashAttention(torch.nn.Module):
-    """Core attention implementation by using the flash-attn package.
+    """Dot product attention implementation by using the flash-attn package.
     """
 
     def __init__(
@@ -250,9 +246,7 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if rearrange is None:
-            raise ImportError('Einops is not installed. Please install with pip install einops.')
-        if flash_attn_version is None or "hopper" not in flash_attn_version:
+        if "hopper" not in _flash_attn_version:
             raise ImportError(
                 'Please install correct version of flash-attn with ' \
                 'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
@@ -362,10 +356,6 @@ class DotProductAttention(torch.nn.Module):
                               torch.float32 dtype (single precision)
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
-    use_flash_attention: bool, default = `False`
-                        if set to `True`, the
-                        `flash-attn <https://github.com/ksivaman/flash-attention>`_
-                        implementation is used for the attention mechanism.
 
     Parallelism parameters
     ----------------------
@@ -384,18 +374,17 @@ class DotProductAttention(torch.nn.Module):
         apply_query_key_layer_scaling: bool = True,
         attention_softmax_in_fp32: bool = False,
         attn_mask_type: str = "causal",
-        use_flash_attention: bool = False,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
     ) -> None:
         super().__init__()
 
-        self.use_flash_attention = use_flash_attention
-        if use_flash_attention:
+        self.use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+        if self.use_flash_attention:
             attention = FlashAttention
         else:
-            attention = CoreAttention
+            attention = UnfusedDotProductAttention
 
         self.attention = attention(
             num_attention_heads,
@@ -505,7 +494,6 @@ class MultiHeadAttention(torch.nn.Module):
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
-        use_flash_attention: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -516,7 +504,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
-        self.use_flash_attention = use_flash_attention
+        self.use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
         assert (
             attention_type in AttnTypes
@@ -613,7 +601,6 @@ class MultiHeadAttention(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
-            use_flash_attention = use_flash_attention,
         )
 
         # Linear
@@ -952,7 +939,6 @@ class TransformerLayer(torch.nn.Module):
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
-        use_flash_attention: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1010,7 +996,6 @@ class TransformerLayer(torch.nn.Module):
             "set_parallel_mode": set_parallel_mode,
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
-            "use_flash_attention": use_flash_attention,
         }
 
         self.self_attention = MultiHeadAttention(
