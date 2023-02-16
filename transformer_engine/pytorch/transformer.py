@@ -260,7 +260,7 @@ class FlashAttention(torch.nn.Module):
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
         assert (
-            attention_softmax_in_fp32 is True,
+            attention_softmax_in_fp32 is True
             ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
