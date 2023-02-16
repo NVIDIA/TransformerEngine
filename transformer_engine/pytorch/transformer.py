@@ -337,7 +337,40 @@ class FlashAttention(torch.nn.Module):
 
 
 class DotProductAttention(torch.nn.Module):
-    """Implements Dot Product Attention
+    """Allows the model to jointly attend to information from different
+    representation subspaces as described in the paper:
+    `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
+
+    Parameters
+    ----------
+    num_attention_heads : int
+                         number of attention heads in the transformer layer.
+    kv_channels : int
+                number of key-value channels.
+    attention_dropout: float, default = 0.0
+                      dropout probability for the dropout op during multi-head attention.
+    layer_number: int, default = `None`
+                 layer number of the current `DotProductAttention` when multiple such modules
+                 are concatenated, for instance in consecutive transformer blocks.
+    apply_query_key_layer_scaling: bool, default = `True`
+                                  apply query-key layer scaling during BMM1
+                                  by a factor of `layer_number`
+    attention_softmax_in_fp32: bool, default = `False`
+                              if set to `True`, softmax is executed in
+                              torch.float32 dtype (single precision)
+    attn_mask_type: {'causal', 'padding'}, default = `causal`
+                   type of attention mask passed into softmax operation.
+    use_flash_attention: bool, default = `False`
+                        if set to `True`, the
+                        `flash-attn <https://github.com/ksivaman/flash-attention>`_
+                        implementation is used for the attention mechanism.
+
+    Parallelism parameters
+    ----------------------
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
+    tp_size : int, default = 1
+             tensor parallel world size.
     """
 
     def __init__(
@@ -348,11 +381,11 @@ class DotProductAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
         attention_softmax_in_fp32: bool = False,
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        sequence_parallel: bool = False,
         attn_mask_type: str = "causal",
         use_flash_attention: bool = False,
+        sequence_parallel: bool = False,
+        tp_size: int = 1,
+        get_rng_state_tracker: Optional[Callable] = None,
     ) -> None:
         super().__init__()
 
@@ -403,7 +436,25 @@ class DotProductAttention(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
     ) -> torch.Tensor:
-        """DotProductAttention forward"""
+        """
+        Dot Product Attention Layer.
+
+        Parameters
+        ----------
+        query_layer : torch.Tensor
+                     Query tensor.
+        key_layer : torch.Tensor
+                   Key tensor.
+        value_layer : torch.Tensor
+                     Value tensor.
+        attention_mask : torch.Tensor
+                        Boolean tensor used to mask out softmax input when not using flash-attn.
+        checkpoint_core_attention : bool, default = `True`
+                                   If true, forward activations for attention are recomputed
+                                   during the backward pass in order to save memory that would
+                                   otherwise be occupied to store the forward activations until
+                                   backprop.
+        """
 
         if self.use_flash_attention:
             assert attention_mask is None, "flash-attn does not require attention_mask."
@@ -463,7 +514,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
-        self.use_flash_attention=use_flash_attention
+        self.use_flash_attention = use_flash_attention
 
         assert (
             attention_type in AttnTypes
