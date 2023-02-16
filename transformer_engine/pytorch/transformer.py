@@ -229,7 +229,7 @@ class CoreAttention(torch.nn.Module):
         return context_layer
 
 
-class CoreAttention_FlashAttn(torch.nn.Module):
+class FlashAttention(torch.nn.Module):
     """Core attention implementation by using the flash-attn package.
     """
 
@@ -240,10 +240,10 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         attention_dropout: float = 0.0,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
+        attention_softmax_in_fp32: bool = True,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
-        attention_type: str = "self",
         attn_mask_type: str = "causal",
     ) -> None:
         super().__init__()
@@ -251,16 +251,17 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         if rearrange is None:
             raise ImportError('Einops is not installed. Please install with pip install einops.')
         if flash_attn_unpadded_func is None:
-            raise ImportError('FlashAttention is not installed. ' \
-                              'Please install with pip install flash-attn. ' \
-                              'If running on Hopper, ' \
-                              'please install from source with compute capability 9.0.')
-        assert (
-            attention_type == "self"
-            ), 'FlashAttention currently only supports self attention.'
+            raise ImportError(
+                'FlashAttention is not installed. Please install with ' \
+                'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
+                'If running on Hopper, ' \
+                'please install from source with compute capability 9.0.')
         assert (
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
+        assert (
+            attention_softmax_in_fp32 is True,
+            ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
@@ -289,7 +290,6 @@ class CoreAttention_FlashAttn(torch.nn.Module):
             self.norm_factor *= coeff
 
         self.attention_dropout = attention_dropout
-
 
     def forward(
         self,
@@ -336,6 +336,92 @@ class CoreAttention_FlashAttn(torch.nn.Module):
         return output
 
 
+class DotProductAttention(torch.nn.Module):
+    """Implements Dot Product Attention
+    """
+
+    def __init__(
+        self,
+        num_attention_heads: int,
+        kv_channels: int,
+        attention_dropout: float = 0.0,
+        layer_number: Optional[int] = None,
+        apply_query_key_layer_scaling: bool = True,
+        attention_softmax_in_fp32: bool = False,
+        tp_size: int = 1,
+        get_rng_state_tracker: Optional[Callable] = None,
+        sequence_parallel: bool = False,
+        attn_mask_type: str = "causal",
+        use_flash_attention: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.use_flash_attention = use_flash_attention
+        if use_flash_attention:
+            attention = FlashAttention
+        else:
+            attention = CoreAttention
+
+        self.attention = attention(
+            num_attention_heads,
+            kv_channels,
+            attention_dropout,
+            layer_number=layer_number,
+            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
+            attention_softmax_in_fp32=attention_softmax_in_fp32,
+            tp_size=tp_size,
+            get_rng_state_tracker=get_rng_state_tracker,
+            attn_mask_type=attn_mask_type,
+            sequence_parallel=sequence_parallel,
+        )
+
+    def _checkpointed_attention_forward(
+        self,
+        *forward_args: Tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        """Forward method with activation checkpointing."""
+
+        def custom_forward(*inputs):
+            return self.attention(*inputs)
+
+        hidden_states = checkpoint(
+            custom_forward,
+            False,
+            self.get_rng_state_tracker,
+            self.tp_group,
+            *forward_args,
+        )
+
+        return hidden_states
+
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        checkpoint_core_attention: bool = False,
+    ) -> torch.Tensor:
+        """DotProductAttention forward"""
+
+        if self.use_flash_attention:
+            assert attention_mask is None, "flash-attn does not require attention_mask."
+
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(query_layer, key_layer, value_layer)
+            return self.attention(query_layer, key_layer, value_layer)
+
+        if checkpoint_core_attention:
+            return self._checkpointed_attention_forward(
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask
+            )
+        return self.attention(query_layer, key_layer, value_layer, attention_mask)
+
+
 class MultiHeadAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
@@ -365,7 +451,8 @@ class MultiHeadAttention(torch.nn.Module):
         attention_type: str = "self",
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
-        zero_centered_gamma:bool = False,
+        zero_centered_gamma: bool = False,
+        use_flash_attention: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -376,6 +463,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
+        self.use_flash_attention=use_flash_attention
 
         assert (
             attention_type in AttnTypes
@@ -398,23 +486,6 @@ class MultiHeadAttention(torch.nn.Module):
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
-
-        self.use_flash_attn = int(os.getenv("NVTE_FLASH_ATTN", "0"))
-        if self.use_flash_attn:
-            if rearrange is None:
-                raise ImportError('Einops is not installed. ' \
-                                  'Please install with pip install einops.')
-            if flash_attn_unpadded_func is None:
-                raise ImportError('FlashAttention is not installed. ' \
-                                  'Please install with pip install flash-attn. ' \
-                                  'If running on Hopper, ' \
-                                  'please install from source with compute capability 9.0.')
-            assert (
-                attention_type == "self"
-                ), 'FlashAttention currently only supports self attention.'
-            assert (
-                attn_mask_type == "causal"
-                ), 'FlashAttention currently only supports causal attention mask.'
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -477,8 +548,8 @@ class MultiHeadAttention(torch.nn.Module):
                 **common_gemm_kwargs,
             )
 
-        # Core Self attention.
-        self.core_attention = CoreAttention(
+        # Attention.
+        self.dot_product_attention = DotProductAttention(
             num_attention_heads,
             kv_channels,
             attention_dropout,
@@ -489,22 +560,8 @@ class MultiHeadAttention(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
+            use_flash_attention = use_flash_attention,
         )
-
-        # Core self attention with flash-attn.
-        if self.use_flash_attn:
-            self.core_attention_flash = CoreAttention_FlashAttn(
-            num_attention_heads,
-            kv_channels,
-            attention_dropout,
-            layer_number=layer_number,
-            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
-            tp_size=tp_size,
-            get_rng_state_tracker=get_rng_state_tracker,
-            sequence_parallel=sequence_parallel,
-            attention_type=attention_type,
-            attn_mask_type=attn_mask_type,
-            )
 
         # Linear
         self.proj = Linear(
@@ -517,66 +574,6 @@ class MultiHeadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
-    def _checkpointed_core_attention_forward(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Forward method with activation checkpointing."""
-
-        def custom_forward(*inputs):
-            query_layer = inputs[0]
-            key_layer = inputs[1]
-            value_layer = inputs[2]
-            attention_mask = inputs[3]
-            output_ = self.core_attention(
-                query_layer, key_layer, value_layer, attention_mask
-            )
-            return output_
-
-        hidden_states = checkpoint(
-            custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
-            query_layer,
-            key_layer,
-            value_layer,
-            attention_mask,
-        )
-
-        return hidden_states
-
-    def _checkpointed_core_attention_flash_forward(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-    ) -> torch.Tensor:
-        """Forward method with activation checkpointing."""
-
-        def custom_forward(*inputs):
-            query_layer = inputs[0]
-            key_layer = inputs[1]
-            value_layer = inputs[2]
-            output_ = self.core_attention_flash(
-                query_layer, key_layer, value_layer
-            )
-            return output_
-
-        hidden_states = checkpoint(
-            custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
-            query_layer,
-            key_layer,
-            value_layer,
-        )
-
-        return hidden_states
 
     def _allocate_memory(
         self, inference_max_sequence_len: int, batch_size: int
@@ -734,28 +731,24 @@ class MultiHeadAttention(torch.nn.Module):
         # core attention computation
         # ==================================
 
-        if not self.use_flash_attn:
-            if checkpoint_core_attention:
-                context_layer = self._checkpointed_core_attention_forward(
-                    query_layer, key_layer, value_layer, attention_mask
-                )
-            else:
-                context_layer = self.core_attention(
-                    query_layer, key_layer, value_layer, attention_mask
-                )
-        else:
+        if self.use_flash_attention:
             query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                        for x in (query_layer, key_layer, value_layer)]
-            if checkpoint_core_attention:
-                context_layer = self._checkpointed_core_attention_flash_forward(
-                    query_layer, key_layer, value_layer
-                )
-            else:
-                context_layer = self.core_attention_flash(
-                    query_layer, key_layer, value_layer
-                )
+            context_layer = self.dot_product_attention(
+                query_layer,
+                key_layer,
+                value_layer,
+                checkpoint_core_attention=checkpoint_core_attention,
+            )
             context_layer = rearrange(context_layer, 'b sq np hn -> sq b (np hn)').contiguous()
-
+        else:
+            context_layer = self.dot_product_attention(
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask,
+                checkpoint_core_attention=checkpoint_core_attention,
+            )
 
         # =================
         # Output. [sq, b, h]
@@ -906,6 +899,7 @@ class TransformerLayer(torch.nn.Module):
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
+        use_flash_attention: bool = False,
     ) -> None:
         super().__init__()
 
@@ -962,7 +956,8 @@ class TransformerLayer(torch.nn.Module):
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "set_parallel_mode": set_parallel_mode,
             "fuse_qkv_params": fuse_qkv_params,
-            "zero_centered_gamma": zero_centered_gamma
+            "zero_centered_gamma": zero_centered_gamma,
+            "use_flash_attention": use_flash_attention,
         }
 
         self.self_attention = MultiHeadAttention(
