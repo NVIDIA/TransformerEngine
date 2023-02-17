@@ -11,7 +11,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
-from einops import rearrange
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
@@ -317,8 +316,9 @@ class FlashAttention(torch.nn.Module):
 
         # [b, sq, np, hn]
         query_layer, key_layer, value_layer = [
-            rearrange(x, 'b sq ... -> (b sq) ...') for x in [query_layer, key_layer, value_layer]
-            ]
+            x.view(x.shape[0] * x.shape[1], *x.shape[2:])
+            for x in [query_layer, key_layer, value_layer]
+        ]
 
         max_seqlen = seqlen
         cu_seqlens = torch.arange(
@@ -336,10 +336,7 @@ class FlashAttention(torch.nn.Module):
             )
 
         # [b, sq, np, hn]
-        output = rearrange(output, '(b sq) ... -> b sq ...', b=batch_size)
-        output = rearrange(output, 'b sq np hn -> sq b (np hn)').contiguous()
-
-        return output
+        return output.view(seqlen, batch_size, -1).contiguous()
 
 
 class DotProductAttention(torch.nn.Module):

@@ -314,7 +314,6 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": TEBuildExtension},
     install_requires = [
-        "einops",
         "flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",
     ],
     license_files=("LICENSE",),
