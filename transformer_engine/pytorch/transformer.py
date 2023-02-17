@@ -79,59 +79,28 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
     def __init__(
         self,
-        num_attention_heads: int,
-        kv_channels: int,
+        norm_factor: float,
         attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
         attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
 
-        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
-        self.attention_softmax_in_fp32 = attention_softmax_in_fp32
-
-        if layer_number is None:
-            self.apply_query_key_layer_scaling = False
-        else:
-            self.layer_number = max(1, layer_number)
-
-        if self.apply_query_key_layer_scaling:
-            self.attention_softmax_in_fp32 = True
-
-        self.attn_mask_type = attn_mask_type
-        projection_size = kv_channels * num_attention_heads
         assert (
             attn_mask_type in AttnMaskTypes
         ), f"attn_mask_type {attn_mask_type} not supported"
 
-        # Per attention head and per partition values.
-        self.hidden_size_per_partition = divide(projection_size, tp_size)
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
-        )
-
-        self.sequence_parallel = sequence_parallel
-        if self.sequence_parallel or get_rng_state_tracker is None:
-            self.attention_dropout_ctx = nullcontext
-        else:
-            self.attention_dropout_ctx = get_rng_state_tracker().fork
-
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
+        self.norm_factor = norm_factor
+        self.attention_dropout_ctx = attention_dropout_ctx
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            self.attn_mask_type,
+            attn_mask_type,
             attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff,
+            attention_softmax_in_fp32,
+            layer_number if apply_query_key_layer_scaling else None,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -234,15 +203,12 @@ class FlashAttention(torch.nn.Module):
 
     def __init__(
         self,
-        num_attention_heads: int,
-        kv_channels: int,
+        norm_factor: float,
         attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
         attention_softmax_in_fp32: bool = True,
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        sequence_parallel: bool = False,
         attn_mask_type: str = "causal",
     ) -> None:
         super().__init__()
@@ -261,32 +227,11 @@ class FlashAttention(torch.nn.Module):
             ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
-        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
-
-        if layer_number is None:
-            self.apply_query_key_layer_scaling = False
-        else:
-            self.layer_number = max(1, layer_number)
-
-        projection_size = kv_channels * num_attention_heads
-        self.hidden_size_per_partition = divide(projection_size, tp_size)
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
-        )
-
-        self.sequence_parallel = sequence_parallel
-        if self.sequence_parallel or get_rng_state_tracker is None:
-            self.attention_dropout_ctx = nullcontext
-        else:
-            self.attention_dropout_ctx = get_rng_state_tracker().fork
-
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
-
+        self.norm_factor = norm_factor
+        self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
+        self.layer_number = layer_number
+        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
 
     def forward(
         self,
@@ -387,30 +332,49 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if layer_number is None:
+            apply_query_key_layer_scaling = False
+        else:
+            layer_number = max(1, layer_number)
+
+        if apply_query_key_layer_scaling:
+            attention_softmax_in_fp32 = True
+
+        projection_size = kv_channels * num_attention_heads
+        self.hidden_size_per_partition = divide(projection_size, tp_size)
+        self.hidden_size_per_attention_head = divide(
+            projection_size, num_attention_heads
+        )
+
+        if sequence_parallel or get_rng_state_tracker is None:
+            attention_dropout_ctx = nullcontext
+        else:
+            attention_dropout_ctx = get_rng_state_tracker().fork
+
+        norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        if apply_query_key_layer_scaling:
+            norm_factor *= layer_number
+
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attention_softmax_in_fp32
             and attn_mask_type == "causal"
         )
 
-        attn_args = (num_attention_heads, kv_channels)
         attn_kwargs = {
             "attention_dropout": attention_dropout,
+            "attention_dropout_ctx": attention_dropout_ctx,
             "layer_number": layer_number,
             "apply_query_key_layer_scaling": apply_query_key_layer_scaling,
             "attention_softmax_in_fp32": attention_softmax_in_fp32,
-            "tp_size": tp_size,
-            "get_rng_state_tracker": get_rng_state_tracker,
             "attn_mask_type": attn_mask_type,
-            "sequence_parallel": sequence_parallel,
         }
 
         if self.use_flash_attention:
-            self.flash_attention = FlashAttention(*attn_args, **attn_kwargs)
+            self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
         # Instantiating both types since use of flash-attn
         # might be ruled out due to forward inputs.
-        self.unfused_attention = UnfusedDotProductAttention(*attn_args, **attn_kwargs)
-
+        self.unfused_attention = UnfusedDotProductAttention(norm_factor, **attn_kwargs)
 
     def _checkpointed_attention_forward(
         self,
@@ -431,7 +395,6 @@ class DotProductAttention(torch.nn.Module):
         )
 
         return hidden_states
-
 
     def forward(
         self,
