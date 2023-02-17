@@ -25,7 +25,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: te_wheel
-          path: wheelhouse/*.whl
+          path: wheelhouse/transformer_engine*.whl
           retention-days: 7
       - name: 'Install'
         run: pip install --no-cache-dir wheelhouse/*.whl
