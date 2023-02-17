@@ -493,6 +493,7 @@ def reduce_tensor_across_group_op_max(
 
 def global_amax_reduction(
     fp8_meta: Dict[str, Any],
+    reduce_amax: bool = False,
     reduce_amax_across_tp_group: bool = False,
     tp_group: Optional[dist_group_type] = None,
     forward: bool = True,
@@ -508,7 +509,8 @@ def global_amax_reduction(
     chunk_sizes = [x.numel() for x in _global_fp8_buffer[amax_buffer_key]]
     contiguous_amax = torch.cat(_global_fp8_buffer[amax_buffer_key])
 
-    reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"])
+    if reduce_amax:
+        reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"])
     if reduce_amax_across_tp_group:
         reduce_tensor_across_group_op_max(contiguous_amax, tp_group)
 
