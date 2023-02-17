@@ -247,7 +247,7 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if "hopper" not in _flash_attn_version:
+        if "dev" not in _flash_attn_version:
             raise ImportError(
                 'Please install correct version of flash-attn with ' \
                 'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
