@@ -116,6 +116,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
+        batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
+
         # [b, np, sq, sk]
         output_size = (
             query_layer.size(1),
@@ -189,10 +191,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
-        new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size_per_partition,
-        )
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.view(seqlen, batch_size, -1)
 
         return context_layer
 
