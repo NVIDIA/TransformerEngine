@@ -6,6 +6,7 @@
 import os
 import re
 import math
+import warnings
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -81,7 +82,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self,
         num_attention_heads: int,
         kv_channels: int,
-        attention_dropout: float,
+        attention_dropout: float = 0.0,
         layer_number: Optional[int] = None,
         apply_query_key_layer_scaling: bool = True,
         attention_softmax_in_fp32: bool = True,
@@ -144,7 +145,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
         # [b, np, sq, sk]
@@ -257,7 +258,7 @@ class FlashAttention(torch.nn.Module):
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
         assert (
-            attention_softmax_in_fp32 is True
+            attention_softmax_in_fp32
             ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
@@ -293,8 +294,9 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """core attention fprop"""
+        """flash-attn fprop"""
 
         assert (
             (query_layer.dtype in [torch.float16, torch.bfloat16])
@@ -304,6 +306,12 @@ class FlashAttention(torch.nn.Module):
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'FlashAttention currently only supports CUDA tensors.'
+        assert (
+            attention_mask is None
+        ), 'FlashAttention currently does not support attention mask.'
+
+        query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+                       for x in (query_layer, key_layer, value_layer)]
 
         batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
 
@@ -329,6 +337,7 @@ class FlashAttention(torch.nn.Module):
 
         # [b, sq, np, hn]
         output = rearrange(output, '(b sq) ... -> b sq ...', b=batch_size)
+        output = rearrange(output, 'b sq np hn -> sq b (np hn)').contiguous()
 
         return output
 
@@ -381,33 +390,40 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-        if self.use_flash_attention:
-            attention = FlashAttention
-        else:
-            attention = UnfusedDotProductAttention
-
-        self.attention = attention(
-            num_attention_heads,
-            kv_channels,
-            attention_dropout,
-            layer_number=layer_number,
-            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
-            attention_softmax_in_fp32=attention_softmax_in_fp32,
-            tp_size=tp_size,
-            get_rng_state_tracker=get_rng_state_tracker,
-            attn_mask_type=attn_mask_type,
-            sequence_parallel=sequence_parallel,
+        self.use_flash_attention = (
+            int(os.getenv("NVTE_FLASH_ATTN", "1"))
+            and attention_softmax_in_fp32
+            and attn_mask_type == "causal"
         )
+
+        attn_args = (num_attention_heads, kv_channels)
+        attn_kwargs = {
+            "attention_dropout": attention_dropout,
+            "layer_number": layer_number,
+            "apply_query_key_layer_scaling": apply_query_key_layer_scaling,
+            "attention_softmax_in_fp32": attention_softmax_in_fp32,
+            "tp_size": tp_size,
+            "get_rng_state_tracker": get_rng_state_tracker,
+            "attn_mask_type": attn_mask_type,
+            "sequence_parallel": sequence_parallel,
+        }
+
+        if self.use_flash_attention:
+            self.flash_attention = FlashAttention(*attn_args, **attn_kwargs)
+        # Instantiating both types since use of flash-attn
+        # might be ruled out due to forward inputs.
+        self.unfused_attention = UnfusedDotProductAttention(*attn_args, **attn_kwargs)
+
 
     def _checkpointed_attention_forward(
         self,
+        attention_func: Callable,
         *forward_args: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
         """Forward method with activation checkpointing."""
 
         def custom_forward(*inputs):
-            return self.attention(*inputs)
+            return attention_func(*inputs)
 
         hidden_states = checkpoint(
             custom_forward,
@@ -439,7 +455,7 @@ class DotProductAttention(torch.nn.Module):
                    Key tensor.
         value_layer : torch.Tensor
                      Value tensor.
-        attention_mask : torch.Tensor
+        attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
         checkpoint_core_attention : bool, default = `True`
                                    If true, forward activations for attention are recomputed
@@ -448,21 +464,33 @@ class DotProductAttention(torch.nn.Module):
                                    backprop.
         """
 
-        if self.use_flash_attention:
-            assert attention_mask is None, "flash-attn does not require attention_mask."
+        use_flash_attention = self.use_flash_attention
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
+            or key_layer.dtype not in [torch.bfloat16, torch.float16]
+            or value_layer.dtype not in [torch.bfloat16, torch.float16]
+        ):
+            use_flash_attention = False
 
+        if attention_mask is not None:
+            use_flash_attention = False
+            warnings.warn(
+                "FlashAttention disabled to utilize custom attention_mask. "
+                "Pass `attention_mask=None` to use FlashAttention."
+            )
+
+        if use_flash_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(query_layer, key_layer, value_layer)
-            return self.attention(query_layer, key_layer, value_layer)
+            return self.flash_attention(query_layer, key_layer, value_layer)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
                 query_layer,
                 key_layer,
                 value_layer,
-                attention_mask
+                attention_mask,
             )
-        return self.attention(query_layer, key_layer, value_layer, attention_mask)
+        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class MultiHeadAttention(torch.nn.Module):
@@ -505,7 +533,6 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
-        self.use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
         assert (
             attention_type in AttnTypes
@@ -591,7 +618,7 @@ class MultiHeadAttention(torch.nn.Module):
             )
 
         # Attention.
-        self.dot_product_attention = DotProductAttention(
+        self.core_attention = DotProductAttention(
             num_attention_heads,
             kv_channels,
             attention_dropout,
@@ -635,7 +662,7 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: Optional[bool] = None,
@@ -772,24 +799,13 @@ class MultiHeadAttention(torch.nn.Module):
         # core attention computation
         # ==================================
 
-        if self.use_flash_attention:
-            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-                       for x in (query_layer, key_layer, value_layer)]
-            context_layer = self.dot_product_attention(
-                query_layer,
-                key_layer,
-                value_layer,
-                checkpoint_core_attention=checkpoint_core_attention,
-            )
-            context_layer = rearrange(context_layer, 'b sq np hn -> sq b (np hn)').contiguous()
-        else:
-            context_layer = self.dot_product_attention(
-                query_layer,
-                key_layer,
-                value_layer,
-                attention_mask,
-                checkpoint_core_attention=checkpoint_core_attention,
-            )
+        context_layer = self.core_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            attention_mask,
+            checkpoint_core_attention=checkpoint_core_attention,
+        )
 
         # =================
         # Output. [sq, b, h]
@@ -1082,7 +1098,7 @@ class TransformerLayer(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -1096,12 +1112,12 @@ class TransformerLayer(torch.nn.Module):
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : torch.Tensor
+        attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
-        encoder_output : torch.Tensor
+        encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
-        enc_dec_attn_mask : torch.Tensor
+        enc_dec_attn_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out inter-attention softmax input if using
              `layer_type="decoder"`.
         is_first_microbatch : {True, False, None}, default = None
