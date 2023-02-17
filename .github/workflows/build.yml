@@ -28,6 +28,6 @@ jobs:
           path: wheelhouse/transformer_engine*.whl
           retention-days: 7
       - name: 'Install'
-        run: pip install --no-cache-dir wheelhouse/*.whl
+        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
       - name: 'Sanity check'
         run: python tests/test_sanity_import.py
