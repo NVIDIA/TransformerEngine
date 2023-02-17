@@ -6,7 +6,6 @@
 import os
 import re
 import math
-import warnings
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -406,6 +405,14 @@ class DotProductAttention(torch.nn.Module):
         """
         Dot Product Attention Layer.
 
+        .. note::
+
+            Input tensors :attr:`query_layer`, :attr:`key_layer`, and :attr:`value_layer`
+            must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
+            :attr:`num_attention_heads`, :attr:`kv_channels`). Output of shape
+            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
+            * :attr:`kv_channels`) is returned.
+
         Parameters
         ----------
         query_layer : torch.Tensor
@@ -416,7 +423,7 @@ class DotProductAttention(torch.nn.Module):
                      Value tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
-        checkpoint_core_attention : bool, default = `True`
+        checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
                                    otherwise be occupied to store the forward activations until
@@ -424,18 +431,12 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (attention_mask is not None
+            or query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
         ):
             use_flash_attention = False
-
-        if attention_mask is not None:
-            use_flash_attention = False
-            warnings.warn(
-                "FlashAttention disabled to utilize custom attention_mask. "
-                "Pass `attention_mask=None` to use FlashAttention."
-            )
 
         if use_flash_attention:
             if checkpoint_core_attention:
