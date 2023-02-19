@@ -278,8 +278,8 @@ class FlashAttention(torch.nn.Module):
                 softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask
             )
 
-        # [b, sq, np, hn]
-        return output.view(seqlen, batch_size, -1).contiguous()
+        # [(b sq), np, hn] -> [sq, b, (np hn)]
+        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
 
 
 class DotProductAttention(torch.nn.Module):
