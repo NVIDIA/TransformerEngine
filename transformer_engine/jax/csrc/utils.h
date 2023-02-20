@@ -18,89 +18,66 @@
 namespace transformer_engine {
 namespace jax {
 
-template <typename T>
-std::string PackDescriptorAsString(const T &descriptor) {
-  return std::string(reinterpret_cast<const char *>(&descriptor), sizeof(T));
-}
-
-template <typename T>
-pybind11::bytes PackDescriptor(const T &descriptor) {
-  return pybind11::bytes(PackDescriptorAsString(descriptor));
-}
-
-template <typename T>
-const T *UnpackDescriptor(const char *opaque, std::size_t opaque_len) {
-  if (opaque_len != sizeof(T)) {
-    throw std::runtime_error("Invalid opaque object size");
-  }
-  return reinterpret_cast<const T *>(opaque);
-}
-
-template <typename T>
-pybind11::capsule EncapsulateFunction(T *fn) {
-  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
-}
-
 class cublasLtMetaManager {
  public:
-  static cublasLtMetaManager &Instance() {
-    static thread_local cublasLtMetaManager instance;
-    return instance;
-  }
+    static cublasLtMetaManager &Instance() {
+        static thread_local cublasLtMetaManager instance;
+        return instance;
+    }
 
-  cublasLtMetaManager() {}
-  ~cublasLtMetaManager() { Clear_(); }
+    cublasLtMetaManager() {}
+    ~cublasLtMetaManager() { Clear_(); }
 
-  void *GetWorkspace(size_t size = 4194304) {
-    ReallocateIfNeed_(size);
-    return workspace_;
-  }
+    void *GetWorkspace(size_t size = 4194304) {
+        ReallocateIfNeed_(size);
+        return workspace_;
+    }
 
  private:
-  void *workspace_ = nullptr;
-  size_t size_ = 0;
+    void *workspace_ = nullptr;
+    size_t size_ = 0;
 
-  void Clear_() {
-    if (workspace_ != nullptr) {
-      NVTE_CHECK_CUDA(cudaFree(workspace_));
+    void Clear_() {
+        if (workspace_ != nullptr) {
+            NVTE_CHECK_CUDA(cudaFree(workspace_));
+        }
+        workspace_ = nullptr;
+        size_ = 0;
     }
-    workspace_ = nullptr;
-    size_ = 0;
-  }
 
-  void Allocate_(size_t new_size) {
-    NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
-    size_ = new_size;
-  }
-
-  void ReallocateIfNeed_(size_t new_size) {
-    if (new_size > size_) {
-      Clear_();
-      Allocate_(new_size);
+    void Allocate_(size_t new_size) {
+        NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
+        size_ = new_size;
     }
-  }
+
+    void ReallocateIfNeed_(size_t new_size) {
+        if (new_size > size_) {
+            Clear_();
+            Allocate_(new_size);
+        }
+    }
 };
 
 class cudaDevicePropertiesManager {
  public:
-  static cudaDevicePropertiesManager &Instance() {
-    static thread_local cudaDevicePropertiesManager instance;
-    return instance;
-  }
-
-  int GetMultiProcessorCount() {
-    if (!prop_queried_) {
-      int device_id;
-      NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-      cudaGetDeviceProperties(&prop_, device_id);
-      prop_queried_ = true;
+    static cudaDevicePropertiesManager &Instance() {
+        static thread_local cudaDevicePropertiesManager instance;
+        return instance;
     }
-    return prop_.multiProcessorCount;
-  }
+
+    int GetMultiProcessorCount() {
+        if (!prop_queried_) {
+            int device_id;
+            NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+            cudaGetDeviceProperties(&prop_, device_id);
+            prop_queried_ = true;
+        }
+        return prop_.multiProcessorCount;
+    }
 
  private:
-  bool prop_queried_ = false;
-  cudaDeviceProp prop_;
+    bool prop_queried_ = false;
+    cudaDeviceProp prop_;
 };
 
 }  // namespace jax
