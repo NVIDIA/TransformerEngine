@@ -82,7 +82,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
+        apply_query_key_layer_scaling: bool = False,
         attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
     ) -> None:
@@ -205,7 +205,7 @@ class FlashAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
+        apply_query_key_layer_scaling: bool = False,
         attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
     ) -> None:
@@ -298,7 +298,7 @@ class DotProductAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
-    apply_query_key_layer_scaling: bool, default = `True`
+    apply_query_key_layer_scaling: bool, default = `False`
                                   apply query-key layer scaling during BMM1
                                   by a factor of `layer_number`
     attention_softmax_in_fp32: bool, default = `True`
@@ -321,7 +321,7 @@ class DotProductAttention(torch.nn.Module):
         kv_channels: int,
         attention_dropout: float = 0.0,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
+        apply_query_key_layer_scaling: bool = False,
         attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
@@ -350,6 +350,7 @@ class DotProductAttention(torch.nn.Module):
             attention_dropout_ctx = get_rng_state_tracker().fork
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        norm_factor_flash_attn = norm_factor
         if apply_query_key_layer_scaling:
             norm_factor *= layer_number
 
@@ -357,6 +358,7 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attention_softmax_in_fp32
             and attn_mask_type == "causal"
+            and not apply_query_key_layer_scaling
         )
 
         attn_kwargs = {
@@ -369,7 +371,7 @@ class DotProductAttention(torch.nn.Module):
         }
 
         if self.use_flash_attention:
-            self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
+            self.flash_attention = FlashAttention(norm_factor_flash_attn, **attn_kwargs)
         # Instantiating both types since use of flash-attn
         # might be ruled out due to forward inputs.
         self.unfused_attention = UnfusedDotProductAttention(norm_factor, **attn_kwargs)
@@ -468,7 +470,7 @@ class MultiHeadAttention(torch.nn.Module):
         init_method: Callable,
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
+        apply_query_key_layer_scaling: bool = False,
         attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
@@ -815,7 +817,7 @@ class TransformerLayer(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    apply_query_key_layer_scaling: bool, default = `True`
+    apply_query_key_layer_scaling: bool, default = `False`
                                   apply query-key layer scaling during BMM1
                                   by a factor of `layer_number`
     output_layernorm: bool, default = `False`
@@ -904,7 +906,7 @@ class TransformerLayer(torch.nn.Module):
         params_dtype: torch.dtype = torch.float32,
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        apply_query_key_layer_scaling: bool = True,
+        apply_query_key_layer_scaling: bool = False,
         attention_softmax_in_fp32: bool = True,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
