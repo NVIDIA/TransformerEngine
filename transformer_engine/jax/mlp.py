@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 # pylint: disable=no-name-in-module
-
 """JAX MLP modules"""
 
 from typing import Tuple, Sequence, Union, Callable
