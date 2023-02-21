@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 # pylint: disable=no-name-in-module
-
 """JAX te modules"""
 
 from typing import Tuple, Sequence

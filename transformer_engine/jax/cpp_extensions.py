@@ -4,10 +4,10 @@
 
 # pylint: disable=c-extension-no-member
 # pylint: disable=no-name-in-module
-
 """JAX te custom call"""
 
 from abc import ABCMeta, abstractmethod
+from dataclasses import dataclass
 from typing import Tuple
 from functools import partial, reduce
 import operator
@@ -113,6 +113,7 @@ def register_primitive(cls):
     return p
 
 
+@dataclass
 class CustomCallArgsWrapper:
     """
     wrapper of XLA custom call args
