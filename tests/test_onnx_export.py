@@ -793,7 +793,7 @@ def test_export_core_attention(
 
     if attn_mask_type is None:
         attn_mask_type = 'causal'
-    model = te.transformer.CoreAttention(
+    model = te.transformer.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
         attention_dropout=0.5,
