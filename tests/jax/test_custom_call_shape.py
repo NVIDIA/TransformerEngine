@@ -58,14 +58,14 @@ class TestGEMMShapeInfer:
         out = (n, m)
         return a, b, out
 
-    @pytest.mark.parametrize('shpaes', SHAPES)
+    @pytest.mark.parametrize('shapes', SHAPES)
     @pytest.mark.parametrize('named_shape1', NAMED_SHAPES)
     @pytest.mark.parametrize('named_shape2', NAMED_SHAPES)
     @pytest.mark.parametrize('te_dtype', DTYPE)
     @pytest.mark.parametrize('transa', TRANSPOSE)
     @pytest.mark.parametrize('transb', TRANSPOSE)
-    def test_shape_infer(self, shpaes, named_shape1, named_shape2, te_dtype, transa, transb):
-        a_shape, b_shape, out_shape = TestGEMMShapeInfer._get_shapes(*shpaes, transa, transb)
+    def test_shape_infer(self, shapes, named_shape1, named_shape2, te_dtype, transa, transb):
+        a_shape, b_shape, out_shape = TestGEMMShapeInfer._get_shapes(*shapes, transa, transb)
         dtype = te_dtype_to_jax_dtype(te_dtype)
         mat_a = ShapedArray(a_shape, dtype, named_shape=named_shape1)
         mat_b = ShapedArray(b_shape, dtype, named_shape=named_shape2)
