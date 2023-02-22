@@ -88,6 +88,7 @@ class TestGEMMShapeInfer:
                                               transa=transa,
                                               transb=transb,
                                               use_split_accumulator=False)
+            assert not need_assert
             assert ref_out == test_out
         except AssertionError as ae:
             assert need_assert, f"{ae.args}"
