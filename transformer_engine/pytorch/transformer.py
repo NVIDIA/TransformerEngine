@@ -250,7 +250,7 @@ class FlashAttention(torch.nn.Module):
             ), 'FlashAttention currently only supports CUDA tensors.'
         assert (
             attention_mask is None
-        ), 'FlashAttention currently does not support attention mask.'
+        ), 'FlashAttention currently does not support external attention mask.'
 
         query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                        for x in (query_layer, key_layer, value_layer)]
@@ -321,6 +321,8 @@ class DotProductAttention(torch.nn.Module):
                        if set to `True`, uses sequence parallelism.
     tp_size : int, default = 1
              tensor parallel world size.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
     """
 
     def __init__(
@@ -335,6 +337,7 @@ class DotProductAttention(torch.nn.Module):
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
+        tp_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__()
 
@@ -345,6 +348,10 @@ class DotProductAttention(torch.nn.Module):
 
         if apply_query_key_layer_scaling:
             attention_softmax_in_fp32 = True
+
+        tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
+        self.tp_group = tp_group
+        self.get_rng_state_tracker = get_rng_state_tracker
 
         projection_size = kv_channels * num_attention_heads
         self.hidden_size_per_partition = divide(projection_size, tp_size)
@@ -450,11 +457,15 @@ class DotProductAttention(torch.nn.Module):
 
         if use_flash_attention:
             if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(query_layer, key_layer, value_layer)
+                return self._checkpointed_attention_forward(self.flash_attention,
+                                                            query_layer,
+                                                            key_layer,
+                                                            value_layer)
             return self.flash_attention(query_layer, key_layer, value_layer)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
+                self.unfused_attention,
                 query_layer,
                 key_layer,
                 value_layer,
@@ -599,6 +610,7 @@ class MultiHeadAttention(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
+            tp_group=tp_group,
         )
 
         # Linear
@@ -635,7 +647,7 @@ class MultiHeadAttention(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-        checkpoint_core_attention: Optional[bool] = None,
+        checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
@@ -1072,7 +1084,7 @@ class TransformerLayer(torch.nn.Module):
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-        checkpoint_core_attention: Optional[bool] = False,
+        checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
     ) -> torch.Tensor:
         """
@@ -1103,7 +1115,7 @@ class TransformerLayer(torch.nn.Module):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-        checkpoint_core_attention: bool, default = `True`
+        checkpoint_core_attention: bool, default = `False`
                                   If true, forward activations for core attention are recomputed
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
