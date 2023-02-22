@@ -287,6 +287,14 @@ class DotProductAttention(torch.nn.Module):
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
+    .. warning::
+
+        For the default attention mechanism, this module executes a non-deterministic version of
+        `flash-attn <https://github.com/ksivaman/flash-attention>`_ whenever possible in order to
+        achieve optimal performance. To observe deterministic behavior, set the environment
+        variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order to disable
+        `flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
+
     Parameters
     ----------
     num_attention_heads : int
