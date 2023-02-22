@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-import abc
 import atexit
 import os
 import sys
@@ -115,32 +114,32 @@ class CMakeExtension(Extension):
         super(CMakeExtension, self).__init__(name, sources=sources, **kwargs)
         self.cmake_path = cmake_path
 
-class FrameworkBuilder(metaclass=abc.ABCMeta):
-    @abc.abstractmethod
+class FrameworkBuilderBase:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
     def cmake_flags(self):
-        return NotImplemented
+        return []
 
-    @abc.abstractmethod
     def initialize_options(self):
-        return NotImplemented
+        pass
 
-    @abc.abstractmethod
     def finalize_options(self):
-        return NotImplemented
+        pass
 
-    @abc.abstractmethod
     def run(self, extensions):
-        return NotImplemented
+        pass
 
-class PyTorchBuilder(FrameworkBuilder):
+    @staticmethod
+    def install_requires():
+        return []
+
+class PyTorchBuilder(FrameworkBuilderBase):
     def __init__(self, *args, **kwargs) -> None:
         pytorch_args = copy.deepcopy(args)
         pytorch_kwargs = copy.deepcopy(kwargs)
         from torch.utils.cpp_extension import BuildExtension
         self.pytorch_build_extensions = BuildExtension(*pytorch_args, **pytorch_kwargs)
-
-    def cmake_flags(self):
-        return []
 
     def initialize_options(self):
         self.pytorch_build_extensions.initialize_options()
@@ -156,18 +155,13 @@ class PyTorchBuilder(FrameworkBuilder):
         print("Building pyTorch extensions!")
         self.pytorch_build_extensions.run()
 
-class JaxBuilder(FrameworkBuilder):
-    def __init__(self, *args, **kwargs) -> None:
-        pass
+    @staticmethod
+    def install_requires():
+        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
 
+class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
         return ["-DENABLE_JAX=ON"]
-
-    def initialize_options(self):
-        pass
-
-    def finalize_options(self):
-        pass
 
     def run(self, extensions):
         print("Building jax extensions!")
@@ -201,6 +195,11 @@ if framework in ("all", "pytorch"):
 
 if framework in ("all", "jax"):
     dlfw_builder_funcs.append(JaxBuilder)
+
+dlfw_install_requires = []
+for builder in dlfw_builder_funcs:
+    dlfw_install_requires = dlfw_install_requires + builder.install_requires()
+
 
 def get_cmake_bin():
     cmake_bin = "cmake"
@@ -384,8 +383,6 @@ setup(
     description="Transformer acceleration library",
     ext_modules=ext_modules,
     cmdclass={"build_ext": TEBuildExtension},
-    install_requires = [
-        "flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",
-    ],
+    install_requires=dlfw_install_requires,
     license_files=("LICENSE",),
 )
