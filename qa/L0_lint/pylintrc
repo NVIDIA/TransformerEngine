@@ -1,6 +1,7 @@
 [MASTER]
 extension-pkg-whitelist=torch,
-                        transformer_engine_extensions
+                        transformer_engine_extensions,
+                        transformer_engine_jax
 
 disable=too-many-locals,
         invalid-name,

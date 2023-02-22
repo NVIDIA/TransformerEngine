@@ -5,7 +5,6 @@
 # pylint: disable=missing-module-docstring
 # pylint: disable=missing-function-docstring
 # pylint: disable=missing-class-docstring
-# pylint: disable=c-extension-no-member
 
 from typing import Any, Callable, Tuple, Union
 

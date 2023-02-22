@@ -1,8 +1,6 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-# pylint: disable=no-name-in-module
 """JAX layernorm modules"""
 
 from typing import Tuple, Sequence
