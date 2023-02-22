@@ -4,11 +4,14 @@
 
 """Transformer."""
 import os
+import re
 import math
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
+
+from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
 from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
@@ -37,6 +40,11 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
+_flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
+
+
+__all__ = ["DotProductAttention", "TransformerLayer"]
+
 
 class DropPath(torch.nn.Module):
     """Drop paths (Stochastic Depth) per sample
@@ -63,66 +71,35 @@ class DropPath(torch.nn.Module):
         return output
 
 
-class CoreAttention(torch.nn.Module):
+class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
     """
 
     def __init__(
         self,
-        num_attention_heads: int,
-        kv_channels: int,
-        attention_dropout: float,
+        norm_factor: float,
+        attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        apply_query_key_layer_scaling: bool = False,
+        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
 
-        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
-        self.attention_softmax_in_fp32 = attention_softmax_in_fp32
-
-        if layer_number is None:
-            self.apply_query_key_layer_scaling = False
-        else:
-            self.layer_number = max(1, layer_number)
-
-        if self.apply_query_key_layer_scaling:
-            self.attention_softmax_in_fp32 = True
-
-        self.attn_mask_type = attn_mask_type
-        projection_size = kv_channels * num_attention_heads
         assert (
             attn_mask_type in AttnMaskTypes
         ), f"attn_mask_type {attn_mask_type} not supported"
 
-        # Per attention head and per partition values.
-        self.hidden_size_per_partition = divide(projection_size, tp_size)
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
-        )
-
-        self.sequence_parallel = sequence_parallel
-        if self.sequence_parallel or get_rng_state_tracker is None:
-            self.attention_dropout_ctx = nullcontext
-        else:
-            self.attention_dropout_ctx = get_rng_state_tracker().fork
-
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
+        self.norm_factor = norm_factor
+        self.attention_dropout_ctx = attention_dropout_ctx
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            self.attn_mask_type,
+            attn_mask_type,
             attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff,
+            attention_softmax_in_fp32,
+            layer_number if apply_query_key_layer_scaling else None,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -135,9 +112,11 @@ class CoreAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
+        batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
+
         # [b, np, sq, sk]
         output_size = (
             query_layer.size(1),
@@ -211,12 +190,288 @@ class CoreAttention(torch.nn.Module):
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
-        new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size_per_partition,
-        )
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.view(seqlen, batch_size, -1)
 
         return context_layer
+
+
+class FlashAttention(torch.nn.Module):
+    """Dot product attention implementation by using the flash-attn package.
+    """
+
+    def __init__(
+        self,
+        norm_factor: float,
+        attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
+        layer_number: Optional[int] = None,
+        apply_query_key_layer_scaling: bool = False,
+        attention_softmax_in_fp32: bool = True,
+        attn_mask_type: str = "causal",
+    ) -> None:
+        super().__init__()
+
+        if "dev" not in _flash_attn_version:
+            raise ImportError(
+                'Please install correct version of flash-attn with ' \
+                'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
+                'If running on Hopper, ' \
+                'please install from source with compute capability 9.0.')
+        assert (
+            attn_mask_type == "causal"
+            ), 'FlashAttention currently only supports causal attention mask.'
+        assert (
+            attention_softmax_in_fp32
+            ), 'FlashAttention currently only supports softmax compute in fp32.'
+
+        self.attn_causal_mask = attn_mask_type == "causal"
+        self.norm_factor = norm_factor
+        self.attention_dropout_ctx = attention_dropout_ctx
+        self.attention_dropout = attention_dropout
+        self.layer_number = layer_number
+        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """flash-attn fprop"""
+
+        assert (
+            (query_layer.dtype in [torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.float16, torch.bfloat16])
+            ), 'FlashAttention currently only supports FP16 and BF16.'
+        assert (
+            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            ), 'FlashAttention currently only supports CUDA tensors.'
+        assert (
+            attention_mask is None
+        ), 'FlashAttention currently does not support external attention mask.'
+
+        query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+                       for x in (query_layer, key_layer, value_layer)]
+
+        batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
+
+        # [b, sq, np, hn]
+        query_layer, key_layer, value_layer = [
+            x.view(x.shape[0] * x.shape[1], *x.shape[2:])
+            for x in [query_layer, key_layer, value_layer]
+        ]
+
+        max_seqlen = seqlen
+        cu_seqlens = torch.arange(
+            0,
+            (batch_size + 1) * seqlen,
+            step=seqlen,
+            dtype=torch.int32,
+            device=query_layer.device)
+
+        with self.attention_dropout_ctx():
+            output = flash_attn_unpadded_func(
+                query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
+                self.attention_dropout if self.training else 0.0,
+                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask
+            )
+
+        # [(b sq), np, hn] -> [sq, b, (np hn)]
+        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+
+
+class DotProductAttention(torch.nn.Module):
+    """Allows the model to jointly attend to information from different
+    representation subspaces as described in the paper:
+    `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
+
+    .. warning::
+
+        For the default attention mechanism, this module executes a non-deterministic version of
+        `flash-attn <https://github.com/ksivaman/flash-attention>`_ whenever possible in order to
+        achieve optimal performance. To observe deterministic behavior, set the environment
+        variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order to disable
+        `flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
+
+    Parameters
+    ----------
+    num_attention_heads : int
+                         number of attention heads in the transformer layer.
+    kv_channels : int
+                number of key-value channels.
+    attention_dropout: float, default = 0.0
+                      dropout probability for the dropout op during multi-head attention.
+    layer_number: int, default = `None`
+                 layer number of the current `DotProductAttention` when multiple such modules
+                 are concatenated, for instance in consecutive transformer blocks.
+    apply_query_key_layer_scaling: bool, default = `False`
+                                  apply query-key layer scaling during BMM1
+                                  by a factor of `layer_number`
+    attention_softmax_in_fp32: bool, default = `True`
+                              if set to `False`, softmax is executed in
+                              the dtype of activation tensors.
+    attn_mask_type: {'causal', 'padding'}, default = `causal`
+                   type of attention mask passed into softmax operation.
+
+    Parallelism parameters
+    ----------------------
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
+    tp_size : int, default = 1
+             tensor parallel world size.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    """
+
+    def __init__(
+        self,
+        num_attention_heads: int,
+        kv_channels: int,
+        attention_dropout: float = 0.0,
+        layer_number: Optional[int] = None,
+        apply_query_key_layer_scaling: bool = False,
+        attention_softmax_in_fp32: bool = True,
+        attn_mask_type: str = "causal",
+        sequence_parallel: bool = False,
+        tp_size: int = 1,
+        get_rng_state_tracker: Optional[Callable] = None,
+        tp_group: Optional[dist_group_type] = None,
+    ) -> None:
+        super().__init__()
+
+        if layer_number is None:
+            apply_query_key_layer_scaling = False
+        else:
+            layer_number = max(1, layer_number)
+
+        if apply_query_key_layer_scaling:
+            attention_softmax_in_fp32 = True
+
+        tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
+        self.tp_group = tp_group
+        self.get_rng_state_tracker = get_rng_state_tracker
+
+        projection_size = kv_channels * num_attention_heads
+        self.hidden_size_per_partition = divide(projection_size, tp_size)
+        self.hidden_size_per_attention_head = divide(
+            projection_size, num_attention_heads
+        )
+
+        if sequence_parallel or get_rng_state_tracker is None:
+            attention_dropout_ctx = nullcontext
+        else:
+            attention_dropout_ctx = get_rng_state_tracker().fork
+
+        norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        norm_factor_flash_attn = norm_factor
+        if apply_query_key_layer_scaling:
+            norm_factor *= layer_number
+
+        self.use_flash_attention = (
+            int(os.getenv("NVTE_FLASH_ATTN", "1"))
+            and attention_softmax_in_fp32
+            and attn_mask_type == "causal"
+            and not apply_query_key_layer_scaling
+        )
+
+        attn_kwargs = {
+            "attention_dropout": attention_dropout,
+            "attention_dropout_ctx": attention_dropout_ctx,
+            "layer_number": layer_number,
+            "apply_query_key_layer_scaling": apply_query_key_layer_scaling,
+            "attention_softmax_in_fp32": attention_softmax_in_fp32,
+            "attn_mask_type": attn_mask_type,
+        }
+
+        if self.use_flash_attention:
+            self.flash_attention = FlashAttention(norm_factor_flash_attn, **attn_kwargs)
+        # Instantiating both types since use of flash-attn
+        # might be ruled out due to forward inputs.
+        self.unfused_attention = UnfusedDotProductAttention(norm_factor, **attn_kwargs)
+
+    def _checkpointed_attention_forward(
+        self,
+        attention_func: Callable,
+        *forward_args: Tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        """Forward method with activation checkpointing."""
+
+        def custom_forward(*inputs):
+            return attention_func(*inputs)
+
+        hidden_states = checkpoint(
+            custom_forward,
+            False,
+            self.get_rng_state_tracker,
+            self.tp_group,
+            *forward_args,
+        )
+
+        return hidden_states
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        checkpoint_core_attention: bool = False,
+    ) -> torch.Tensor:
+        """
+        Dot Product Attention Layer.
+
+        .. note::
+
+            Input tensors :attr:`query_layer`, :attr:`key_layer`, and :attr:`value_layer`
+            must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
+            :attr:`num_attention_heads`, :attr:`kv_channels`). Output of shape
+            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
+            * :attr:`kv_channels`) is returned.
+
+        Parameters
+        ----------
+        query_layer : torch.Tensor
+                     Query tensor.
+        key_layer : torch.Tensor
+                   Key tensor.
+        value_layer : torch.Tensor
+                     Value tensor.
+        attention_mask : Optional[torch.Tensor], default = `None`
+                        Boolean tensor used to mask out softmax input when not using flash-attn.
+        checkpoint_core_attention : bool, default = `False`
+                                   If true, forward activations for attention are recomputed
+                                   during the backward pass in order to save memory that would
+                                   otherwise be occupied to store the forward activations until
+                                   backprop.
+        """
+
+        use_flash_attention = self.use_flash_attention
+        if (attention_mask is not None
+            or query_layer.dtype not in [torch.bfloat16, torch.float16]
+            or key_layer.dtype not in [torch.bfloat16, torch.float16]
+            or value_layer.dtype not in [torch.bfloat16, torch.float16]
+        ):
+            use_flash_attention = False
+
+        if use_flash_attention:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(self.flash_attention,
+                                                            query_layer,
+                                                            key_layer,
+                                                            value_layer)
+            return self.flash_attention(query_layer, key_layer, value_layer)
+
+        if checkpoint_core_attention:
+            return self._checkpointed_attention_forward(
+                self.unfused_attention,
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask,
+            )
+        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class MultiHeadAttention(torch.nn.Module):
@@ -234,8 +489,8 @@ class MultiHeadAttention(torch.nn.Module):
         init_method: Callable,
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        apply_query_key_layer_scaling: bool = False,
+        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
@@ -248,6 +503,7 @@ class MultiHeadAttention(torch.nn.Module):
         attention_type: str = "self",
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -293,6 +549,7 @@ class MultiHeadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
+                    zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
             else:
@@ -317,6 +574,7 @@ class MultiHeadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
+                    zero_centered_gamma=zero_centered_gamma,
                     **common_gemm_kwargs,
                 )
             else:
@@ -340,8 +598,8 @@ class MultiHeadAttention(torch.nn.Module):
                 **common_gemm_kwargs,
             )
 
-        # Core Self attention.
-        self.core_attention = CoreAttention(
+        # Attention.
+        self.core_attention = DotProductAttention(
             num_attention_heads,
             kv_channels,
             attention_dropout,
@@ -352,6 +610,7 @@ class MultiHeadAttention(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
+            tp_group=tp_group,
         )
 
         # Linear
@@ -365,37 +624,6 @@ class MultiHeadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
-    def _checkpointed_core_attention_forward(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Forward method with activation checkpointing."""
-
-        def custom_forward(*inputs):
-            query_layer = inputs[0]
-            key_layer = inputs[1]
-            value_layer = inputs[2]
-            attention_mask = inputs[3]
-            output_ = self.core_attention(
-                query_layer, key_layer, value_layer, attention_mask
-            )
-            return output_
-
-        hidden_states = checkpoint(
-            custom_forward,
-            False,
-            self.get_rng_state_tracker,
-            self.tp_group,
-            query_layer,
-            key_layer,
-            value_layer,
-            attention_mask,
-        )
-
-        return hidden_states
 
     def _allocate_memory(
         self, inference_max_sequence_len: int, batch_size: int
@@ -416,10 +644,10 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-        checkpoint_core_attention: Optional[bool] = None,
+        checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
@@ -553,14 +781,13 @@ class MultiHeadAttention(torch.nn.Module):
         # core attention computation
         # ==================================
 
-        if checkpoint_core_attention:
-            context_layer = self._checkpointed_core_attention_forward(
-                query_layer, key_layer, value_layer, attention_mask
-            )
-        else:
-            context_layer = self.core_attention(
-                query_layer, key_layer, value_layer, attention_mask
-            )
+        context_layer = self.core_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            attention_mask,
+            checkpoint_core_attention=checkpoint_core_attention,
+        )
 
         # =================
         # Output. [sq, b, h]
@@ -576,7 +803,7 @@ class MultiHeadAttention(torch.nn.Module):
 
 
 class TransformerLayer(torch.nn.Module):
-    """
+    r"""
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
 
@@ -610,16 +837,16 @@ class TransformerLayer(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    apply_query_key_layer_scaling: bool, default = `True`
+    apply_query_key_layer_scaling: bool, default = `False`
                                   apply query-key layer scaling during BMM1
                                   by a factor of `layer_number`
     output_layernorm: bool, default = `False`
                      if set to `True`, layer normalization is applied on the output side,
                      after the final dropout-add. default behavior is to apply layer
                      normalization on the input side, before the QKV transformation.
-    attention_softmax_in_fp32: bool, default = `False`
-                              if set to `True`, softmax is executed in
-                              torch.float32 dtype (single precision)
+    attention_softmax_in_fp32: bool, default = `True`
+                              if set to `False`, softmax is executed in
+                              the dtype of activation tensors.
     layer_type: {'encoder', 'decoder'}, default = `encoder`
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
@@ -629,6 +856,13 @@ class TransformerLayer(torch.nn.Module):
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
     self_attn_mask_type: {'causal', 'padding'}, default = `causal`
                         type of attention mask passed into softmax operation.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
 
     Parallelism parameters
     ----------------------
@@ -692,8 +926,8 @@ class TransformerLayer(torch.nn.Module):
         params_dtype: torch.dtype = torch.float32,
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        apply_query_key_layer_scaling: bool = True,
-        attention_softmax_in_fp32: bool = False,
+        apply_query_key_layer_scaling: bool = False,
+        attention_softmax_in_fp32: bool = True,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         sequence_parallel: bool = False,
@@ -703,6 +937,7 @@ class TransformerLayer(torch.nn.Module):
         drop_path_rate: float = 0.0,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
 
@@ -759,6 +994,7 @@ class TransformerLayer(torch.nn.Module):
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "set_parallel_mode": set_parallel_mode,
             "fuse_qkv_params": fuse_qkv_params,
+            "zero_centered_gamma": zero_centered_gamma,
         }
 
         self.self_attention = MultiHeadAttention(
@@ -799,6 +1035,7 @@ class TransformerLayer(torch.nn.Module):
             seq_length=seq_length,
             micro_batch_size=micro_batch_size,
             set_parallel_mode=set_parallel_mode,
+            zero_centered_gamma=zero_centered_gamma,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -828,6 +1065,7 @@ class TransformerLayer(torch.nn.Module):
                 eps=layernorm_epsilon,
                 sequence_parallel=self.sequence_parallel,
                 params_dtype=params_dtype,
+                zero_centered_gamma=zero_centered_gamma
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -842,11 +1080,11 @@ class TransformerLayer(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-        checkpoint_core_attention: Optional[bool] = False,
+        checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
     ) -> torch.Tensor:
         """
@@ -856,12 +1094,12 @@ class TransformerLayer(torch.nn.Module):
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : torch.Tensor
+        attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
-        encoder_output : torch.Tensor
+        encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
-        enc_dec_attn_mask : torch.Tensor
+        enc_dec_attn_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out inter-attention softmax input if using
              `layer_type="decoder"`.
         is_first_microbatch : {True, False, None}, default = None
@@ -877,7 +1115,7 @@ class TransformerLayer(torch.nn.Module):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-        checkpoint_core_attention: bool, default = `True`
+        checkpoint_core_attention: bool, default = `False`
                                   If true, forward activations for core attention are recomputed
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until

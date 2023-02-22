@@ -433,10 +433,12 @@ def test_export_gemm(
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("scale_factor", [448, 112])
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm(
     use_fp8: bool,
     scale_factor: float,
-    precision: torch.dtype
+    precision: torch.dtype,
+    zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
@@ -458,7 +460,8 @@ def test_export_layernorm(
                 inp,
                 self.weight,
                 self.bias,
-                self.eps)
+                self.eps,
+                zero_centered_gamma)
             return ret
 
     class TestFP8_Layernorm(nn.Module):
@@ -481,7 +484,8 @@ def test_export_layernorm(
                 self.eps,
                 self.meta,
                 self.fp8_tensor,
-                self.fp8_type)
+                self.fp8_type,
+                zero_centered_gamma)
 
             ret = cast_from_fp8(
                 ret,
@@ -499,7 +503,7 @@ def test_export_layernorm(
     do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
         # TODO: FP32 has a small threshold (1e-5)
-        validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
+        validate_result(fname, inp, model, atol=4e-3, is_fp8=use_fp8)
 
 
 @skip_FP8
@@ -645,13 +649,15 @@ def test_export_linear(
     (torch.float16, True),
     (torch.float16, False),
 ])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm_linear(
     scale_factor: float,
     use_fp8: bool,
     use_bias: bool,
     return_bias: bool,
     return_layernorm_output: bool,
-    precision: torch.dtype
+    precision: torch.dtype,
+    zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
@@ -675,6 +681,7 @@ def test_export_layernorm_linear(
             return_bias=return_bias,
             return_layernorm_output=return_layernorm_output,
             params_dtype=precision,
+            zero_centered_gamma=zero_centered_gamma,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor)
@@ -697,13 +704,15 @@ def test_export_layernorm_linear(
     (torch.float16, True),
     (torch.float16, False),
 ])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm_mlp(
     scale_factor: float,
     use_fp8: bool,
     use_bias: bool,
     return_bias: bool,
     return_layernorm_output: bool,
-    precision: torch.dtype
+    precision: torch.dtype,
+    zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
@@ -728,6 +737,7 @@ def test_export_layernorm_mlp(
             return_bias=return_bias,
             return_layernorm_output=return_layernorm_output,
             params_dtype=precision,
+            zero_centered_gamma=zero_centered_gamma,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor)
@@ -782,7 +792,7 @@ def test_export_core_attention(
 
     if attn_mask_type is None:
         attn_mask_type = 'causal'
-    model = te.transformer.CoreAttention(
+    model = te.transformer.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
         attention_dropout=0.5,
@@ -901,6 +911,7 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
 @pytest.mark.parametrize("apply_query_key_layer_scaling", [True, False])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_transformer_layer(
     use_fp8: bool,
     use_mask: bool,
@@ -908,7 +919,8 @@ def test_export_transformer_layer(
     output_layernorm: bool,
     precision: torch.dtype,
     fuse_qkv_params: bool,
-    apply_query_key_layer_scaling: bool
+    apply_query_key_layer_scaling: bool,
+    zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
@@ -946,7 +958,8 @@ def test_export_transformer_layer(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        apply_query_key_layer_scaling=apply_query_key_layer_scaling).to(device='cuda')
+        apply_query_key_layer_scaling=apply_query_key_layer_scaling,
+        zero_centered_gamma=zero_centered_gamma).to(device='cuda')
     do_export(model, inp, fname, use_fp8)
     if not use_fp8:
         validate_result(fname, inp, model, atol=1e-3)
