@@ -2,15 +2,11 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
-
 import pytest
-
 import jax.numpy as jnp
-from transformer_engine_jax import DType
 from jax.abstract_arrays import ShapedArray
+
+from transformer_engine_jax import DType
 from transformer_engine.jax.cpp_extensions import te_dtype_to_jax_dtype
 from transformer_engine.jax.cpp_extensions import GemmPrimitive
 

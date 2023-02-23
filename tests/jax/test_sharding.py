@@ -2,22 +2,18 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
-
-import pytest
-
-import numpy as np
 import jax
+import numpy as np
+import pytest
 from jax.experimental import maps
-from transformer_engine.jax.sharding import ShardingType, ShardingMeta, ShardingResource
-from transformer_engine.jax.sharding import global_shard_guard
-from transformer_engine.jax.sharding import get_fp8_meta_sharding_meta
+
 from transformer_engine.jax.sharding import get_dot_sharding_meta
+from transformer_engine.jax.sharding import get_elementwise_sharding_meta
+from transformer_engine.jax.sharding import get_fp8_meta_sharding_meta
+from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import is_dp_enabled, is_tp_enabled
-from transformer_engine.jax.sharding import get_elementwise_sharding_meta
+from transformer_engine.jax.sharding import ShardingMeta, ShardingResource, ShardingType
 
 
 def _get_sharding_resource(mesh_names, sharding_type):

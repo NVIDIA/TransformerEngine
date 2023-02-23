@@ -2,18 +2,11 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
-
 from typing import Any, Callable, Tuple, Union
 
-from cuda import cudart
-
-import numpy as np
-
 import jax.numpy as jnp
-
+import numpy as np
+from cuda import cudart
 from jax import lax
 
 PRNGKey = Any

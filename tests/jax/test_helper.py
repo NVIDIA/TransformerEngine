@@ -2,21 +2,19 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
 import unittest
-import numpy as np
+
 import flax
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.experimental import maps
-from utils import is_fp8_supported, assert_allclose
 
+from utils import assert_allclose, is_fp8_supported
+from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.fp8 import FP8Helper
-from transformer_engine.common.recipe import Format as FP8Format
-from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import MajorShardingType
 from transformer_engine.jax.sharding import ShardingResource

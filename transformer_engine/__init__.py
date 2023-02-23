@@ -2,9 +2,6 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
 """Top level package"""
 from . import common
 

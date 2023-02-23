@@ -2,28 +2,24 @@
 #
 # See LICENSE for license information.
 
-# pylint: disable=missing-module-docstring
-# pylint: disable=missing-function-docstring
-# pylint: disable=missing-class-docstring
-
 import functools
 import operator
-import pytest
-import numpy as np
+
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 from jax import lax
-from jax import value_and_grad, jit
+from jax import jit, value_and_grad
 from flax import linen as nn
 
-from utils import is_fp8_supported, assert_allclose
-
+from utils import assert_allclose, is_fp8_supported
 from transformer_engine.common.recipe import Format
-from transformer_engine.jax.cpp_extensions import gated_gelu, dgated_gelu
-from transformer_engine.jax.cpp_extensions import gated_gelu_fp8, dgated_gelu_cast_transpose
-from transformer_engine.jax.cpp_extensions import quantize, dequantize
-from transformer_engine.jax.fp8 import FP8Helper, FP8GemmPackage, _format2dtypes, DType
+from transformer_engine.jax.cpp_extensions import dgated_gelu, gated_gelu
+from transformer_engine.jax.cpp_extensions import dgated_gelu_cast_transpose, gated_gelu_fp8
+from transformer_engine.jax.cpp_extensions import dequantize, quantize
 from transformer_engine.jax.dot import fp8_dot
+from transformer_engine.jax.fp8 import DType, FP8GemmPackage, FP8Helper, _format2dtypes
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.mlp import fp8_ln_mlp
 
