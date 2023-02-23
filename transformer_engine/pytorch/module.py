@@ -960,7 +960,6 @@ class _LayerNormLinear(torch.autograd.Function):
                             ctx.activation_dtype,
                             get_workspace(),
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
@@ -980,7 +979,6 @@ class _LayerNormLinear(torch.autograd.Function):
                             layout="NT",
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                         )
                 else:
@@ -994,7 +992,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         grad=True,
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
-                        fp32_output=ctx.fuse_wgrad_accumulation,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
@@ -1652,7 +1649,6 @@ class _Linear(torch.autograd.Function):
                             ctx.activation_dtype,
                             get_workspace(),
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
@@ -1665,7 +1661,6 @@ class _Linear(torch.autograd.Function):
                             layout="NT",
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                         )
                 else:
@@ -1679,7 +1674,6 @@ class _Linear(torch.autograd.Function):
                         grad=True,
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
-                        fp32_output=ctx.fuse_wgrad_accumulation,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
@@ -2358,7 +2352,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             ctx.activation_dtype,
                             get_workspace(),
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=fc2_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
@@ -2390,7 +2383,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             grad=True,
                             use_bias=ctx.use_bias,
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=fc2_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
@@ -2446,7 +2438,6 @@ class _LayerNormMLP(torch.autograd.Function):
                         grad=True,
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
-                        fp32_output=ctx.fuse_wgrad_accumulation,
                         out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
@@ -2491,7 +2482,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             ctx.activation_dtype,
                             get_workspace(),
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=fc1_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
@@ -2513,7 +2503,6 @@ class _LayerNormMLP(torch.autograd.Function):
                             layout="NT",
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            fp32_output=ctx.fuse_wgrad_accumulation,
                             out=fc1_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
@@ -2529,7 +2518,6 @@ class _LayerNormMLP(torch.autograd.Function):
                         grad=True,
                         use_bias=not ctx.bias_gelu_nvfusion,
                         accumulate=accumulate_wgrad_into_param_main_grad,
-                        fp32_output=ctx.fuse_wgrad_accumulation,
                         out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
