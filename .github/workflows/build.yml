@@ -30,4 +30,4 @@ jobs:
       - name: 'Install'
         run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
       - name: 'Sanity check'
-        run: python tests/test_sanity_import.py
+        run: python tests/pytorch/test_sanity_import.py
