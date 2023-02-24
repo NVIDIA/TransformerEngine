@@ -371,9 +371,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attention_softmax_in_fp32
             and attn_mask_type == "causal"
-            and not apply_query_key_layer_scaling
         )
 
         attn_kwargs = {
@@ -448,8 +446,7 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (attention_mask is not None
-            or query_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
         ):
