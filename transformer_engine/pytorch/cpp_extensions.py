@@ -26,9 +26,8 @@ def fp8_gemm(
     fp8_meta_tensor: tex.FP8TensorMeta = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
-    fp32_output: bool = False,
     use_split_accumulator: bool = False,
-    D_dtype: tex.DType = None,
+    D_dtype: Optional[tex.DType] = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
@@ -41,15 +40,14 @@ def fp8_gemm(
         out = torch.empty(
             B.shape[0],
             A.shape[0],
-            dtype=torch.float32 if fp32_output else out_dtype,
+            dtype=out_dtype,
             device="cuda",
         )
         return_output = True
 
-    out_dtype = tex.DType.kFloat32 if fp32_output else TE_DType[out_dtype]
+    out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
     # Use bfloat16 as default bias_dtype
     bias_dtype = tex.DType.kBFloat16 if bias is None else TE_DType[bias.dtype]
-    out_dtype = D_dtype if D_dtype is not None else out_dtype
 
     _ = torch.ops.tex_ts.te_gemm_ts(
         A,
@@ -94,7 +92,6 @@ def gemm(
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
-    fp32_output: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
@@ -104,16 +101,12 @@ def gemm(
     empty_tensor = torch.Tensor()
     fp8_index = -1 # dummy index
 
-    input_dtype = TE_DType[dtype]
-    output_dtype = tex.DType.kFloat32 if fp32_output else input_dtype
-    bias_dtype = output_dtype if bias is None else TE_DType[bias.dtype]
-
     return_output = False
     if out is None:
         out = torch.empty(
             B.shape[1] if transb else B.shape[0],
             A.shape[0] if transa else A.shape[1],
-            dtype=torch.float32 if fp32_output else dtype,
+            dtype=dtype,
             device="cuda",
         )
         return_output = True
@@ -124,13 +117,20 @@ def gemm(
         gelu_input = empty_tensor
 
     if grad and use_bias:
-        grad_bias = torch.empty(
-            B.shape[1], dtype=torch.float32 if fp32_output else dtype, device="cuda"
-        )
+        grad_bias = torch.empty(B.shape[1], dtype=out.dtype, device="cuda")
     else:
         grad_bias = empty_tensor
 
     bias = bias if use_bias else empty_tensor
+
+    assert A.dtype == dtype and B.dtype == dtype, \
+        f'Expected dtype={dtype}, but found A.dtype={A.dtype} and B.dtype={B.dtype}'
+    input_dtype = TE_DType[dtype]
+    output_dtype = TE_DType[out.dtype]
+    if use_bias:
+        bias_dtype = TE_DType[grad_bias.dtype] if grad else TE_DType[bias.dtype]
+    else:
+        bias_dtype = output_dtype
 
     _ = torch.ops.tex_ts.te_gemm_ts(
         A,
