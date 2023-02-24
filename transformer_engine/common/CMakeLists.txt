@@ -1,25 +1,6 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-cmake_minimum_required(VERSION 3.18)
-
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
-endif()
-
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-project(transformer_engine LANGUAGES CUDA CXX)
-
-list(APPEND CMAKE_CUDA_FLAGS "--threads 4")
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  list(APPEND CMAKE_CUDA_FLAGS "-G")
-endif()
-
 add_library(transformer_engine SHARED
                                transformer_engine.cpp
                                transpose/cast_transpose.cu
@@ -38,9 +19,7 @@ add_library(transformer_engine SHARED
                                fused_softmax/scaled_masked_softmax.cu
                                fused_softmax/scaled_upper_triang_masked_softmax.cu)
 
-target_include_directories(transformer_engine PUBLIC "${PROJECT_SOURCE_DIR}/include")
-
-find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart CUDA::nvToolsExt)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
