@@ -4,4 +4,14 @@
 
 """Top level package"""
 from . import common
-from . import pytorch
+
+
+try:
+    from . import pytorch
+except ImportError as e:
+    pass
+
+try:
+    from . import jax
+except ImportError as e:
+    pass
