@@ -2177,7 +2177,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 gelu=not bias_gelu_nvfusion,
             )
 
-            if bias_gelu_nvfusion and is_grad_enabled:
+            if bias_gelu_nvfusion:
                 fc1_out, _, _ = fc1_outputs
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
             else:
