@@ -27,7 +27,8 @@ class TestFP8Helper(unittest.TestCase):
         margin = 5.0
         fp8_format = FP8Format.E4M3
         update_fp8meta_interval = 10
-        amax_history_size = 10
+        # Set amax_history_size=1 for now, since we only support amax_history_size = 1 for now
+        amax_history_size = 1
 
         FP8Helper.initialize(margin=margin,
                              fp8_format=fp8_format,
@@ -54,7 +55,8 @@ class TestFP8Helper(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     def test_update_fp8_metas(self):
-        FP8Helper.initialize(margin=3.0, amax_history_size=5)
+        # Set amax_history_size=1 for now, since we only support amax_history_size = 1 for now
+        FP8Helper.initialize(margin=3.0, amax_history_size=1)
 
         seed = 0
         key1, key2 = jax.random.split(jax.random.PRNGKey(seed))

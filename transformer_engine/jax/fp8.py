@@ -159,6 +159,8 @@ class FP8Helper:
             _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.UPDATE_FP8META_INTERVAL = update_fp8meta_interval
         FP8Helper.AMAX_HISTORY_SIZE = amax_history_size
+        assert FP8Helper.AMAX_HISTORY_SIZE == 1, \
+            "It only support amax_history_len == 1 for now."
         FP8Helper.FP8_2X_ACC_FPROP = bool(
             int(os.environ.get(FP8Helper.FP8_2X_ACC_FPROP_ENV_VAR_NAME, False)))
         FP8Helper.FP8_2X_ACC_DGRAD = bool(
@@ -180,7 +182,7 @@ class FP8Helper:
         FP8Helper.AMAX_HISTORY_SIZE = 1
 
     @staticmethod
-    def update_collections(new: Collection, original: Collection) -> None:
+    def update_collections(new: Collection, original: Collection) -> Collection:
         """
         Update the collections
         """
@@ -262,7 +264,7 @@ class FP8Helper:
 def fp8_autocast(enabled: bool = False,
                  fp8_recipe: Optional[DelayedScaling] = None,
                  sharding_resource: Optional[ShardingResource] = None) -> None:
-    """
+    r"""
     Context manager for FP8 usage.
 
     .. code-block:: python
@@ -290,9 +292,9 @@ def fp8_autocast(enabled: bool = False,
     Parameters
     ----------
     enabled: bool, default = False
-             whether or not to enable fp8
+        whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
-                recipe used for FP8 training.
+        recipe used for FP8 training.
     sharding_resource: ShardingResource, defaule = None
         specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then ShardingResource() would be created.
@@ -316,3 +318,52 @@ def fp8_autocast(enabled: bool = False,
             yield
     finally:
         FP8Helper.finalize()
+
+
+# Function Wrappers
+def update_collections(new: Collection, original: Collection) -> Collection:
+    r"""
+    A helper to update Flax's Collection. Collection is a union type of dict and
+    Flax's FrozenDict.
+
+    Collection = [dict, FrozenDict]
+
+    Parameters
+    ----------
+    new: Collection
+        A collection that includes new data.
+    original: Collection
+        The base collection.
+
+    Returns
+    -------
+    outputs : Collection
+        The updated collection.
+    """
+    return FP8Helper.update_collections(new, original)
+
+
+def update_fp8_metas(state: Collection) -> Collection:
+    r"""
+    Calculate new fp8 scales and its inverse via the followed formula
+
+    `exp` = floor(log2(`fp8_max` / `amax`)) - `margin`
+    `sf` = round(power(2, abs(exp)))
+    `sf` = `sf` if `amax` > 0.0, else original_scale
+    `sf` = `sf` if isfinite(`amax`), else original_scale)
+    `updated_scale` = `1/sf` if exp < 0, else `sf`
+    `updated_scale_inv` = `1/updated_scale`
+
+    Collection = [dict, FrozenDict]
+
+    Parameters
+    ----------
+    state: Collection
+        A collection that includes FP8 metas.
+
+    Returns
+    -------
+    outputs : Collection
+        The collection with updated FP8 metas.
+    """
+    return FP8Helper.update_fp8_metas(state)

@@ -694,9 +694,10 @@ class SoftmaxShardingMetaGenerator(ShardingMetaGenerator):
         in_axes = [{dp_dim: dp_axis_name}]
         input_new_shapes = [input_new_shape]
 
-        return ShardingMeta(tuple(in_axes), ({
-            dp_dim: dp_axis_name
-        }), {dp_axis_name: dp_mesh_axis}, input_new_shapes, [input_shape])
+        out_axes = in_axes[0]
+
+        return ShardingMeta(tuple(in_axes), out_axes, {dp_axis_name: dp_mesh_axis},
+                            input_new_shapes, [input_shape])
 
     def get_tp_col_sharding_meta(self,
                                  input_shape: Tuple,
@@ -764,9 +765,10 @@ class SoftmaxShardingMetaGenerator(ShardingMetaGenerator):
         in_axes = [{tp_dim: tp_axis_name}]
         input_new_shapes = [input_new_shape]
 
-        return ShardingMeta(tuple(in_axes), ({
-            tp_dim: tp_axis_name
-        }), {tp_axis_name: tp_mesh_axis}, input_new_shapes, [input_shape])
+        out_axes = in_axes[0]
+
+        return ShardingMeta(tuple(in_axes), out_axes, {tp_axis_name: tp_mesh_axis},
+                            input_new_shapes, [input_shape])
 
     @staticmethod
     def _get_dptp_sharding_meta(input_shape: Tuple,
@@ -794,7 +796,7 @@ class SoftmaxShardingMetaGenerator(ShardingMetaGenerator):
         in_axes = [{dp_dim: dp_axis_name, tp_dim + 1: tp_axis_name}]
         input_new_shapes = [input_new_shape]
 
-        out_axes = in_axes
+        out_axes = in_axes[0]
 
         return ShardingMeta(tuple(in_axes), out_axes, {
             dp_axis_name: dp_mesh_axis,
