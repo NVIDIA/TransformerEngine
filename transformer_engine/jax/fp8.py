@@ -134,8 +134,8 @@ class FP8Helper:
     FP8_2X_ACC_DGRAD_ENV_VAR_NAME = "NVTE_JAX_FP8_2X_ACC_DGRAD"
     FP8_2X_ACC_WGRAD_ENV_VAR_NAME = "NVTE_JAX_FP8_2X_ACC_WGRAD"
     FP8_2X_ACC_FPROP: bool = False
-    FP8_2X_ACC_DGRAD: bool = False
-    FP8_2X_ACC_WGRAD: bool = False
+    FP8_2X_ACC_DGRAD: bool = True
+    FP8_2X_ACC_WGRAD: bool = True
 
     @staticmethod
     def enable_fp8():
@@ -164,9 +164,9 @@ class FP8Helper:
         FP8Helper.FP8_2X_ACC_FPROP = bool(
             int(os.environ.get(FP8Helper.FP8_2X_ACC_FPROP_ENV_VAR_NAME, False)))
         FP8Helper.FP8_2X_ACC_DGRAD = bool(
-            int(os.environ.get(FP8Helper.FP8_2X_ACC_DGRAD_ENV_VAR_NAME, False)))
+            int(os.environ.get(FP8Helper.FP8_2X_ACC_DGRAD_ENV_VAR_NAME, True)))
         FP8Helper.FP8_2X_ACC_WGRAD = bool(
-            int(os.environ.get(FP8Helper.FP8_2X_ACC_WGRAD_ENV_VAR_NAME, False)))
+            int(os.environ.get(FP8Helper.FP8_2X_ACC_WGRAD_ENV_VAR_NAME, True)))
 
     @staticmethod
     def finalize() -> None:
