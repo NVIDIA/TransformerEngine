@@ -1,4 +1,5 @@
 ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+ARG FRAMEWORK=pytorch
 
 FROM scratch as transformerengine
 COPY 3rdparty/ 3rdparty/
@@ -14,11 +15,21 @@ COPY setup.py .
 COPY VERSION .
 
 FROM ${FROM_IMAGE_NAME}
+ARG FRAMEWORK
 
 WORKDIR /opt/transformerengine/
 COPY --from=transformerengine . .
 
-RUN pip install . && \
-    rm -rf transformer_engine.egg-info dist build
+# Install dependencies for JAX build
+RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+ && DEBIAN_FRONTEND=noninteractive apt-get -y update \
+ && DEBIAN_FRONTEND=noninteractive apt -y install pybind11-dev ninja-build \
+ && pip install pydantic \
+ || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+
+
+# Install Transformer Engine
+RUN NVTE_FRAMEWORK=${FRAMEWORK} pip install . \
+ && rm -rf transformer_engine.egg-info dist build
 
 WORKDIR /workspace/
