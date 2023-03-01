@@ -5,8 +5,12 @@
 variables:
     EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
     DATADIR: /mnt/nvdl/datasets
+    PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+    JAX_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/jax:main-py3-base
 
     # variables that may be overridden by the pipeline vars
+    BUILD_PYTORCH: 1
+    BUILD_JAX: 1
     API_LOGGING: 0
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -30,12 +34,14 @@ stages:
     - finalize
 
 before_script:
+    - export FRAMEWORK=${FRAMEWORK:-pytorch}                                                       && echo "${FRAMEWORK}"
     - export PYVER=3.8   && echo "${PYVER}"
     - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
     - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
+    - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
-    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
+    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-${FRAMEWORK}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
     - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
     - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
     - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
@@ -167,7 +173,7 @@ create_branch:
         - vm-builder
 
 
-.base_template : &BASE
+.base_template:
     variables:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
@@ -180,6 +186,7 @@ create_branch:
                            $(test "$VIRTUAL" -eq 1 && echo "--virtual")
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
     - echo ${JOB_END_STRING}
     except:
     - tags
@@ -188,11 +195,29 @@ create_branch:
     only:
     - pipelines
 
-py3-base:
+pytorch-py3-base:
     stage: build base
-    <<: *BASE
+    variables:
+      FROM_IMAGE_NAME: $PYTORCH_IMAGE
+      FRAMEWORK: pytorch
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
-.devel_template : &DEVEL
+jax-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_IMAGE
+      FRAMEWORK: jax
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_JAX == "0"
+
+.devel_template:
     variables:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
@@ -209,9 +234,21 @@ py3-base:
     only:
     - pipelines
 
-py3-devel:
+pytorch-py3-devel:
     stage: build devel
-    <<: *DEVEL
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-base ]
+    extends:
+    - .devel_template
+
+jax-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-base ]
+    extends:
+    - .devel_template
 
 .stage_template : &STAGE
     environment: staging
@@ -245,6 +282,7 @@ py3-devel:
     variables:
       TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
       TEST_SCRIPT: "./test.sh"
+      FRAMEWORK: pytorch
     script:
     - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
     - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
@@ -287,7 +325,7 @@ py3-devel:
     except:
     - tags
     allow_failure: false
-    needs: [ py3-devel ]
+    needs: [ pytorch-py3-devel ]
     only:
     - pipelines
 
@@ -335,7 +373,7 @@ py3-devel:
     except:
     - tags
     allow_failure: false
-    needs: [ py3-devel ]
+    needs: [ pytorch-py3-devel ]
     only:
     - pipelines
 
@@ -546,50 +584,94 @@ upload_logs:
 ##   like this:
 ##
 ##   L0_mytest:
-##      <<: *L0_TEST
 ##      variables:
 ##        TEST_WORK_DIR: "/some/other/path"
 ##        TEST_SCRIPT: "./test.sh"
+##      extends:
+##      - .L0_test
 ##
 ######################################################
 
 L0_lint:
-    <<: *L0_TEST
+    extends:
+    - .L0_test
     tags:
     - 1GPU
 
 L0_license:
-    <<: *L0_TEST
+    extends:
+    - .L0_test
     tags:
     - 1GPU
 
 L0_unittest--V100_1GPU:
-    <<: *L0_TEST
-    <<: *V100_1GPU
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
 L0_unittest--A100_1GPU:
-    <<: *L0_TEST
-    <<: *A100_1GPU
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
 L0_unittest--TU102_R445_1GPU:
-    <<: *L0_TEST
-    <<: *TU102_R445_1GPU
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .TU102_R445_1GPU
 
 L0_unittest--H100_1GPU:
-  extends:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_jax_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
     - .L0_test
     - .H100_1GPU
 
 L0_cppunittest--V100_1GPU:
-    <<: *L0_TEST
-    <<: *V100_1GPU
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
 L0_cppunittest--A100_1GPU:
-    <<: *L0_TEST
-    <<: *A100_1GPU
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
 L0_cppunittest--H100_1GPU:
-  extends:
+    extends:
     - .L0_test
     - .H100_1GPU
 

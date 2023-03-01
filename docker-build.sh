@@ -44,6 +44,11 @@ Usage:
                  devel image, 's' to build qa and stage images, and c to contamer
                  scan base image. Default is 'bd'. Either 'c', 'd' or 's' assume
                  that a base image exists in the local or remote registry.
+  --framework    Framework extensions to build with Transformer Engine. Options
+                 include 'pytorch', 'jax', 'all'. Framework should already be
+                 installed in base image.
+
+
 EOF
 }
 
@@ -106,6 +111,11 @@ while [[ $# -gt 0 ]]; do
     --from-image)
       valcheck "$key" "$val"
       FROM_IMAGE="$val"
+      shift $((val_separate+1))
+      ;;
+    --framework)
+      valcheck "$key" "$val"
+      FRAMEWORK="$val"
       shift $((val_separate+1))
       ;;
     --devops-image)
@@ -234,9 +244,12 @@ fi
 JOB_ID=${CI_JOB_ID:-NONE}
 
 FROM_IMAGE_ARG=$(docker pull "${FROM_IMAGE}" >& /dev/null && echo "--build-arg FROM_IMAGE_NAME=${FROM_IMAGE}")
+[[ -n "${FRAMEWORK}" ]] \
+    && FRAMEWORK_ARG="--build-arg FRAMEWORK=${FRAMEWORK}" \
+    || FRAMEWORK_ARG=""
 
 BRANCH_NAME_SLUG=$(echo "${TAG_ROOT}" | sed 's/[^A-Za-z0-9._\-]/../g')
-TAG_ATTRIB="py${PYVER%.*}"
+TAG_ATTRIB="${FRAMEWORK}-py${PYVER%.*}"
 IMAGE_NAME_ROOT="${DOCKER_IMG}:${BRANCH_NAME_SLUG}-${TAG_ATTRIB}"
 PIPELINE_IMAGE_NAME_ROOT="${DOCKER_IMG}:${PIPELINE}"
 [[ ${FROM_IMAGE_ARG} =~ cudnn7  ]] \
@@ -295,6 +308,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
       ${CACHE_TO} \
       ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-base" -t "${PIPELINE_IMAGE_NAME_ROOT}-base" \
       $FROM_IMAGE_ARG \
+      $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
       --build-arg "PYVER=${PYVER}" \
       --build-arg "NVIDIA_BUILD_REF=${COMMIT_SHA}" \
@@ -305,7 +319,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   docker stop buildx_buildkit_node_${CI_RUNNER_ID}
   docker rm buildx_buildkit_node_${CI_RUNNER_ID}
   docker buildx rm buildkit
-  exit $RV 
+  exit $RV
 fi
 
 if [[ "$BUILD_DEVEL" -eq 1 ]]; then
@@ -350,6 +364,7 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
 
   docker build --progress=plain --network=host \
       ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-devel" -t "${PIPELINE_IMAGE_NAME_ROOT}-devel" \
+      $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
       --build-arg "NVIDIA_PIPELINE_ID=${CI_PIPELINE_ID:-NONE}" \
@@ -375,7 +390,7 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
     if [[ $? -ne 0 ]]; then
       echo "Failed to push ${PIPELINE_IMAGE_NAME_ROOT}-devel"
       exit 1
-    fi    
+    fi
   fi
 
 fi
@@ -387,7 +402,7 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"
   DEVEL_IMAGE_NAME_SQRL="${DEVEL_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
   QA_IMAGE_NAME_SQRL="${QA_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
-  STAGE_IMAGE_NAME_SQRL="${STAGE_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}" 
+  STAGE_IMAGE_NAME_SQRL="${STAGE_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
 
   if [[ "$PULL" -eq 1 ]]; then
     docker pull "${BASE_IMAGE}"
@@ -402,7 +417,7 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
     echo ABORT Failed to create qa image
     exit 1
   fi
- 
+
   docker tag "${DEVEL_IMAGE_NAME}" "${DEVEL_IMAGE_NAME_SQRL}"
   docker tag "${QA_IMAGE_NAME}" "${QA_IMAGE_NAME_SQRL}"
   docker tag "${STAGE_IMAGE_NAME}" "${STAGE_IMAGE_NAME_SQRL}"
@@ -410,10 +425,10 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   if [[ "${PUSH}" -eq 1 ]]; then
     docker push "${STAGE_IMAGE_NAME}"
     docker push "${QA_IMAGE_NAME}"
-    docker push "${DEVEL_IMAGE_NAME_SQRL}" 
+    docker push "${DEVEL_IMAGE_NAME_SQRL}"
     docker push "${QA_IMAGE_NAME_SQRL}"
     docker push "${STAGE_IMAGE_NAME_SQRL}"
-    
+
     # push a xx.yy-stage tag that records the commit we staged from
     ORIGIN_GIT="$(git remote get-url origin)"
     ORIGIN_TMP="${ORIGIN_GIT##*@}"

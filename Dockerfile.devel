@@ -1,6 +1,9 @@
 ARG BASE_IMAGE
+ARG FRAMEWORK=pytorch
 
 FROM ${BASE_IMAGE}
+ARG FRAMEWORK
+
 COPY qa/L0_lint/pylintrc /opt/transformerengine/
 COPY qa/L0_lint/CPPLINT.cfg /opt/transformerengine/
 COPY .git/ /opt/transformerengine/.git/
@@ -24,3 +27,7 @@ RUN set -x \
  && NO_USER="${NO_PROT#*@}" \
  && git remote set-url origin "https://${NO_USER}"
 
+# Install dependencies for JAX build
+RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+ && pip install pytest tensorflow_datasets \
+ || [[ ! "${FRAMEWORK}" =~ jax|all ]]
