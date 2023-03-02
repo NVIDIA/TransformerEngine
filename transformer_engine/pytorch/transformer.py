@@ -424,6 +424,11 @@ class DotProductAttention(torch.nn.Module):
 
         .. note::
 
+            Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
+            is set to `"causal"`.
+
+        .. note::
+
             Input tensors :attr:`query_layer`, :attr:`key_layer`, and :attr:`value_layer`
             must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
             :attr:`num_attention_heads`, :attr:`kv_channels`). Output of shape
@@ -448,8 +453,7 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (attention_mask is not None
-            or query_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
         ):
@@ -515,6 +519,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
+        self.attn_mask_type = attn_mask_type
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -658,7 +663,7 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
-        if attention_mask is not None:
+        if self.attn_mask_type != "causal" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
@@ -983,6 +988,7 @@ class TransformerLayer(torch.nn.Module):
         self.apply_residual_connection_post_layernorm = (
             apply_residual_connection_post_layernorm
         )
+        self.self_attn_mask_type = self_attn_mask_type
         assert (
             self_attn_mask_type in AttnMaskTypes
         ), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -1129,6 +1135,11 @@ class TransformerLayer(torch.nn.Module):
         """
         Transformer Layer: attention block and a feedforward network (MLP)
 
+        .. note::
+
+            Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
+            is set to `"causal"`.
+
         Parameters
         ----------
         hidden_states : torch.Tensor
@@ -1163,7 +1174,7 @@ class TransformerLayer(torch.nn.Module):
 
         hidden_states = hidden_states.contiguous()
 
-        if attention_mask is not None:
+        if self.self_attn_mask_type != "causal" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
