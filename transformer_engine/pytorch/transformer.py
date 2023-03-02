@@ -287,6 +287,11 @@ class DotProductAttention(torch.nn.Module):
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`attn_mask_type` is set to `"causal"`.
+
     .. warning::
 
         For the default attention mechanism, this module executes a non-deterministic version of
@@ -303,15 +308,6 @@ class DotProductAttention(torch.nn.Module):
                 number of key-value channels.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    layer_number: int, default = `None`
-                 layer number of the current `DotProductAttention` when multiple such modules
-                 are concatenated, for instance in consecutive transformer blocks.
-    apply_query_key_layer_scaling: bool, default = `False`
-                                  apply query-key layer scaling during BMM1
-                                  by a factor of `layer_number`
-    attention_softmax_in_fp32: bool, default = `True`
-                              if set to `False`, softmax is executed in
-                              the dtype of activation tensors.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
 
@@ -371,9 +367,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attention_softmax_in_fp32
             and attn_mask_type == "causal"
-            and not apply_query_key_layer_scaling
         )
 
         attn_kwargs = {
@@ -840,6 +834,11 @@ class TransformerLayer(torch.nn.Module):
     r"""
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
+
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`self_attn_mask_type` is set to `"causal"`.
 
     Parameters
     ----------
