@@ -178,7 +178,6 @@ class AttentionType(Enum):
 
 
 class MultiHeadAttention(nn.Module):
-    # pylint: disable=line-too-long
     r"""
     Multi-head Attention (MHA), including Query,
     Key, Value and Output projection.
@@ -192,12 +191,14 @@ class MultiHeadAttention(nn.Module):
     dropout_rate : float, default = 0.0
         dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
-        the key in given RNGs via flax.linen.Module.apply that for generate Dropout masks in the core attention.
+        the key in given RNGs via flax.linen.Module.apply that
+        for generate Dropout masks in the core attention.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         a value added to the denominator of layer normalization for numerical stability.
-    kernel_init: Initializer, default  = flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+    kernel_init: Initializer, default =
+        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         used for initializing weights of QKV and Output projection weights.
     use_bias: bool, default = False
         indicate whether to enable bias shifting for QKVO projections.
@@ -232,7 +233,7 @@ class MultiHeadAttention(nn.Module):
     float32_logits : bool, default = False
         whether to compute attention logits in float32.
     """
-    # pylint: enable=line-too-long
+
     head_dim: int
     num_heads: int
     dropout_rate: float = 0.
@@ -598,7 +599,6 @@ class TransformerLayerType(Enum):
 
 
 class TransformerLayer(nn.Module):
-    # pylint: disable=line-too-long
     r"""
     TransformerLayer is made up of a relative embedding,
     an attention block and a feedforward network (MLP).
@@ -621,19 +621,23 @@ class TransformerLayer(nn.Module):
     attention_dropout: float, default = 0.1
         dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
-        the key in given RNGs via flax.linen.Module.apply that for generate Dropout masks in the Multi-Head Attention.
-    mha_kernel_init: Initializer, default  = flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        the key in given RNGs via flax.linen.Module.apply that for
+        generate Dropout masks in the Multi-Head Attention.
+    mha_kernel_init: Initializer, default =
+        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         used for initializing weights of QKV and Output projection weights.
-    mlp_kernel_init: Initializer, default = flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    mlp_kernel_init: Initializer, default =
+        flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         used for initializing weights of FC1 and FC2 layers.
     mlp_activations: Sequence[str], default = ('relu', )
-        the sequence of activation functions to apply after the first linear transformation. Each activation has
-        its own transformation layer.
+        the sequence of activation functions to apply after the first linear transformation.
+        Each activation has its own transformation layer.
     use_bias: bool, default = False
         indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
         if set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias of QKVO projections, FC1 and FC2, only works when :attr:`use_bias=True`.
+        used for initializing bias of QKVO projections,
+        FC1 and FC2, only works when :attr:`use_bias=True`.
     apply_residual_connection_post_layernorm: bool, default = False
         if set to True, residual connections are taken from the output
         of layer norm (default is taken from input of layer norm)
@@ -680,7 +684,7 @@ class TransformerLayer(nn.Module):
     scaled_query_init: bool, default = `True`
         whether to scale WQ on initilization by :math:`\sqrt{head_dim}`
     """
-    # pylint: enable=line-too-long
+
     hidden_size: int = 512
     mlp_hidden_size: int = 2048
     num_attention_heads: int = 8
