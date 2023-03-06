@@ -59,6 +59,7 @@ class TestShardingSideAPI:
                 target_te_rules = extend_logical_axis_rules(tuple())
                 extended_rules = extend_logical_axis_rules(base_rules)
                 assert extended_rules == (*base_rules, *target_te_rules)
+                assert not need_assert
             except AssertionError as ae:
                 assert need_assert, f"{ae.args}"
 
