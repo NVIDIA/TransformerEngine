@@ -27,6 +27,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
     cast_if_needed,
     get_default_init_method,
+    get_device_compute_capability,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -220,9 +221,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
-        assert (
-            attention_softmax_in_fp32
-            ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
@@ -230,6 +228,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.layer_number = layer_number
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
+        self.attention_softmax_in_fp32 = attention_softmax_in_fp32
 
     def forward(
         self,
@@ -368,6 +367,7 @@ class DotProductAttention(torch.nn.Module):
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attn_mask_type == "causal"
+            and get_device_compute_capability() >= 7.5
         )
 
         attn_kwargs = {
