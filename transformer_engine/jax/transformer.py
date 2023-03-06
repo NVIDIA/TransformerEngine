@@ -780,8 +780,10 @@ class TransformerLayer(nn.Module):
             if self.layer_type == TransformerLayerType.ENCODER:
                 attn_bias = rel_emb(inputs.shape[sequence_dim], inputs.shape[sequence_dim], True)
             else:
-                l = max_decode_length if decode and max_decode_length else inputs.shape[
-                    sequence_dim]    # pylint: disable=line-too-long
+                if decode and max_decode_length:
+                    l = max_decode_length
+                else:
+                    l = inputs.shape[sequence_dim]
                 attn_bias = rel_emb(l, l, False)
 
         self_attn_type = None
