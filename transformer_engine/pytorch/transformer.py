@@ -367,7 +367,7 @@ class DotProductAttention(torch.nn.Module):
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attn_mask_type == "causal"
-            and get_device_compute_capability() >= 7.5
+            and get_device_compute_capability() >= 8.0
         )
 
         attn_kwargs = {
