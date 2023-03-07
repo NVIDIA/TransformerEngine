@@ -280,8 +280,8 @@ class MultiHeadAttention(nn.Module):
             v_shape = (shape[0], shape[-1])
 
             q_kernel = query_init(q_key, q_shape, dtype)
-            k_kernel = self.kernel_init(k_key, k_shape, dtype)    # pylint: disable=too-many-function-args
-            v_kernel = self.kernel_init(v_key, v_shape, dtype)    # pylint: disable=too-many-function-args
+            k_kernel = self.kernel_init(k_key, k_shape, dtype)
+            v_kernel = self.kernel_init(v_key, v_shape, dtype)
 
             return jnp.stack([q_kernel, k_kernel, v_kernel], axis=-2, dtype=dtype)
 
@@ -294,8 +294,8 @@ class MultiHeadAttention(nn.Module):
             k_shape = (shape[0], shape[-1])
             v_shape = (shape[0], shape[-1])
 
-            k_kernel = self.kernel_init(k_key, k_shape, dtype)    # pylint: disable=too-many-function-args
-            v_kernel = self.kernel_init(v_key, v_shape, dtype)    # pylint: disable=too-many-function-args
+            k_kernel = self.kernel_init(k_key, k_shape, dtype)
+            v_kernel = self.kernel_init(v_key, v_shape, dtype)
 
             return jnp.stack([k_kernel, v_kernel], axis=-2, dtype=dtype)
 
