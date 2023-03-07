@@ -790,11 +790,12 @@ class TransformerLayer(nn.Module):
                     l = inputs.shape[sequence_dim]
                 attn_bias = rel_emb(l, l, False)
 
+        assert inputs.ndim == 3
+
         self_attn_type = None
         # Make name be the exactly same as T5X, since names would affect
         # RNGKey during init and apply. Myabe no need in the feature.
         if self.layer_type == TransformerLayerType.ENCODER:
-            assert inputs.ndim == 3
             mha_name = 'attention'
             self_attn_type = AttentionType.PADDING
         else:
@@ -829,7 +830,7 @@ class TransformerLayer(nn.Module):
                            deterministic=deterministic,
                            decode=decode)
 
-        x = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(-2,))(x,
+        x = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(sequence_dim,))(x,
                                                                        deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
@@ -867,7 +868,7 @@ class TransformerLayer(nn.Module):
                                                   encoder_decoder_mask,
                                                   deterministic=deterministic)
             y = nn.Dropout(rate=self.hidden_dropout,
-                           broadcast_dims=(-2,))(y, deterministic=deterministic)
+                           broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
             mlp_input = y + residual
 
         # MlpBlock
@@ -895,7 +896,7 @@ class TransformerLayer(nn.Module):
             assert ln_out is not None
             residual = ln_out
 
-        z = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(-2,))(z,
+        z = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(sequence_dim,))(z,
                                                                        deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)

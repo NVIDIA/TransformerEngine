@@ -804,7 +804,7 @@ class EncoderLayer(nn.Module):
                                                  encoder_mask,
                                                  encoder_bias,
                                                  deterministic=deterministic)
-        x = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(-2,))(x, deterministic=deterministic)
+        x = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -830,7 +830,7 @@ class EncoderLayer(nn.Module):
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(y, deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+        y = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
             y = nn.Dropout(rate=self.drop_path,
@@ -920,7 +920,7 @@ class DecoderLayer(nn.Module):
                                                       decoder_bias,
                                                       deterministic=deterministic,
                                                       decode=decode)
-        x = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(-2,))(x, deterministic=deterministic)
+        x = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -948,7 +948,7 @@ class DecoderLayer(nn.Module):
                                                                  encoded,
                                                                  encoder_decoder_mask,
                                                                  deterministic=deterministic)
-        y = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+        y = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
         y = y + residual
 
         # MLP block.
@@ -967,7 +967,7 @@ class DecoderLayer(nn.Module):
             fuse_wi=self.fuse_mlp_wi,
             name='mlp',
         )(z, deterministic=deterministic)
-        z = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(-2,))(z, deterministic=deterministic)
+        z = nn.Dropout(rate=self.dropout_rate, broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)
             z = nn.Dropout(rate=self.drop_path,
