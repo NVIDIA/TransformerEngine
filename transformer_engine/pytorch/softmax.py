@@ -16,6 +16,15 @@ THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
 
 
+_default_causal_mask = {}
+
+def _get_default_causal_mask(sq: int) -> torch.Tensor:
+    """Return the causal upper triangular mask for softmax input"""
+    if sq not in _default_causal_mask:
+        _default_causal_mask[sq] = torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
+    return _default_causal_mask[sq]
+
+
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following three operations in sequence
@@ -274,6 +283,10 @@ class FusedScaleMaskSoftmax(nn.Module):
 
         if self.scale is not None:
             inp = inp * self.scale
+
+        if self.attn_mask_type == "causal":
+            mask = _get_default_causal_mask(inp.size()[2])
+
         mask_output = self.mask_func(inp, mask) if mask is not None else inp
         probs = torch.nn.Softmax(dim=-1)(mask_output)
 

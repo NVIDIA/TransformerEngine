@@ -793,6 +793,7 @@ def test_export_core_attention(
 
     if attn_mask_type is None:
         attn_mask_type = 'causal'
+        inp = (query_layer, key_layer, value_layer)
     model = te.transformer.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
