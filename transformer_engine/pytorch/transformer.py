@@ -27,6 +27,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
     cast_if_needed,
     get_default_init_method,
+    get_device_compute_capability,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -220,9 +221,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             attn_mask_type == "causal"
             ), 'FlashAttention currently only supports causal attention mask.'
-        assert (
-            attention_softmax_in_fp32
-            ), 'FlashAttention currently only supports softmax compute in fp32.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
@@ -230,6 +228,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.layer_number = layer_number
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
+        self.attention_softmax_in_fp32 = attention_softmax_in_fp32
 
     def forward(
         self,
@@ -287,6 +286,11 @@ class DotProductAttention(torch.nn.Module):
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`attn_mask_type` is set to `"causal"`.
+
     .. warning::
 
         For the default attention mechanism, this module executes a non-deterministic version of
@@ -303,15 +307,6 @@ class DotProductAttention(torch.nn.Module):
                 number of key-value channels.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    layer_number: int, default = `None`
-                 layer number of the current `DotProductAttention` when multiple such modules
-                 are concatenated, for instance in consecutive transformer blocks.
-    apply_query_key_layer_scaling: bool, default = `False`
-                                  apply query-key layer scaling during BMM1
-                                  by a factor of `layer_number`
-    attention_softmax_in_fp32: bool, default = `True`
-                              if set to `False`, softmax is executed in
-                              the dtype of activation tensors.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
 
@@ -371,9 +366,8 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attention_softmax_in_fp32
             and attn_mask_type == "causal"
-            and not apply_query_key_layer_scaling
+            and get_device_compute_capability() >= 8.0
         )
 
         attn_kwargs = {
@@ -424,6 +418,11 @@ class DotProductAttention(torch.nn.Module):
 
         .. note::
 
+            Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
+            is set to `"causal"`.
+
+        .. note::
+
             Input tensors :attr:`query_layer`, :attr:`key_layer`, and :attr:`value_layer`
             must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
             :attr:`num_attention_heads`, :attr:`kv_channels`). Output of shape
@@ -448,8 +447,7 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (attention_mask is not None
-            or query_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
         ):
@@ -515,6 +513,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = params_dtype
         self.init_method = init_method
+        self.attn_mask_type = attn_mask_type
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -658,7 +657,7 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
-        if attention_mask is not None:
+        if self.attn_mask_type != "causal" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
@@ -836,6 +835,11 @@ class TransformerLayer(torch.nn.Module):
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
 
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`self_attn_mask_type` is set to `"causal"`.
+
     Parameters
     ----------
     hidden_size : int
@@ -983,6 +987,7 @@ class TransformerLayer(torch.nn.Module):
         self.apply_residual_connection_post_layernorm = (
             apply_residual_connection_post_layernorm
         )
+        self.self_attn_mask_type = self_attn_mask_type
         assert (
             self_attn_mask_type in AttnMaskTypes
         ), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -1129,6 +1134,11 @@ class TransformerLayer(torch.nn.Module):
         """
         Transformer Layer: attention block and a feedforward network (MLP)
 
+        .. note::
+
+            Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
+            is set to `"causal"`.
+
         Parameters
         ----------
         hidden_states : torch.Tensor
@@ -1163,7 +1173,7 @@ class TransformerLayer(torch.nn.Module):
 
         hidden_states = hidden_states.contiguous()
 
-        if attention_mask is not None:
+        if self.self_attn_mask_type != "causal" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
