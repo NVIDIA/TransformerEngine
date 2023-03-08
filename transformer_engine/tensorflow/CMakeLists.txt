@@ -13,8 +13,6 @@ add_library(
 )
 
 # Includes
-
-message(STATUS "YO!!! ${Python_EXECUTABLE}")
 execute_process(COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.sysconfig.get_include())" 
                 OUTPUT_VARIABLE Tensorflow_INCLUDE_DIRS OUTPUT_STRIP_TRAILING_WHITESPACE)
 execute_process(COMMAND ${Python_EXECUTABLE} -c "import numpy as np; print(np.get_include())" 
@@ -27,7 +25,6 @@ target_include_directories(transformer_engine_tensorflow PRIVATE
 target_include_directories(_get_stream PRIVATE ${Tensorflow_INCLUDE_DIRS})
 
 # Libraries
-message(STATUS ${Python_EXECUTABLE})
 execute_process(COMMAND ${Python_EXECUTABLE} -c "import tensorflow as tf; print(tf.__file__)" 
                 OUTPUT_VARIABLE Tensorflow_LIB_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
 get_filename_component(Tensorflow_LIB_PATH ${Tensorflow_LIB_PATH} DIRECTORY)
