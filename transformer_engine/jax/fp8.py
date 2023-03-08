@@ -6,10 +6,13 @@ Helper module for fp8 meta management
 """
 import os
 from contextlib import contextmanager
-from typing import Optional, Union, Dict, List, Tuple
-from flax.core.frozen_dict import FrozenDict
+from enum import Enum
+from typing import Dict, List, Optional, Tuple, Union
+
 import jax
 import jax.numpy as jnp
+from flax.core.frozen_dict import FrozenDict
+
 from transformer_engine_jax import DType
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
@@ -110,6 +113,12 @@ class FP8GemmPackage:
         return self._scale_inv
 
 
+class AmaxComputeAlgo(Enum):
+    """AmaxComputeAlgo."""
+    MAX = "max"
+    MOST_RECENT = "most_recent"
+
+
 class FP8Helper:
     """
     FP8 helper to manage the FP8 meta
@@ -121,6 +130,7 @@ class FP8Helper:
     BWD_DTYPE: DType = DType.kFloat8E5M2
     UPDATE_FP8META_INTERVAL: int = 1
     AMAX_HISTORY_LEN: int = 1
+    AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MOST_RECENT
     NUM_META_PER_GEMM: int = 3
     INPUT_META_IDX_PER_GEMM: int = 0
     KERNEL_META_IDX_PER_GEMM: int = 1
@@ -148,7 +158,8 @@ class FP8Helper:
     def initialize(margin: float = 0.0,
                    fp8_format: Format = Format.HYBRID,
                    update_fp8meta_interval: int = 1,
-                   amax_history_len: int = 1) -> None:
+                   amax_history_len: int = 1,
+                   amax_compute_algo: AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MOST_RECENT) -> None:
         """
         Initialize the FP8 meta
         """
@@ -159,8 +170,7 @@ class FP8Helper:
             _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.UPDATE_FP8META_INTERVAL = update_fp8meta_interval
         FP8Helper.AMAX_HISTORY_LEN = amax_history_len
-        assert FP8Helper.AMAX_HISTORY_LEN == 1, \
-            "It only support amax_history_len == 1 for now."
+        FP8Helper.AMAX_COMPUTE_ALGO = amax_compute_algo
         FP8Helper.FP8_2X_ACC_FPROP = bool(
             int(os.environ.get(FP8Helper.FP8_2X_ACC_FPROP_ENV_VAR_NAME, False)))
         FP8Helper.FP8_2X_ACC_DGRAD = bool(
@@ -180,6 +190,15 @@ class FP8Helper:
         FP8Helper.BWD_DTYPE = DType.kFloat8E5M2
         FP8Helper.UPDATE_FP8META_INTERVAL = 1
         FP8Helper.AMAX_HISTORY_LEN = 1
+
+    @staticmethod
+    def update_amax_history(amax_buffers: jnp.ndarray) -> jnp.ndarray:
+        """
+        Update the amax history
+        """
+        updated_amax_buffers = jnp.roll(amax_buffers, -1, 1)
+        updated_amax_buffers.at[:, 0].set(0)
+        return updated_amax_buffers
 
     @staticmethod
     def update_collections(new: Collection, original: Collection) -> Collection:
@@ -246,7 +265,10 @@ class FP8Helper:
             fp8_scale_inv_idx = fp8_scale_idx + 1
 
             fp8_max = fp8_meta_arrays[fp8_max_idx]
-            amax = fp8_meta_arrays[fp8_amax_idx]
+            if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
+                amax = jnp.max(fp8_meta_arrays[fp8_amax_idx], axis=1, keepdims=True)
+            else:
+                amax = fp8_meta_arrays[fp8_amax_idx][:, 0:1]
             scale = fp8_meta_arrays[fp8_scale_idx]
 
             exp = jnp.floor(jnp.log2(fp8_max / amax)) - FP8Helper.MARGIN
@@ -286,7 +308,7 @@ def fp8_autocast(enabled: bool = False,
 
     .. note::
         We only support :attr:`margin`, :attr:`fp8_format`, :attr:`interval` and
-        :attr:`amax_history_len=1` in recipe.DelayedScaling currently. Other parameters
+        :attr:`amax_history_len` in recipe.DelayedScaling currently. Other parameters
         in recipe.DelayedScaling would be ignored, even is set.
 
     Parameters
@@ -302,19 +324,21 @@ def fp8_autocast(enabled: bool = False,
     if fp8_recipe is None:
         fp8_recipe = DelayedScaling()
 
-    assert fp8_recipe.amax_history_len == 1, \
-        "It only support amax_history_len == 1 for now."
-
     if sharding_resource is None:
         sharding_resource = ShardingResource()
 
     try:
         with global_shard_guard(sharding_resource):
             if enabled:
+                amax_compute_algo = AmaxComputeAlgo.MOST_RECENT
+                if fp8_recipe.amax_compute_algo == 'max':
+                    amax_compute_algo = AmaxComputeAlgo.MAX
+
                 FP8Helper.initialize(margin=fp8_recipe.margin,
                                      fp8_format=fp8_recipe.fp8_format,
                                      update_fp8meta_interval=fp8_recipe.interval,
-                                     amax_history_len=fp8_recipe.amax_history_len)
+                                     amax_history_len=fp8_recipe.amax_history_len,
+                                     amax_compute_algo=amax_compute_algo)
             yield
     finally:
         FP8Helper.finalize()

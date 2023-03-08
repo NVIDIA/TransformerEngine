@@ -401,7 +401,6 @@ class DenseGeneral(TransformerEngineBase):
             fp8_gemm_package = \
                 TransformerEngineBase.get_fp8_gemm_package(1, inputs, [kernel])
             y = fp8_dot(fp8_gemm_package,
-                        0,
                         FP8Helper.FWD_DTYPE,
                         FP8Helper.BWD_DTYPE, (axis, contract_ind),
                         sharding_type=self.sharding_type,
@@ -566,7 +565,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
             if not fuse_layernorm:
                 z = fp8_dot(fp8_gemm_package,
-                            0,
                             FP8Helper.FWD_DTYPE,
                             FP8Helper.BWD_DTYPE, (axis, contract_ind),
                             sharding_type=self.sharding_type,
@@ -576,7 +574,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                       scale,
                                       ln_bias,
                                       self.layernorm_type,
-                                      0,
                                       FP8Helper.FWD_DTYPE,
                                       FP8Helper.BWD_DTYPE, (axis, contract_ind),
                                       sharding_type=self.sharding_type,
@@ -795,7 +792,6 @@ class LayerNormMLP(TransformerEngineBase):
                              scale,
                              ln_bias,
                              self.layernorm_type,
-                             0,
                              FP8Helper.FWD_DTYPE,
                              FP8Helper.BWD_DTYPE,
                              epsilon=self.epsilon,
@@ -844,7 +840,6 @@ class LayerNormMLP(TransformerEngineBase):
 
                 if not fuse_layernorm:
                     x = fp8_dot(fp8_gemm_package,
-                                0,
                                 FP8Helper.FWD_DTYPE,
                                 FP8Helper.BWD_DTYPE, (axis, contract_ind),
                                 sharding_type=first_sharding_type,
@@ -854,7 +849,6 @@ class LayerNormMLP(TransformerEngineBase):
                                           scale,
                                           ln_bias,
                                           self.layernorm_type,
-                                          0,
                                           FP8Helper.FWD_DTYPE,
                                           FP8Helper.BWD_DTYPE, (axis, contract_ind),
                                           sharding_type=first_sharding_type,
@@ -913,7 +907,6 @@ class LayerNormMLP(TransformerEngineBase):
                     fp8_metas_scale_inv[FP8Helper.NUM_META_PER_GEMM:, :])
 
                 out = fp8_dot(fp8_gemm_package,
-                              0,
                               FP8Helper.FWD_DTYPE,
                               FP8Helper.BWD_DTYPE, (axis, contract_ind),
                               sharding_type=second_sharding_type,

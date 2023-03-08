@@ -27,8 +27,7 @@ class TestFP8Helper(unittest.TestCase):
         margin = 5.0
         fp8_format = FP8Format.E4M3
         update_fp8meta_interval = 10
-        # Set amax_history_len=1 for now, since we only support amax_history_len = 1 for now
-        amax_history_len = 1
+        amax_history_len = 10
 
         FP8Helper.initialize(margin=margin,
                              fp8_format=fp8_format,
@@ -55,8 +54,7 @@ class TestFP8Helper(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     def test_update_fp8_metas(self):
-        # Set amax_history_len=1 for now, since we only support amax_history_len = 1 for now
-        FP8Helper.initialize(margin=3.0, amax_history_len=1)
+        FP8Helper.initialize(margin=3.0, amax_history_len=3)
 
         seed = 0
         key1, key2 = jax.random.split(jax.random.PRNGKey(seed))
@@ -77,10 +75,12 @@ class TestFP8Helper(unittest.TestCase):
         meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
         fp8_max_array = FP8Helper.generate_fp8_max_array(num_of_meta)
         fp8_amax_array1 = jax.random.uniform(key1, shape=meta_shape)
-        fp8_scale_array1 = get_fp8_scale(fp8_max_array, fp8_amax_array1, jnp.ones(meta_shape))
+        fp8_scale_array1 = get_fp8_scale(fp8_max_array, fp8_amax_array1[:, 0:1],
+                                         jnp.ones(meta_shape))
         fp8_scale_inv_array1 = 1 / fp8_scale_array1
         fp8_amax_array2 = jax.random.uniform(key2, shape=meta_shape)
-        fp8_scale_array2 = get_fp8_scale(fp8_max_array, fp8_amax_array2, jnp.ones(meta_shape))
+        fp8_scale_array2 = get_fp8_scale(fp8_max_array, fp8_amax_array2[:, 0:1],
+                                         jnp.ones(meta_shape))
         fp8_scale_inv_array2 = 1 / fp8_scale_array2
 
         state = flax.core.frozen_dict.FrozenDict({
@@ -158,6 +158,9 @@ class TestFP8Functions(unittest.TestCase):
 
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     def test_fp8_autocast(self):
+        FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
+        self._check_defult_state()
+
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
             self.assertFalse(FP8Helper.enable_fp8())
 
@@ -181,13 +184,9 @@ class TestFP8Functions(unittest.TestCase):
             self.assertEqual(FP8Helper.AMAX_HISTORY_LEN, ds.amax_history_len)
         self._check_defult_state()
 
-        ds = DelayedScaling(amax_history_len=2)
-        with self.assertRaises(AssertionError):
-            with fp8_autocast(enabled=True, fp8_recipe=DelayedScaling(amax_history_len=2)):
-                pass
-
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     def test_fp8_autocast_with_sharding_resource(self):
+        FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
         self._check_defult_state()
 
         ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)

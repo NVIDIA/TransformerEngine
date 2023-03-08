@@ -68,7 +68,7 @@ class TestFP8Dot:
             # y = input, matrix 2d (weight)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.sum(fp8_dot(fp8_gemm_pkg, 0, *_format2dtypes(None)))
+            return jnp.sum(fp8_dot(fp8_gemm_pkg, *_format2dtypes(None)))
 
         value_n_grad_func = value_and_grad(func, (0, 1))
         value_n_grad_func_compiled = jit(value_n_grad_func).lower(a, b).compile()
@@ -90,7 +90,7 @@ class TestFP8Dot:
             fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.sum(fp8_dot(fp8_gemm_pkg, 0, *compute_type))
+            return jnp.sum(fp8_dot(fp8_gemm_pkg, *compute_type))
 
         value_n_grad_func = value_and_grad(func, (0, 1))
         value_n_grad_func_compiled = jit(value_n_grad_func).lower(a, b).compile()
@@ -110,7 +110,7 @@ class TestFP8Dot:
         fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
         fp8_gemm_pkg = FP8GemmPackage(1, a, [b], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                       fp8_metas_scale_inv)
-        primitive_out = fp8_dot(fp8_gemm_pkg, 0, *_format2dtypes(None))
+        primitive_out = fp8_dot(fp8_gemm_pkg, *_format2dtypes(None))
         ref_out = jnp.dot(a, b)
 
         assert_allclose(primitive_out, ref_out)
@@ -136,12 +136,12 @@ class TestFP8Dot:
 
         # calculate amax
         fp8_gemm_pkg = FP8GemmPackage(1, a, [b], *fp8_meta)
-        primitive_out = fp8_dot(fp8_gemm_pkg, 0, *compute_type)
+        primitive_out = fp8_dot(fp8_gemm_pkg, *compute_type)
         # calculate scale by amax
         fp8_meta = FP8Helper._update_fp8_metas_impl(fp8_meta)
 
         fp8_gemm_pkg = FP8GemmPackage(1, a, [b], *fp8_meta)
-        primitive_out = fp8_dot(fp8_gemm_pkg, 0, *compute_type)
+        primitive_out = fp8_dot(fp8_gemm_pkg, *compute_type)
         ref_out = jnp.dot(a, b)
 
         ref_out = ref_out.astype(jnp.float32)
@@ -164,7 +164,7 @@ class TestFP8Dot:
             fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.mean(fp8_dot(fp8_gemm_pkg, 0, *_format2dtypes(None)))
+            return jnp.mean(fp8_dot(fp8_gemm_pkg, *_format2dtypes(None)))
 
         def ref_func(x, y):
             return jnp.mean(jnp.dot(x, y))
@@ -201,7 +201,7 @@ class TestFP8Dot:
 
         def primitive_func(x, y, metas):
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], *metas)
-            return jnp.sum(fp8_dot(fp8_gemm_pkg, 0, *compute_type))
+            return jnp.sum(fp8_dot(fp8_gemm_pkg, *compute_type))
 
         def ref_func(x, y):
             return jnp.sum(jnp.dot(x, y))
@@ -238,7 +238,7 @@ class TestFP8Dot:
             fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.sum(fp8_dot(fp8_gemm_pkg, 0, *_format2dtypes(None), ((2, 3), (0, 1))))
+            return jnp.sum(fp8_dot(fp8_gemm_pkg, *_format2dtypes(None), ((2, 3), (0, 1))))
 
         def ref_func(x, y):
             return jnp.sum(lax.dot_general(x, y, dimension_numbers=(((2, 3), (0, 1)), ((), ()))))
@@ -283,7 +283,6 @@ class TestFP8Dot:
                            ln_s,
                            None,
                            "rmsnorm",
-                           0,
                            *compute_type,
                            activations=activations))
 
@@ -305,7 +304,6 @@ class TestFP8Dot:
                           amax: jnp.ndarray,
                           scale: jnp.ndarray,
                           scale_inv: jnp.ndarray,
-                          amax_history_idx: int,
                           fwd_dtype,
                           bwd_dtype,
                           epsilon=1e-6,
@@ -323,7 +321,6 @@ class TestFP8Dot:
                                             scale[:FP8Helper.NUM_META_PER_GEMM],
                                             scale_inv[:FP8Helper.NUM_META_PER_GEMM])
             linear_1_out = fp8_dot(fp8_gemm_1_pkg,
-                                   amax_history_idx,
                                    fwd_dtype,
                                    bwd_dtype,
                                    contracting_dims,
@@ -341,7 +338,6 @@ class TestFP8Dot:
                                             scale[FP8Helper.NUM_META_PER_GEMM:],
                                             scale_inv[FP8Helper.NUM_META_PER_GEMM:])
             output = fp8_dot(fp8_gemm_2_pkg,
-                             amax_history_idx,
                              fwd_dtype,
                              bwd_dtype,
                              contracting_dims,
@@ -350,7 +346,7 @@ class TestFP8Dot:
 
         def ref_func(x, ln_s, y, z, metas):
             return jnp.mean(
-                fp8_ln_mlp_py(x, ln_s, y, z, *metas, 0, *compute_type, activations=activations))
+                fp8_ln_mlp_py(x, ln_s, y, z, *metas, *compute_type, activations=activations))
 
         value_n_grad_primitive_func = jit(value_and_grad(primitive_func, (0, 1, 2, 3)))
         value_n_grad_ref_func = jit(value_and_grad(ref_func, (0, 1, 2, 3)))
