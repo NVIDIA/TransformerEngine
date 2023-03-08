@@ -209,11 +209,16 @@ class DenseGeneral(nn.Module):
     features: Union[Iterable[int], int]
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
@@ -274,10 +279,15 @@ class MlpBlock(nn.Module):
     transpose_batch_sequence: bool
     intermediate_dim: int = 2048
     activations: Sequence[Union[str, Callable]] = ('relu',)
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    kernel_init: Initializer = None
     intermediate_dropout_rate: float = 0.1
     dtype: Any = jnp.float32
     fuse_wi: bool = False
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs, deterministic: bool = False):
@@ -348,11 +358,16 @@ class MultiHeadAttention(nn.Module):
     transpose_batch_sequence: bool
     dtype: DType = jnp.float32
     dropout_rate: float = 0.
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+    kernel_init: Initializer = None
     float32_logits: bool = False    # computes logits in float32 for stability.
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     fuse_qkv: bool = True
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self,

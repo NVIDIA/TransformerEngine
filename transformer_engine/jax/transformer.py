@@ -240,7 +240,7 @@ class MultiHeadAttention(nn.Module):
     dropout_rng_name: str = 'dropout'
     layernorm_type: str = "layernorm"
     layernorm_epsilon: float = 1e-6
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+    kernel_init: Initializer = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     apply_residual_connection_post_layernorm: bool = False
@@ -252,6 +252,11 @@ class MultiHeadAttention(nn.Module):
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False    # computes logits in float32 for stability.
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self,
@@ -696,9 +701,8 @@ class TransformerLayer(nn.Module):
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
     dropout_rng_name: str = 'dropout'
-    mha_kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
-    mlp_kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in',
-                                                                    'truncated_normal')
+    mha_kernel_init: Initializer = None
+    mlp_kernel_init: Initializer = None
     mlp_activations: Sequence[str] = ('relu',)
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -714,6 +718,14 @@ class TransformerLayer(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
+
+    def __post_init__(self):
+        if self.mha_kernel_init is None:
+            self.mha_kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        if self.mlp_kernel_init is None:
+            self.mlp_kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in',
+                                                                    'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self,

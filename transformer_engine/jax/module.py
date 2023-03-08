@@ -346,7 +346,7 @@ class DenseGeneral(TransformerEngineBase):
     """
 
     features: Union[Iterable[int], int]
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -355,6 +355,11 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
     sharding_type: ShardingType = ShardingType.SINGLE
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
@@ -481,7 +486,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     scale_axes: Tuple[str, ...] = ('embed',)
     ln_bias_init: Initializer = nn.initializers.zeros
     ln_bias_axes: Tuple[str, ...] = ('embed',)
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -492,6 +497,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     transpose_batch_sequence: bool = True
     depth_scaling: float = None
     sharding_type: ShardingType = ShardingType.SINGLE
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
@@ -678,7 +688,7 @@ class LayerNormMLP(TransformerEngineBase):
     scale_axes: Tuple[str, ...] = ('embed',)
     ln_bias_init: Initializer = nn.initializers.zeros
     ln_bias_axes: Tuple[str, ...] = ('embed',)
-    kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+    kernel_init: Initializer = None
     kernel_axes_1: Tuple[str, ...] = ('embed', 'act', 'mlp')
     kernel_axes_2: Tuple[str, ...] = ('mlp', 'embed')
     use_bias: bool = False
@@ -692,6 +702,11 @@ class LayerNormMLP(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
     major_sharding_type: MajorShardingType = MajorShardingType.SINGLE
+
+    def __post_init__(self):
+        if self.kernel_init is None:
+            self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array, deterministic: bool = False) -> Array:
