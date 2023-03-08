@@ -40,7 +40,7 @@ def train_step(batch, state, others):
     """Training function."""
 
     def loss_fn(collections):
-        logits = network().apply(collections, batch)
+        logits = state.apply_fn(collections, batch)
         loss = jnp.mean(logits)
         return loss
 
@@ -55,16 +55,13 @@ def test_encoder():
     """Encoder example"""
     rng = jax.random.PRNGKey(0)
     rng, init_rng, data_rng = jax.random.split(rng, 3)
-
     inputs = synthesis_data(data_rng)
 
-    variables = jax.jit(network().init)(init_rng, inputs)
-
-    optimizer = optax.sgd(0.001, 0.9)
+    encoder = network()
+    variables = jax.jit(encoder.init)(init_rng, inputs)
     variables, params = variables.pop(PARAMS_KEY)
-
-    state = train_state.TrainState.create(apply_fn=network().apply, params=params, tx=optimizer)
-
+    optimizer = optax.sgd(0.001, 0.9)
+    state = train_state.TrainState.create(apply_fn=encoder.apply, params=params, tx=optimizer)
     jitted_train_step = jax.jit(train_step)
 
     for i in range(5):
