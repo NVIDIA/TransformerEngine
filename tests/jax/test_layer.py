@@ -145,7 +145,9 @@ class TestEncoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
+        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
+                            hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
                             dtype=dtype,
                             **te_layer_attrs)
@@ -185,7 +187,9 @@ class TestEncoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
+        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
+                            hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
                             dtype=dtype,
                             **te_layer_attrs)
@@ -350,7 +354,9 @@ class TestDecoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
+        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
+                            hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
                             dtype=dtype,
                             **te_layer_attrs)
@@ -392,7 +398,9 @@ class TestDecoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
+        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
+                            hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
                             dtype=dtype,
                             **te_layer_attrs)

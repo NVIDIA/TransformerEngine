@@ -618,6 +618,8 @@ class TransformerLayer(nn.Module):
         a value added to the denominator of layer normalization for numerical stability.
     hidden_dropout: float, default = 0.1
         dropout probability for the dropout op after FC2 layer.
+    hidden_dropout_dims: Sequence[int], default = ()
+        dimensions that will share the same dropout mask for hidden
     attention_dropout: float, default = 0.1
         dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
@@ -691,6 +693,7 @@ class TransformerLayer(nn.Module):
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
     hidden_dropout: float = 0.1
+    hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
     dropout_rng_name: str = 'dropout'
     mha_kernel_init: Initializer = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
@@ -830,8 +833,16 @@ class TransformerLayer(nn.Module):
                            deterministic=deterministic,
                            decode=decode)
 
-        x = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
+        def hidden_dropout(x, deterministic):
+            assert isinstance(self.hidden_dropout_dims, Sequence)
+            x_shape_len = len(x.shape)
+            for dims in self.hidden_dropout_dims:
+                assert -x_shape_len < dims < x_shape_len
+
+            return nn.Dropout(rate=self.hidden_dropout,
+                              broadcast_dims=self.hidden_dropout_dims)(x, deterministic)
+
+        x = hidden_dropout(x, deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -867,8 +878,7 @@ class TransformerLayer(nn.Module):
                                                   encoded,
                                                   encoder_decoder_mask,
                                                   deterministic=deterministic)
-            y = nn.Dropout(rate=self.hidden_dropout,
-                           broadcast_dims=(sequence_dim,))(y, deterministic=deterministic)
+            y = hidden_dropout(y, deterministic)
             mlp_input = y + residual
 
         # MlpBlock
@@ -896,8 +906,7 @@ class TransformerLayer(nn.Module):
             assert ln_out is not None
             residual = ln_out
 
-        z = nn.Dropout(rate=self.hidden_dropout,
-                       broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
+        z = hidden_dropout(z, deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)
             z = nn.Dropout(rate=self.drop_path,
