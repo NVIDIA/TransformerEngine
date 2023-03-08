@@ -11,4 +11,3 @@ from .recipe import Format
 
 from .transformer import MultiHeadAttention
 from .transformer import TransformerLayer
-
