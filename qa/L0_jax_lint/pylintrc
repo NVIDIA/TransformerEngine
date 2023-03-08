@@ -1,6 +1,5 @@
 [MASTER]
-extension-pkg-whitelist=torch,
-                        transformer_engine_extensions
+extension-pkg-whitelist=transformer_engine_jax
 
 disable=too-many-locals,
         invalid-name,
@@ -24,7 +23,3 @@ disable=too-many-locals,
         too-many-branches,
         global-variable-not-assigned,
         redefined-argument-from-local
-
-[TYPECHECK]
-ignored-modules=torch
-ignored-classes=torch
