@@ -9,18 +9,18 @@ set -e
 pip install cpplint==1.6.0 pylint==2.13.5
 if [ -z "${PYTHON_ONLY}" ]
 then
-  cp $TE_PATH/qa/L0_lint/CPPLINT.cfg $TE_PATH
+  cp $TE_PATH/qa/L0_jax_lint/CPPLINT.cfg $TE_PATH
   cd $TE_PATH
   echo "Checking common API headers"
   cpplint --root transformer_engine/common/include --recursive transformer_engine/common/include
   echo "Checking C++ files"
-  cpplint --recursive --exclude=transformer_engine/common/include transformer_engine
-  cpplint --recursive transformer_engine/pytorch
+  cpplint --recursive --exclude=transformer_engine/common/include transformer_engine/common
+  cpplint --recursive transformer_engine/jax
 fi
 if [ -z "${CPP_ONLY}" ]
 then
-  cp $TE_PATH/qa/L0_lint/pylintrc $TE_PATH
+  cp $TE_PATH/qa/L0_jax_lint/pylintrc $TE_PATH
   cd $TE_PATH
   echo "Checking Python files"
-  pylint --recursive=y transformer_engine/common transformer_engine/pytorch
+  pylint --recursive=y transformer_engine/common transformer_engine/jax
 fi
