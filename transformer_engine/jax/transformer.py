@@ -830,8 +830,8 @@ class TransformerLayer(nn.Module):
                            deterministic=deterministic,
                            decode=decode)
 
-        x = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(sequence_dim,))(x,
-                                                                       deterministic=deterministic)
+        x = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=(sequence_dim,))(x, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
@@ -896,8 +896,8 @@ class TransformerLayer(nn.Module):
             assert ln_out is not None
             residual = ln_out
 
-        z = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=(sequence_dim,))(z,
-                                                                       deterministic=deterministic)
+        z = nn.Dropout(rate=self.hidden_dropout,
+                       broadcast_dims=(sequence_dim,))(z, deterministic=deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(z.shape, batch_dim)
             z = nn.Dropout(rate=self.drop_path,
