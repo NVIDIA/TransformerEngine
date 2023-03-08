@@ -279,7 +279,7 @@ class TransformerEngineBase(nn.Module):
         fp8_metas_amax = nn_partitioning.variable_with_axes(
             FP8Helper.FP8_COLLECTION_NAME,
             FP8Helper.FP8_AMAX_NAME,
-            jnp.zeros, (num_of_meta, FP8Helper.AMAX_HISTORY_SIZE),
+            jnp.zeros, (num_of_meta, FP8Helper.AMAX_HISTORY_LEN),
             jnp.float32,
             axes=axes)
         fp8_metas_scale = nn_partitioning.variable_with_axes(FP8Helper.FP8_COLLECTION_NAME,

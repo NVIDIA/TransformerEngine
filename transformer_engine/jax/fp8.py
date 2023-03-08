@@ -120,7 +120,7 @@ class FP8Helper:
     FWD_DTYPE: DType = DType.kFloat8E4M3
     BWD_DTYPE: DType = DType.kFloat8E5M2
     UPDATE_FP8META_INTERVAL: int = 1
-    AMAX_HISTORY_SIZE: int = 1
+    AMAX_HISTORY_LEN: int = 1
     NUM_META_PER_GEMM: int = 3
     INPUT_META_IDX_PER_GEMM: int = 0
     KERNEL_META_IDX_PER_GEMM: int = 1
@@ -148,7 +148,7 @@ class FP8Helper:
     def initialize(margin: float = 0.0,
                    fp8_format: Format = Format.HYBRID,
                    update_fp8meta_interval: int = 1,
-                   amax_history_size: int = 1) -> None:
+                   amax_history_len: int = 1) -> None:
         """
         Initialize the FP8 meta
         """
@@ -158,8 +158,8 @@ class FP8Helper:
         FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = \
             _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.UPDATE_FP8META_INTERVAL = update_fp8meta_interval
-        FP8Helper.AMAX_HISTORY_SIZE = amax_history_size
-        assert FP8Helper.AMAX_HISTORY_SIZE == 1, \
+        FP8Helper.AMAX_HISTORY_LEN = amax_history_len
+        assert FP8Helper.AMAX_HISTORY_LEN == 1, \
             "It only support amax_history_len == 1 for now."
         FP8Helper.FP8_2X_ACC_FPROP = bool(
             int(os.environ.get(FP8Helper.FP8_2X_ACC_FPROP_ENV_VAR_NAME, False)))
@@ -179,7 +179,7 @@ class FP8Helper:
         FP8Helper.FWD_DTYPE = DType.kFloat8E4M3
         FP8Helper.BWD_DTYPE = DType.kFloat8E5M2
         FP8Helper.UPDATE_FP8META_INTERVAL = 1
-        FP8Helper.AMAX_HISTORY_SIZE = 1
+        FP8Helper.AMAX_HISTORY_LEN = 1
 
     @staticmethod
     def update_collections(new: Collection, original: Collection) -> Collection:
@@ -314,7 +314,7 @@ def fp8_autocast(enabled: bool = False,
                 FP8Helper.initialize(margin=fp8_recipe.margin,
                                      fp8_format=fp8_recipe.fp8_format,
                                      update_fp8meta_interval=fp8_recipe.interval,
-                                     amax_history_size=fp8_recipe.amax_history_len)
+                                     amax_history_len=fp8_recipe.amax_history_len)
             yield
     finally:
         FP8Helper.finalize()
