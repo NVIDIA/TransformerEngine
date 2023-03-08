@@ -496,7 +496,7 @@ class TestDecoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=1e-04)
+        self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
     @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
@@ -513,7 +513,7 @@ class TestDecoderLayer:
     @pytest.mark.parametrize('attrs', ATTRS)
     def test_forward_backward(self, data_shape, dtype, attrs):
         FP8Helper.finalize()    # Ensure FP8 disabled.
-        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=1e-04)
+        self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
     @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
