@@ -602,7 +602,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         return z, ln_output    # dense_output, layer_norm_output
 
 
-class LayerNormMlpBlock(TransformerEngineBase):
+class LayerNormMLP(TransformerEngineBase):
     r"""
     Applies layer normalization on the input followed by the MLP module,
     consisting of 2 successive linear transformations, separated by given activations.

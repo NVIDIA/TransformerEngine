@@ -16,7 +16,7 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 
-from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMlpBlock
+from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from .softmax import SoftmaxType
 from .sharding import infer_major_sharding_type, infer_sharding_type
@@ -873,7 +873,7 @@ class TransformerLayer(nn.Module):
 
         # MlpBlock
         residual = mlp_input
-        z, ln_out = LayerNormMlpBlock(
+        z, ln_out = LayerNormMLP(
             layernorm_type=self.layernorm_type,
             epsilon=self.layernorm_epsilon,
             major_sharding_type=infer_major_sharding_type(),
