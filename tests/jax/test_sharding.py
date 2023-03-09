@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from jax.experimental import maps
 
+from transformer_engine.jax import extend_logical_axis_rules
 from transformer_engine.jax.sharding import get_dot_sharding_meta
 from transformer_engine.jax.sharding import get_elementwise_sharding_meta
 from transformer_engine.jax.sharding import get_fp8_meta_sharding_meta
@@ -14,6 +15,7 @@ from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import is_dp_enabled, is_tp_enabled
 from transformer_engine.jax.sharding import ShardingMeta, ShardingResource, ShardingType
+from utils import is_devices_enough
 
 
 def _get_sharding_resource(mesh_names, sharding_type):
@@ -47,14 +49,25 @@ SRS = [
 ]
 
 
-def is_devices_enough():
-    return len(jax.devices()) >= DEVICE_COUNT
+class TestShardingSideAPI:
+
+    @pytest.mark.parametrize('base_rules,need_assert', LOGICAL_RULES)
+    @pytest.mark.parametrize('sr', SRS)
+    def test_extend_logical_axis_rules(self, base_rules, need_assert, sr):
+        with global_shard_guard(sr):
+            try:
+                target_te_rules = extend_logical_axis_rules(tuple())
+                extended_rules = extend_logical_axis_rules(base_rules)
+                assert extended_rules == (*base_rules, *target_te_rules)
+                assert not need_assert
+            except AssertionError as ae:
+                assert need_assert, f"{ae.args}"
 
 
 class TestGeneralFunc:
 
     @pytest.mark.parametrize('mesh_shape,mesh_names,sharding_type', MESH_CONFIG)
-    @pytest.mark.skipif(not is_devices_enough(), reason='Num of GPU is not enough')
+    @pytest.mark.skipif(not is_devices_enough(DEVICE_COUNT), reason='Num of GPU is not enough')
     def test_infer_major_sharding_type(
             self,
             mesh_shape,    # pylint: disable=unused-argument
@@ -94,7 +107,7 @@ class TestShardingMetaGenerator:
     MODEL_AXIS_NAME = 'model'
 
     @pytest.mark.parametrize('mesh_shape,mesh_names,sharding_type', MESH_CONFIG)
-    @pytest.mark.skipif(not is_devices_enough(), reason='Num of GPU is not enough')
+    @pytest.mark.skipif(not is_devices_enough(DEVICE_COUNT), reason='Num of GPU is not enough')
     def test_fp8_meta(self, mesh_shape, mesh_names, sharding_type, num_of_fp8_meta=4):
 
         def stack_axes_meta(mapping):
@@ -145,7 +158,7 @@ class TestShardingMetaGenerator:
     @pytest.mark.parametrize('a_shape, b_shape', [((64, 128, 256), (256, 512)),
                                                   ((128, 64, 512), (512, 256))])
     @pytest.mark.parametrize('batch_dim_of_a', [0, 1])
-    @pytest.mark.skipif(not is_devices_enough(), reason='Num of GPU is not enough')
+    @pytest.mark.skipif(not is_devices_enough(DEVICE_COUNT), reason='Num of GPU is not enough')
     def test_dot(self, mesh_shape, mesh_names, sharding_type, a_shape, b_shape, batch_dim_of_a):
         model_dim_of_a = len(a_shape) - 1
         model_dim_of_b = 0 if sharding_type in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW) else 1
@@ -240,7 +253,7 @@ class TestShardingMetaGenerator:
     @pytest.mark.parametrize('input_shape', [(64, 128, 256), (128, 64, 512)])
     @pytest.mark.parametrize('other_shape', [(256,), (512,)])
     @pytest.mark.parametrize('batch_dim', [0, 1])
-    @pytest.mark.skipif(not is_devices_enough(), reason='Num of GPU is not enough')
+    @pytest.mark.skipif(not is_devices_enough(DEVICE_COUNT), reason='Num of GPU is not enough')
     def test_elementwise(self, mesh_shape, mesh_names, sharding_type, input_shape, other_shape,
                          batch_dim):
 

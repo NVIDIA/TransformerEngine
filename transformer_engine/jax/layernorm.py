@@ -132,7 +132,6 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                       gamma: jnp.ndarray,
                       beta: jnp.ndarray,
                       layernorm_type: str,
-                      amax_history_idx: int,
                       fwd_dtype: TEDType,
                       bwd_dtype: TEDType,
                       contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
@@ -167,7 +166,6 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                     scale,
                                     scale_inv,
                                     layernorm_type,
-                                    amax_history_idx,
                                     fwd_dtype,
                                     bwd_dtype,
                                     contracting_dims,
@@ -213,7 +211,6 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
 
         partial_ln_fp8_dot = partial(_layernorm_fp8_dot,
                                      layernorm_type=layernorm_type,
-                                     amax_history_idx=amax_history_idx,
                                      fwd_dtype=fwd_dtype,
                                      bwd_dtype=bwd_dtype,
                                      contracting_dims=contracting_dims,
@@ -233,7 +230,7 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16))
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15))
 def _layernorm_fp8_dot(inputs: jnp.ndarray,
                        kernel: jnp.ndarray,
                        gamma: jnp.ndarray,
@@ -243,7 +240,6 @@ def _layernorm_fp8_dot(inputs: jnp.ndarray,
                        scale: jnp.ndarray,
                        scale_inv: jnp.ndarray,
                        layernorm_type: str,
-                       amax_history_idx: int,
                        fwd_dtype: TEDType,
                        bwd_dtype: TEDType,
                        contracting_dims: Tuple[Sequence[int], Sequence[int]],
@@ -252,9 +248,9 @@ def _layernorm_fp8_dot(inputs: jnp.ndarray,
                        tp_axis_name: str,
                        epsilon: float = 1e-6) -> jnp.ndarray:
     output, _ = _layernorm_fp8_dot_fwd(inputs, kernel, gamma, beta, fp8_maxs, amax, scale,
-                                       scale_inv, layernorm_type, amax_history_idx, fwd_dtype,
-                                       bwd_dtype, contracting_dims, sharding_type, dp_axis_name,
-                                       tp_axis_name, epsilon)
+                                       scale_inv, layernorm_type, fwd_dtype, bwd_dtype,
+                                       contracting_dims, sharding_type, dp_axis_name, tp_axis_name,
+                                       epsilon)
     return output
 
 
@@ -268,7 +264,6 @@ def _layernorm_fp8_dot_fwd(
         scale,
         scale_inv,
         layernorm_type,
-        amax_history_idx,    # pylint: disable=unused-argument
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         contracting_dims,
@@ -285,6 +280,8 @@ def _layernorm_fp8_dot_fwd(
     input_contracting_size = reduce(operator.mul, input_shape_suf)
     kernel_contracting_size = reduce(operator.mul, kernel_shape_pre)
     assert input_contracting_size == kernel_contracting_size
+
+    amax = FP8Helper.update_amax_history(amax)
 
     gemm_input_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
 
@@ -337,7 +334,6 @@ def _layernorm_fp8_dot_fwd(
 
 def _layernorm_fp8_dot_bwd(
         layernorm_type,
-        amax_history_idx,
         fwd_dtype,
         bwd_dtype,
         contracting_dims,    # pylint: disable=unused-argument
@@ -386,9 +382,9 @@ def _layernorm_fp8_dot_bwd(
         grad_input, grad_gamma = rmsnorm_bwd(dgrad, rsigma, inputs, gamma, epsilon=epsilon)
         grad_beta = None
 
-    amax = amax.at[gemm_input_idx, amax_history_idx].set(input_amax[0])
-    amax = amax.at[gemm_kernel_idx, amax_history_idx].set(kernel_amax[0])
-    amax = amax.at[gemm_grad_idx, amax_history_idx].set(grad_amax[0])
+    amax = amax.at[gemm_input_idx, 0].set(input_amax[0])
+    amax = amax.at[gemm_kernel_idx, 0].set(kernel_amax[0])
+    amax = amax.at[gemm_grad_idx, 0].set(grad_amax[0])
 
     if is_dp_enabled(sharding_type.value[0]):
         wgrad = jax.lax.psum(wgrad, dp_axis_name)

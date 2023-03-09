@@ -276,7 +276,7 @@ class CastTransposePrimitive(BasePrimitive):
         out_types = [
             ir.RankedTensorType.get([ir_in_shape[0], ir_in_shape[1]], ir_out_dtype),
             ir.RankedTensorType.get([ir_in_shape[1], ir_in_shape[0]], ir_out_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [inputs, amax, scale, scale_inv]
         operand_shapes = [ir_in_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -427,7 +427,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         batch_size = ir_in_shape[0]    # In Transformer, batch_size = batch x seqlen
         out_types = [
             ir.RankedTensorType.get([batch_size, hidden_size // 2], ir_out_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [inputs, amax, scale, scale_inv]
         operand_shapes = [ir_in_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -599,7 +599,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         out_types = [
             ir.RankedTensorType.get([gi_batch_size, gi_hidden_size], ir_out_dtype),
             ir.RankedTensorType.get([gi_hidden_size, gi_batch_size], ir_out_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [inputs, gelu_inputs, amax, scale, scale_inv]
         operand_shapes = [ir_in_shape, gi_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -915,7 +915,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get((batch_size,), ir_mu_dtype),
             ir.RankedTensorType.get((batch_size,), ir_rsigma_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [x, gamma, beta, amax, scale, scale_inv]
         operand_shapes = [
@@ -1196,7 +1196,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get((batch_size,), ir_rsigma_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [x, gamma, amax, scale, scale_inv]
         operand_shapes = [x_shape, w_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -1369,7 +1369,7 @@ class QuantizePrimitive(BasePrimitive):
 
         out_types = [
             ir.RankedTensorType.get(ir_out_shape, ir_out_dtype),
-            ir.RankedTensorType.get((1,), ir_amax_dtype),
+            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [inputs, amax, scale, scale_inv]
         operand_shapes = [ir_in_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]

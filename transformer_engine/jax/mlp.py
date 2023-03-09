@@ -101,7 +101,6 @@ def fp8_ln_mlp(
     ln_scale: jnp.ndarray,
     ln_bias: jnp.ndarray,
     layernorm_type: str,
-    amax_history_idx: int,
     fwd_dtype: TEDType,
     bwd_dtype: TEDType,
     epsilon: float = 1e-6,
@@ -130,8 +129,8 @@ def fp8_ln_mlp(
     assert activations == ('gelu', 'linear')
     if major_sharding_type is MajorShardingType.SINGLE:
         res = _fp8_mlp(inputs, ln_scale, ln_bias, kernel_1, kernel_2, fp8_max, amax, scale,
-                       scale_inv, layernorm_type, amax_history_idx, activations, epsilon, fwd_dtype,
-                       bwd_dtype, contracting_dims, major_sharding_type, "", "")
+                       scale_inv, layernorm_type, activations, epsilon, fwd_dtype, bwd_dtype,
+                       contracting_dims, major_sharding_type, "", "")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -177,7 +176,6 @@ def fp8_ln_mlp(
 
         partial_fp8_mlp = partial(_fp8_mlp,
                                   layernorm_type=layernorm_type,
-                                  amax_history_idx=amax_history_idx,
                                   activations=activations,
                                   epsilon=epsilon,
                                   fwd_dtype=fwd_dtype,
@@ -198,10 +196,10 @@ def fp8_ln_mlp(
     return res
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
-             scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str, amax_history_idx: int,
+             scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str,
              activations: Sequence[Union[str, Callable]], epsilon: float, fwd_dtype: TEDType,
              bwd_dtype: TEDType, contracting_dims: Tuple[Sequence[int], Sequence[int]],
              major_sharding_type: MajorShardingType, dp_axis_name: str, tp_axis_name: str):
@@ -215,7 +213,6 @@ def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
                           scale,
                           scale_inv,
                           layernorm_type,
-                          amax_history_idx,
                           activations,
                           epsilon,
                           fwd_dtype,
@@ -238,7 +235,6 @@ def _fp8_mlp_fwd(
         scale,
         scale_inv,
         layernorm_type,
-        amax_history_idx,    # pylint: disable=unused-argument
         activations,
         epsilon,
         fwd_dtype,
@@ -265,6 +261,8 @@ def _fp8_mlp_fwd(
     inputs_ = jnp.reshape(inputs, (-1, input_contracting_size))
     kernel_1_ = jnp.reshape(kernel_1, (kernel_1_pre_size, -1))
     kernel_2_ = jnp.reshape(kernel_2, (kernel_2_pre_size, -1))
+
+    amax = FP8Helper.update_amax_history(amax)
 
     gemm1_input_idx, gemm1_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
 
@@ -335,7 +333,6 @@ def _fp8_mlp_fwd(
 
 def _fp8_mlp_bwd(
         layernorm_type,
-        amax_history_idx,
         activations,    # pylint: disable=unused-argument
         epsilon,
         fwd_dtype,
@@ -405,12 +402,12 @@ def _fp8_mlp_bwd(
         grad_input, grad_gamma = rmsnorm_bwd(dgrad_1, rsigma, inputs_, gamma, epsilon=epsilon)
         grad_beta = None
 
-    amax = amax.at[gemm1_input_idx, amax_history_idx].set(ln_out_amax[0])
-    amax = amax.at[gemm1_kernel_idx, amax_history_idx].set(kernel_1_amax[0])
-    amax = amax.at[gemm1_grad_idx, amax_history_idx].set(dgelu_amax[0])
-    amax = amax.at[gemm2_input_idx, amax_history_idx].set(gated_gelu_amax[0])
-    amax = amax.at[gemm2_kernel_idx, amax_history_idx].set(kernel_2_amax[0])
-    amax = amax.at[gemm2_grad_idx, amax_history_idx].set(grad_amax[0])
+    amax = amax.at[gemm1_input_idx, 0].set(ln_out_amax[0])
+    amax = amax.at[gemm1_kernel_idx, 0].set(kernel_1_amax[0])
+    amax = amax.at[gemm1_grad_idx, 0].set(dgelu_amax[0])
+    amax = amax.at[gemm2_input_idx, 0].set(gated_gelu_amax[0])
+    amax = amax.at[gemm2_kernel_idx, 0].set(kernel_2_amax[0])
+    amax = amax.at[gemm2_grad_idx, 0].set(grad_amax[0])
 
     if major_sharding_type in (MajorShardingType.DP, MajorShardingType.DPTP):
         wgrad_1 = jax.lax.psum(wgrad_1, dp_axis_name)
