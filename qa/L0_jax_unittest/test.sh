@@ -6,3 +6,4 @@ set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
 pytest -Wignore -v $TE_PATH/tests/jax
+pytest -Wignore -v $TE_PATH/examples/jax
