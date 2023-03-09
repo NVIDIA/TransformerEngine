@@ -159,7 +159,7 @@ class FP8Helper:
                    fp8_format: Format = Format.HYBRID,
                    update_fp8meta_interval: int = 1,
                    amax_history_len: int = 1,
-                   amax_compute_algo: AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MOST_RECENT) -> None:
+                   amax_compute_algo: AmaxComputeAlgo = AmaxComputeAlgo.MOST_RECENT) -> None:
         """
         Initialize the FP8 meta
         """
