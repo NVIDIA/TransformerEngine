@@ -338,11 +338,11 @@ def fp8_autocast(enabled: bool = False,
 
 
 # Function Wrappers
-def update_collections(new: Collection, original: Collection) -> Collection:
+def update_collections(new: Collection, original: Collection) -> FrozenDict:
     r"""
-    A helper to update Flax's Collection. Collection = Flax's FrozenDict.
+    A helper to update Flax's Collection.
 
-    Collection = [dict, FrozenDict]
+    Collection = [dict, Flax's FrozenDict]
 
     Parameters
     ----------
@@ -363,14 +363,16 @@ def update_fp8_metas(state: Collection) -> Collection:
     r"""
     Calculate new fp8 scales and its inverse via the followed formula
 
-    `exp` = floor(log2(`fp8_max` / `amax`)) - `margin`
-    `sf` = round(power(2, abs(exp)))
-    `sf` = `sf` if `amax` > 0.0, else original_scale
-    `sf` = `sf` if isfinite(`amax`), else original_scale)
-    `updated_scale` = `1/sf` if exp < 0, else `sf`
-    `updated_scale_inv` = `1/updated_scale`
+    .. code-block:: python
 
-    Collection = Flax's FrozenDict.
+        exp = floor(log2(fp8_max / amax)) - margin
+        sf = round(power(2, abs(exp)))
+        sf = sf if amax > 0.0, else original_scale
+        sf = sf if isfinite(amax), else original_scale)
+        updated_scale = 1/sf if exp < 0, else sf
+        updated_scale_inv = 1/updated_scale
+
+    Collection = [dict, Flax's FrozenDict]
 
     Parameters
     ----------
