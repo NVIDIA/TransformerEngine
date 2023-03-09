@@ -171,8 +171,7 @@ class FP8Helper:
         FP8Helper.UPDATE_FP8META_INTERVAL = update_fp8meta_interval
         FP8Helper.AMAX_HISTORY_LEN = amax_history_len
         FP8Helper.AMAX_COMPUTE_ALGO = amax_compute_algo
-        FP8Helper.FP8_2X_ACC_FPROP = bool(
-            int(os.environ.get(FP8Helper.FP8_2X_ACC_FPROP_ENV_VAR_NAME, False)))
+        FP8Helper.FP8_2X_ACC_FPROP = False
         FP8Helper.FP8_2X_ACC_DGRAD = bool(
             int(os.environ.get(FP8Helper.FP8_2X_ACC_DGRAD_ENV_VAR_NAME, True)))
         FP8Helper.FP8_2X_ACC_WGRAD = bool(
