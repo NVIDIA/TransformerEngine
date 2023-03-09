@@ -4,7 +4,6 @@
 """
 Helper module for fp8 meta management
 """
-import os
 from contextlib import contextmanager
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
