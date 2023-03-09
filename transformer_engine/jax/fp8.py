@@ -140,9 +140,6 @@ class FP8Helper:
     FP8_SCALE_NAME: str = "fp8_meta_scale"
     FP8_SCALE_INV_NAME: str = "fp8_meta_scale_inv"
     FP8_MAX_NAME: str = "fp8_max"
-    FP8_2X_ACC_FPROP_ENV_VAR_NAME = "NVTE_JAX_FP8_2X_ACC_FPROP"
-    FP8_2X_ACC_DGRAD_ENV_VAR_NAME = "NVTE_JAX_FP8_2X_ACC_DGRAD"
-    FP8_2X_ACC_WGRAD_ENV_VAR_NAME = "NVTE_JAX_FP8_2X_ACC_WGRAD"
     FP8_2X_ACC_FPROP: bool = False
     FP8_2X_ACC_DGRAD: bool = True
     FP8_2X_ACC_WGRAD: bool = True
@@ -172,10 +169,8 @@ class FP8Helper:
         FP8Helper.AMAX_HISTORY_LEN = amax_history_len
         FP8Helper.AMAX_COMPUTE_ALGO = amax_compute_algo
         FP8Helper.FP8_2X_ACC_FPROP = False
-        FP8Helper.FP8_2X_ACC_DGRAD = bool(
-            int(os.environ.get(FP8Helper.FP8_2X_ACC_DGRAD_ENV_VAR_NAME, True)))
-        FP8Helper.FP8_2X_ACC_WGRAD = bool(
-            int(os.environ.get(FP8Helper.FP8_2X_ACC_WGRAD_ENV_VAR_NAME, True)))
+        FP8Helper.FP8_2X_ACC_DGRAD = True
+        FP8Helper.FP8_2X_ACC_WGRAD = True
 
     @staticmethod
     def finalize() -> None:
