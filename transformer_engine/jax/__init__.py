@@ -5,5 +5,6 @@
 from .fp8 import fp8_autocast, update_collections, update_fp8_metas
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP, TransformerEngineBase
 from .transformer import extend_logical_axis_rules
-from .transformer import RelativePositionBiases, TransformerLayer, TransformerLayerType
+from .transformer import RelativePositionBiases, MultiHeadAttention
+from .transformer import TransformerLayer, TransformerLayerType
 from .sharding import ShardingResource

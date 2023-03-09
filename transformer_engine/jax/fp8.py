@@ -302,16 +302,16 @@ def fp8_autocast(enabled: bool = False,
     .. note::
         We only support :attr:`margin`, :attr:`fp8_format`, :attr:`interval` and
         :attr:`amax_history_len` in recipe.DelayedScaling currently. Other parameters
-        in recipe.DelayedScaling would be ignored, even is set.
+        in recipe.DelayedScaling would be ignored, even if set.
 
     Parameters
     ----------
     enabled: bool, default = False
-        whether or not to enable fp8
+        Whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
-        recipe used for FP8 training.
-    sharding_resource: ShardingResource, defaule = None
-        specify the mesh axes for data and tensor parallelism to shard along.
+        Recipe used for FP8 training.
+    sharding_resource: ShardingResource, default = None
+        Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then ShardingResource() would be created.
     """
     if fp8_recipe is None:
@@ -340,8 +340,7 @@ def fp8_autocast(enabled: bool = False,
 # Function Wrappers
 def update_collections(new: Collection, original: Collection) -> Collection:
     r"""
-    A helper to update Flax's Collection. Collection is a union type of dict and
-    Flax's FrozenDict.
+    A helper to update Flax's Collection. Collection = Flax's FrozenDict.
 
     Collection = [dict, FrozenDict]
 
@@ -371,7 +370,7 @@ def update_fp8_metas(state: Collection) -> Collection:
     `updated_scale` = `1/sf` if exp < 0, else `sf`
     `updated_scale_inv` = `1/updated_scale`
 
-    Collection = [dict, FrozenDict]
+    Collection = Flax's FrozenDict.
 
     Parameters
     ----------
