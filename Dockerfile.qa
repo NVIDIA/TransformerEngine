@@ -3,6 +3,3 @@ ARG FROM_IMAGE
 
 FROM ${FROM_IMAGE_DEVEL} as devel
 FROM ${FROM_IMAGE}
-
-COPY --from=devel /opt/transformerengine/pylintrc /opt/transformerengine/
-COPY --from=devel /opt/transformerengine/CPPLINT.cfg /opt/transformerengine/
