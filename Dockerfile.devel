@@ -4,8 +4,6 @@ ARG FRAMEWORK=pytorch
 FROM ${BASE_IMAGE}
 ARG FRAMEWORK
 
-COPY qa/L0_lint/pylintrc /opt/transformerengine/
-COPY qa/L0_lint/CPPLINT.cfg /opt/transformerengine/
 COPY .git/ /opt/transformerengine/.git/
 COPY .gitignore /opt/transformerengine/
 COPY .gitlab-ci.yml docker-build.sh Dockerfile.base Dockerfile.devel Dockerfile.qa /opt/transformerengine/

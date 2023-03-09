@@ -592,13 +592,25 @@ upload_logs:
 ##
 ######################################################
 
-L0_lint:
+L0_license:
     extends:
     - .L0_test
     tags:
     - 1GPU
 
-L0_license:
+L0_lint:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_jax_lint:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
     extends:
     - .L0_test
     tags:
