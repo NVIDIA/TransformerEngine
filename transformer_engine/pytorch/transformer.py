@@ -85,6 +85,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         attn_mask_type: str = "causal",
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -94,11 +95,12 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
+        self.layer_number = layer_number
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             attn_mask_type,
             attention_mask_func,
-            None,
+            layer_number,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -140,13 +142,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
             device=torch.cuda.current_device(),
         )
 
+        scale = self.norm_factor
+        if self.layer_number is not None and query_layer.dtype == torch.float16:
+            scale *= self.layer_number
+
         # Raw attention scores. [b * np, sq, sk]
         matmul_result = torch.baddbmm(
             matmul_result,
             query_layer.transpose(0, 1),  # [b * np, sq, hn]
             key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             beta=0.0,
-            alpha=(1.0 / self.norm_factor),
+            alpha=(1.0 / scale),
         )
 
         # change view to [b, np, sq, sk]
@@ -301,6 +307,9 @@ class DotProductAttention(torch.nn.Module):
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
+    layer_number: int, default = `None`
+                 layer number of the current `DotProductAttention` when multiple such modules
+                 are concatenated, for instance in consecutive transformer blocks.
 
     Parallelism parameters
     ----------------------
@@ -322,6 +331,7 @@ class DotProductAttention(torch.nn.Module):
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
         tp_group: Optional[dist_group_type] = None,
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -358,7 +368,8 @@ class DotProductAttention(torch.nn.Module):
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
         # Instantiating both types since use of flash-attn
         # might be ruled out due to forward inputs.
-        self.unfused_attention = UnfusedDotProductAttention(norm_factor, **attn_kwargs)
+        self.unfused_attention = UnfusedDotProductAttention(
+            norm_factor, **attn_kwargs, layer_number=layer_number)
 
     def _checkpointed_attention_forward(
         self,
@@ -585,6 +596,7 @@ class MultiHeadAttention(torch.nn.Module):
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
+            layer_number=layer_number,
         )
 
         # Linear

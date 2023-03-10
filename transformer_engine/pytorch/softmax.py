@@ -260,7 +260,9 @@ class FusedScaleMaskSoftmax(nn.Module):
     ) -> torch.Tensor:
         """Fused masked softmax kernel"""
         b, np, sq, sk = inp.size()
-        scale = self.scale if self.scale is not None else 1.0
+        scale = 1.0
+        if self.scale is not None and self.input_in_fp16:
+            scale = self.scale
 
         if self.attn_mask_type == "causal":
             assert sq == sk, "causal mask is only for self attention"
@@ -281,7 +283,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.input_in_float16 and self.softmax_in_fp32:
             inp = inp.float()
 
-        if self.scale is not None:
+        if self.scale is not None and self.input_in_fp16:
             inp = inp * self.scale
 
         if self.attn_mask_type == "causal":
