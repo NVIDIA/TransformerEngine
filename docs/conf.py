@@ -54,7 +54,7 @@ option_nr = 0
 version = version + """<br/>
 Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
     <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>
-    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/archives/index.html">Older releases</option>
+    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html">Older releases</option>
 </select>""".format(option_nr, release_opt)
 
 # -- General configuration ---------------------------------------------------
