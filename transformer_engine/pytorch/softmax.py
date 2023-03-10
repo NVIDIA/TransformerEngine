@@ -205,8 +205,8 @@ class FusedScaleMaskSoftmax(nn.Module):
         self,
         attn_mask_type: str,
         mask_func: Callable,
-        softmax_in_fp32: bool,
         scale: float,
+        softmax_in_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.attn_mask_type = attn_mask_type

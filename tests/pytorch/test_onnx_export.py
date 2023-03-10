@@ -756,16 +756,10 @@ def test_export_layernorm_mlp(
     (torch.float16, True,     "padding"), # calls ScaledMaskedSoftmax
     (torch.float16, False,    "padding"), # calls ScaledSoftmax
 ])
-@pytest.mark.parametrize("attention_softmax_in_fp32",
-    [True, False])
-@pytest.mark.parametrize("apply_query_key_layer_scaling",
-    [True, False])
 def test_export_core_attention(
     precision: torch.dtype,
     use_mask: bool,
     attn_mask_type: str,
-    attention_softmax_in_fp32: bool,
-    apply_query_key_layer_scaling: bool,
 ):
     # Set dimensions (these are arbitrary).
     kv_channels = 64
@@ -784,11 +778,9 @@ def test_export_core_attention(
         input_names.append("attention_mask")
     inp = (query_layer, key_layer, value_layer, attention_mask)
 
-    sm_prec_str = "_sm-fp32" if attention_softmax_in_fp32 else "_sm-fp16"
-    qk_scaling_str = "_qk-scaling" if apply_query_key_layer_scaling else ""
     mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
-    fname = f"te.core_attention{mask_str}{qk_scaling_str}{sm_prec_str}{high_prec_str}.onnx"
+    fname = f"te.core_attention{mask_str}{high_prec_str}.onnx"
 
     if attn_mask_type is None:
         attn_mask_type = 'causal'
@@ -798,8 +790,6 @@ def test_export_core_attention(
         kv_channels=kv_channels,
         attention_dropout=0.5,
         attn_mask_type=attn_mask_type,
-        attention_softmax_in_fp32=attention_softmax_in_fp32,
-        apply_query_key_layer_scaling=apply_query_key_layer_scaling,
     ).to(device='cuda')
     do_export(model,
             inp,
@@ -911,7 +901,6 @@ def test_export_multihead_attention(
 ])
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
-@pytest.mark.parametrize("apply_query_key_layer_scaling", [True, False])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_transformer_layer(
     use_fp8: bool,
@@ -920,7 +909,6 @@ def test_export_transformer_layer(
     output_layernorm: bool,
     precision: torch.dtype,
     fuse_qkv_params: bool,
-    apply_query_key_layer_scaling: bool,
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
@@ -946,10 +934,9 @@ def test_export_transformer_layer(
 
     fp8_str = "_fp8" if use_fp8 else ""
     fuse_qkv_params_str = "_fused-qkv" if fuse_qkv_params else ""
-    qk_scaling_str = "_qk-scaling" if apply_query_key_layer_scaling else ""
     high_prec_str = dtype2str(precision)
     attn_mask_str = get_attn_mask_str(use_mask, attn_mask_type)
-    fname = f"te.transformer_layer{fp8_str}{attn_mask_str}{fuse_qkv_params_str}{qk_scaling_str}{high_prec_str}.onnx"
+    fname = f"te.transformer_layer{fp8_str}{attn_mask_str}{fuse_qkv_params_str}{high_prec_str}.onnx"
 
     model = te.TransformerLayer(
         hidden_size,
@@ -959,7 +946,6 @@ def test_export_transformer_layer(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        apply_query_key_layer_scaling=apply_query_key_layer_scaling,
         zero_centered_gamma=zero_centered_gamma).to(device='cuda')
     do_export(model, inp, fname, use_fp8)
     if not use_fp8:
