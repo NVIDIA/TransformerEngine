@@ -1,0 +1,30 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger the build of TE documentation on GitHub
+name: 'Build documentation'
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build_docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Install dependencies'
+        run: |
+          pip install sphinx sphinx_rtd_theme nbsphinx IPython ipython_genutils ipywidgets
+          pip install breathe sphinx-autoapi
+          sudo apt-get install -y pandoc graphviz doxygen
+          export GIT_SHA=$(git show-ref --hash HEAD)
+          doxygen docs/Doxyfile
+          cd docs
+          make html
+      - name: 'Upload docs'
+        uses: actions/upload-artifact@v3
+        with:
+          name: te_docs
+          path: _build/html
+          retention-days: 7
