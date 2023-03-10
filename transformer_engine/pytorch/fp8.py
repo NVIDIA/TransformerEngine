@@ -157,7 +157,20 @@ def copy_amax_from_global_buffer(
     buffer_position_key = get_buffer_position_key(forward=forward)
     if buffer_position_key not in fp8_meta:
         return
+
     amax_buffer_key = get_amax_buffer_key(fp8_meta, forward=forward)
+    if amax_buffer_key not in _global_fp8_buffer:
+        # Case: FP8 execution with `reduce_amax=True`
+        # Reaching this point means that the key was already deleted as a result
+        # of the same module being called twice in the previous autocast region.
+        raise RuntimeError(
+            "Same module is being invoked more than once inside an `fp8_autocast` region when "
+            "using FP8 with `reduce_amax=True`. This is unsupported behavior because the amax "
+            "reduction is handled during the exit of the `fp8_autocast` context. Calling the same "
+            "module more than once inside an `fp8_autocast` region overrides the amax tensors "
+            "before reduction can occur. For more details and correct usage, please see "
+            "https://github.com/NVIDIA/TransformerEngine/pull/93.")
+
     fp8_meta[fp8_meta_tensor_key].amax_history[0] = _global_fp8_buffer[amax_buffer_key][
         fp8_meta[buffer_position_key]
     ]
