@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE_NAME}
 ARG GIT_SHA=00000000
 ENV GIT_SHA=${GIT_SHA}
 
-RUN pip install sphinx sphinx_rtd_theme nbsphinx IPython ipython_genutils breathe ipywidgets
+RUN pip install sphinx==5.1.1 sphinx_rtd_theme==1.0.0 nbsphinx==0.8.10 IPython ipython_genutils==0.2.0 breathe==4.34.0 ipywidgets==8.0.2 sphinx-autoapi==2.0.1
 RUN apt-get update && apt-get install -y pandoc graphviz doxygen && \
     rm -rf /var/lib/apt/lists/*
 
