@@ -358,12 +358,12 @@ class DenseGeneral(TransformerEngineBase):
     features: Union[Iterable[int], int]
     kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
-    use_bias: bool = False
+    use_bias: bool = True
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     sharding_type: ShardingType = ShardingType.SINGLE
 
     def __post_init__(self):
