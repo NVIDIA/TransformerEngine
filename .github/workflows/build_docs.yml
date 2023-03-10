@@ -19,6 +19,8 @@ jobs:
           pip install breathe sphinx-autoapi
           sudo apt-get install -y pandoc graphviz doxygen
           export GIT_SHA=$(git show-ref --hash HEAD)
+      - name: 'Build docs'
+        run: |
           doxygen docs/Doxyfile
           cd docs
           make html
@@ -26,5 +28,5 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: te_docs
-          path: _build/html
+          path: docs/_build/html
           retention-days: 7
