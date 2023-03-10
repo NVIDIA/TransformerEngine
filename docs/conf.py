@@ -100,3 +100,4 @@ breathe_projects = {"TransformerEngine": os.path.abspath("doxygen/xml/")}
 breathe_default_project = "TransformerEngine"
 
 autoapi_generate_api_docs = False
+autoapi_dirs = ["../transformer_engine"]
