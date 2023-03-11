@@ -19,6 +19,7 @@ def _bgrad_dgelu_fused(grad_output, inp):
 
 
 def bgrad_dgelu_fused(grad_output, inp):
+    """Bgrad-Dgelu fused"""
     return _bgrad_dgelu_fused(grad_output, inp)
 
 
@@ -72,6 +73,7 @@ def bias_dropout_add_fused_train(
     residual: tf.Tensor,
     prob: float,
 ) -> tf.Tensor:
+    """Jit fused bias_dropout_add for training"""
     return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
@@ -92,4 +94,5 @@ def bias_dropout_add_fused_inference(
     residual: tf.Tensor,
     prob: float,
 ) -> tf.Tensor:
+    """Jit fused bias_dropout_add for inference"""
     return bias_dropout_add_fused_inference_(x, bias, residual, prob)

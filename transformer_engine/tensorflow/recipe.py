@@ -1,7 +1,7 @@
 """This module provides predefined FP8 recipes."""
+from typing import Literal, Optional, Union, Callable, NamedTuple
 from enum import Enum
 from pydantic.dataclasses import dataclass
-from typing import Literal, Optional, Union, Callable, NamedTuple
 
 
 class _FormatHelper(NamedTuple):
@@ -63,7 +63,8 @@ class DelayedScaling:
       pass.
     amax_history_len : int, default = 1
       The length of the amax history window used for scaling factor computation.
-    amax_compute_algo : {'max', 'most_recent', Callable}, default = 'most_recent'
+    amax_compute_algo : {'max', 'most_recent', Callable}, default =
+                        'most_recent'
       Algorithm used for choosing the `amax` value for the scaling factor
       computation. There are 2 predefined choices: `max` chooses the largest
       `amax` in the history window, while `most_recent` always chooses the most
@@ -103,20 +104,23 @@ class DelayedScaling:
           exp = get_exponent(FP8_MAX / amax) - margin
           new_scaling_factor = 2.0 ^ exp
 
-    * The scaling factor should always be a power of 2 to not introduce numerical
-      error during the conversion from FP8 to higher precision format.
+    * The scaling factor should always be a power of 2 to not introduce
+      numerical error during the conversion from FP8 to higher precision format.
     """
 
     margin: int = 0
     interval: int = 1
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1
-    amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "most_recent"
-    override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
+    amax_compute_algo: \
+        Union[Literal["max", "most_recent"], Callable] = "most_recent"
+    override_linear_precision: \
+        _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
 
     def __post_init__(self) -> None:
-        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.fp8_format != Format.E5M2, \
+            "Pure E5M2 training is not supported."
         assert self.override_linear_precision in (
             (False, False, False),
             (False, False, True),

@@ -1,13 +1,14 @@
 """Top level Transformer Engine PyTorch modules"""
+from typing import Union, Callable
+
 import transformer_engine_tensorflow as tex
 import tensorflow as tf
 
-from contextlib import contextmanager
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
 from tensorflow.python.framework import load_library
 from tensorflow.python.platform import resource_loader
-from typing import Union, Callable
+from tensorflow.tools.docs import doc_controls
 
 from .constants import TE_DType
 from .fp8 import (
@@ -35,6 +36,7 @@ stream_lib = load_library.load_op_library(
 
 
 def get_stream_id():
+    """Get stream index for GPU tasks."""
     return stream_lib.get_stream().numpy()[0]
 
 
@@ -53,6 +55,7 @@ def get_workspace():
 
 
 def get_autocast_bias(dtype, bias_var, use_bias):
+    """Get autocast bias for fp8 Gemm."""
     if not use_bias:
         return None
     with autocast_variable.enable_auto_cast_variables(dtype):
@@ -62,16 +65,19 @@ def get_autocast_bias(dtype, bias_var, use_bias):
     return bias
 
 
+@doc_controls.do_not_generate_docs
 def get_init_method(user_input, default_init_method):
     if user_input is None:
         return default_init_method
-    elif callable(user_input):
+
+    if callable(user_input):
         return user_input
     else:
         assert isinstance(user_input, str)
         return initializers.get(user_input)
 
 
+@doc_controls.do_not_generate_docs
 def cast_to_fp8_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, stream_id):
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
@@ -83,6 +89,7 @@ def cast_to_fp8_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, stream_id):
     return x_fp8
 
 
+@doc_controls.do_not_generate_docs
 def cast_from_fp8_wrapper(x, fp8_meta, amax_index, fwd, idtype, odtype, sid):
     scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
     scale_inv = fp8_meta[scaling_key]["scale_inv"].value()
@@ -90,7 +97,9 @@ def cast_from_fp8_wrapper(x, fp8_meta, amax_index, fwd, idtype, odtype, sid):
     return x_fp8
 
 
-def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, sid):
+@doc_controls.do_not_generate_docs
+def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype,
+                                     sid):
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -101,6 +110,7 @@ def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype,
     return x_fp8, x_t_fp8
 
 
+@doc_controls.do_not_generate_docs
 def fp8_cast_transpose_bgrad_fused_wrapper(
     x, fp8_meta, amax_index, fwd, output_dtype, sid
 ):
@@ -114,6 +124,7 @@ def fp8_cast_transpose_bgrad_fused_wrapper(
     return grad_bias, grad_fp8, grad_t_fp8
 
 
+@doc_controls.do_not_generate_docs
 def fp8_cast_transpose_bgrad_dgelu_fused_wrapper(
     dy, x, fp8_meta, amax_index, fwd, output_dtype, sid
 ):
@@ -127,15 +138,18 @@ def fp8_cast_transpose_bgrad_dgelu_fused_wrapper(
     return dbias, dgelu_c, dgelu_t
 
 
+@doc_controls.do_not_generate_docs
 def fp8_gelu_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, sid):
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
     scale_inv = fp8_meta[scaling_key]["scale_inv"].value()
-    y_fp8 = tex.te_gelu(x, scale, output_dtype, amax, scale_inv, amax_index, sid)
+    y_fp8 = tex.te_gelu(x, scale, output_dtype, amax, scale_inv, amax_index,
+                        sid)
     return y_fp8
 
 
+@doc_controls.do_not_generate_docs
 def matmul_wrapper(
     inp,
     weight,
@@ -183,6 +197,7 @@ def matmul_wrapper(
     )
 
 
+@doc_controls.do_not_generate_docs
 def fp8_matmul_wrapper(
     inp,
     weight,
@@ -263,6 +278,7 @@ def fp8_matmul_wrapper(
     )
 
 
+@doc_controls.do_not_generate_docs
 def layernorm_fwd_fp8_wrapper(
     x, ln_gamma, ln_beta, epsilon, fp8_meta, amax_index, output_dtype, sid
 ):
@@ -289,6 +305,7 @@ def layernorm_fwd_fp8_wrapper(
 # passing this object to the custom gradient function, we only extract the
 # useful information.
 def get_recipe_attrs(recipe):
+    """Get attributes from the recipe."""
     fp8_dtype_fwd = get_fp8_te_dtype(recipe, fprop_tensor=True)
     fp8_dtype_bwd = get_fp8_te_dtype(recipe, fprop_tensor=False)
     override_linear_precision = recipe.override_linear_precision
@@ -299,6 +316,7 @@ def get_recipe_attrs(recipe):
 # through all the positional and keyword arguments to other subclasses. Make
 # sure this class is inherited first.
 class TransformerEngineBaseModule:
+    """Base TE module."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -314,7 +332,8 @@ class TransformerEngineBaseModule:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
         num_fp8_tensors = (
-            self.fp8_meta["num_gemms"] * 2 if fwd else self.fp8_meta["num_gemms"]
+            self.fp8_meta["num_gemms"] * 2 if fwd else
+            self.fp8_meta["num_gemms"]
         )
 
         self.fp8_meta[fp8_meta_tensor_key] = {}
@@ -342,6 +361,7 @@ class TransformerEngineBaseModule:
         self.set_meta_tensor(False)
 
     def fp8_init(self, num_gemms=1):
+        """Initialize fp8 related metadata and tensors during fprop."""
         if not is_fp8_enabled():
             self.fp8 = False
             return
@@ -356,13 +376,15 @@ class TransformerEngineBaseModule:
         self.fp8_meta["num_gemms"] = num_gemms
 
         # Set FP8_MAX per tensor according to recipe
-        self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-        self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+        fp8_format_val = self.fp8_meta["recipe"].fp8_format.value
+        self.fp8_meta["fp8_max_fwd"] = fp8_format_val.max_fwd
+        self.fp8_meta["fp8_max_bwd"] = fp8_format_val.max_bwd
 
         # Allocate scales and amaxes
         self.init_fp8_meta_tensors()
 
-    def pre_forward(self, inputs, training, num_gemms=1):
+    def pre_forward(self, training, num_gemms=1):
+        """Checks and prep for FWD."""
         self.fp8_init(num_gemms=num_gemms)
 
         if self.fp8:
@@ -382,24 +404,18 @@ class TransformerEngineBaseModule:
 
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
 
-                # Create an empty tensor as a placeholder for the backprop to correctly
-                # know how many tensors to autograd.
+                # Create an empty tensor as a placeholder for the backprop to
+                # correctly know how many tensors to autograd.
                 self.fp8_meta["autocast_id_bwd"] = -1
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
 
-    def pre_backward(self, fp8_meta):
+    def pre_backward(self):
+        """Checks and prep for BWD."""
         # From previous iteration
-        amax_and_scale_update(fp8_meta, False)
-        set_amax_buffer_key_deletion(fp8_meta, forward=False)
-
-        # Get new backward key.
-        # if "autocast_id_bwd" not in fp8_meta:
-        if fp8_meta["autocast_id_bwd"] == -1:
-            fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd"]
-        else:
-            fp8_meta["autocast_id_bwd"] += 1
-
+        amax_and_scale_update(self.fp8_meta, False)
+        set_amax_buffer_key_deletion(self.fp8_meta, forward=False)
+        
 
 class Dense(TransformerEngineBaseModule, layers.Layer):
     """
@@ -424,16 +440,16 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
     Parallelism parameters
     ----------------------
     skip_weight_param_allocation: bool, default = `False`
-      if set to `True`, weight parameter is not allocated and must be passed as a
-      keyword argument `weight` during the forward pass.
+      if set to `True`, weight parameter is not allocated and must be passed as
+      a keyword argument `weight` during the forward pass.
 
     Optimization parameters
     -----------------------
     return_bias : bool, default = `False`
-      when set to `True`, this module will not apply the additive bias itself, but
-      instead return the bias value during the forward pass together with the
-      output of the linear transformation :math:`y = xW`. This is useful when
-      the bias addition can be fused to subsequent operations.
+      when set to `True`, this module will not apply the additive bias itself,
+      but instead return the bias value during the forward pass together with
+      the output of the linear transformation :math:`y = xW`. This is useful
+      when the bias addition can be fused to subsequent operations.
     """
 
     def __init__(
@@ -446,26 +462,28 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
         skip_weight_param_allocation: bool = False,
         **kwargs,
     ):
-        super(Dense, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.units = units
         self.use_bias = use_bias
         self.return_bias = return_bias
         self.kernel_initializer = get_init_method(
-            kernel_initializer, initializers.RandomNormal(mean=0.0, stddev=0.023)
+            kernel_initializer, initializers.RandomNormal(mean=0.0,
+                                                          stddev=0.023)
         )
         self.bias_initializer = get_init_method(
             bias_initializer, initializers.get("zeros")
         )
         self.skip_weight_param_allocation = skip_weight_param_allocation
 
+    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
             raise ValueError(
-                "The last dimension of the inputs to a Dense layer should be defined."
-                f" Found None. Full input shape received: {input_shape}"
+                "The last dimension of the inputs to a Dense layer should be "
+                f"defined. Found None. Full input shape received: {input_shape}"
             )
 
         self.kernel = None
@@ -502,6 +520,7 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
+    @doc_controls.do_not_generate_docs
     def non_fp8_matmul(
         self,
         inp: tf.Tensor,
@@ -518,12 +537,14 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
 
             output_dtype = self._compute_dtype_object
             outputs = matmul_wrapper(
-                x, kernel_val, "fwd", output_dtype, self.stream_id, self.use_bias, bias
+                x, kernel_val, "fwd", output_dtype, self.stream_id,
+                self.use_bias, bias,
             )
 
             def grad_fn(upstream, variables=None):
                 grad_x = matmul_wrapper(
-                    upstream, kernel_val, "bwd_input", output_dtype, self.stream_id
+                    upstream, kernel_val, "bwd_input", output_dtype,
+                    self.stream_id,
                 )
                 grad_weight = matmul_wrapper(
                     x, upstream, "bwd_weight", output_dtype, self.stream_id
@@ -544,6 +565,7 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_matmul_func(inp)
 
+    @doc_controls.do_not_generate_docs
     def fp8_matmul(
         self,
         inp: tf.Tensor,
@@ -551,9 +573,8 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
         bias_var: Union[tf.Variable, None] = None,
     ):
         fp8_meta = self.fp8_meta
-        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = get_recipe_attrs(
-            fp8_meta["recipe"]
-        )
+        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
+            get_recipe_attrs(fp8_meta["recipe"])
 
         @tf.custom_gradient
         def fp8_matmul_func(x):
@@ -607,7 +628,7 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             )
 
             def grad_fn(upstream, variables=None):
-                self.pre_backward(fp8_meta)
+                self.pre_backward()
                 if self.use_bias:
                     (
                         grad_bias,
@@ -691,12 +712,30 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
         bias=None,
         training=None,
     ):
-        # self.pre_forward needs to be called outside the following branch, since
-        # it will set the self.fp8 if the autocast is detected.
-        training = self._get_training_value(training)
-        self.pre_forward(inputs, training)
+        """
+        Apply the linear transformation to the input.
 
-        kernel_var = kernel if self.skip_weight_param_allocation else self.kernel
+        Parameters
+        ----------
+        inp : tf.Tensor
+          Input tensor.
+        weight : tf.Variable, default = None
+          An optional weight tensor for the module. This argument is compulsory
+          if module is initialized with `skip_weight_param_allocation=True`
+        bias : tf.Variable, default = None
+          An optional bias tensor for the module. This argument is compulsory if
+          module is initialized with `skip_weight_param_allocation=True` and one
+          of `use_bias` or `return_bias`
+        training : {True, False, None}, default = None
+          Whether this is in the training context.
+        """
+        # self.pre_forward needs to be called outside the following branch,
+        # since it will set the self.fp8 if the autocast is detected.
+        training = self._get_training_value(training)
+        self.pre_forward(training)
+
+        kernel_var = (kernel if self.skip_weight_param_allocation else
+                      self.kernel)
         bias_var = bias if self.skip_weight_param_allocation else self.bias
         if kernel_var is None:
             raise ValueError("No valid kernel is provided")
@@ -715,15 +754,19 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             return outputs, bias_var
         return outputs
 
+    @doc_controls.do_not_generate_docs
     def get_config(self):
-        config = super(Dense, self).get_config()
+        config = super().get_config()
         config.update(
             {
                 "units": self.units,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "skip_weight_param_allocation": self.skip_weight_param_allocation,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer),
+                "bias_initializer": initializers.serialize(
+                    self.bias_initializer),
+                "skip_weight_param_allocation":
+                    self.skip_weight_param_allocation,
             }
         )
 
@@ -746,22 +789,24 @@ class LayerNorm(layers.Layer):
     """
 
     def __init__(
-        self, epsilon=1e-3, gamma_initializer="ones", beta_initializer="zeros", **kwargs
+        self, epsilon=1e-3, gamma_initializer="ones", beta_initializer="zeros",
+        **kwargs
     ):
-        super(LayerNorm, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.epsilon = epsilon
         self.beta_initializer = initializers.get(beta_initializer)
         self.gamma_initializer = initializers.get(gamma_initializer)
         self.stream = get_stream_id()
 
+    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
             raise ValueError(
-                "The last dimension of the inputs to a Dense layer should be defined."
-                f" Found None. Full input shape received: {input_shape}"
+                "The last dimension of the inputs to a Dense layer should be "
+                f"defined. Found None. Full input shape received: {input_shape}"
             )
 
         self.gamma = self.add_weight(
@@ -781,12 +826,13 @@ class LayerNorm(layers.Layer):
 
     @tf.custom_gradient
     def layernorm(self, inp: tf.Tensor):
+        """LayerNorm custom gradient funcion."""
         gamma = self.gamma.value()
         ln_out, mu, rsigma = tex.layernorm_fwd(
             inp, gamma, self.beta.value(), self.epsilon, self.stream
         )
 
-        def grad_fn(upstream, variables):
+        def grad_fn(upstream, variables=None):
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
                 upstream, inp, mu, rsigma, gamma, self.stream
             )
@@ -798,26 +844,30 @@ class LayerNorm(layers.Layer):
         return ln_out, grad_fn
 
     def call(self, inputs):
+        """LayerNorm FWD"""
         inputmat = tf.reshape(inputs, shape=(-1, inputs.shape[-1]))
         outputmat = self.layernorm(inputmat)
         outputs = tf.reshape(outputmat, shape=inputs.shape)
         return outputs
 
-    def get_config(self, inputs):
-        config = super(LayerNorm, self).get_config()
+    @doc_controls.do_not_generate_docs
+    def get_config(self):
+        config = super().get_config()
         config.update(
             {
                 "epsilon": self.epsilon,
-                "gamma_initializer": initializers.serialize(self.gamma_initializer),
-                "beta_initializer": initializers.serialize(self.beta_initializer),
+                "gamma_initializer": initializers.serialize(
+                    self.gamma_initializer),
+                "beta_initializer": initializers.serialize(
+                    self.beta_initializer),
             }
         )
 
 
 class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
     """
-    Applies layer normalization followed by linear transformation to the incoming
-    data.
+    Applies layer normalization followed by linear transformation to the
+    incoming data.
 
     Parameters
     ----------
@@ -842,24 +892,24 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
       used for initializing GEMM bias in the following way:
       `bias_initializer(weight)`. When set to `None`, defaults to `zeros`.
     return_layernorm_output : bool, default = `False`
-      if set to `True`, output of layernorm is returned from the forward together
-      with the output of the linear transformation.
+      if set to `True`, output of layernorm is returned from the forward
+      together with the output of the linear transformation.
       Example use case: residual connection for transformer module is taken post
       layernorm.
 
     Parallelism parameters
     ----------------------
     skip_weight_param_allocation: bool, default = `False`
-      if set to `True`, weight parameter is not allocated and must be passed as a
-      keyword argument `weight` during the forward pass.
+      if set to `True`, weight parameter is not allocated and must be passed as
+      a keyword argument `weight` during the forward pass.
 
     Optimization parameters
     -----------------------
     return_bias : bool, default = `False`
-      when set to `True`, this module will not apply the additive bias itself, but
-      instead return the bias value during the forward pass together with the
-      output of the linear transformation :math:`y = xW`. This is useful when
-      the bias addition can be fused to subsequent operations.
+      when set to `True`, this module will not apply the additive bias itself,
+      but instead return the bias value during the forward pass together with
+      the output of the linear transformation :math:`y = xW`. This is useful
+      when the bias addition can be fused to subsequent operations.
     """
 
     def __init__(
@@ -876,7 +926,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         skip_weight_param_allocation=False,
         **kwargs,
     ):
-        super(LayerNormDense, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.units = units
         self.epsilon = epsilon
@@ -890,20 +940,22 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         self.use_bias = use_bias
         self.return_bias = return_bias
         self.kernel_initializer = get_init_method(
-            kernel_initializer, initializers.RandomNormal(mean=0.0, stddev=0.023)
+            kernel_initializer, initializers.RandomNormal(mean=0.0,
+                                                          stddev=0.023)
         )
         self.bias_initializer = get_init_method(
             bias_initializer, initializers.get("zeros")
         )
         self.skip_weight_param_allocation = skip_weight_param_allocation
 
+    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
             raise ValueError(
-                "The last dimension of the inputs to a Dense layer should be defined."
-                f" Found None. Full input shape received: {input_shape}"
+                "The last dimension of the inputs to a Dense layer should be "
+                f"defined. Found None. Full input shape received: {input_shape}"
             )
 
         self.gamma = self.add_weight(
@@ -953,6 +1005,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
+    @doc_controls.do_not_generate_docs
     def non_fp8_layernorm_matmul(
         self,
         inp: tf.Tensor,
@@ -989,10 +1042,12 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
 
             def grad_fn(*upstream, variables=None):
                 grad_x = matmul_wrapper(
-                    upstream[0], kernel_val, "bwd_input", output_dtype, self.stream_id
+                    upstream[0], kernel_val, "bwd_input", output_dtype,
+                    self.stream_id,
                 )
                 grad_weight = matmul_wrapper(
-                    ln_out, upstream[0], "bwd_weight", output_dtype, self.stream_id
+                    ln_out, upstream[0], "bwd_weight", output_dtype,
+                    self.stream_id,
                 )
                 if self.use_bias:
                     grad_bias = tf.math.reduce_sum(upstream[0], axis=0)
@@ -1025,6 +1080,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_layernorm_matmul_func(inp)
 
+    @doc_controls.do_not_generate_docs
     def fp8_layernorm_matmul(
         self,
         inp: tf.Tensor,
@@ -1034,9 +1090,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         bias_var: Union[tf.Variable, None] = None,
     ):
         fp8_meta = self.fp8_meta
-        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = get_recipe_attrs(
-            fp8_meta["recipe"]
-        )
+        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
+            get_recipe_attrs(fp8_meta["recipe"])
 
         @tf.custom_gradient
         def fp8_layernorm_matmul_func(x):
@@ -1098,7 +1153,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             )
 
             def grad_fn(*upstream, variables=None):
-                self.pre_backward(self.fp8_meta)
+                self.pre_backward()
                 if self.use_bias:
                     (
                         grad_bias,
@@ -1145,7 +1200,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
                 )
 
                 if not override_linear_precision.wgrad:
-                    ln_out_t = tex.fp8_transpose(ln_out, fp8_dtype_fwd, self.stream_id)
+                    ln_out_t = tex.fp8_transpose(ln_out, fp8_dtype_fwd,
+                                                 self.stream_id)
                     grad_weight = fp8_matmul_wrapper(
                         ln_out_t,
                         grad_t_fp8,
@@ -1210,12 +1266,32 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         bias=None,
         training=None,
     ):
-        # self.pre_forward needs to be called outside the following branch, since
-        # it has side effects to set the self.fp8 if the autocast is detected.
-        training = self._get_training_value(training)
-        self.pre_forward(inputs, training)
+        """
+        Apply layer normalization to the input followed by a linear
+        transformation.
 
-        kernel_var = kernel if self.skip_weight_param_allocation else self.kernel
+        Parameters
+        ----------
+        inputs : tf.Tensor
+          Input tensor.
+        kernel : tf.Variable, default = None
+          An optional weight tensor for the module. This argument is compulsory
+          if module is initialized with `skip_weight_param_allocation=True`
+        bias : tf.Variable, default = None
+          An optional bias tensor for the module. This argument is compulsory if
+          module is initialized with `skip_weight_param_allocation=True` and one
+          of `use_bias` or `return_bias`
+        training : {True, False, None}, default = None
+          Whether this is in the training context.
+        """
+        # self.pre_forward needs to be called outside the following branch,
+        # since it has side effects to set the self.fp8 if the autocast is
+        # detected.
+        training = self._get_training_value(training)
+        self.pre_forward(training)
+
+        kernel_var = (kernel if self.skip_weight_param_allocation else
+                      self.kernel)
         bias_var = bias if self.skip_weight_param_allocation else self.bias
         if kernel_var is None:
             raise ValueError("No valid kernel is provided")
@@ -1247,19 +1323,25 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             return (outputs, ln_outputs)
         return outputs
 
+    @doc_controls.do_not_generate_docs
     def get_config(self):
-        config = super(LayerNormDense, self).get_config()
+        config = super().get_config()
         config.update(
             {
                 "units": self.units,
                 "epsilon": self.epsilon,
-                "gamma_initializer": initializers.serialize(self.gamma_initializer),
-                "beta_initializer": initializers.serialize(self.beta_initializer),
+                "gamma_initializer": initializers.serialize(
+                    self.gamma_initializer),
+                "beta_initializer": initializers.serialize(
+                    self.beta_initializer),
                 "return_layernorm_output": self.return_layernorm_output,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "skip_weight_param_allocation": self.skip_weight_param_allocation,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer),
+                "bias_initializer": initializers.serialize(
+                    self.bias_initializer),
+                "skip_weight_param_allocation":
+                    self.skip_weight_param_allocation,
             }
         )
 
@@ -1296,8 +1378,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
       `ffn_kernel_initializer(weight)`. When set to `None`, defaults to
       `tf.keras.initializers.RandomNormal(mean=0.0, std=0.023)`.
     return_layernorm_output : bool, default = `False`
-      if set to `True`, output of layernorm is returned from the forward together
-      with the output of the linear transformation.
+      if set to `True`, output of layernorm is returned from the forward
+      together with the output of the linear transformation.
       Example use case: residual connection for transformer module is taken post
       layernorm.
     bias_initializer: Callable, default = `None`
@@ -1307,10 +1389,10 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
     Optimization parameters
     -----------------------
     return_bias : bool, default = `False`
-      when set to `True`, this module will not apply the additive bias itself, but
-      instead return the bias value during the forward pass together with the
-      output of the linear transformation :math:`y = xW`. This is useful when
-      the bias addition can be fused to subsequent operations.
+      when set to `True`, this module will not apply the additive bias itself,
+      but instead return the bias value during the forward pass together with
+      the output of the linear transformation :math:`y = xW`. This is useful
+      when the bias addition can be fused to subsequent operations.
     """
 
     def __init__(
@@ -1328,7 +1410,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         bias_initializer: Union[Callable, str, None] = None,
         **kwargs,
     ):
-        super(LayerNormMLP, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.fc1_units = units
         self.fc2_units = ffn_units
@@ -1344,22 +1426,25 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         self.use_bias = use_bias
         self.return_bias = return_bias
         self.kernel1_initializer = get_init_method(
-            kernel_initializer, initializers.RandomNormal(mean=0.0, stddev=0.023)
+            kernel_initializer, initializers.RandomNormal(mean=0.0,
+                                                          stddev=0.023)
         )
         self.kernel2_initializer = get_init_method(
-            ffn_kernel_initializer, initializers.RandomNormal(mean=0.0, stddev=0.023)
+            ffn_kernel_initializer, initializers.RandomNormal(mean=0.0,
+                                                              stddev=0.023)
         )
         self.bias_initializer = get_init_method(
             bias_initializer, initializers.get("zeros")
         )
 
+    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
             raise ValueError(
-                "The last dimension of the inputs to a Dense layer should be defined."
-                f" Found None. Full input shape received: {input_shape}"
+                "The last dimension of the inputs to a Dense layer should be "
+                f"defined. Found None. Full input shape received: {input_shape}"
             )
 
         self.gamma = self.add_weight(
@@ -1423,6 +1508,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
+    @doc_controls.do_not_generate_docs
     def non_fp8_layernorm_mlp(
         self,
         inp: tf.Tensor,
@@ -1454,8 +1540,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
 
             output_dtype = self._compute_dtype_object
             # TODO(kaixih): Ideally, we should set gelu=True to fuse the gelu in
-            # cuBlasLt calls. However, it seems it is slower than the unfused version.
-            # Fix this when cuBlasLt improves the issue.
+            # cuBlasLt calls. However, it seems it is slower than the unfused
+            # version. Fix this when cuBlasLt improves the issue.
             fc1_out = matmul_wrapper(
                 ln_out,
                 fc1_kernel_val,
@@ -1466,7 +1552,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 bias=fc1_bias,
             )
             gelu_out = tex.te_gelu(
-                fc1_out, None, TE_DType[output_dtype], None, None, 0, self.stream_id
+                fc1_out, None, TE_DType[output_dtype], None, None, 0,
+                self.stream_id,
             )
 
             fc2_out = matmul_wrapper(
@@ -1492,7 +1579,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 )
 
                 fc2_wgrad = matmul_wrapper(
-                    gelu_out, upstream[0], "bwd_weight", output_dtype, self.stream_id
+                    gelu_out, upstream[0], "bwd_weight", output_dtype,
+                    self.stream_id,
                 )
                 if self.use_bias:
                     fc2_bias_grad = tf.math.reduce_sum(upstream[0], axis=0)
@@ -1500,7 +1588,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 dgelu = fc2_dgrad
 
                 fc1_dgrad = matmul_wrapper(
-                    dgelu, fc1_kernel_val, "fc1_bwd_input", output_dtype, self.stream_id
+                    dgelu, fc1_kernel_val, "fc1_bwd_input", output_dtype,
+                    self.stream_id,
                 )
                 fc1_wgrad = matmul_wrapper(
                     ln_out, dgelu, "bwd_weight", output_dtype, self.stream_id
@@ -1541,6 +1630,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_layernorm_mlp_func(inp)
 
+    @doc_controls.do_not_generate_docs
     def fp8_layernorm_mlp(
         self,
         inp: tf.Tensor,
@@ -1552,9 +1642,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         fc2_bias_var: Union[tf.Variable, None] = None,
     ):
         fp8_meta = self.fp8_meta
-        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = get_recipe_attrs(
-            fp8_meta["recipe"]
-        )
+        fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
+            get_recipe_attrs(fp8_meta["recipe"])
 
         @tf.custom_gradient
         def fp8_layernorm_mlp_func(x):
@@ -1652,7 +1741,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             )
 
             def grad_fn(*upstream, variables=None):
-                self.pre_backward(self.fp8_meta)
+                self.pre_backward()
                 if self.use_bias:
                     (
                         fc2_bias_grad,
@@ -1745,9 +1834,11 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                         self.stream_id,
                     )
 
-                    # Different from PyTorch implementation, the fc1_out has already added
-                    # bias. So we don't need to pass fc1_bias here.
-                    fc1_bias_grad, dgelu_no_fp8 = bgrad_dgelu_fused(fc2_dgrad, fc1_out)
+                    # Different from PyTorch implementation, the fc1_out has
+                    # already added bias. So we don't need to pass fc1_bias
+                    # here.
+                    fc1_bias_grad, dgelu_no_fp8 = bgrad_dgelu_fused(fc2_dgrad,
+                                                                    fc1_out)
                     dgelu = cast_to_fp8_wrapper(
                         dgelu_no_fp8,
                         fp8_meta,
@@ -1771,7 +1862,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 )
 
                 if not override_linear_precision.wgrad:
-                    ln_out_t = tex.fp8_transpose(ln_out, fp8_dtype_fwd, self.stream_id)
+                    ln_out_t = tex.fp8_transpose(ln_out, fp8_dtype_fwd,
+                                                 self.stream_id)
                     fc1_wgrad = fp8_matmul_wrapper(
                         ln_out_t,
                         dgelu_t,
@@ -1840,10 +1932,22 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         inputs,
         training=None,
     ):
-        # self.pre_forward needs to be called outside the following branch, since
-        # it has side effects to set the self.fp8 if the autocast is detected.
+        """
+        Apply layer normalization to the input followed by a feedforward network
+        (MLP Block).
+
+        Parameters
+        ----------
+        inputs : tf.Tensor
+          Input tensor.
+        training : {True, False, None}, default = None
+          Whether this is in the training context.
+        """
+        # self.pre_forward needs to be called outside the following branch,
+        # since it has side effects to set the self.fp8 if the autocast is
+        # detected.
         training = self._get_training_value(training)
-        self.pre_forward(inputs, training, num_gemms=2)
+        self.pre_forward(training, num_gemms=2)
 
         inputmat = tf.reshape(inputs, shape=(-1, inputs.shape[-1]))
         if self.fp8:
@@ -1884,21 +1988,25 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             return (outputs, ln_outputs)
         return outputs
 
+    @doc_controls.do_not_generate_docs
     def get_config(self):
-        config = super(Dense, self).get_config()
+        config = super().get_config()
         config.update(
             {
                 "hidden_size": self.fc1_units,
                 "ffn_hidden_size": self.fc2_units,
                 "epsilon": self.epsilon,
-                "gamma_init_method": initializers.serialize(self.gamma_initializer),
-                "beta_init_method": initializers.serialize(self.beta_initializer),
+                "gamma_init_method": initializers.serialize(
+                    self.gamma_initializer),
+                "beta_init_method": initializers.serialize(
+                    self.beta_initializer),
                 "return_layernorm_output": self.return_layernorm_output,
                 "use_bias": self.use_bias,
                 "init_method": initializers.serialize(self.kernel1_initializer),
                 "output_layer_init_method": initializers.serialize(
                     self.kernel2_initializer
                 ),
-                "bias_init_method": initializers.serialize(self.bias_initializer),
+                "bias_init_method": initializers.serialize(
+                    self.bias_initializer),
             }
         )

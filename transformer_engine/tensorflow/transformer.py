@@ -1,16 +1,20 @@
+"""Transformer."""
+
+from typing import Callable, Optional, Tuple, Union
+
 import os
 import tensorflow as tf
 
 from contextlib import nullcontext
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
+from tensorflow.tools.docs import doc_controls
 from transformer_engine.tensorflow import (
     LayerNorm,
     LayerNormDense,
     LayerNormMLP,
     Dense,
 )
-from typing import Callable, Optional, Any, Tuple, Union
 
 from .softmax import FusedScaleMaskSoftmax
 from .constants import (
@@ -29,7 +33,7 @@ from .jit import (
 )
 
 
-class CoreAttention(tf.keras.Model):
+class CoreAttention(tf.keras.Model): # pylint: disable=too-few-public-methods
     """Parallel attention w/o QKV and Proj Gemms
     BMM1 -> softmax + dropout -> BMM2
     """
@@ -72,7 +76,8 @@ class CoreAttention(tf.keras.Model):
         self.attention_dropout_ctx = nullcontext
 
         coeff = None
-        self.norm_factor = tf.math.sqrt(float(self.hidden_size_per_attention_head))
+        self.norm_factor = tf.math.sqrt(
+            float(self.hidden_size_per_attention_head))
         if self.apply_query_key_layer_scaling:
             coeff = self.layer_number
             self.norm_factor *= coeff
@@ -126,7 +131,8 @@ class CoreAttention(tf.keras.Model):
         attention_scores = tf.reshape(matmul_result, output_size)
 
         # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
+        attention_probs = self.scale_mask_softmax(attention_scores,
+                                                  attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -143,7 +149,8 @@ class CoreAttention(tf.keras.Model):
         )
 
         # change view [sk, b * np, hn]
-        new_v_shape = (value_layer.shape[0], output_size[0] * output_size[1], -1)
+        new_v_shape = (value_layer.shape[0], output_size[0] * output_size[1],
+                       -1)
         value_layer = tf.reshape(value_layer, new_v_shape)
 
         # change view [b * np, sq, sk]
@@ -278,20 +285,20 @@ class MultiHeadAttention(layers.Layer):
             return_bias=True,
         )
 
+    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
             raise ValueError(
-                "The last dimension of the inputs to a Dense layer should be defined."
-                f" Found None. Full input shape received: {input_shape}"
+                "The last dimension of the inputs to a Dense layer should be "
+                f"defined. Found None. Full input shape received: {input_shape}"
             )
 
         if not self.fuse_qkv_params:
             self.set_qkv_params(
                 last_dim,
                 3 * self.hidden_size,
-                parallel_mode=None,
                 use_bias=True,
             )
 
@@ -299,7 +306,6 @@ class MultiHeadAttention(layers.Layer):
         self,
         in_features,
         out_features,
-        parallel_mode: Optional[bool] = None,
         use_bias: bool = False,
     ) -> None:
         """Initialize separate Parameters for query, key, and value tensors."""
@@ -497,7 +503,7 @@ class MultiHeadAttention(layers.Layer):
         return attention_output, attention_bias
 
 
-class DropPath(tf.keras.Model):
+class DropPath(tf.keras.Model): # pylint: disable=too-few-public-methods
     """Drop paths (Stochastic Depth) per sample (when applied in main path of
     residual blocks).
     """
@@ -513,18 +519,20 @@ class DropPath(tf.keras.Model):
         keep_prob = 1 - self.drop_prob
         # work with diff dim tensors, not just 2D ConvNets
         shape = (hidden_state.shape[0],) + (1,) * (len(hidden_state.shape) - 1)
-        # TODO(kaixih): We set the seed mainly for debugging purpose. Should allow
-        # users to turn it off.
+        # TODO(kaixih): We set the seed mainly for debugging purpose. Should
+        # allow users to turn it off.
         random_tensor = tf.random.stateless_uniform(shape, seed=[1, 0])
-        random_mask = tf.cast(random_tensor <= keep_prob, dtype=hidden_state.dtype)
+        random_mask = tf.cast(random_tensor <= keep_prob,
+                              dtype=hidden_state.dtype)
         output = (hidden_state / keep_prob) * random_mask
         return output
 
 
-class TransformerLayer(tf.keras.Model):
+class TransformerLayer(tf.keras.Model): # pylint: disable=too-few-public-methods
     """
     TransformerLayer is made up of an attention block and a feedforward network
-    (MLP). This standard layer is based on the paper "Attention Is All You Need".
+    (MLP). This standard layer is based on the paper
+    "Attention Is All You Need".
 
     Parameters
     ----------
@@ -562,7 +570,8 @@ class TransformerLayer(tf.keras.Model):
       the final dropout-add. default behavior is to apply layer normalization on
       the input side, before the QKV transformation.
     attention_softmax_in_fp32: bool, default = `False`
-      if set to `True`, softmax is executed in tf.float32 dtype (single precision)
+      if set to `True`, softmax is executed in tf.float32 dtype (single
+      precision)
     layer_type: {'encoder', 'decoder'}, default = `encoder`
       if set to `decoder`, an additional cross-attn block is added after
       self-attn. This can be used for structures like `T5` Transformer in
@@ -579,9 +588,9 @@ class TransformerLayer(tf.keras.Model):
       when > 0.0, applies stochastic depth per sample in the main path of the
       residual block.
     fuse_qkv_params: bool, default = 'False'
-      if set to `True`, `TransformerLayer` module exposes a single fused parameter
-      for query-key-value. This enables optimizations such as QKV fusion without
-      concatentations/splits.
+      if set to `True`, `TransformerLayer` module exposes a single fused
+      parameter for query-key-value. This enables optimizations such as QKV
+      fusion without concatentations/splits.
     """
 
     def __init__(
@@ -607,7 +616,8 @@ class TransformerLayer(tf.keras.Model):
     ) -> None:
         super().__init__()
 
-        bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
+        bias_dropout_fusion = \
+            bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
         self.layer_type = layer_type
@@ -617,7 +627,8 @@ class TransformerLayer(tf.keras.Model):
         assert (
             self_attn_mask_type in AttnMaskTypes
         ), f"self_attn_mask_type {self_attn_mask_type} not supported"
-        assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
+        assert layer_type in LayerTypes, \
+            f"layer_type {layer_type} not supported"
 
         self.kv_channels = (
             kv_channels if kv_channels else (hidden_size // num_attention_heads)
@@ -626,7 +637,8 @@ class TransformerLayer(tf.keras.Model):
         if init_method is None:
             init_method = initializers.RandomNormal(mean=0.0, stddev=0.023)
         if output_layer_init_method is None:
-            output_layer_init_method = initializers.RandomNormal(mean=0.0, stddev=0.023)
+            output_layer_init_method = initializers.RandomNormal(mean=0.0,
+                                                                 stddev=0.023)
 
         attention_args = (
             hidden_size,
@@ -676,7 +688,8 @@ class TransformerLayer(tf.keras.Model):
 
         self.hidden_dropout = hidden_dropout
         self.bias_dropout_fusion = bias_dropout_fusion
-        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
+        self.drop_path = (DropPath(drop_path_rate) if drop_path_rate > 0.0 else
+                          None)
 
         if self.output_layernorm:
             self.layernorm = LayerNorm(
@@ -723,11 +736,12 @@ class TransformerLayer(tf.keras.Model):
                 attention_mask.dtype == tf.bool
             ), "Attention mask must be a boolean tensor"
 
-        # Theoretically, the input dtype can be handled by the autocast during the
-        # layer call. However, we may use the input (hidden_states) in the residual
-        # connection before the layer is called. So, we convert it ahead of time. As
-        # for the other input (encoder_output), we can leave the conversion to the
-        # inter_attention layer, since it won't be used in the residual connection.
+        # Theoretically, the input dtype can be handled by the autocast during
+        # the layer call. However, we may use the input (hidden_states) in the
+        # residual connection before the layer is called. So, we convert it
+        # ahead of time. As for the other input (encoder_output), we can leave
+        # the conversion to the inter_attention layer, since it won't be used in
+        # the residual connection.
         hidden_states = self._maybe_cast_inputs(hidden_states)
 
         # Self attention.
@@ -737,7 +751,8 @@ class TransformerLayer(tf.keras.Model):
             training=training,
         )
 
-        if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
+        if (self.apply_residual_connection_post_layernorm and
+            not self.output_layernorm):
             attention_output, attention_bias, residual = self_attention_outputs
         else:
             attention_output, attention_bias = self_attention_outputs
@@ -754,7 +769,8 @@ class TransformerLayer(tf.keras.Model):
 
         # Bias dropout add.
         # The autocast scope is used to enforce the correct dtype for the bias.
-        with autocast_variable.enable_auto_cast_variables(self._compute_dtype_object):
+        with autocast_variable.enable_auto_cast_variables(
+            self._compute_dtype_object):
             if self.drop_path is None:
                 bda_output = bias_dropout_add_func(
                     attention_output,
@@ -763,8 +779,8 @@ class TransformerLayer(tf.keras.Model):
                     self.hidden_dropout,
                 )
             else:
-                # TODO(kaixih): Use stateless_dropout and specify the seed mainly for
-                # debugging purpose. Should allow random seed.
+                # TODO(kaixih): Use stateless_dropout and specify the seed
+                # mainly for debugging purpose. Should allow random seed.
                 out = (
                     tf.nn.experimental.stateless_dropout(
                         attention_output + attention_bias,
@@ -785,12 +801,14 @@ class TransformerLayer(tf.keras.Model):
                 training=training,
             )
             if self.apply_residual_connection_post_layernorm:
-                attention_output, attention_bias, residual = inter_attention_outputs
+                attention_output, attention_bias, residual = \
+                    inter_attention_outputs
             else:
                 attention_output, attention_bias = inter_attention_outputs
                 residual = bda_output
 
-            # The autocast scope is used to enforce the correct dtype for the bias.
+            # The autocast scope is used to enforce the correct dtype for the
+            # bias.
             with autocast_variable.enable_auto_cast_variables(
                 self._compute_dtype_object
             ):
@@ -814,7 +832,8 @@ class TransformerLayer(tf.keras.Model):
 
         # Bias dropout add.
         # The autocast scope is used to enforce the correct dtype for the bias.
-        with autocast_variable.enable_auto_cast_variables(self._compute_dtype_object):
+        with autocast_variable.enable_auto_cast_variables(
+            self._compute_dtype_object):
             if self.drop_path is None:
                 output = bias_dropout_add_func(
                     mlp_output,
@@ -823,8 +842,8 @@ class TransformerLayer(tf.keras.Model):
                     self.hidden_dropout,
                 )
             else:
-                # TODO(kaixih): Use stateless_dropout and specify the seed mainly for
-                # debugging purpose. Should allow random seed.
+                # TODO(kaixih): Use stateless_dropout and specify the seed
+                # mainly for debugging purpose. Should allow random seed.
                 output = (
                     tf.nn.experimental.stateless_dropout(
                         mlp_output + mlp_bias,

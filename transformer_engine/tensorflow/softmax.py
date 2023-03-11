@@ -1,9 +1,12 @@
-import transformer_engine_tensorflow as tex
+"""Fused scaled masked softmax functions"""
+
+from typing import Callable
+
 import os
+import transformer_engine_tensorflow as tex
 import tensorflow as tf
 
 from .module import get_stream_id
-from typing import Callable
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
@@ -76,17 +79,21 @@ class FusedScaleMaskSoftmax(tf.keras.Model):
         return False
 
     @tf.custom_gradient
-    def scaled_masked_softmax(self, x: tf.Tensor, mask: tf.Tensor, scale: float):
+    def scaled_masked_softmax(self, x: tf.Tensor, mask: tf.Tensor,
+                              scale: float):
+        """Scaled masked softmax."""
         y = tex.scaled_masked_softmax_forward(x, mask, scale, self.stream)
 
         def grad_fn(upstream):
-            dx = tex.scaled_masked_softmax_backward(upstream, y, scale, self.stream)
+            dx = tex.scaled_masked_softmax_backward(upstream, y, scale,
+                                                    self.stream)
             return dx, None, None
 
         return y, grad_fn
 
     @tf.custom_gradient
     def scaled_softmax(self, x: tf.Tensor, scale: float):
+        """Scaled softmax."""
         y = tex.scaled_softmax_forward(x, scale, self.stream)
 
         def grad_fn(upstream):
@@ -97,7 +104,9 @@ class FusedScaleMaskSoftmax(tf.keras.Model):
 
     @tf.custom_gradient
     def scaled_upper_triang_masked_softmax(self, x: tf.Tensor, scale: float):
-        y = tex.scaled_upper_triang_masked_softmax_forward(x, scale, self.stream)
+        """Scaled upper triangular masked softmax."""
+        y = tex.scaled_upper_triang_masked_softmax_forward(x, scale,
+                                                           self.stream)
 
         def grad_fn(upstream):
             dx = tex.scaled_upper_triang_masked_softmax_backward(
@@ -107,9 +116,13 @@ class FusedScaleMaskSoftmax(tf.keras.Model):
 
         return y, grad_fn
 
-    def forward_fused_softmax(self, inp: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
+    def forward_fused_softmax(
+        self,
+        inp: tf.Tensor,
+        mask: tf.Tensor,
+    ) -> tf.Tensor:
         """Fused masked softmax kernel"""
-        b, np, sq, sk = inp.shape[0], inp.shape[1], inp.shape[2], inp.shape[3]
+        sq, sk = inp.shape[2], inp.shape[3]
         scale = self.scale if self.scale is not None else 1.0
 
         if self.attn_mask_type == "causal":

@@ -224,7 +224,7 @@ void* AllocateSpace(const std::vector<size_t>& shape,
     CHECK_EQ(cudaMemsetAsync(data, 0, num_bytes, stream), cudaSuccess);
   }
   return data;
-};
+}
 
 TFE_TensorHandle* CreateTensor(void* data, const std::vector<size_t>& shape,
                                transformer_engine::DType te_dtype) {
@@ -511,6 +511,77 @@ int GetDeviceMultiProcessorCount() {
   return count;
 }
 
+py::object TFE_Py_TeGemm_wrapper(
+    const pybind11::handle& a_mat, const pybind11::handle& a_scale_inv,
+    const transformer_engine::DType atype, const int a_offset,
+    const pybind11::handle& b_mat, const pybind11::handle& b_scale_inv,
+    const transformer_engine::DType btype, const int b_offset,
+    const pybind11::handle& workspace, const bool use_bias,
+    const pybind11::handle& bias, const bool use_gelu,
+    const pybind11::handle& gelu_input, const bool transa,
+    const bool transb, const bool grad, const bool accumulate,
+    const bool use_split_accumulate, const transformer_engine::DType otype,
+    const int64_t stream_id) {
+  using namespace transformer_engine;
+
+  std::vector<size_t> a_shape = GetShape(a_mat);
+  std::vector<size_t> b_shape = GetShape(b_mat);
+  CHECK_EQ(a_shape.size(), 2);
+  CHECK_EQ(b_shape.size(), 2);
+
+  std::vector<size_t> d_shape{transb ? b_shape[1] : b_shape[0],
+                              transa ? a_shape[0] : a_shape[1]};
+
+  auto a_tensor =
+      MakeNVTETensor(GetDevicePtr(a_mat), a_shape, atype, nullptr,
+                     nullptr, GetDevicePtr(a_scale_inv, a_offset));
+
+  auto b_tensor =
+      MakeNVTETensor(GetDevicePtr(b_mat), b_shape, btype, nullptr,
+                     nullptr, GetDevicePtr(b_scale_inv, b_offset));
+
+  NVTEShape empty_shape;
+  TensorWrapper bias_tensor(nullptr, empty_shape, DType::kBFloat16);
+  if (use_bias) {
+    bias_tensor = MakeNVTETensor(GetDevicePtr(bias), GetShape(bias),
+                                 GetDataType(bias));
+  }
+
+  TensorWrapper gelu_input_tensor(nullptr, empty_shape, DType::kBFloat16);
+  void* gelu_input_ptr = nullptr;
+  if (use_gelu && !grad) {
+    gelu_input_ptr = AllocateSpace(d_shape, otype);
+    gelu_input_tensor = MakeNVTETensor(gelu_input_ptr, d_shape, otype);
+  } else if (use_gelu) {
+    gelu_input_tensor =
+        MakeNVTETensor(GetDevicePtr(gelu_input), GetShape(gelu_input),
+                       GetDataType(gelu_input));
+  }
+
+  auto workspace_tensor =
+      MakeNVTETensor(GetDevicePtr(workspace), GetShape(workspace),
+                     GetDataType(workspace));
+
+  void* d_ptr = AllocateSpace(d_shape, otype);
+  auto d_tensor = MakeNVTETensor(d_ptr, d_shape, otype);
+
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_id);
+  nvte_cublas_gemm(a_tensor.data(), b_tensor.data(), d_tensor.data(),
+                   bias_tensor.data(), gelu_input_tensor.data(), transa,
+                   transb, grad, workspace_tensor.data(), accumulate,
+                   use_split_accumulate, stream);
+
+  auto d_eager = CreateTensor(d_ptr, d_shape, otype);
+  if (use_gelu && !grad) {
+    auto gelu_input_eager = CreateTensor(gelu_input_ptr, d_shape, otype);
+    PyObject* result(PyList_New(2));
+    PyList_SET_ITEM(result, 0, EagerTensorFromHandle(d_eager));
+    PyList_SET_ITEM(result, 1, EagerTensorFromHandle(gelu_input_eager));
+    return tensorflow::PyoOrThrow(result);
+  }
+  return tensorflow::PyoOrThrow(EagerTensorFromHandle(d_eager));
+}
+      
 }  // end namespace
 
 PYBIND11_MODULE(transformer_engine_tensorflow, m) {
@@ -672,64 +743,11 @@ PYBIND11_MODULE(transformer_engine_tensorflow, m) {
          const bool transb, const bool grad, const bool accumulate,
          const bool use_split_accumulate, const transformer_engine::DType otype,
          const int64_t stream_id) {
-        using namespace transformer_engine;
-
-        std::vector<size_t> a_shape = GetShape(a_mat);
-        std::vector<size_t> b_shape = GetShape(b_mat);
-        CHECK_EQ(a_shape.size(), 2);
-        CHECK_EQ(b_shape.size(), 2);
-
-        std::vector<size_t> d_shape{transb ? b_shape[1] : b_shape[0],
-                                    transa ? a_shape[0] : a_shape[1]};
-
-        auto a_tensor =
-            MakeNVTETensor(GetDevicePtr(a_mat), a_shape, atype, nullptr,
-                           nullptr, GetDevicePtr(a_scale_inv, a_offset));
-
-        auto b_tensor =
-            MakeNVTETensor(GetDevicePtr(b_mat), b_shape, btype, nullptr,
-                           nullptr, GetDevicePtr(b_scale_inv, b_offset));
-
-        NVTEShape empty_shape;
-        TensorWrapper bias_tensor(nullptr, empty_shape, DType::kBFloat16);
-        if (use_bias) {
-          bias_tensor = MakeNVTETensor(GetDevicePtr(bias), GetShape(bias),
-                                       GetDataType(bias));
-        }
-
-        TensorWrapper gelu_input_tensor(nullptr, empty_shape, DType::kBFloat16);
-        void* gelu_input_ptr = nullptr;
-        if (use_gelu && !grad) {
-          gelu_input_ptr = AllocateSpace(d_shape, otype);
-          gelu_input_tensor = MakeNVTETensor(gelu_input_ptr, d_shape, otype);
-        } else if (use_gelu) {
-          gelu_input_tensor =
-              MakeNVTETensor(GetDevicePtr(gelu_input), GetShape(gelu_input),
-                             GetDataType(gelu_input));
-        }
-
-        auto workspace_tensor =
-            MakeNVTETensor(GetDevicePtr(workspace), GetShape(workspace),
-                           GetDataType(workspace));
-
-        void* d_ptr = AllocateSpace(d_shape, otype);
-        auto d_tensor = MakeNVTETensor(d_ptr, d_shape, otype);
-
-        cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_id);
-        nvte_cublas_gemm(a_tensor.data(), b_tensor.data(), d_tensor.data(),
-                         bias_tensor.data(), gelu_input_tensor.data(), transa,
-                         transb, grad, workspace_tensor.data(), accumulate,
-                         use_split_accumulate, stream);
-
-        auto d_eager = CreateTensor(d_ptr, d_shape, otype);
-        if (use_gelu && !grad) {
-          auto gelu_input_eager = CreateTensor(gelu_input_ptr, d_shape, otype);
-          PyObject* result(PyList_New(2));
-          PyList_SET_ITEM(result, 0, EagerTensorFromHandle(d_eager));
-          PyList_SET_ITEM(result, 1, EagerTensorFromHandle(gelu_input_eager));
-          return tensorflow::PyoOrThrow(result);
-        }
-        return tensorflow::PyoOrThrow(EagerTensorFromHandle(d_eager));
+      return TFE_Py_TeGemm_wrapper(a_mat, a_scale_inv, atype, a_offset, b_mat,
+                                   b_scale_inv, btype, b_offset, workspace,
+                                   use_bias, bias, use_gelu, gelu_input, transa,
+                                   transb, grad, accumulate,
+                                   use_split_accumulate, otype, stream_id);
       });
   m.def("layernorm_fwd",
         [](const pybind11::handle& input, const pybind11::handle& gamma,
@@ -964,7 +982,7 @@ PYBIND11_MODULE(transformer_engine_tensorflow, m) {
 
         const size_t attn_batches = shape_in[0];
         const size_t seq_len = shape_in[1];
-        CHECK(seq_len <= 2048);
+        CHECK_LE(seq_len, 2048);
 
         auto input_cu = MakeNVTETensor(GetDevicePtr(input), shape_in, itype);
         void* softmax_ptr = AllocateSpace(shape_in, itype);
@@ -1027,10 +1045,10 @@ PYBIND11_MODULE(transformer_engine_tensorflow, m) {
     const size_t attn_heads = shape_x[1];
     const size_t query_seq_len = shape_x[2];
     const size_t key_seq_len = shape_x[3];
-    CHECK(key_seq_len <= 4096);
-    CHECK(query_seq_len > 1);
+    CHECK_LE(key_seq_len, 4096);
+    CHECK_GT(query_seq_len, 1);
     CHECK(pad_batches == 1 || pad_batches == batches);
-    CHECK(shape_m[1] == 1);
+    CHECK_EQ(shape_m[1], 1);
     CHECK(shape_m[2] == query_seq_len);
     CHECK(shape_m[3] == key_seq_len);
 
@@ -1092,8 +1110,8 @@ PYBIND11_MODULE(transformer_engine_tensorflow, m) {
     const size_t query_seq_len = shape_x[2];
     const size_t key_seq_len = shape_x[3];
 
-    CHECK(key_seq_len <= 4096);
-    CHECK(query_seq_len > 1);
+    CHECK_LE(key_seq_len, 4096);
+    CHECK_GT(query_seq_len, 1);
 
     void* softmax_ptr = AllocateSpace(shape_x, xtype);
     auto softmax_results_cu = MakeNVTETensor(softmax_ptr, shape_x, xtype);
