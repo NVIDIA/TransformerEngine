@@ -266,7 +266,7 @@ def _fp8_mlp_fwd(
 
     gemm1_input_idx, gemm1_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
 
-    input_amax = amax[gemm1_input_idx]
+    input_amax = amax[gemm1_input_idx, 0:1]
     input_scale = scale[gemm1_input_idx]
     input_scale_inv = scale_inv[gemm1_input_idx]
     if layernorm_type == 'layernorm':
@@ -286,7 +286,7 @@ def _fp8_mlp_fwd(
                                                       epsilon=epsilon)
         mu = None
 
-    kernel_1_amax = amax[gemm1_kernel_idx]
+    kernel_1_amax = amax[gemm1_kernel_idx, 0:1]
     kernel_1_scale = scale[gemm1_kernel_idx]
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
     kernel_1_cast, kernel_1_cast_trans, kernel_1_amax = cast_transpose(
@@ -297,13 +297,13 @@ def _fp8_mlp_fwd(
 
     gemm2_input_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
 
-    kernel_2_amax = amax[gemm2_kernel_idx]
+    kernel_2_amax = amax[gemm2_kernel_idx, 0:1]
     kernel_2_scale = scale[gemm2_kernel_idx]
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
     kernel_2_cast, kernel_2_cast_trans, kernel_2_amax = cast_transpose(
         kernel_2_, kernel_2_amax, kernel_2_scale, kernel_2_scale_inv, fwd_dtype)
 
-    dense_1_out_amax = amax[gemm2_input_idx]
+    dense_1_out_amax = amax[gemm2_input_idx, 0:1]
     dense_1_out_scale = scale[gemm2_input_idx]
     dense_1_out_scale_inv = scale_inv[gemm2_input_idx]
     gated_gelu_output_cast, gated_gelu_amax = gated_gelu_fp8(dense_1_output, dense_1_out_amax,
@@ -354,7 +354,7 @@ def _fp8_mlp_bwd(
 
     gemm2_input_idx, gemm2_kernel_idx, gemm2_grad_idx = FP8Helper.get_fp8_meta_indices(1)
 
-    grad_amax = amax[gemm2_grad_idx]
+    grad_amax = amax[gemm2_grad_idx, 0:1]
     grad_scale = scale[gemm2_grad_idx]
     grad_scale_inv = scale_inv[gemm2_grad_idx]
 
@@ -372,7 +372,7 @@ def _fp8_mlp_bwd(
 
     gemm1_input_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
-    dgrad_2_amax = amax[gemm1_grad_idx]
+    dgrad_2_amax = amax[gemm1_grad_idx, 0:1]
     dgrad_2_scale = scale[gemm1_grad_idx]
     dgrad_2_scale_inv = scale_inv[gemm1_grad_idx]
     dgelu, dgelu_trans, dgelu_amax = dgated_gelu_cast_transpose(dgrad_2, dense_1_output,

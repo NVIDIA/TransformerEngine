@@ -138,13 +138,13 @@ def _fp8_dot_fwd(
 
     gemm_input_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
 
-    input_amax = amax[gemm_input_idx]
+    input_amax = amax[gemm_input_idx, 0:1]
     input_scale = scale[gemm_input_idx]
     input_scale_inv = scale_inv[gemm_input_idx]
     input_cast, input_cast_trans, input_amax = cast_transpose(inputs_, input_amax, input_scale,
                                                               input_scale_inv, fwd_dtype)
 
-    kernel_amax = amax[gemm_kernel_idx]
+    kernel_amax = amax[gemm_kernel_idx, 0:1]
     kernel_scale = scale[gemm_kernel_idx]
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     kernel_cast, kernel_cast_trans, kernel_amax = cast_transpose(kernel_, kernel_amax, kernel_scale,
@@ -182,7 +182,7 @@ def _fp8_dot_bwd(
 
     gemm_input_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
-    grad_amax = amax[gemm_grad_idx]
+    grad_amax = amax[gemm_grad_idx, 0:1]
     grad_scale = scale[gemm_grad_idx]
     grad_scale_inv = scale_inv[gemm_grad_idx]
     g = jnp.reshape(g, (input_cast_trans.shape[1], -1))
