@@ -6,6 +6,7 @@
 import os
 import re
 import math
+import warnings
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -13,7 +14,7 @@ import torch
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
-from transformer_engine.pytorch import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -42,6 +43,7 @@ from transformer_engine.pytorch.distributed import (
 )
 
 _flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
+warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
 __all__ = ["DotProductAttention", "TransformerLayer"]
@@ -82,10 +84,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = False,
-        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -95,12 +95,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
+        self.layer_number = layer_number
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             attn_mask_type,
             attention_mask_func,
-            attention_softmax_in_fp32,
-            layer_number if apply_query_key_layer_scaling else None,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -117,6 +116,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """core attention fprop"""
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
+        apply_qk_layer_scaling = self.layer_number is not None and key_layer.dtype == torch.float16
 
         # [b, np, sq, sk]
         output_size = (
@@ -142,20 +142,25 @@ class UnfusedDotProductAttention(torch.nn.Module):
             device=torch.cuda.current_device(),
         )
 
+        scale = self.norm_factor
+        if apply_qk_layer_scaling:
+            scale *= self.layer_number
+
         # Raw attention scores. [b * np, sq, sk]
         matmul_result = torch.baddbmm(
             matmul_result,
             query_layer.transpose(0, 1),  # [b * np, sq, hn]
             key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             beta=0.0,
-            alpha=(1.0 / self.norm_factor),
+            alpha=(1.0 / scale),
         )
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
 
         # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
+        softmax_scale = self.layer_number if apply_qk_layer_scaling else None
+        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask, softmax_scale)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -205,9 +210,6 @@ class FlashAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = False,
-        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
     ) -> None:
         super().__init__()
@@ -226,9 +228,6 @@ class FlashAttention(torch.nn.Module):
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
-        self.layer_number = layer_number
-        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
-        self.attention_softmax_in_fp32 = attention_softmax_in_fp32
 
     def forward(
         self,
@@ -309,6 +308,9 @@ class DotProductAttention(torch.nn.Module):
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
                    type of attention mask passed into softmax operation.
+    layer_number: int, default = `None`
+                 layer number of the current `DotProductAttention` when multiple such modules
+                 are concatenated, for instance in consecutive transformer blocks.
 
     Parallelism parameters
     ----------------------
@@ -325,24 +327,14 @@ class DotProductAttention(torch.nn.Module):
         num_attention_heads: int,
         kv_channels: int,
         attention_dropout: float = 0.0,
-        layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = False,
-        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
         tp_group: Optional[dist_group_type] = None,
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
-
-        if layer_number is None:
-            apply_query_key_layer_scaling = False
-        else:
-            layer_number = max(1, layer_number)
-
-        if apply_query_key_layer_scaling:
-            attention_softmax_in_fp32 = True
 
         tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
@@ -360,9 +352,6 @@ class DotProductAttention(torch.nn.Module):
             attention_dropout_ctx = get_rng_state_tracker().fork
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        norm_factor_flash_attn = norm_factor
-        if apply_query_key_layer_scaling:
-            norm_factor *= layer_number
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -373,17 +362,15 @@ class DotProductAttention(torch.nn.Module):
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
-            "layer_number": layer_number,
-            "apply_query_key_layer_scaling": apply_query_key_layer_scaling,
-            "attention_softmax_in_fp32": attention_softmax_in_fp32,
             "attn_mask_type": attn_mask_type,
         }
 
         if self.use_flash_attention:
-            self.flash_attention = FlashAttention(norm_factor_flash_attn, **attn_kwargs)
+            self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
         # Instantiating both types since use of flash-attn
         # might be ruled out due to forward inputs.
-        self.unfused_attention = UnfusedDotProductAttention(norm_factor, **attn_kwargs)
+        self.unfused_attention = UnfusedDotProductAttention(
+            norm_factor, **attn_kwargs, layer_number=layer_number)
 
     def _checkpointed_attention_forward(
         self,
@@ -487,8 +474,6 @@ class MultiHeadAttention(torch.nn.Module):
         init_method: Callable,
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
-        apply_query_key_layer_scaling: bool = False,
-        attention_softmax_in_fp32: bool = True,
         attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
@@ -607,14 +592,12 @@ class MultiHeadAttention(torch.nn.Module):
             num_attention_heads,
             kv_channels,
             attention_dropout,
-            layer_number=layer_number,
-            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
-            attention_softmax_in_fp32=attention_softmax_in_fp32,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
+            layer_number=layer_number,
         )
 
         # Linear
@@ -835,6 +818,11 @@ class TransformerLayer(torch.nn.Module):
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
 
+    .. warning::
+
+        Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
+        are deprecated and will be fully removed in future releases.
+
     .. note::
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
@@ -870,16 +858,10 @@ class TransformerLayer(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    apply_query_key_layer_scaling: bool, default = `False`
-                                  apply query-key layer scaling during BMM1
-                                  by a factor of `layer_number`
     output_layernorm: bool, default = `False`
                      if set to `True`, layer normalization is applied on the output side,
                      after the final dropout-add. default behavior is to apply layer
                      normalization on the input side, before the QKV transformation.
-    attention_softmax_in_fp32: bool, default = `True`
-                              if set to `False`, softmax is executed in
-                              the dtype of activation tensors.
     layer_type: {'encoder', 'decoder'}, default = `encoder`
                if set to `decoder`, an additional cross-attn block is added after self-attn.
                This can be used for structures like `T5` Transformer in conjunction with the
@@ -964,8 +946,8 @@ class TransformerLayer(torch.nn.Module):
         params_dtype: torch.dtype = torch.float32,
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        apply_query_key_layer_scaling: bool = False,
-        attention_softmax_in_fp32: bool = True,
+        apply_query_key_layer_scaling: bool = False, # pylint: disable=unused-argument
+        attention_softmax_in_fp32: bool = True, # pylint: disable=unused-argument
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         sequence_parallel: bool = False,
@@ -979,6 +961,12 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
     ) -> None:
         super().__init__()
+
+        warnings.warn(
+            "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
+            "are deprecated and will be fully removed in future releases.",
+            category=DeprecationWarning,
+        )
 
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
@@ -1026,8 +1014,6 @@ class TransformerLayer(torch.nn.Module):
         )
         common_attention_kwargs = {
             "layer_number": layer_number,
-            "apply_query_key_layer_scaling": apply_query_key_layer_scaling,
-            "attention_softmax_in_fp32": attention_softmax_in_fp32,
             "tp_group": tp_group,
             "tp_size": tp_size,
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
