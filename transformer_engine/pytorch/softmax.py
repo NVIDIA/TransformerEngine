@@ -4,7 +4,7 @@
 
 """Fused scaled masked softmax functions"""
 import os
-from typing import Callable, Tuple, Union
+from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
 import torch._C._onnx as _C_onnx
@@ -198,15 +198,13 @@ class FusedScaleMaskSoftmax(nn.Module):
         attn_mask_type: attention mask type (pad or causal)
         mask_func: mask function to be applied.
         softmax_in_fp32: if true, softmax in performed at fp32 precision.
-        scale: scaling factor used in input tensor scaling.
     """
 
     def __init__(
         self,
         attn_mask_type: str,
         mask_func: Callable,
-        softmax_in_fp32: bool,
-        scale: float,
+        softmax_in_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.attn_mask_type = attn_mask_type
@@ -215,13 +213,13 @@ class FusedScaleMaskSoftmax(nn.Module):
         )
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
-        self.scale = scale
 
-        assert (
-            self.scale is None or softmax_in_fp32
-        ), "softmax should be in fp32 when scaled"
-
-    def forward(self, inp: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        inp: torch.Tensor,
+        mask: torch.Tensor,
+        scale: Optional[float] = None,
+    ) -> torch.Tensor:
         """FusedScaleMaskSoftmax fprop"""
         # [b, np, sq, sk]
         assert inp.dim() == 4
@@ -229,9 +227,13 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.input_in_bf16 = inp.dtype == torch.bfloat16
         self.input_in_float16 = self.input_in_fp16 or self.input_in_bf16
 
+        assert (
+            scale is None or self.softmax_in_fp32
+        ), "softmax should be in fp32 when scaled"
+
         if self.is_kernel_available(*inp.size()):
-            return self.forward_fused_softmax(inp, mask)
-        return self.forward_torch_softmax(inp, mask)
+            return self.forward_fused_softmax(inp, mask, scale)
+        return self.forward_torch_softmax(inp, mask, scale)
 
     def is_kernel_available(self, b: int, np: int, sq: int, sk: int) -> bool:
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
@@ -256,11 +258,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         return False
 
     def forward_fused_softmax(
-        self, inp: torch.Tensor, mask: torch.Tensor
+        self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
     ) -> torch.Tensor:
         """Fused masked softmax kernel"""
         b, np, sq, sk = inp.size()
-        scale = self.scale if self.scale is not None else 1.0
+        scale = 1.0 if scale is None else scale
 
         if self.attn_mask_type == "causal":
             assert sq == sk, "causal mask is only for self attention"
@@ -275,14 +277,14 @@ class FusedScaleMaskSoftmax(nn.Module):
         return ScaledSoftmax.apply(inp, scale)
 
     def forward_torch_softmax(
-        self, inp: torch.Tensor, mask: torch.Tensor
+        self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
     ) -> torch.Tensor:
         """Framework softmax"""
         if self.input_in_float16 and self.softmax_in_fp32:
             inp = inp.float()
 
-        if self.scale is not None:
-            inp = inp * self.scale
+        if scale is not None:
+            inp = inp * scale
 
         if self.attn_mask_type == "causal":
             mask = _get_default_causal_mask(inp.size()[2])
