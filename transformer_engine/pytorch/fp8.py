@@ -95,6 +95,12 @@ def add_amax_to_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) ->
     if buffer_position_key not in fp8_meta:
         fp8_meta[buffer_position_key] = len(_global_fp8_buffer[buffer_key]) - 1
 
+    # Catch incorrect fp8_autocast usage.
+    assert fp8_meta[buffer_position_key] == len(_global_fp8_buffer[buffer_key]) - 1, \
+        "Same module is being invoked more than once inside an `fp8_autocast` region when using " \
+        "FP8 with amax reduction. This behavior is currently unsupported. For more details and " \
+        "correct usage, please see https://github.com/NVIDIA/TransformerEngine/pull/93."
+
 
 def copy_forward_fp8_meta_tensors_for_recompute(fp8_meta: Dict[str, Any]) -> None:
     """Copy the scaling factors and amaxes for recompute forward phase
@@ -159,17 +165,7 @@ def copy_amax_from_global_buffer(
         return
 
     amax_buffer_key = get_amax_buffer_key(fp8_meta, forward=forward)
-    if amax_buffer_key not in _global_fp8_buffer:
-        # Case: FP8 execution with `reduce_amax=True`
-        # Reaching this point means that the key was already deleted as a result
-        # of the same module being called twice in the previous autocast region.
-        raise RuntimeError(
-            "Same module is being invoked more than once inside an `fp8_autocast` region when "
-            "using FP8 with `reduce_amax=True`. This is unsupported behavior because the amax "
-            "reduction is handled during the exit of the `fp8_autocast` context. Calling the same "
-            "module more than once inside an `fp8_autocast` region overrides the amax tensors "
-            "before reduction can occur. For more details and correct usage, please see "
-            "https://github.com/NVIDIA/TransformerEngine/pull/93.")
+    assert amax_buffer_key in _global_fp8_buffer, "TE internal error."
 
     fp8_meta[fp8_meta_tensor_key].amax_history[0] = _global_fp8_buffer[amax_buffer_key][
         fp8_meta[buffer_position_key]
@@ -216,6 +212,14 @@ def fp8_autocast(
         Support for FP8 in the Linear layer of Transformer Engine is currently limited to tensors
         with shapes where both dimensions are divisible by 16. In terms of the input to the full
         Transformer network, this typically requires padding sequence length to be multiple of 16.
+
+    .. note::
+
+        When :attr:`fp8_recipe.reduce_amax==True`, any module must not be invoked more than once
+        inside a single `fp8_autocast` region. This is unsupported behavior because the amax
+        reduction is handled during the exit of the `fp8_autocast` context. Calling the same
+        module more than once inside an `fp8_autocast` region overrides the amax tensors
+        before reduction can occur.
 
     Parameters
     ----------
