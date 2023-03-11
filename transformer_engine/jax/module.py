@@ -101,15 +101,15 @@ class Softmax(nn.Module):
     The input's shape should be [batch, heads, q_seqlen, k_seqlen].
 
     .. code-block:: python
-        shifted_input = input + bias
-        masked_scaled = (1 - mask)*(shifted_input * scale_factor)
+        shifted_input = input * scale_factor + bias
+        masked_scaled = (1 - mask) * shifted_input
         softmax_mask = mask * -1e-10
         output = softmax(masked_scaled + softmax_mask)
 
     Parameters
     ----------
     scale_factor : float, default = 1.0
-        Scalar for the input to softmax.
+        Scalar for the input to softmax before bias shifting.
     softmax_type : SoftmaxType, default = SoftmaxType.SCALED
         Indicate the type of softmax.
 
@@ -131,19 +131,27 @@ class Softmax(nn.Module):
         k_seqlen = inputs.shape[3]
         dtype = inputs.dtype
         logits = inputs
+        scale_factor = self.scale_factor
+
+        with_bias = bias is not None
+
+        if with_bias and scale_factor != 1.0:
+            # if with_bias, the scale can't be fused into softmax
+            logits = logits * scale_factor
+            # reset it to 1 because scale has been applied
+            scale_factor = 1.0
 
         if (self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
                 self.softmax_type, batch, heads, q_seqlen, k_seqlen, inputs.dtype)):
 
-            if bias is not None:
+            if with_bias:
                 logits = logits + bias.astype(dtype)
 
             mask_ = mask
             if self.softmax_type is not SoftmaxType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type,
-                              self.sharding_type)
+            outputs = softmax(logits, mask_, scale_factor, self.softmax_type, self.sharding_type)
         else:
             attention_bias = None
             if mask is not None:
@@ -151,7 +159,7 @@ class Softmax(nn.Module):
                                             jnp.full(mask.shape, -1e10).astype(dtype),
                                             jnp.full(mask.shape, 0.).astype(dtype))
 
-            if bias is not None:
+            if with_bias:
                 attention_bias = _combine_biases(attention_bias, bias)
 
             if attention_bias is not None:
@@ -161,10 +169,10 @@ class Softmax(nn.Module):
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
             if is_softmax_kernel_available(SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen,
                                            dtype):
-                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED,
+                outputs = softmax(logits, None, scale_factor, SoftmaxType.SCALED,
                                   self.sharding_type)
             else:
-                outputs = jax_nn.softmax(logits * self.scale_factor)
+                outputs = jax_nn.softmax(logits * scale_factor)
 
         return outputs
 
@@ -485,9 +493,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
-    depth_scaling: float, default = None
-        The factor to scale the output from `DenseGeneral`. It should be a float
-        value or None. When None is set, then no scaling is applied.
     sharding_type : ShardingType, default = ShardingType.SINGLE
         Indicate the sharding pattern.
     """
@@ -509,7 +514,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
-    depth_scaling: float = None
     sharding_type: ShardingType = ShardingType.SINGLE
 
     def __post_init__(self):
@@ -616,9 +620,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         if bias is not None:
             z += jnp.reshape(bias, (1,) * (z.ndim - 1) + (-1,))
-
-        if self.depth_scaling is not None:
-            z = z / self.depth_scaling
 
         return z, ln_output    # dense_output, layer_norm_output
 
