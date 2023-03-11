@@ -65,7 +65,8 @@ extensions = [
         'sphinx.ext.mathjax',
         'sphinx.ext.napoleon',
         'nbsphinx',
-        'breathe']
+        'breathe',
+        'autoapi.extension']
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
@@ -97,3 +98,6 @@ napoleon_custom_sections = [('Parallelism parameters', 'params_style'),
 
 breathe_projects = {"TransformerEngine": os.path.abspath("doxygen/xml/")}
 breathe_default_project = "TransformerEngine"
+
+autoapi_generate_api_docs = False
+autoapi_dirs = ["../transformer_engine"]
