@@ -6,6 +6,7 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
 from enum import Enum
+from math import sqrt
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 
 import jax.numpy as jnp
@@ -121,6 +122,7 @@ def combine_biases(*masks: Optional[Array]):
 def core_attention(query: Array,
                    key: Array,
                    value: Array,
+                   scale_factor: float,
                    transpose_batch_sequence: bool,
                    softmax_type: SoftmaxType = SoftmaxType.SCALED,
                    softmax_sharding_type: ShardingType = ShardingType.SINGLE,
@@ -151,6 +153,7 @@ def core_attention(query: Array,
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
     attn_weights = Softmax(softmax_type=softmax_type,
+                           scale_factor=scale_factor,
                            sharding_type=softmax_sharding_type)(attn_weights, mask, bias)
 
     if not deterministic and dropout_rate > 0.:
@@ -295,9 +298,8 @@ class MultiHeadAttention(nn.Module):
             Output tensors.
         """
 
-        depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-
         def query_init(*args):
+            depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
             return self.kernel_init(*args) / (depth_scaling if self.scaled_query_init else 1.0)
 
         def qkv_init(key, shape, dtype):
@@ -355,8 +357,6 @@ class MultiHeadAttention(nn.Module):
                 query = jnp.reshape(query, (*query.shape[:-2], -1))
                 key = jnp.reshape(key, (*key.shape[:-2], -1))
                 value = jnp.reshape(value, (*value.shape[:-2], -1))
-                if self.scale_attn_logits:
-                    query = query / depth_scaling
             else:
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
@@ -367,7 +367,6 @@ class MultiHeadAttention(nn.Module):
                     sharding_type=first_sharding_type,
                     transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.apply_residual_connection_post_layernorm,
-                    depth_scaling=depth_scaling if self.scale_attn_logits else None,
                     scale_axes=('embed',),
                     kernel_axes=('embed', 'joined_kv'),
                     use_bias=self.use_bias,
@@ -410,7 +409,6 @@ class MultiHeadAttention(nn.Module):
                 sharding_type=first_sharding_type,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
-                depth_scaling=depth_scaling if self.scale_attn_logits else None,
                 scale_axes=('embed',),
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
@@ -499,6 +497,7 @@ class MultiHeadAttention(nn.Module):
         x = core_attention(query,
                            key,
                            value,
+                           scale_factor=1.0/sqrt(self.head_dim) if self.scale_attn_logits else 1.0,
                            transpose_batch_sequence=self.transpose_batch_sequence,
                            softmax_type=softmax_type,
                            softmax_sharding_type=first_sharding_type,

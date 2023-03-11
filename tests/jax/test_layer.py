@@ -67,6 +67,7 @@ _KEY_OF_MLP_ACTIVATIONS = "mlp_activations"
 _KEY_OF_FUSE_MLP_WI = "fuse_mlp_wi"
 _KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
 _KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
+_KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
 
 BASE_ATTRS = {_KEY_OF_TRANSPOSE_BS: True}
 
@@ -97,6 +98,7 @@ ATTRS = [{
     _KEY_OF_FUSE_MLP_WI: True
 }, {
     _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_SCALE_ATTN_LOGITS: True,
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
