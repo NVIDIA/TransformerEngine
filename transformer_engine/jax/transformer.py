@@ -624,7 +624,16 @@ class RelativePositionBiases(nn.Module):
 
 
 class TransformerLayerType(Enum):
-    """TransformerLayerType."""
+    r"""
+    TransformerLayerType is an Enum class to specify a type of TransformerLayer
+
+    Values
+    ----------
+    ENCODER:
+        Encoder type of TransformerLayer.
+    DECODER:
+        Decoder type of TransformerLayer.
+    """
     ENCODER = "encoder"
     DECODER = "decoder"
 

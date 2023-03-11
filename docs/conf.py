@@ -64,7 +64,6 @@ extensions = [
         'sphinx.ext.autodoc',
         'sphinx.ext.mathjax',
         'sphinx.ext.napoleon',
-        'enum_tools.autoenum',
         'nbsphinx',
         'breathe',
         'autoapi.extension']

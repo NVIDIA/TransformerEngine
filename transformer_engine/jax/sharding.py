@@ -71,12 +71,19 @@ def global_shard_resource() -> ShardingResource:
 
 
 class MajorShardingType(Enum):
-    """
+    r"""
     The major sharding type to indicate sharding pattern.
-    `SINGLE` means single process training.
-    `DP` means data parallel traiing.
-    `TP` means tensor parallel traiing.
-    `DPTP` means data and tensor parallel traiing.
+
+    Values
+    ----------
+    SINGLE:
+        Single process training.
+    DP:
+        Data parallel traiing.
+    TP:
+        Standard tensor parallel traiing.
+    DPTP:
+        Data and Standard tensor parallel traiing.
     """
     SINGLE = 0
     DP = 1
@@ -87,12 +94,21 @@ class MajorShardingType(Enum):
 class ShardingType(Enum):
     """
     The sharding type to indicate sharding pattern.
-    `SINGLE` means no sharding.
-    `DP` means sharding along data parallelism.
-    `TP_COL` means sharding along column-split tensor parallelism.
-    `TP_ROW` means sharding along row-split tensor parallelism.
-    `DP_TP_COL` means sharding along data and column-split tensor parallelism.
-    `DP_TP_ROW` means sharding along data and row-split tensor parallelism.
+
+    Values
+    ----------
+    SINGLE:
+        No sharding.
+    DP:
+        Sharding along data parallelism.
+    TP_COL:
+        Sharding along column-split tensor parallelism.
+    TP_ROW:
+        Sharding along row-split tensor parallelism.
+    DP_TP_COL:
+        Sharding along data and column-split tensor parallelism.
+    DP_TP_ROW:
+        Sharding along data and row-split tensor parallelism.
     """
     SINGLE = (MajorShardingType.SINGLE, "single")
     DP = (MajorShardingType.DP, "dp")
