@@ -1,9 +1,9 @@
 """FP8 utilies for TransformerEngine"""
-import transformer_engine_tensorflow as tex
-import tensorflow as tf
-
 from contextlib import contextmanager
 from typing import Optional, Dict, Any
+
+import tensorflow as tf
+import transformer_engine_tensorflow as tex
 
 from .recipe import DelayedScaling, Format
 

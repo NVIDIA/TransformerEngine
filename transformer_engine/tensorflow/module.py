@@ -1,14 +1,12 @@
 """Top level Transformer Engine PyTorch modules"""
-from typing import Union, Callable
-
-import transformer_engine_tensorflow as tex
-import tensorflow as tf
-
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
 from tensorflow.python.framework import load_library
 from tensorflow.python.platform import resource_loader
-from tensorflow.tools.docs import doc_controls
+from typing import Union, Callable
+
+import tensorflow as tf
+import transformer_engine_tensorflow as tex
 
 from .constants import TE_DType
 from .fp8 import (
@@ -34,11 +32,9 @@ stream_lib = load_library.load_op_library(
     )
 )
 
-
 def get_stream_id():
     """Get stream index for GPU tasks."""
     return stream_lib.get_stream().numpy()[0]
-
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -55,7 +51,7 @@ def get_workspace():
 
 
 def get_autocast_bias(dtype, bias_var, use_bias):
-    """Get autocast bias for fp8 Gemm."""
+    """Get casted bias for fp8 gemm."""
     if not use_bias:
         return None
     with autocast_variable.enable_auto_cast_variables(dtype):
@@ -65,20 +61,20 @@ def get_autocast_bias(dtype, bias_var, use_bias):
     return bias
 
 
-@doc_controls.do_not_generate_docs
 def get_init_method(user_input, default_init_method):
+    """Get initializer method for variables."""
     if user_input is None:
         return default_init_method
 
     if callable(user_input):
         return user_input
-    else:
-        assert isinstance(user_input, str)
-        return initializers.get(user_input)
+
+    assert isinstance(user_input, str)
+    return initializers.get(user_input)
 
 
-@doc_controls.do_not_generate_docs
 def cast_to_fp8_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, stream_id):
+    """Wrapper to call the tex.cast_to_fp8."""
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -89,17 +85,17 @@ def cast_to_fp8_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, stream_id):
     return x_fp8
 
 
-@doc_controls.do_not_generate_docs
 def cast_from_fp8_wrapper(x, fp8_meta, amax_index, fwd, idtype, odtype, sid):
+    """Wrapper to call the tex.cast_from_fp8."""
     scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
     scale_inv = fp8_meta[scaling_key]["scale_inv"].value()
     x_fp8 = tex.cast_from_fp8(x, scale_inv, idtype, odtype, amax_index, sid)
     return x_fp8
 
 
-@doc_controls.do_not_generate_docs
 def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype,
                                      sid):
+    """Wrapper to call the tex.fp8_cast_transpose_fused."""
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -110,10 +106,10 @@ def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype,
     return x_fp8, x_t_fp8
 
 
-@doc_controls.do_not_generate_docs
 def fp8_cast_transpose_bgrad_fused_wrapper(
     x, fp8_meta, amax_index, fwd, output_dtype, sid
 ):
+    """Wrapper to call the tex.fp8_cast_transpose_bgrad_fused."""
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -124,10 +120,10 @@ def fp8_cast_transpose_bgrad_fused_wrapper(
     return grad_bias, grad_fp8, grad_t_fp8
 
 
-@doc_controls.do_not_generate_docs
 def fp8_cast_transpose_bgrad_dgelu_fused_wrapper(
     dy, x, fp8_meta, amax_index, fwd, output_dtype, sid
 ):
+    """Wrapper to call the tex.fp8_fused_cast_transpose_bgrad_dgelu."""
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -138,8 +134,8 @@ def fp8_cast_transpose_bgrad_dgelu_fused_wrapper(
     return dbias, dgelu_c, dgelu_t
 
 
-@doc_controls.do_not_generate_docs
 def fp8_gelu_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, sid):
+    """Wrapper to call the tex.te_gelu."""
     scaling_key = get_meta_tensor_key(fwd)
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -149,7 +145,6 @@ def fp8_gelu_wrapper(x, fp8_meta, amax_index, fwd, output_dtype, sid):
     return y_fp8
 
 
-@doc_controls.do_not_generate_docs
 def matmul_wrapper(
     inp,
     weight,
@@ -162,6 +157,7 @@ def matmul_wrapper(
     gelu=False,
     gelu_input=None,
 ):
+    """Wrapper to call the tex.te_gemm for the non-fp8 gemm."""
     A = inp
     B = weight
     A_dtype, B_dtype = TE_DType[A.dtype], TE_DType[B.dtype]
@@ -197,7 +193,6 @@ def matmul_wrapper(
     )
 
 
-@doc_controls.do_not_generate_docs
 def fp8_matmul_wrapper(
     inp,
     weight,
@@ -211,6 +206,7 @@ def fp8_matmul_wrapper(
     use_bias=False,
     bias=None,
 ):
+    """Wrapper to call the tex.te_gemm for the fp8 gemm."""
     A = inp
     B = weight
     if mode in ("fwd", "fc1_fwd"):
@@ -278,10 +274,10 @@ def fp8_matmul_wrapper(
     )
 
 
-@doc_controls.do_not_generate_docs
 def layernorm_fwd_fp8_wrapper(
     x, ln_gamma, ln_beta, epsilon, fp8_meta, amax_index, output_dtype, sid
 ):
+    """Wrapper to call the tex.layernorm_fwd_fp8."""
     scaling_key = "scaling_fwd"
     scale = fp8_meta[scaling_key]["scale"].value()
     amax = fp8_meta[scaling_key]["amax_history"].value()
@@ -415,7 +411,7 @@ class TransformerEngineBaseModule:
         # From previous iteration
         amax_and_scale_update(self.fp8_meta, False)
         set_amax_buffer_key_deletion(self.fp8_meta, forward=False)
-        
+
 
 class Dense(TransformerEngineBaseModule, layers.Layer):
     """
@@ -476,8 +472,8 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
         )
         self.skip_weight_param_allocation = skip_weight_param_allocation
 
-    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
+        """One-time allocation of the variables."""
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
@@ -520,13 +516,13 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
-    @doc_controls.do_not_generate_docs
     def non_fp8_matmul(
         self,
         inp: tf.Tensor,
         kernel_var: tf.Variable,
         bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd non-fp8 matmul."""
         @tf.custom_gradient
         def non_fp8_matmul_func(x):
             # Use value() to convert from Variable to EagerTensor
@@ -565,13 +561,13 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_matmul_func(inp)
 
-    @doc_controls.do_not_generate_docs
     def fp8_matmul(
         self,
         inp: tf.Tensor,
         kernel_var: tf.Variable,
         bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd fp8 matmul."""
         fp8_meta = self.fp8_meta
         fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
             get_recipe_attrs(fp8_meta["recipe"])
@@ -754,8 +750,8 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             return outputs, bias_var
         return outputs
 
-    @doc_controls.do_not_generate_docs
     def get_config(self):
+        """Returns the config of the layer."""
         config = super().get_config()
         config.update(
             {
@@ -799,8 +795,8 @@ class LayerNorm(layers.Layer):
         self.gamma_initializer = initializers.get(gamma_initializer)
         self.stream = get_stream_id()
 
-    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
+        """One-time allocation of the variables."""
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
@@ -826,13 +822,14 @@ class LayerNorm(layers.Layer):
 
     @tf.custom_gradient
     def layernorm(self, inp: tf.Tensor):
-        """LayerNorm custom gradient funcion."""
+        """Prep fwd+bwd non-fp8 layernorm."""
         gamma = self.gamma.value()
         ln_out, mu, rsigma = tex.layernorm_fwd(
             inp, gamma, self.beta.value(), self.epsilon, self.stream
         )
 
         def grad_fn(upstream, variables=None):
+            # pylint: disable=unused-argument
             dxmat, dgamma, dbeta = tex.layernorm_bwd(
                 upstream, inp, mu, rsigma, gamma, self.stream
             )
@@ -850,8 +847,8 @@ class LayerNorm(layers.Layer):
         outputs = tf.reshape(outputmat, shape=inputs.shape)
         return outputs
 
-    @doc_controls.do_not_generate_docs
     def get_config(self):
+        """Returns the config of the layer."""
         config = super().get_config()
         config.update(
             {
@@ -948,8 +945,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         )
         self.skip_weight_param_allocation = skip_weight_param_allocation
 
-    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
+        """One-time allocation of the variables."""
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
@@ -1005,7 +1002,6 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
-    @doc_controls.do_not_generate_docs
     def non_fp8_layernorm_matmul(
         self,
         inp: tf.Tensor,
@@ -1014,6 +1010,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         kernel_var: tf.Variable,
         bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd non-fp8 layernorm followed by matmul."""
         @tf.custom_gradient
         def non_fp8_layernorm_matmul_func(x):
             # Use value() to convert from Variable to EagerTensor
@@ -1080,7 +1077,6 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_layernorm_matmul_func(inp)
 
-    @doc_controls.do_not_generate_docs
     def fp8_layernorm_matmul(
         self,
         inp: tf.Tensor,
@@ -1089,6 +1085,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         kernel_var: tf.Variable,
         bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd fp8 layernorm followed by matmul."""
         fp8_meta = self.fp8_meta
         fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
             get_recipe_attrs(fp8_meta["recipe"])
@@ -1323,8 +1320,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             return (outputs, ln_outputs)
         return outputs
 
-    @doc_controls.do_not_generate_docs
     def get_config(self):
+        """Returns the config of the layer."""
         config = super().get_config()
         config.update(
             {
@@ -1437,8 +1434,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             bias_initializer, initializers.get("zeros")
         )
 
-    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
+        """One-time allocation of the variables."""
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
@@ -1508,7 +1505,6 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             training = False
         return training
 
-    @doc_controls.do_not_generate_docs
     def non_fp8_layernorm_mlp(
         self,
         inp: tf.Tensor,
@@ -1519,6 +1515,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         fc2_kernel_var: tf.Variable,
         fc2_bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd non-fp8 layernorm followed by mlp."""
         @tf.custom_gradient
         def non_fp8_layernorm_mlp_func(x):
             # Use value() to convert from Variable to EagerTensor
@@ -1630,7 +1627,6 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
 
         return non_fp8_layernorm_mlp_func(inp)
 
-    @doc_controls.do_not_generate_docs
     def fp8_layernorm_mlp(
         self,
         inp: tf.Tensor,
@@ -1641,6 +1637,7 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         fc2_kernel_var: tf.Variable,
         fc2_bias_var: Union[tf.Variable, None] = None,
     ):
+        """Prep fwd+bwd fp8 layernorm followed by mlp."""
         fp8_meta = self.fp8_meta
         fp8_dtype_fwd, fp8_dtype_bwd, override_linear_precision = \
             get_recipe_attrs(fp8_meta["recipe"])
@@ -1988,8 +1985,8 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             return (outputs, ln_outputs)
         return outputs
 
-    @doc_controls.do_not_generate_docs
     def get_config(self):
+        """Returns the config of the layer."""
         config = super().get_config()
         config.update(
             {

@@ -581,7 +581,7 @@ py::object TFE_Py_TeGemm_wrapper(
   }
   return tensorflow::PyoOrThrow(EagerTensorFromHandle(d_eager));
 }
-      
+
 }  // end namespace
 
 PYBIND11_MODULE(transformer_engine_tensorflow, m) {

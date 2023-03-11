@@ -1,21 +1,19 @@
 """Transformer."""
 
+from contextlib import nullcontext
+from keras import backend, layers, initializers
+from keras.mixed_precision import autocast_variable
 from typing import Callable, Optional, Tuple, Union
 
 import os
 import tensorflow as tf
 
-from contextlib import nullcontext
-from keras import backend, layers, initializers
-from keras.mixed_precision import autocast_variable
-from tensorflow.tools.docs import doc_controls
 from transformer_engine.tensorflow import (
     LayerNorm,
     LayerNormDense,
     LayerNormMLP,
     Dense,
 )
-
 from .softmax import FusedScaleMaskSoftmax
 from .constants import (
     AttnMaskTypes,
@@ -285,8 +283,8 @@ class MultiHeadAttention(layers.Layer):
             return_bias=True,
         )
 
-    @doc_controls.do_not_generate_docs
     def build(self, input_shape):
+        """One-time allocation of the variables."""
         input_shape = tf.TensorShape(input_shape)
         last_dim = tf.compat.dimension_value(input_shape[-1])
         if last_dim is None:
