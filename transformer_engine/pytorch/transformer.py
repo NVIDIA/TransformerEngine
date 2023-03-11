@@ -100,7 +100,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             attn_mask_type,
             attention_mask_func,
-            layer_number,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -117,6 +116,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """core attention fprop"""
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
+        apply_qk_layer_scaling = self.layer_number is not None and key_layer.dtype == torch.float16
 
         # [b, np, sq, sk]
         output_size = (
@@ -143,7 +143,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
 
         scale = self.norm_factor
-        if self.layer_number is not None and query_layer.dtype == torch.float16:
+        if apply_qk_layer_scaling:
             scale *= self.layer_number
 
         # Raw attention scores. [b * np, sq, sk]
@@ -159,7 +159,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_scores = matmul_result.view(*output_size)
 
         # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
+        softmax_scale = self.layer_number if apply_qk_layer_scaling else None
+        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask, softmax_scale)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
