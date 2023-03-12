@@ -54,7 +54,7 @@ def compare_frozen_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
                             err_msg=f"{key=} is not close")
 
 
-DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]    # (seqlen, batch, emb_dim)
+DATA_SHAPE = [(32, 128, 1024), (32, 512, 1024)]    # (batch, seqlen, emb_dim)
 DTYPE = [jnp.float32, jnp.bfloat16]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
@@ -95,6 +95,12 @@ ATTRS = [{
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
+}, {
+    _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
+    _KEY_OF_FUSE_MLP_WI: True
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]
@@ -125,11 +131,14 @@ class TestEncoderLayer:
         return ref, flax.core.frozen_dict.FrozenDict(unfreeze_target)
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+        batch, seqlen = data_shape[:2]
+        if transpose_batch_sequence:
+            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+        sequence_dim = 0 if transpose_batch_sequence else 1
+
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
-
-        batch = data_shape[1] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[0]
-        seqlen = data_shape[0] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[1]
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         ref_masks = (1 - padded_mask,)
@@ -145,7 +154,6 @@ class TestEncoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
-        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
@@ -167,11 +175,14 @@ class TestEncoderLayer:
         del data_rng, init_rng, apply_rng
 
     def forward_backward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+        batch, seqlen = data_shape[:2]
+        if transpose_batch_sequence:
+            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+        sequence_dim = 0 if transpose_batch_sequence else 1
+
         data_rng, init_rng, apply_rng = generate_test_rngs()
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
-
-        batch = data_shape[1] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[0]
-        seqlen = data_shape[0] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[1]
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         ref_masks = (1 - padded_mask,)
@@ -187,7 +198,6 @@ class TestEncoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
-        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
@@ -331,11 +341,13 @@ class TestDecoderLayer:
         return ref, flax.core.frozen_dict.FrozenDict(unfreeze_target)
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+        batch, seqlen = data_shape[:2]
+        if transpose_batch_sequence:
+            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+        sequence_dim = 0 if transpose_batch_sequence else 1
+
         data_rng, init_rng, apply_rng = generate_test_rngs()
-
-        batch = data_shape[1] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[0]
-        seqlen = data_shape[0] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[1]
-
         inputs = (jax.random.normal(data_rng, data_shape,
                                     dtype), jax.random.normal(data_rng, data_shape, dtype))
 
@@ -354,7 +366,6 @@ class TestDecoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
-        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
@@ -375,11 +386,13 @@ class TestDecoderLayer:
         del data_rng, init_rng, apply_rng
 
     def forward_backward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
+        transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
+        batch, seqlen = data_shape[:2]
+        if transpose_batch_sequence:
+            data_shape = (data_shape[1], data_shape[0], *data_shape[2:])
+        sequence_dim = 0 if transpose_batch_sequence else 1
+
         data_rng, init_rng, apply_rng = generate_test_rngs()
-
-        batch = data_shape[1] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[0]
-        seqlen = data_shape[0] if _KEY_OF_TRANSPOSE_BS in attrs else data_shape[1]
-
         inputs = (jax.random.normal(data_rng, data_shape,
                                     dtype), jax.random.normal(data_rng, data_shape, dtype))
 
@@ -398,7 +411,6 @@ class TestDecoderLayer:
             else:
                 te_layer_attrs[k] = v
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
-        sequence_dim = 0
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
