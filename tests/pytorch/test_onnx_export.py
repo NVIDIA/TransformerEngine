@@ -76,7 +76,7 @@ def do_export(
                           opset_version=opset,
                           input_names=input_names,
                           output_names=output_names,
-                          do_constant_folding=True,
+                          do_constant_folding=False,
                           operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
@@ -502,8 +502,7 @@ def test_export_layernorm(
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
-        # TODO: FP32 has a small threshold (1e-5)
-        validate_result(fname, inp, model, atol=4e-3, is_fp8=use_fp8)
+        validate_result(fname, inp, model, atol=1e-5, is_fp8=use_fp8)
 
 
 @skip_FP8
