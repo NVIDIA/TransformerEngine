@@ -130,7 +130,7 @@ enum class MHA_Matrix {
 //                size_t workspaceSize,
 //                cudaStream_t stream);
 
-void nvte_cudnn_fmha_fp8_fwd(const NVTETensor QKV,
+void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
                 const NVTETensor O,
