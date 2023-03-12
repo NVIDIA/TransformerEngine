@@ -6,6 +6,28 @@
 
 #include "common.h"
 
+void cudnn_fmha_fp8_fwd(at::Tensor QKV,
+	     at::Tensor M,
+	     at::Tensor ZInv,
+	     at::Tensor O,
+	     transformer_engine::DType QKV_type,
+	     at::Tensor descaleQ,
+	     at::Tensor descaleK,
+	     at::Tensor descaleV,
+	     at::Tensor descaleS,
+	     at::Tensor scaleS,
+	     at::Tensor scaleO,
+	     at::Tensor amaxS,
+	     at::Tensor amaxO,
+	     transformer_engine::DType misc_type,
+	     at::Tensor QKVRaggedOffset,
+	     at::Tensor ORaggedOffset,
+	     at::Tensor actualSeqlenQ,
+	     at::Tensor actualSeqlenK,
+	     at::Tensor actualSeqlenO,
+	     transformer_engine::DType seqlen_type,
+             at::Tensor workspace,
+             size_t workspaceSize);
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,

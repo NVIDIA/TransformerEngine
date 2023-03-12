@@ -6,6 +6,117 @@
 
 #include "extensions.h"
 
+void cudnn_fmha_fp8_fwd(at::Tensor QKV,
+	     at::Tensor M,
+	     at::Tensor ZInv,
+	     at::Tensor O,
+	     transformer_engine::DType QKV_type,
+	     at::Tensor descaleQ,
+	     at::Tensor descaleK,
+	     at::Tensor descaleV,
+	     at::Tensor descaleS,
+	     at::Tensor scaleS,
+	     at::Tensor scaleO,
+	     at::Tensor amaxS,
+	     at::Tensor amaxO,
+	     transformer_engine::DType misc_type,
+	     at::Tensor QKVRaggedOffset,
+	     at::Tensor ORaggedOffset,
+	     at::Tensor actualSeqlenQ,
+	     at::Tensor actualSeqlenK,
+	     at::Tensor actualSeqlenO,
+	     transformer_engine::DType seqlen_type,
+             at::Tensor workspace,
+             size_t workspaceSize
+) {
+  // QKV: b x s_q * 3 * h * d
+  size_t b = static_cast<size_t>(QKV.size(0));
+  size_t s_q = static_cast<size_t>(QKV.size(1));
+  size_t s_kv = s_q;
+  size_t h = static_cast<size_t>(QKV.size(3));
+  size_t d = static_cast<size_t>(QKV.size(4));
+
+  using namespace transformer_engine;
+  auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
+                                          {b, s_q, 3, h, d},
+                                          QKV_type);
+  auto te_M = makeTransformerEngineTensor(M.data_ptr(),
+                                          {b, h, s_q},
+                                          QKV_type);
+  auto te_ZInv = makeTransformerEngineTensor(ZInv.data_ptr(),
+                                          {b, h, s_q},
+                                          QKV_type);
+  auto te_O = makeTransformerEngineTensor(O.data_ptr(),
+                                          {b, s_q, h, d},
+                                          QKV_type);
+
+  auto te_descaleQ = makeTransformerEngineTensor(descaleQ.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_descaleK = makeTransformerEngineTensor(descaleK.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_descaleV = makeTransformerEngineTensor(descaleV.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_descaleS = makeTransformerEngineTensor(descaleS.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_scaleS = makeTransformerEngineTensor(scaleS.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_scaleO = makeTransformerEngineTensor(scaleO.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_amaxO = makeTransformerEngineTensor(amaxO.data_ptr(),
+                                          {1},
+					  misc_type);
+  auto te_amaxS = makeTransformerEngineTensor(amaxS.data_ptr(),
+                                          {1},
+					  misc_type);
+
+  auto te_QKVRaggedOffset = makeTransformerEngineTensor(QKVRaggedOffset.data_ptr(),
+                                          {b+1},
+					  seqlen_type);
+  auto te_ORaggedOffset = makeTransformerEngineTensor(ORaggedOffset.data_ptr(),
+                                          {b+1},
+					  seqlen_type);
+  auto te_actualSeqlenQ = makeTransformerEngineTensor(actualSeqlenQ.data_ptr(),
+                                          {1},
+					  seqlen_type);
+  auto te_actualSeqlenK = makeTransformerEngineTensor(actualSeqlenK.data_ptr(),
+                                          {1},
+					  seqlen_type);
+  auto te_actualSeqlenO = makeTransformerEngineTensor(actualSeqlenO.data_ptr(),
+                                          {1},
+					  seqlen_type);
+
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  {workspaceSize},
+                                                  DType::kByte);
+
+
+  nvte_cudnn_fmha_fp8_fwd(te_QKV.data(),
+		  te_M.data(),
+		  te_ZInv.data(),
+		  te_O.data(),
+	          te_descaleQ.data(),
+	          te_descaleK.data(),
+	          te_descaleV.data(),
+	          te_descaleS.data(),
+	          te_scaleS.data(),
+	          te_scaleO.data(),
+	          te_amaxS.data(),
+	          te_amaxO.data(),
+	          te_QKVRaggedOffset.data(),
+	          te_ORaggedOffset.data(),
+	          te_actualSeqlenQ.data(),
+	          te_actualSeqlenK.data(),
+	          te_actualSeqlenO.data(),
+                  te_workspace.data(),
+		  at::cuda::getCurrentCUDAStream());
+
+}
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -396,7 +507,8 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dbeta_cu   = makeTransformerEngineTensor(dbeta);
 
     // This call populates tensors with the required config.
-    const auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+    //const 
+    auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
     bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
             dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
             dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
@@ -859,6 +971,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
+  m.def("cudnn_fmha_fp8_fwd", &cudnn_fmha_fp8_fwd, "cuDNN FMHA FP8 FWD");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
 

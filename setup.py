@@ -19,6 +19,17 @@ from distutils.file_util import copy_file
 path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
+
+os.environ["CUDA_HOME"] = "/jliu/cuda_builds/cuda12.1"
+os.environ["CUDNN_HOME"] = "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1"
+os.environ["PATH"] = "/jliu/cuda_builds/cuda12.1/bin:"+os.environ["PATH"]
+os.environ["LD_LIBRARY_PATH"] = "/jliu/cuda_builds/cuda12.1/lib64:/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64:"+os.environ["LD_LIBRARY_PATH"]
+os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
+print("CUDA_HOME: ",os.environ["CUDA_HOME"])
+print("CUDNN_HOME: ",os.environ["CUDNN_HOME"])
+print("PATH: ",os.environ["PATH"])
+print("LD_LIBRARY_PATH: ",os.environ["LD_LIBRARY_PATH"])
+
 CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
 
 def get_cuda_bare_metal_version(cuda_dir):
@@ -42,19 +53,23 @@ def append_nvcc_threads(nvcc_extra_args):
 
 def extra_gencodes(cc_flag):
     _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if int(bare_metal_major) >= 11:
+    #if int(bare_metal_major) >= 11:
+    #    cc_flag.append("-gencode")
+    #    cc_flag.append("arch=compute_80,code=sm_80")
+    #    if int(bare_metal_minor) >= 8:
+    #        cc_flag.append("-gencode")
+    #        cc_flag.append("arch=compute_90,code=sm_90")
+    if int(bare_metal_major) >= 12:
         cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-        if int(bare_metal_minor) >= 8:
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
+        cc_flag.append("arch=compute_90,code=sm_90")
 
 
+
+        #"-gencode",
+        #"arch=compute_70,code=sm_70",
 def extra_compiler_flags():
     return [
         "-O3",
-        "-gencode",
-        "arch=compute_70,code=sm_70",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -79,6 +94,9 @@ def make_abs_path(l):
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
+    "/jliu/cuda_builds/cuda12.1/include",
+    "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/include",
+    "/code/fmha/cudnn_frontend/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
@@ -152,8 +170,10 @@ class PyTorchBuilder(FrameworkBuilderBase):
             ext for ext in extensions if not isinstance(ext, CMakeExtension)
         ]
         self.pytorch_build_extensions.extensions = other_ext
+        print("---------- Building pyTorch extensions! begin -----------")
         print("Building pyTorch extensions!")
         self.pytorch_build_extensions.run()
+        print("---------- Building pyTorch extensions! end -----------")
 
     @staticmethod
     def install_requires():
@@ -189,6 +209,9 @@ if framework in ("all", "pytorch"):
                 "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
             },
             include_dirs=include_dirs,
+            library_dirs=["jliu/cuda_builds/cuda12.1/lib64", 
+                "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64"],
+            libraries = ['cudnn'],
         )
     )
     dlfw_builder_funcs.append(PyTorchBuilder)
@@ -259,6 +282,9 @@ class CMakeBuildExtension(build_ext, object):
         cmake_args = [
             "-GNinja",
             "-DCMAKE_BUILD_TYPE=" + config,
+            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
+            "-DCMAKE_CUDNN_HOME=/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1",
+            "-DCMAKE_CUDNN_FRONTEND_HOME=/code/fmha/cudnn_frontend",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
         cmake_args = cmake_args + self.dlfw_flags
@@ -322,10 +348,15 @@ class TEBuildExtension(build_ext, object):
         old_inplace, self.inplace = self.inplace, 0
         cmake_ext = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
         self.cmake_build_extensions.extensions = cmake_ext
+        print("------------- TEBuildExtension cmake_build_extensions begin ----------")
         self.cmake_build_extensions.run()
+        print("------------- TEBuildExtension cmake_build_extensions end ----------")
 
+        print("------------- TEBuildExtension dlfw_builder begin ----------")
         for builder in self.dlfw_builder:
+            print("------------ builder --------")
             builder.run(self.extensions)
+        print("------------- TEBuildExtension dlfw_builder end ----------")
 
         self.all_outputs = []
         for f in os.scandir(self.build_lib):
