@@ -6,7 +6,7 @@
 
 #include "common.h"
 
-void cudnn_fmha_fwd(at::Tensor QKV,
+void cudnn_flash_attn_fwd(at::Tensor QKV,
 	     at::Tensor M,
 	     at::Tensor ZInv,
 	     at::Tensor O,

@@ -19,7 +19,7 @@ from transformer_engine.pytorch.module import (
     Linear,
     LayerNormMLP,
     LayerNorm,
-    cuDNN_FMHA_func,
+    cuDNN_FlashAttn,
 )
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
@@ -234,6 +234,7 @@ class FlashAttention_cuDNN(torch.nn.Module):
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
+        #self.fa_cudnn = cuDNN_FlashAttn()
 
     def forward(
         self,
@@ -269,20 +270,17 @@ class FlashAttention_cuDNN(torch.nn.Module):
             dtype=torch.int32,
             device=query_layer.device)
 
-        with self.attention_dropout_ctx():
-            output = cuDNN_FMHA_func.forward(
-                qkv, actualSeqlen, 
-                self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor
-            )
-        print("output shape: ",output.shape)
-        return output
+        #with self.attention_dropout_ctx():
+        #    output = self.fa_cudnn(
+        #        qkv, actualSeqlen, 
+        #        self.attention_dropout if self.training else 0.0,
+        #        softmax_scale=1.0/self.norm_factor
+        #    )
+        #print("output shape: ",output.shape)
+        #return output
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         #return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
-
-
-
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention implementation by using the flash-attn package.

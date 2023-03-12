@@ -77,7 +77,7 @@ from .cpp_extensions import (
     layernorm_fwd_inf,
     cast_to_fp8,
     cast_from_fp8,
-    cudnn_fmha_fwd,
+    cudnn_flash_attn_fwd,
 )
 from .constants import GemmParallelModes, dist_group_type, TE_DType
 
@@ -129,46 +129,6 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
             global_amax_reduction(fp8_meta, forward=False)
             delete_key_from_amax_buffer(forward=False)
 
-
-class cuDNN_FMHA_func(torch.autograd.Function):
-    """This class is a cuDNN implementation of flash attention."""
-
-    @staticmethod
-    def forward(ctx,
-            qkv: torch.Tensor,
-            actualSeqlen: torch.Tensor,
-            dropout: torch.float,
-            attn_scale: torch.float,
-    ) -> torch.Tensor:
-
-        b, s_q, _, h, d = qkv.shape
-
-        O = torch.empty(
-            b,
-            s_q,
-            h,
-            d,
-            dtype=QKV.dtype,
-            device="cuda",
-        )
-
-        cudnn_fmha_fwd(qkv, actualSeqlen, O)
-
-        ctx.save_for_backward(qkv, O)
-
-        return O
-
-    #@staticmethod
-    #def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-    #    full_param_buffer, *params_split = ctx.saved_tensors
-
-    #    split_size = full_param_buffer.shape[0] // len(params_split)
-    #    grads = []
-
-    #    for i, _ in enumerate(params_split):
-    #        grads.append(grad_output[i * split_size : (i+1) * split_size])
-
-    #    return None, *grads
 
 class _NoopCat(torch.autograd.Function):
     """This class is a no-op replacement for `torch.cat`."""
@@ -3089,3 +3049,119 @@ class LayerNorm(torch.nn.Module):
             self.bwd_ln_sm_margin,
             self.zero_centered_gamma
         )
+
+class _cuDNN_FlashAttn(torch.autograd.Function):
+    """This class is a cuDNN implementation of flash attention."""
+
+    @staticmethod
+    def forward(ctx,
+            qkv: torch.Tensor,
+            actualSeqlen: torch.Tensor,
+            dropout: torch.float,
+            attn_scale: torch.float,
+    ) -> torch.Tensor:
+
+        b, s_q, _, h, d = qkv.shape
+
+        O = torch.empty(
+            b,
+            s_q,
+            h,
+            d,
+            dtype=QKV.dtype,
+            device="cuda",
+        )
+
+        cudnn_flash_attn_fwd(qkv, actualSeqlen, O)
+
+        ctx.save_for_backward(qkv, O)
+
+        return O
+
+    #@staticmethod
+    #def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    #    full_param_buffer, *params_split = ctx.saved_tensors
+
+    #    split_size = full_param_buffer.shape[0] // len(params_split)
+    #    grads = []
+
+    #    for i, _ in enumerate(params_split):
+    #        grads.append(grad_output[i * split_size : (i+1) * split_size])
+
+    #    return None, *grads
+
+class cuDNN_FlashAttn(TransformerEngineBaseModule):
+    """This class is a cuDNN implementation of flash attention."""
+    def __init__(
+        self,
+        tp_group: Optional[dist_group_type] = None,
+        tp_size: int = 1,
+        get_rng_state_tracker: Optional[Callable] = None,
+        init_method: Optional[Callable] = None,
+        bias: bool = True,
+        params_dtype: torch.dtype = torch.float32,
+        parallel_mode: Optional[str] = None,
+        skip_weight_param_allocation: bool = False,
+        parameters_split: Optional[Tuple[str, ...]] = None,
+        zero_centered_gamma: bool = False,
+    ) -> None:
+        super().__init__()
+
+    def forward(
+        self,
+        inp: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        is_first_microbatch: Optional[bool] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+
+        with self.prepare_forward(inp, is_first_microbatch) as inp:
+            bias_tensor = (
+                bias if bias is not None
+                else self.bias if self.parameters_split is None
+                else self.bias_tensor if not torch.is_grad_enabled()
+                else self.noop_cat("bias_tensor", self.bias_names)
+            )
+            weight_tensor = (
+                weight if weight is not None
+                else self.weight if self.parameters_split is None
+                else self.weight_tensor if not torch.is_grad_enabled()
+                else self.noop_cat("weight_tensor", self.weight_names)
+            )
+
+            if torch.is_grad_enabled():
+                fwd_fn = _cuDNN_FlashAttn.apply
+                args = []
+            else:
+                fwd_fn = _cuDNN_FlashAttn.forward
+                args = [None]
+            args += (
+                inp,
+#                self.layer_norm_weight,
+#                self.layer_norm_bias,
+#                weight_tensor,
+#                self.weight1_fp8 if self.fp8 else None,
+#                self.weight1_t_fp8 if self.fp8 else None,
+#                bias_tensor,
+#                self.use_bias,
+#                self.eps,
+#                is_first_microbatch,
+#                self.fp8,
+#                self.fp8_calibration,
+#                self.fp8_meta,
+#                self.fuse_wgrad_accumulation,
+#                self.tp_group,
+#                self.sequence_parallel,
+#                self.tp_size > 1,
+#                self.activation_dtype,
+#                self.parallel_mode,
+#                self.return_layernorm_output,
+#                torch.is_grad_enabled(),
+#                self.fwd_ln_sm_margin,
+#                self.bwd_ln_sm_margin,
+#                self.zero_centered_gamma,
+            )
+            out = fwd_fn(*args)
+
+        return out
+

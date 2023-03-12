@@ -25,7 +25,7 @@
 //#include "transformer_engine/error_util.h"
 
 
-#include "transformer_engine/cudnn_fmha_fp8.h"
+#include "transformer_engine/cudnn_flash_attn_fp8.h"
 #include <cudnn_frontend.h>
 #include "../common.h"
 
@@ -48,7 +48,7 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
 }
 
 namespace transformer_engine {
-namespace cudnn_fmha {
+namespace cudnn_flash_attn {
 
 using namespace transformer_engine;
 
@@ -602,7 +602,7 @@ createBMM2(int64_t b,
 }
 
 void 
-flash_mha_fprop_fp8(int64_t b, 
+cudnn_fa_fprop_fp8(int64_t b, 
                 int64_t h, 
                 int64_t s_q,
                 int64_t s_kv,
@@ -628,7 +628,7 @@ flash_mha_fprop_fp8(int64_t b,
                 void* devPtrKOverride,
                 cudnnDataType_t tensorType) {
                 
-    using namespace cudnn_fmha;
+    using namespace cudnn_flash_attn;
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
@@ -843,7 +843,7 @@ flash_mha_fprop_fp8(int64_t b,
     }
 }
 
-} // namespace cudnn_fmha
+} // namespace cudnn_flash_attn
 
 //void flash_mha_fprop(int64_t b, 
 //                int64_t h, 
@@ -852,7 +852,7 @@ flash_mha_fprop_fp8(int64_t b,
 //                int64_t d,
 //                float attnScale,
 //                MHA_Layout layout,
-void flash_mha_fprop(const Tensor *inputQKV,
+void cudnn_fa_fwd(const Tensor *inputQKV,
 		const Tensor *inputM,
                 const Tensor *inputZInv,
                 const Tensor *inputO,
@@ -901,7 +901,7 @@ void flash_mha_fprop(const Tensor *inputQKV,
 
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (s_q <= 512))
   {
-    cudnn_fmha::flash_mha_fprop_fp8(b, h, s_q, s_kv, d, attnScale, layout,
+    cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, s_q, s_kv, d, attnScale, layout,
                 devPtrQKV, 
                 devPtrM,
                 devPtrZInv,  
@@ -923,11 +923,11 @@ void flash_mha_fprop(const Tensor *inputQKV,
   }
   else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16)) && (s_q <= 512))
   {
-    printf("TO DO: call bf16/fp16 version of cudnn fmha fwd \n");
+    printf("TO DO: call bf16/fp16 version of cudnn flash attn fwd \n");
   }
   else if (s_q > 512)
   {
-    printf("TO DO: call Julien version of cudnn fmha fwd \n");
+    printf("TO DO: call Julien version of cudnn flash attn fwd \n");
   }
   else
   {
@@ -938,7 +938,7 @@ void flash_mha_fprop(const Tensor *inputQKV,
 
 } // namespace transformer_engine
 
-void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
+void nvte_cudnn_flash_attn_fwd(const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
                 const NVTETensor O,
@@ -958,7 +958,7 @@ void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
-  NVTE_API_CALL(nvte_cudnn_fmha_fwd);
+  NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
@@ -979,7 +979,7 @@ void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
   const Tensor *inputActualSeqlenO = reinterpret_cast<const Tensor*>(ActualSeqlenO);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
-  flash_mha_fprop(inputQKV, inputM, inputZInv, inputO,
+  cudnn_fa_fwd(inputQKV, inputM, inputZInv, inputO,
 		  inputDescaleQ, inputDescaleK, inputDescaleV, inputDescaleS,
 		  inputScaleS, inputScaleO,
 		  inputAmaxS, inputAmaxO,
