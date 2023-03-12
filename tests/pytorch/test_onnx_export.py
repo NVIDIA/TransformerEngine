@@ -401,7 +401,6 @@ def test_export_gemm(
                 get_workspace(),
                 bias=self.bias,
                 use_bias=self.use_bias,
-                fp32_output=(self.precision==torch.float32),
                 use_split_accumulator=False)
             return ret
 
