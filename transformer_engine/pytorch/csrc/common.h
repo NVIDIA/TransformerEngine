@@ -15,7 +15,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/softmax.h>
-#include <transformer_engine/cudnn_fmha_fp8.h>
+#include <transformer_engine/cudnn_flash_attn_fp8.h>
 #include <ATen/ATen.h>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/cuda/CUDAContext.h>

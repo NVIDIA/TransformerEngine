@@ -42,8 +42,8 @@
 ////#include "../common.h"
 
 
-#ifndef TRANSFORMER_ENGINE_CUDNN_FMHA_FP8_H_
-#define TRANSFORMER_ENGINE_CUDNN_FMHA_FP8_H_
+#ifndef TRANSFORMER_ENGINE_CUDNN_FLASH_ATTN_FP8_H_
+#define TRANSFORMER_ENGINE_CUDNN_FLASH_ATTN_FP8_H_
 
 #include "transformer_engine.h"
 
@@ -130,7 +130,7 @@ enum class MHA_Matrix {
 //                size_t workspaceSize,
 //                cudaStream_t stream);
 
-void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
+void nvte_cudnn_flash_attn_fwd(const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
                 const NVTETensor O,

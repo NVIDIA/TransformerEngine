@@ -8,7 +8,7 @@ import torch
 import transformer_engine_extensions as tex
 from .constants import TE_DType
 
-def cudnn_fmha_fwd(
+def cudnn_flash_attn_fwd(
     QKV: torch.Tensor,
     actualSeqlenQ: torch.Tensor,
     O: Optional[torch.Tensor] = None,
@@ -62,7 +62,7 @@ def cudnn_fmha_fwd(
     workspace = get_workspace()
     workspaceSize = workspace.shape[0]
 
-    _ = tex.cudnn_fmha_fwd(QKV,
+    _ = tex.cudnn_flash_attn_fwd(QKV,
              M,
              ZInv,
              O,

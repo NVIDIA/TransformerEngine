@@ -7,6 +7,7 @@ from .module import LayerNormLinear
 from .module import Linear
 from .module import LayerNormMLP
 from .module import LayerNorm
+from .module import cuDNN_FlashAttn 
 from .transformer import DotProductAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
