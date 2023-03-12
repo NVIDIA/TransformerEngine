@@ -8,6 +8,87 @@ import torch
 import transformer_engine_extensions as tex
 from .constants import TE_DType
 
+def cudnn_fmha_fwd(
+    QKV: torch.Tensor,
+    actualSeqlenQ: torch.Tensor,
+    O: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+
+    b, s_q, _, h, d = QKV.shape
+
+    M = torch.empty(
+            b,
+            h,
+            s_q,
+            dtype=QKV.dtype,
+            device="cuda",
+        )
+    ZInv = torch.empty(
+            b,
+            h,
+            s_q,
+            dtype=QKV.dtype,
+            device="cuda",
+        )
+
+    return_output = False
+    if O is None:
+        O = torch.empty(
+            b,
+            s_q,
+            h,
+            d,
+            dtype=QKV.dtype,
+            device="cuda",
+        )
+        return_output = True
+
+    qkv_type = TE_DType[QKV.dtype]
+    out_type = qkv_type
+    descaleQ = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    descaleK = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    descaleV = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    descaleS = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    scaleS = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    scaleO = torch.ones(1, dtype=QKV.dtype, device="cuda")
+    amaxS = torch.empty(1, dtype=QKV.dtype, device="cuda")
+    amaxO = torch.empty(1, dtype=QKV.dtype, device="cuda")
+    actualSeqlenK = actualSeqlenQ.detach().clone()
+    actualSeqlenO = actualSeqlenQ.detach().clone()
+    QKVRaggedOffset = torch.cat([torch.zeros(1,device=actualSeqlenQ.device), 3.0 * s_q * h * d * torch.cumsum(actualSeqlenQ,dim=0)],dim=0)
+    ORaggedOffset = torch.cat([torch.zeros(1,device=actualSeqlenQ.device), s_q * h * d * torch.cumsum(actualSeqlenQ,dim=0)],dim=0)
+    seqlen_type = TE_DType[torch.int32]
+    from .module import get_workspace
+    workspace = get_workspace()
+    workspaceSize = workspace.shape[0]
+
+    _ = tex.cudnn_fmha_fwd(QKV,
+             M,
+             ZInv,
+             O,
+             qkv_type,
+             descaleQ,
+             descaleK,
+             descaleV,
+             descaleS,
+             scaleS,
+             scaleO,
+             amaxS,
+             amaxO,
+             qkv_type,
+             QKVRaggedOffset,
+             ORaggedOffset,
+             actualSeqlenQ,
+             actualSeqlenK,
+             actualSeqlenO,
+             seqlen_type,
+             workspace,
+             workspaceSize
+    )
+
+    if return_output:
+        return O 
+    return None
 
 def fp8_gemm(
     A: torch.Tensor,

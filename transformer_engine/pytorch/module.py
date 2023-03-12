@@ -77,6 +77,7 @@ from .cpp_extensions import (
     layernorm_fwd_inf,
     cast_to_fp8,
     cast_from_fp8,
+    cudnn_fmha_fwd,
 )
 from .constants import GemmParallelModes, dist_group_type, TE_DType
 
@@ -128,6 +129,46 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
             global_amax_reduction(fp8_meta, forward=False)
             delete_key_from_amax_buffer(forward=False)
 
+
+class cuDNN_FMHA_func(torch.autograd.Function):
+    """This class is a cuDNN implementation of flash attention."""
+
+    @staticmethod
+    def forward(ctx,
+            qkv: torch.Tensor,
+            actualSeqlen: torch.Tensor,
+            dropout: torch.float,
+            attn_scale: torch.float,
+    ) -> torch.Tensor:
+
+        b, s_q, _, h, d = qkv.shape
+
+        O = torch.empty(
+            b,
+            s_q,
+            h,
+            d,
+            dtype=QKV.dtype,
+            device="cuda",
+        )
+
+        cudnn_fmha_fwd(qkv, actualSeqlen, O)
+
+        ctx.save_for_backward(qkv, O)
+
+        return O
+
+    #@staticmethod
+    #def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    #    full_param_buffer, *params_split = ctx.saved_tensors
+
+    #    split_size = full_param_buffer.shape[0] // len(params_split)
+    #    grads = []
+
+    #    for i, _ in enumerate(params_split):
+    #        grads.append(grad_output[i * split_size : (i+1) * split_size])
+
+    #    return None, *grads
 
 class _NoopCat(torch.autograd.Function):
     """This class is a no-op replacement for `torch.cat`."""

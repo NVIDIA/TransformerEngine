@@ -6,7 +6,7 @@
 
 #include "extensions.h"
 
-void cudnn_fmha_fp8_fwd(at::Tensor QKV,
+void cudnn_fmha_fwd(at::Tensor QKV,
 	     at::Tensor M,
 	     at::Tensor ZInv,
 	     at::Tensor O,
@@ -96,7 +96,7 @@ void cudnn_fmha_fp8_fwd(at::Tensor QKV,
                                                   DType::kByte);
 
 
-  nvte_cudnn_fmha_fp8_fwd(te_QKV.data(),
+  nvte_cudnn_fmha_fwd(te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
 		  te_O.data(),
@@ -1016,7 +1016,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
-  m.def("cudnn_fmha_fp8_fwd", &cudnn_fmha_fp8_fwd, "cuDNN FMHA FP8 FWD");
+  m.def("cudnn_fmha_fwd", &cudnn_fmha_fwd, "cuDNN FMHA FP8/BF16/FP16 FWD");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
 

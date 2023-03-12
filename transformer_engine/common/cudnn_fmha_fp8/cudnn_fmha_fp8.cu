@@ -29,6 +29,24 @@
 #include <cudnn_frontend.h>
 #include "../common.h"
 
+cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDNN_DATA_HALF;
+    case DType::kFloat32:
+      return CUDNN_DATA_FLOAT;
+    case DType::kBFloat16:
+      return CUDNN_DATA_BFLOAT16;
+    case DType::kFloat8E4M3:
+      return CUDNN_DATA_FP8_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDNN_DATA_FP8_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 namespace transformer_engine {
 namespace cudnn_fmha {
 
@@ -584,7 +602,7 @@ createBMM2(int64_t b,
 }
 
 void 
-run_fp8_flash_mha_fprop(int64_t b, 
+flash_mha_fprop_fp8(int64_t b, 
                 int64_t h, 
                 int64_t s_q,
                 int64_t s_kv,
@@ -827,14 +845,14 @@ run_fp8_flash_mha_fprop(int64_t b,
 
 } // namespace cudnn_fmha
 
-void fp8_flash_mha_fprop(int64_t b, 
-                int64_t h, 
-                int64_t s_q,
-                int64_t s_kv,
-                int64_t d,
-                float attnScale,
-                MHA_Layout layout,
-		const Tensor *inputQKV,
+//void flash_mha_fprop(int64_t b, 
+//                int64_t h, 
+//                int64_t s_q,
+//                int64_t s_kv,
+//                int64_t d,
+//                float attnScale,
+//                MHA_Layout layout,
+void flash_mha_fprop(const Tensor *inputQKV,
 		const Tensor *inputM,
                 const Tensor *inputZInv,
                 const Tensor *inputO,
@@ -872,8 +890,18 @@ void fp8_flash_mha_fprop(int64_t b,
   void* devPtrActualSeqlenQ = inputActualSeqlenQ->data.dptr;
   void* devPtrActualSeqlenK = inputActualSeqlenK->data.dptr;
   void* devPtrActualSeqlenO = inputActualSeqlenO->data.dptr;
+  const int64_t b = inputQKV->data.shape[0];
+  const int64_t s_q = inputQKV->data.shape[1];
+  const int64_t s_kv = s_q;
+  const int64_t h = inputQKV->data.shape[3];
+  const int64_t d = inputQKV->data.shape[4];
+  const DType QKV_type = inputQKV->data.dtype;
+  const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
+  MHA_Layout layout = MHA_Layout::QKV_INTERLEAVED;
 
-  cudnn_fmha::run_fp8_flash_mha_fprop(b, h, s_q, s_kv, d, attnScale, layout,
+  if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (s_q <= 512))
+  {
+    cudnn_fmha::flash_mha_fprop_fp8(b, h, s_q, s_kv, d, attnScale, layout,
                 devPtrQKV, 
                 devPtrM,
                 devPtrZInv,  
@@ -891,13 +919,26 @@ void fp8_flash_mha_fprop(int64_t b,
                 devPtrActualSeqlenQ,
                 devPtrActualSeqlenK,
                 devPtrActualSeqlenO,
-                CUDNN_DATA_FP8_E4M3);
+                get_cudnn_dtype(QKV_type));
+  }
+  else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16)) && (s_q <= 512))
+  {
+    printf("TO DO: call bf16/fp16 version of cudnn fmha fwd \n");
+  }
+  else if (s_q > 512)
+  {
+    printf("TO DO: call Julien version of cudnn fmha fwd \n");
+  }
+  else
+  {
+    NVTE_ERROR("Invalid combination of data type and sequence length! \n");
+  }
 
 }
 
 } // namespace transformer_engine
 
-void nvte_cudnn_fmha_fp8_fwd(const NVTETensor QKV,
+void nvte_cudnn_fmha_fwd(const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
                 const NVTETensor O,
@@ -917,7 +958,7 @@ void nvte_cudnn_fmha_fp8_fwd(const NVTETensor QKV,
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
-  NVTE_API_CALL(nvte_cudnn_fmha_fp8_fwd);
+  NVTE_API_CALL(nvte_cudnn_fmha_fwd);
   using namespace transformer_engine;
   const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
@@ -936,17 +977,9 @@ void nvte_cudnn_fmha_fp8_fwd(const NVTETensor QKV,
   const Tensor *inputActualSeqlenQ = reinterpret_cast<const Tensor*>(ActualSeqlenQ);
   const Tensor *inputActualSeqlenK = reinterpret_cast<const Tensor*>(ActualSeqlenK);
   const Tensor *inputActualSeqlenO = reinterpret_cast<const Tensor*>(ActualSeqlenO);
-  const int64_t b = inputQKV->data.shape[0];
-  const int64_t s_q = inputQKV->data.shape[1];
-  const int64_t s_kv = s_q;
-  const int64_t h = inputQKV->data.shape[3];
-  const int64_t d = inputQKV->data.shape[4];
-  const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
-  MHA_Layout layout = MHA_Layout::QKV_INTERLEAVED;
 
-  fp8_flash_mha_fprop(b, h, s_q, s_kv, d, attnScale, layout,
-		  inputQKV, inputM, inputZInv, inputO,
+  flash_mha_fprop(inputQKV, inputM, inputZInv, inputO,
 		  inputDescaleQ, inputDescaleK, inputDescaleV, inputDescaleS,
 		  inputScaleS, inputScaleO,
 		  inputAmaxS, inputAmaxO,
