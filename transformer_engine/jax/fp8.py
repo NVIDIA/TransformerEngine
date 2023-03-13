@@ -342,7 +342,7 @@ def update_collections(new: Collection, original: Collection) -> FrozenDict:
     r"""
     A helper to update Flax's Collection.
 
-    Collection = [dict, Flax's FrozenDict]
+    Collection = [dict, flax.core.frozen_dict.FrozenDict]
 
     Parameters
     ----------
@@ -372,7 +372,7 @@ def update_fp8_metas(state: Collection) -> Collection:
         updated_scale = 1/sf if exp < 0, else sf
         updated_scale_inv = 1/updated_scale
 
-    Collection = [dict, Flax's FrozenDict]
+    Collection = [dict, flax.core.frozen_dict.FrozenDict]
 
     Parameters
     ----------

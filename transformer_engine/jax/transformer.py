@@ -681,7 +681,7 @@ class TransformerLayer(nn.Module):
         If set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing bias of QKVO projections,
-        FC1 and FC2. It only works when :attr:`use_bias=True`.
+        FC1 and FC2. It is only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     apply_residual_connection_post_layernorm: bool, default = False
         If set to True, residual connections are taken from the output
@@ -699,7 +699,7 @@ class TransformerLayer(nn.Module):
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
-        The module for relative embedding execution, only works when
+        The module for relative embedding execution, only used when
         :attr:`enable_relative_embedding=True`. Default is None, which will create
         an instance of RelativePositionBiases if :attr:`enable_relative_embedding=True`.
         Default: RelativePositionBiases( num_buckets=32, max_distance=128,

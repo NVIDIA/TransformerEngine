@@ -203,11 +203,11 @@ class LayerNorm(nn.Module):
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
     bias_init : Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
-        only works when :attr:`layernorm_type='layernorm'`.
+        only used when :attr:`layernorm_type='layernorm'`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        only works when :attr:`layernorm_type='layernorm'`.
+        only used when :attr:`layernorm_type='layernorm'`.
 
     Optimization parameters
     -----------------------
@@ -329,11 +329,11 @@ class DenseGeneral(TransformerEngineBase):
         Indicate whether to enable bias shifting.
         If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        Used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
-        only works when :attr:`use_bias=True`.
+        only used when :attr:`use_bias=True`.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
 
@@ -442,14 +442,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
-        only works when :attr:`enable_layernorm=True`.
+        only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        It only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        It is only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing weights.
@@ -460,11 +460,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         Indicate whether to enable bias shifting.
         If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        Used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
-        only works when :attr:`use_bias=True`.
+        only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
@@ -637,14 +637,14 @@ class LayerNormMLP(TransformerEngineBase):
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
-        only works when :attr:`enable_layernorm=True`.
+        only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        Only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        Only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing the weights of both linear transformations.
@@ -659,16 +659,16 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate whether to enable bias shifting.
         If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        Used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes_1: Tuple[str, ...], default = ('mlp',)
         The name of axes used to shard bias with a corresponding mesh  for
         the weight of the first linear transformations.
-        Only works when :attr:`use_bias=True`.
+        Only used when :attr:`use_bias=True`.
     bias_axes_2: Tuple[str, ...], default = ('embed',)
         The name of axes used to shard bias with a corresponding mesh  for
         the weight of the second linear transformations.
-        Only works when :attr:`use_bias=True`.
+        Only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
