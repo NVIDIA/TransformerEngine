@@ -208,7 +208,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         return context_layer
 
 class FlashAttention_cuDNN(torch.nn.Module):
-    """Dot product attention implementation by using the flash-attn package.
+    """Dot product attention implementation by using the cuDNN flash-attn implementation.
     """
 
     def __init__(
@@ -220,21 +220,11 @@ class FlashAttention_cuDNN(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if "dev" not in _flash_attn_version:
-            raise ImportError(
-                'Please install correct version of flash-attn with ' \
-                'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
-                'If running on Hopper, ' \
-                'please install from source with compute capability 9.0.')
-        assert (
-            attn_mask_type == "causal"
-            ), 'FlashAttention currently only supports causal attention mask.'
-
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
-        #self.fa_cudnn = cuDNN_FlashAttn()
+        self.cudnn_flashattn = cuDNN_FlashAttn()
 
     def forward(
         self,
@@ -245,42 +235,34 @@ class FlashAttention_cuDNN(torch.nn.Module):
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
-        #assert (
-        #    (qkv.dtype in [torch.float16, torch.bfloat16])
-        #    ), 'FlashAttention currently only supports FP16 and BF16.'
-        #assert (
-        #    qkv.is_cuda 
-        #    ), 'FlashAttention currently only supports CUDA tensors.'
-        #assert (
-        #    attention_mask is None
-        #), 'FlashAttention currently does not support external attention mask.'
-        print("=========== FA - cuDNN ===========")
+        print("=========== FA - cuDNN self attn ===========")
 
         qkv = torch.cat([query_layer.unsqueeze(2),
             key_layer.unsqueeze(2),
             value_layer.unsqueeze(2)], dim=2).contiguous()
-        #query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-        #               for x in (query_layer, key_layer, value_layer)]
         print("q,k,v shape: ",query_layer.shape,"qkv shape: ",qkv.shape)
-
         batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
-
-        actualSeqlen = torch.ones(
+        actualSeqlenQ = torch.ones(
+            seqlen,
+            dtype=torch.int32,
+            device=query_layer.device)
+        actualSeqlenK = torch.ones(
             seqlen,
             dtype=torch.int32,
             device=query_layer.device)
 
-        #with self.attention_dropout_ctx():
-        #    output = self.fa_cudnn(
-        #        qkv, actualSeqlen, 
-        #        self.attention_dropout if self.training else 0.0,
-        #        softmax_scale=1.0/self.norm_factor
-        #    )
-        #print("output shape: ",output.shape)
+        with self.attention_dropout_ctx():
+            output = self.cudnn_flashattn(
+                qkv, actualSeqlenQ, actualSeqlenK, is_first_microbatch=None,
+            )
+                #self.attention_dropout if self.training else 0.0,
+                #softmax_scale=1.0/self.norm_factor
+        print("output shape: ",output.shape)
         #return output
 
-        # [(b sq), np, hn] -> [sq, b, (np hn)]
-        #return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        ## [(b, sq), np, hn] 
+        # [b, sq, np, hn] -> [sq, b, (np hn)]
+        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention implementation by using the flash-attn package.
@@ -453,9 +435,11 @@ class DotProductAttention(torch.nn.Module):
         # might be ruled out due to forward inputs.
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
+
+        # temporarily set to True for testing
         self.use_flash_attention_cudnn = True
         if self.use_flash_attention_cudnn:
-            self.fa_cudnn = FlashAttention_cuDNN(norm_factor, **attn_kwargs)
+            self.flash_attention_cudnn = FlashAttention_cuDNN(norm_factor, **attn_kwargs)
 
 
     def _checkpointed_attention_forward(
@@ -529,7 +513,7 @@ class DotProductAttention(torch.nn.Module):
 
         if self.use_flash_attention_cudnn:
             if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.fa_cudnn,
+                return self._checkpointed_attention_forward(self.flash_attention_cudnn,
                                                             query_layer,
                                                             key_layer,
                                                             value_layer)
