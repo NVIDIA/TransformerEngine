@@ -79,11 +79,11 @@ class MajorShardingType(Enum):
     SINGLE:
         Single process training.
     DP:
-        Data parallel traiing.
+        Data parallel training.
     TP:
-        Standard tensor parallel traiing.
+        Standard tensor parallel training.
     DPTP:
-        Data and Standard tensor parallel traiing.
+        Data and Standard tensor parallel training.
     """
     SINGLE = 0
     DP = 1

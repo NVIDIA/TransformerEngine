@@ -664,7 +664,7 @@ class TransformerLayer(nn.Module):
         Dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for
-        generate Dropout masks in the Multi-Head Attention.
+        generating Dropout masks in the Multi-Head Attention.
     mha_kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         Used for initializing weights of QKV and Output projection weights.
