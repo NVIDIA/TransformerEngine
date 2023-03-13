@@ -35,7 +35,7 @@ jobs:
     name: 'TensorFlow build'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/tensorflow:23.02-py3
+      image: nvcr.io/nvidia/tensorflow:23.02-tf2-py3
       options: --user root
     steps:
       - name: 'Checkout'
