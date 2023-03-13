@@ -157,7 +157,8 @@ def onnx_te_gemm(
 
 
 #
-# layer_norm_workaround is a temporary workaround to an ONNX Runtime bug.
+# layer_norm_workaround is a temporary workaround to an ONNX Runtime bug:
+#    https://github.com/microsoft/onnxruntime/issues/15021
 # Seems like ORT is performing a template-matching for LN and incorrectly concludes
 # that it doesn't have a kernel for FP32 LN. The work-around adds the addition of
 # fake_zero which is meant to prevent the template matching while keeping the graph
@@ -172,7 +173,7 @@ from typing import Sequence, Tuple
 from torch.onnx._internal import jit_utils
 from torch import _C
 
-@symbolic_helper.parse_args("v", "is", "v", "v", "f")
+@symbolic_helper.parse_args("v", "is", "v", "v", "f", "v")
 def layer_norm_workaround(
     g: jit_utils.GraphContext,
     input: _C.Value,
@@ -180,6 +181,7 @@ def layer_norm_workaround(
     weight: _C.Value,
     bias: _C.Value,
     eps: float,
+    apply_war: bool,
 ) -> Tuple[_C.Value, _C.Value, _C.Value]:
     axes = [-i for i in range(len(normalized_shape), 0, -1)]
 
@@ -205,8 +207,9 @@ def layer_norm_workaround(
     denominator = torch.onnx.symbolic_opset9.sqrt(g, g.op("Add", variance, eps_cst))
     normalized = g.op("Div", numerator, denominator)
 
-    fake_zero = symbolic_helper._generate_wrapped_number(g, 0.00000001)
-    normalized = g.op("Add", normalized, fake_zero)
+    if apply_war:
+        fake_zero = symbolic_helper._generate_wrapped_number(g, 0.00000001)
+        normalized = g.op("Add", normalized, fake_zero)
 
     # Cast back to input type as eps related ops are all done
     if is_type_half:
@@ -253,7 +256,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        one = g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64, device="cuda"))
+        one = g.op("Constant", value_t=torch.tensor([1.], dtype=torch.float, device="cuda"))
         weight = g.op("Add", weight, one)
 
     # TE computes LN using float32 precision so wrap the LN subgraph with
@@ -269,7 +272,8 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
         normalized_shape,
         weight,
         bias,
-        eps)
+        eps,
+        not is_fp32)
 
     if not is_fp32:
         ln = g.op("Cast", ln, to_i=_type_utils.JitScalarType(input_dtype).onnx_type())
