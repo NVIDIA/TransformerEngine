@@ -191,7 +191,7 @@ class MultiHeadAttention(nn.Module):
     dropout_rate : float, default = 0.0
         Dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
-        The key in given RNGs via flax.linen.Module.apply that
+        The key in given RNGs via flax.linen.Module.apply that is used
         to generate Dropout masks in the core attention.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
@@ -199,13 +199,13 @@ class MultiHeadAttention(nn.Module):
         A value added to the denominator of layer normalization for numerical stability.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
-        Used for initializing weights of QKV and Output projection weights.
+        Used for initializing the QKV and Output projection weights.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     use_bias: bool, default = False
-        Indicate whether to enable bias shifting for QKVO projections.
+        Indicate whether or not to enable bias shifting for QKVO projections.
         If set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        Used for initializing bias of QKVO projections, it only works when :attr:`use_bias=True`.
+        Used for initializing bias of QKVO projections, only used when :attr:`use_bias=True`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     apply_residual_connection_post_layernorm : bool, default = False
         Indicate if apply residual connection with the output of layer normalization.

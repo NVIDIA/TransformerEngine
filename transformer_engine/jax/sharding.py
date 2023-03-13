@@ -37,10 +37,10 @@ class ShardingResource:
     ----------
     dp_resource : str, default = None
         The axis name in Mesh used to shard batches along.
-        If it is None, then disabling data parallelism.
+        If it is None, then data parallelism is disabled.
     tp_resource : str, default = None
         The axis name in Mesh used to split the hidden dimensions along.
-        If it is None, then disabling tensor parallelism.
+        If it is None, then tensor parallelism is disabled.
     """
     dp_resource: str = None
     tp_resource: str = None
