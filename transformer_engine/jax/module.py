@@ -98,13 +98,19 @@ def _combine_biases(*masks: List[Array]):
 class Softmax(nn.Module):
     r"""
     Applies softmax over a mini-batch of inputs.
-    The inputs's shape should be [batch, heads, q_seqlen, k_seqlen].
+    The input's shape should be [batch, heads, q_seqlen, k_seqlen].
+
+    .. code-block:: python
+        shifted_input = input + bias
+        masked_scaled = (1 - mask)*(shifted_input * scale_factor)
+        softmax_mask = mask * -1e-10
+        output = softmax(masked_scaled + softmax_mask)
 
     Parameters
     ----------
     scale_factor : float, default = 1.0
-        Scale the inputs along the last dimension before running softmax.
-    softmax_type : SoftmaxType, default = 'layernorm'
+        Scale the whole (inputs + bias) before running softmax.
+    softmax_type : SoftmaxType, default = SoftmaxType.SCALED
         Indicate the type of softmax.
 
     Optimization parameters
@@ -158,7 +164,7 @@ class Softmax(nn.Module):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED,
                                   self.sharding_type)
             else:
-                outputs = jax_nn.softmax(logits)
+                outputs = jax_nn.softmax(logits * self.scale_factor)
 
         return outputs
 
