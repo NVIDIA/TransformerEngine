@@ -21,7 +21,7 @@ Modules
 -------
 
 .. autoapiclass:: transformer_engine.jax.LayerNorm(epsilon=1e-6, layernorm_type='layernorm', **kwargs)
-    :members: __call__
+  :members: __call__
 
 .. autoapiclass:: transformer_engine.jax.DenseGeneral(features, layernorm_type='layernorm', use_bias=False, **kwargs)
   :members: __call__
