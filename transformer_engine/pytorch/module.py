@@ -92,6 +92,7 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
+#def get_cublas_workspace() -> torch.Tensor:
 def get_workspace() -> torch.Tensor:
     """Returns workspace for cublas."""
     global _cublas_workspace
@@ -100,6 +101,22 @@ def get_workspace() -> torch.Tensor:
             get_cublas_workspace_size_bytes(), dtype=torch.int8, device="cuda"
         )
     return _cublas_workspace
+
+#def get_cudnn_workspace_size_bytes() -> None:
+#    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
+#    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+#        return 33_554_432
+#    return 4_194_304
+#
+#
+#def get_cudnn_workspace() -> torch.Tensor:
+#    """Returns workspace for cudnn."""
+#    global _cudnn_workspace
+#    if _cudnn_workspace is None:
+#        _cudnn_workspace = torch.empty(
+#            get_cudnn_workspace_size_bytes(), dtype=torch.int8, device="cuda"
+#        )
+#    return _cudnn_workspace
 
 @contextmanager
 def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> None:
@@ -3032,79 +3049,144 @@ class _cuDNN_FlashAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx,
-            qkv: torch.Tensor,
-            actualSeqlen: torch.Tensor,
-            dropout: torch.float,
-            attn_scale: torch.float,
-    ) -> torch.Tensor:
+            QKV: torch.Tensor,
+            M: torch.Tensor,
+            ZInv: torch.Tensor,
+            O: torch.Tensor,
+            descaleQ: torch.Tensor,
+            descaleK: torch.Tensor,
+            descaleV: torch.Tensor,
+            descaleS: torch.Tensor,
+            scaleS: torch.Tensor,
+            scaleO: torch.Tensor,
+            amaxS: torch.Tensor,
+            amaxO: torch.Tensor,
+            QKVRaggedOffset: torch.Tensor,
+            ORaggedOffset: torch.Tensor,
+            actualSeqlenQ: torch.Tensor,
+            actualSeqlenK: torch.Tensor,
+            actualSeqlenO: torch.Tensor,
+            workspace: torch.Tensor,
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-        b, s_q, _, h, d = qkv.shape
+        cudnn_flash_attn_fwd(QKV,
+                    M,
+                    ZInv,
+                    O,
+                    descaleQ,
+                    descaleK,
+                    descaleV,
+                    descaleS,
+                    scaleS,
+                    scaleO,
+                    amaxS,
+                    amaxO,
+                    QKVRaggedOffset,
+                    ORaggedOffset,
+                    actualSeqlenQ,
+                    actualSeqlenK,
+                    actualSeqlenO,
+                    workspace)
 
+        if is_grad_enabled:
+            ctx.save_for_backward(QKV,
+                    M,
+                    ZInv,
+                    O,
+                    descaleQ,
+                    descaleK,
+                    descaleV,
+                    descaleS,
+                    scaleS,
+                    scaleO,
+                    amaxS,
+                    amaxO,
+                    QKVRaggedOffset,
+                    ORaggedOffset,
+                    actualSeqlenQ,
+                    actualSeqlenK,
+                    actualSeqlenO)
+
+    #@staticmethod
+    #def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    # TODO: 
+    #    with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_cuDNN_FlashAttn"):
+    #        (
+    #        qkv,
+    #        ) = ctx.saved_tensors
+
+    #        (
+    #            grad_output,
+    #            grad_output_c,
+    #            grad_output_t,
+    #            grad_bias,
+    #        ) = TransformerEngineBaseModule.grad_output_preprocess(
+    #            ctx, grad_outputs[0], ctx.parallel_mode == "row"
+    #        )
+
+class cuDNN_FlashAttn(TransformerEngineBaseModule):
+
+    def __init__(
+        self,
+    ) -> None:
+        super().__init__()
+
+        # TODO: 
+
+    def forward(
+        self,
+        QKV: torch.Tensor,
+        actualSeqlenQ: torch.Tensor,
+        actualSeqlenK: torch.Tensor,
+        is_first_microbatch: Optional[bool] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+
+        b, s_q, _, h, d = QKV.shape
+
+        M = torch.empty(
+                b,
+                h,
+                s_q,
+                dtype=QKV.dtype,
+                device=QKV.device,
+            )
+        ZInv = torch.empty(
+                b,
+                h,
+                s_q,
+                dtype=QKV.dtype,
+                device=QKV.device,
+            )
         O = torch.empty(
             b,
             s_q,
             h,
             d,
             dtype=QKV.dtype,
-            device="cuda",
+            device=QKV.device,
         )
 
-        cudnn_flash_attn_fwd(qkv, actualSeqlen, O)
+        descaleQ = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        descaleK = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        descaleV = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        descaleS = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        scaleS = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        scaleO = torch.ones(1, dtype=QKV.dtype, device=QKV.device)
+        amaxS = torch.empty(1, dtype=QKV.dtype, device=QKV.device)
+        amaxO = torch.empty(1, dtype=QKV.dtype, device=QKV.device)
 
-        ctx.save_for_backward(qkv, O)
+        actualSeqlenO = actualSeqlenQ.detach().clone()
 
-        return O
+        QKVRaggedOffset = torch.cat(
+                [torch.zeros(1, device = actualSeqlenQ.device),
+                3.0 * s_q * h * d * torch.cumsum(actualSeqlenQ, dim=0)], dim=0)
+        ORaggedOffset = torch.cat(
+                [torch.zeros(1, device = actualSeqlenQ.device),
+                s_q * h * d * torch.cumsum(actualSeqlenQ, dim=0)], dim=0)
 
-    #@staticmethod
-    #def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-    #    full_param_buffer, *params_split = ctx.saved_tensors
+        workspace = get_workspace()
 
-    #    split_size = full_param_buffer.shape[0] // len(params_split)
-    #    grads = []
-
-    #    for i, _ in enumerate(params_split):
-    #        grads.append(grad_output[i * split_size : (i+1) * split_size])
-
-    #    return None, *grads
-
-class cuDNN_FlashAttn(TransformerEngineBaseModule):
-    """This class is a cuDNN implementation of flash attention."""
-    def __init__(
-        self,
-        tp_group: Optional[dist_group_type] = None,
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        init_method: Optional[Callable] = None,
-        bias: bool = True,
-        params_dtype: torch.dtype = torch.float32,
-        parallel_mode: Optional[str] = None,
-        skip_weight_param_allocation: bool = False,
-        parameters_split: Optional[Tuple[str, ...]] = None,
-        zero_centered_gamma: bool = False,
-    ) -> None:
-        super().__init__()
-
-    def forward(
-        self,
-        inp: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        is_first_microbatch: Optional[bool] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
-
-        with self.prepare_forward(inp, is_first_microbatch) as inp:
-            bias_tensor = (
-                bias if bias is not None
-                else self.bias if self.parameters_split is None
-                else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names)
-            )
-            weight_tensor = (
-                weight if weight is not None
-                else self.weight if self.parameters_split is None
-                else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names)
-            )
+        with self.prepare_forward(QKV, is_first_microbatch, num_gemms=2) as inp:
 
             if torch.is_grad_enabled():
                 fwd_fn = _cuDNN_FlashAttn.apply
@@ -3113,32 +3195,26 @@ class cuDNN_FlashAttn(TransformerEngineBaseModule):
                 fwd_fn = _cuDNN_FlashAttn.forward
                 args = [None]
             args += (
-                inp,
-#                self.layer_norm_weight,
-#                self.layer_norm_bias,
-#                weight_tensor,
-#                self.weight1_fp8 if self.fp8 else None,
-#                self.weight1_t_fp8 if self.fp8 else None,
-#                bias_tensor,
-#                self.use_bias,
-#                self.eps,
-#                is_first_microbatch,
-#                self.fp8,
-#                self.fp8_calibration,
-#                self.fp8_meta,
-#                self.fuse_wgrad_accumulation,
-#                self.tp_group,
-#                self.sequence_parallel,
-#                self.tp_size > 1,
-#                self.activation_dtype,
-#                self.parallel_mode,
-#                self.return_layernorm_output,
-#                torch.is_grad_enabled(),
-#                self.fwd_ln_sm_margin,
-#                self.bwd_ln_sm_margin,
-#                self.zero_centered_gamma,
+                    QKV,
+                    M,
+                    ZInv,
+                    O,
+                    descaleQ,
+                    descaleK,
+                    descaleV,
+                    descaleS,
+                    scaleS,
+                    scaleO,
+                    amaxS,
+                    amaxO,
+                    QKVRaggedOffset,
+                    ORaggedOffset,
+                    actualSeqlenQ,
+                    actualSeqlenK,
+                    actualSeqlenO,
+                    workspace,
             )
-            out = fwd_fn(*args)
+            fwd_fn(*args)
 
-        return out
+        return O 
 
