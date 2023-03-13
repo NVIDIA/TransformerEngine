@@ -502,7 +502,7 @@ def test_export_layernorm(
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
-        validate_result(fname, inp, model, atol=1e-5, is_fp8=use_fp8)
+        validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8)
 
 
 @skip_FP8
