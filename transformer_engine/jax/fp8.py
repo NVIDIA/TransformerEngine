@@ -302,16 +302,16 @@ def fp8_autocast(enabled: bool = False,
     .. note::
         We only support :attr:`margin`, :attr:`fp8_format`, :attr:`interval` and
         :attr:`amax_history_len` in recipe.DelayedScaling currently. Other parameters
-        in recipe.DelayedScaling would be ignored, even is set.
+        in recipe.DelayedScaling would be ignored, even if set.
 
     Parameters
     ----------
     enabled: bool, default = False
-        whether or not to enable fp8
+        Whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
-        recipe used for FP8 training.
-    sharding_resource: ShardingResource, defaule = None
-        specify the mesh axes for data and tensor parallelism to shard along.
+        Recipe used for FP8 training.
+    sharding_resource: ShardingResource, default = None
+        Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then ShardingResource() would be created.
     """
     if fp8_recipe is None:
@@ -338,12 +338,11 @@ def fp8_autocast(enabled: bool = False,
 
 
 # Function Wrappers
-def update_collections(new: Collection, original: Collection) -> Collection:
+def update_collections(new: Collection, original: Collection) -> FrozenDict:
     r"""
-    A helper to update Flax's Collection. Collection is a union type of dict and
-    Flax's FrozenDict.
+    A helper to update Flax's Collection.
 
-    Collection = [dict, FrozenDict]
+    Collection = [dict, flax.core.frozen_dict.FrozenDict]
 
     Parameters
     ----------
@@ -364,14 +363,16 @@ def update_fp8_metas(state: Collection) -> Collection:
     r"""
     Calculate new fp8 scales and its inverse via the followed formula
 
-    `exp` = floor(log2(`fp8_max` / `amax`)) - `margin`
-    `sf` = round(power(2, abs(exp)))
-    `sf` = `sf` if `amax` > 0.0, else original_scale
-    `sf` = `sf` if isfinite(`amax`), else original_scale)
-    `updated_scale` = `1/sf` if exp < 0, else `sf`
-    `updated_scale_inv` = `1/updated_scale`
+    .. code-block:: python
 
-    Collection = [dict, FrozenDict]
+        exp = floor(log2(fp8_max / amax)) - margin
+        sf = round(power(2, abs(exp)))
+        sf = sf if amax > 0.0, else original_scale
+        sf = sf if isfinite(amax), else original_scale)
+        updated_scale = 1/sf if exp < 0, else sf
+        updated_scale_inv = 1/updated_scale
+
+    Collection = [dict, flax.core.frozen_dict.FrozenDict]
 
     Parameters
     ----------
