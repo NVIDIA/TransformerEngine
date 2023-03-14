@@ -23,10 +23,15 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
     TypeError: 'torch._C.Value' object is not subscriptable
 """
 
+
+from typing import Sequence, Tuple
 import torch
-from torch.onnx import symbolic_helper, register_custom_op_symbolic
+from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
+from torch.onnx._internal import jit_utils
 import torch._C._onnx as _C_onnx
+from torch import _C
 import transformer_engine_extensions as tex
+
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
@@ -156,40 +161,35 @@ def onnx_te_gemm(
     return output
 
 
-#
-# layer_norm_workaround is a temporary workaround to an ONNX Runtime bug:
-#    https://github.com/microsoft/onnxruntime/issues/15021
-# Seems like ORT is performing a template-matching for LN and incorrectly concludes
-# that it doesn't have a kernel for FP32 LN. The work-around adds the addition of
-# fake_zero which is meant to prevent the template matching while keeping the graph
-# virtually unchanged. This also requires `do_constant_folding=False` in
-# `torch.onnx.export`.
-# The code is taken from
-# https://github.com/pytorch/pytorch/blob/1ab883797a2b3b54677574ce98e897b19fbbecec/torch/onnx/symbolic_opset9.py#L2764
-#
-
-from torch.onnx import _type_utils, symbolic_helper
-from typing import Sequence, Tuple
-from torch.onnx._internal import jit_utils
-from torch import _C
-
 @symbolic_helper.parse_args("v", "is", "v", "v", "f", "v")
 def layer_norm_workaround(
     g: jit_utils.GraphContext,
-    input: _C.Value,
+    inp: _C.Value,
     normalized_shape: Sequence[int],
     weight: _C.Value,
     bias: _C.Value,
     eps: float,
     apply_war: bool,
 ) -> Tuple[_C.Value, _C.Value, _C.Value]:
+    """
+    layer_norm_workaround is a temporary workaround to an ONNX Runtime bug:
+        https://github.com/microsoft/onnxruntime/issues/15021
+    Seems like ORT is performing template-matching for LN and incorrectly concludes
+    that it doesn't have a kernel for FP32 LN. The work-around adds the addition of
+    fake_zero which is meant to prevent the template matching while keeping the graph
+    virtually unchanged. This also requires `do_constant_folding=False` in
+    `torch.onnx.export`.
+    The code is taken from
+    https://github.com/pytorch/pytorch/blob/1ab883797a2b3b54677574ce98e897b19fbbecec/torch/onnx/symbolic_opset9.py#L2764
+    """
+
     axes = [-i for i in range(len(normalized_shape), 0, -1)]
 
     two_cst = symbolic_helper._generate_wrapped_number(g, 2.0)
     eps_cst = symbolic_helper._generate_wrapped_number(g, eps)
 
-    mean = g.op("ReduceMean", input, axes_i=axes)
-    numerator = torch.onnx.symbolic_opset9.sub(g, input, mean)
+    mean = g.op("ReduceMean", inp, axes_i=axes)
+    numerator = torch.onnx.symbolic_opset9.sub(g, inp, mean)
 
     # Cast it to eps dtype to avoid precision loss
     is_type_half = (
@@ -203,7 +203,9 @@ def layer_norm_workaround(
         )
 
     # variance = e((x - e(x))^2), and (x - e(x)) is the numerator in the layer_norm formula
-    variance = g.op("ReduceMean", torch.onnx.symbolic_opset9.pow(g, numerator, two_cst), axes_i=axes)
+    variance = g.op(
+        "ReduceMean",
+        torch.onnx.symbolic_opset9.pow(g, numerator, two_cst), axes_i=axes)
     denominator = torch.onnx.symbolic_opset9.sqrt(g, g.op("Add", variance, eps_cst))
     normalized = g.op("Div", numerator, denominator)
 
@@ -213,9 +215,9 @@ def layer_norm_workaround(
 
     # Cast back to input type as eps related ops are all done
     if is_type_half:
-        input_dtype = _type_utils.JitScalarType.from_value(input)
+        inp_dtype = _type_utils.JitScalarType.from_value(inp)
         normalized = g.op(
-            "Cast", normalized, to_i=_type_utils.JitScalarType(input_dtype).onnx_type()
+            "Cast", normalized, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type()
         )
 
     if not (weight is None or symbolic_helper._is_none(weight)):
@@ -225,7 +227,7 @@ def layer_norm_workaround(
 
     if is_type_half:
         denominator = g.op(
-            "Cast", denominator, to_i=_type_utils.JitScalarType(input_dtype).onnx_type()
+            "Cast", denominator, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type()
         )
         rdenominator = g.op("Reciprocal", denominator)
     else:
