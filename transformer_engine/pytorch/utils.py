@@ -179,6 +179,6 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
 
 
-def check_modulo_16(*tensors: Tuple[torch.Tensor, ...]):
+def check_modulo_16(*tensors: Tuple[torch.Tensor, ...]) -> bool:
     """Check if each dimension of given tensors is divisible by 16."""
     return all(all(n % 16 == 0 for n in t.shape) for t in tensors)
