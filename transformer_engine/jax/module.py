@@ -98,19 +98,25 @@ def _combine_biases(*masks: List[Array]):
 class Softmax(nn.Module):
     r"""
     Applies softmax over a mini-batch of inputs.
-    The inputs's shape should be [batch, heads, q_seqlen, k_seqlen].
+    The input's shape should be [batch, heads, q_seqlen, k_seqlen].
+
+    .. code-block:: python
+        shifted_input = input + bias
+        masked_scaled = (1 - mask)*(shifted_input * scale_factor)
+        softmax_mask = mask * -1e-10
+        output = softmax(masked_scaled + softmax_mask)
 
     Parameters
     ----------
     scale_factor : float, default = 1.0
-        scale the inputs along the last dimension before running softmax.
-    softmax_type : SoftmaxType, default = 'layernorm'
-        indicate the type of softmax.
+        Scalar for the input to softmax.
+    softmax_type : SoftmaxType, default = SoftmaxType.SCALED
+        Indicate the type of softmax.
 
     Optimization parameters
     -----------------------
     sharding_type : ShardingType, default = ShardingType.SINGLE
-        indicate the sharding pattern.
+        Indicate the sharding pattern.
     """
 
     scale_factor: float = 1.0
@@ -158,7 +164,7 @@ class Softmax(nn.Module):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED,
                                   self.sharding_type)
             else:
-                outputs = jax_nn.softmax(logits)
+                outputs = jax_nn.softmax(logits * self.scale_factor)
 
         return outputs
 
@@ -193,30 +199,32 @@ class LayerNorm(nn.Module):
     Parameters
     ----------
     epsilon : float, default = 1e-6
-        a value added to the denominator of layer normalization for numerical stability.
+        A value added to the denominator of layer normalization for numerical stability.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
-        indicate the type of layer normalization.
+        Indicate the type of layer normalization.
     scale_init : Initializer, default = flax.linen.initializers.ones
-        used for initializing scale factors :math:`\gamma`.
+        Used for initializing scale factors :math:`\gamma`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
-        the name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
+        The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
     bias_init : Initializer, default = flax.linen.initializers.zeros
-        used for initializing shift factors :math:`\beta`,
-        only works when :attr:`layernorm_type='layernorm'`.
+        Used for initializing shift factors :math:`\beta`,
+        only used when :attr:`layernorm_type='layernorm'`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        only works when :attr:`layernorm_type='layernorm'`.
+        only used when :attr:`layernorm_type='layernorm'`.
 
     Optimization parameters
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
         the data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        Indicate whether the input tensors were switched axis of batch
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     sharding_type : ShardingType, default = ShardingType.SINGLE
-        indicate the sharding pattern.
+        Indicate the sharding pattern.
     """
     epsilon: float = 1e-6
     layernorm_type: str = 'layernorm'
@@ -316,33 +324,35 @@ class DenseGeneral(TransformerEngineBase):
     Parameters
     ----------
     features : Union[Iterable[int], int]
-        the hidden size of each output sample.
+        The hidden size of each output sample.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        used for initializing weights.
+        Used for initializing weights.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     kernel_axes : Tuple[str, ...], default = ()
-        the name of axes used to shard the weights with a corresponding mesh.
+        The name of axes used to shard the weights with a corresponding mesh.
     use_bias: bool, default = False
-        indicate whether to enable bias shifting.
-        if set to False, the layer will not learn an additive bias.
+        Indicate whether to enable bias shifting.
+        If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes: Tuple[str, ...], default = ()
-        the name of axes used to shard bias with a corresponding mesh,
-        only works when :attr:`use_bias=True`.
+        The name of axes used to shard bias with a corresponding mesh,
+        only used when :attr:`use_bias=True`.
     axis:  Union[Iterable[int], int], default = -1
-        a integer of tuple with axes to apply the transformation on.
+        An integer tuple with axes to apply the transformation on.
 
     Optimization parameters
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        Indicate whether the input tensors were switched axis of batch
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     sharding_type : ShardingType, default = ShardingType.SINGLE
-        indicate the sharding pattern.
+        Indicate the sharding pattern.
     """
 
     features: Union[Iterable[int], int]
@@ -426,56 +436,60 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     Parameters
     ----------
     features : Union[Iterable[int], int]
-        the hidden size of each output sample.
+        The hidden size of each output sample.
     enable_layernorm: bool, default = True
-        indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before linear transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
-        indicate the type of layer normalization.
+        Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
-        a value added to the denominator of layer normalization for numerical stability.
+        A value added to the denominator of layer normalization for numerical stability.
     scale_init : Initializer, default = flax.linen.initializers.ones
-        used for initializing scale factors :math:`\gamma`.
+        Used for initializing scale factors :math:`\gamma`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
-        the name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
-        only works when :attr:`enable_layernorm=True`.
+        The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
+        only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing shift factors :math:`\beta`,
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        Used for initializing shift factors :math:`\beta`,
+        only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        It is only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        used for initializing weights.
+        Used for initializing weights.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     kernel_axes : Tuple[str, ...], default = ()
-        the name of axes used to shard the weights with a corresponding mesh.
+        The name of axes used to shard the weights with a corresponding mesh.
     use_bias: bool, default = False
-        indicate whether to enable bias shifting.
-        if set to False, the layer will not learn an additive bias.
+        Indicate whether to enable bias shifting.
+        If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes: Tuple[str, ...], default = ()
-        the name of axes used to shard bias with a corresponding mesh,
-        only works when :attr:`use_bias=True`.
+        The name of axes used to shard bias with a corresponding mesh,
+        only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
-        indicate whether to return the output of layer normalization.
+        Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     axis:  Union[Iterable[int], int], default = -1
-        a integer of tuple with axes to apply the transformation on.
+        An integer tuple with axes to apply the transformation on.
 
     Optimization parameters
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        Indicate whether the input tensors were switched axis of batch
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     depth_scaling: float, default = None
-        the factor to scale the output from `DenseGeneral`. It should be a float
+        The factor to scale the output from `DenseGeneral`. It should be a float
         value or None. When None is set, then no scaling is applied.
     sharding_type : ShardingType, default = ShardingType.SINGLE
-        indicate the sharding pattern.
+        Indicate the sharding pattern.
     """
 
     features: Union[Iterable[int], int]
@@ -519,7 +533,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             Output tensors.
         ln_outputs: jax.numpy.ndarray
             The output tensors of layer normalization.
-            If :attr:`return_layernorm_output=False`, then this woulb be None.
+            If :attr:`return_layernorm_output=False`, then this would be None.
         """
         ln_output = None
 
@@ -617,67 +631,71 @@ class LayerNormMLP(TransformerEngineBase):
     Parameters
     ----------
     intermediate_dim: int, default = 2048
-        intermediate size to which input samples are projected.
+        Intermediate size to which input samples are projected.
     enable_layernorm: bool, default = True
-        indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before linear transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
-        indicate the type of layer normalization.
+        Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
-        a value added to the denominator of layer normalization for numerical stability.
+        A value added to the denominator of layer normalization for numerical stability.
     scale_init : Initializer, default = flax.linen.initializers.ones
-        used for initializing scale factors :math:`\gamma`.
+        Used for initializing scale factors :math:`\gamma`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
-        the name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
-        only works when :attr:`enable_layernorm=True`.
+        The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
+        only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing shift factors :math:`\beta`,
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        Used for initializing shift factors :math:`\beta`,
+        only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
-        only works when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
+        Only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        used for initializing weight of both linear transformations.
+        Used for initializing the weights of both linear transformations.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     kernel_axes_1 : Tuple[str, ...], default = ('embed', 'act', 'mlp')
-        the name of axes used to shard the weights with a corresponding mesh for
+        The name of axes used to shard the weights with a corresponding mesh for
         the weight of the first linear transformations.
     kernel_axes_2 : Tuple[str, ...], default = ('mlp', 'embed')
-        the name of axes used to shard the weights with a corresponding mesh for
+        The name of axes used to shard the weights with a corresponding mesh for
         the weight of the second linear transformations.
     use_bias: bool, default = False
-        indicate whether to enable bias shifting.
-        if set to False, the layer will not learn an additive bias.
+        Indicate whether to enable bias shifting.
+        If set to False, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias, only works when :attr:`use_bias=True`.
+        Used for initializing bias, only used when :attr:`use_bias=True`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes_1: Tuple[str, ...], default = ('mlp',)
-        the name of axes used to shard bias with a corresponding mesh  for
+        The name of axes used to shard bias with a corresponding mesh  for
         the weight of the first linear transformations.
-        only works when :attr:`use_bias=True`.
+        Only used when :attr:`use_bias=True`.
     bias_axes_2: Tuple[str, ...], default = ('embed',)
-        the name of axes used to shard bias with a corresponding mesh  for
+        The name of axes used to shard bias with a corresponding mesh  for
         the weight of the second linear transformations.
-        only works when :attr:`use_bias=True`.
+        Only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
-        indicate whether to return the output of layer normalization.
+        Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     activations: Sequence[Union[str, Callable]], default = ('relu',)
-        the sequence of activation functions to apply after the first linear transformation.
+        The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     intermediate_dropout_rate: float, default = 0.1
-        dropout probability for the dropout op after the :attr:`activations`.
+        Dropout probability for the dropout op after the :attr:`activations`.
     axis:  Union[Iterable[int], int], default = -1
-        a integer of tuple with axes to apply the transformation on.
+        An integer tuple with axes to apply the transformation on.
 
     Optimization parameters
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. if set to True, the input tensors
+        Indicate whether the input tensors were switched axis of batch
+        and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     major_sharding_type : MajorShardingType, default = MajorShardingType.SINGLE
-        indicate the sharding pattern.
+        Indicate the sharding pattern.
     """
 
     intermediate_dim: int = 2048
@@ -726,7 +744,7 @@ class LayerNormMLP(TransformerEngineBase):
             Output tensors.
         ln_outputs: jax.numpy.ndarray
             The output tensors of layer normalization.
-            If :attr:`return_layernorm_output=False`, then this woulb be None.
+            If :attr:`return_layernorm_output=False`, then this would be None.
         """
         ln_output = None
 

@@ -869,7 +869,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-  py::enum_<transformer_engine::DType>(m, "DType")
+  py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)
     .value("kInt32", transformer_engine::DType::kInt32)
     .value("kFloat32", transformer_engine::DType::kFloat32)
