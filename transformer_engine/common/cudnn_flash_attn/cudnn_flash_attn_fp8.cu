@@ -525,7 +525,7 @@ createSoftmaxForward(int64_t b,
     std::cout << reductionAdd_op.describe() << std::endl;
 
     // Define the reciprocal descriptor
-    auto reciprocalDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_RCP);
+    auto reciprocalDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_RECIPROCAL);
 
     // Create a reciprocal Node.
     auto reciprocal_op = unary_pw_op_create(ZTensor, ZInvTensor, reciprocalDesc);
