@@ -109,7 +109,7 @@ class Softmax(nn.Module):
     Parameters
     ----------
     scale_factor : float, default = 1.0
-        Scale the whole (inputs + bias) before running softmax.
+        Scalar for the input to softmax.
     softmax_type : SoftmaxType, default = SoftmaxType.SCALED
         Indicate the type of softmax.
 
