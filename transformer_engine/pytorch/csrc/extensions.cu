@@ -25,9 +25,7 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
 	     at::Tensor MNKOverride,
 	     at::Tensor DropoutSeed,
 	     at::Tensor DropoutOffset,
-	     transformer_engine::DType seqlen_type,
-             at::Tensor workspace,
-             size_t workspaceSize
+	     transformer_engine::DType seqlen_type
 ) {
   // QKV: b x s_q * 3 * h * d
   size_t b = static_cast<size_t>(QKV.size(0));
@@ -92,11 +90,9 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
                                           {1},
 					  seqlen_type);
 
-  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  {workspaceSize},
-                                                  DType::kByte);
+  TensorWrapper workspace;
 
-
+  // This call populates workspace tensors with the required config
   nvte_cudnn_flash_attn_fwd(te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
@@ -114,8 +110,37 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
 	          te_QKVRaggedOffset.data(),
 	          te_ORaggedOffset.data(),
 	          te_MNKOverride.data(),
-                  te_workspace.data(),
+                  workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+
+  // Fill workspace
+  auto workspace_data = allocateSpace(workspace.shape(),
+                                        workspace.dtype());
+
+  workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
+                                            workspace.shape(),
+                                            workspace.dtype());
+  // Actual call to kernel
+  nvte_cudnn_flash_attn_fwd(te_QKV.data(),
+		  te_M.data(),
+		  te_ZInv.data(),
+		  te_O.data(),
+		  te_DropoutSeed.data(),
+		  te_DropoutOffset.data(),
+	          te_descaleQ.data(),
+	          te_descaleK.data(),
+	          te_descaleV.data(),
+	          te_descaleS.data(),
+	          te_scaleS.data(),
+	          te_scaleO.data(),
+	          te_amaxS.data(),
+	          te_amaxO.data(),
+	          te_QKVRaggedOffset.data(),
+	          te_ORaggedOffset.data(),
+	          te_MNKOverride.data(),
+                  workspace.data(),
+		  at::cuda::getCurrentCUDAStream());
+
 
 }
 

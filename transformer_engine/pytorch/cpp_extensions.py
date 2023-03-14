@@ -13,6 +13,8 @@ def cudnn_flash_attn_fwd(
     M: torch.Tensor,
     ZInv: torch.Tensor,
     O: torch.Tensor,
+    DropoutSeed: torch.Tensor,
+    DropoutOffset: torch.Tensor,
     descaleQ: torch.Tensor,
     descaleK: torch.Tensor,
     descaleV: torch.Tensor,
@@ -23,10 +25,7 @@ def cudnn_flash_attn_fwd(
     amaxO: torch.Tensor,
     QKVRaggedOffset: torch.Tensor,
     ORaggedOffset: torch.Tensor,
-    actualSeqlenQ: torch.Tensor,
-    actualSeqlenK: torch.Tensor,
-    actualSeqlenO: torch.Tensor,
-    workspace: torch.Tensor,
+    MNKOverride: torch.Tensor,
 ) -> torch.Tensor:
 
     b, s_q, _, h, d = QKV.shape
@@ -50,12 +49,10 @@ def cudnn_flash_attn_fwd(
              misc_type,
              QKVRaggedOffset,
              ORaggedOffset,
-             actualSeqlenQ,
-             actualSeqlenK,
-             actualSeqlenO,
+             MNKOverride,
+             DropoutSeed,
+             DropoutOffset,
              seqlen_type,
-             workspace,
-             workspace.shape[0],
     )
 
 def fp8_gemm(
