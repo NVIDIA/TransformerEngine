@@ -22,9 +22,9 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
 	     transformer_engine::DType misc_type,
 	     at::Tensor QKVRaggedOffset,
 	     at::Tensor ORaggedOffset,
-	     at::Tensor actualSeqlenQ,
-	     at::Tensor actualSeqlenK,
-	     at::Tensor actualSeqlenO,
+	     at::Tensor MNKOverride,
+	     at::Tensor DropoutSeed,
+	     at::Tensor DropoutOffset,
 	     transformer_engine::DType seqlen_type,
              at::Tensor workspace,
              size_t workspaceSize
@@ -75,19 +75,20 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
                                           {1},
 					  misc_type);
 
+  auto te_DropoutSeed = makeTransformerEngineTensor(DropoutSeed.data_ptr(),
+                                          {1},
+                                          seqlen_type);
+  auto te_DropoutOffset = makeTransformerEngineTensor(DropoutOffset.data_ptr(),
+                                          {1},
+                                          seqlen_type);
+
   auto te_QKVRaggedOffset = makeTransformerEngineTensor(QKVRaggedOffset.data_ptr(),
                                           {b+1},
 					  seqlen_type);
   auto te_ORaggedOffset = makeTransformerEngineTensor(ORaggedOffset.data_ptr(),
                                           {b+1},
 					  seqlen_type);
-  auto te_actualSeqlenQ = makeTransformerEngineTensor(actualSeqlenQ.data_ptr(),
-                                          {1},
-					  seqlen_type);
-  auto te_actualSeqlenK = makeTransformerEngineTensor(actualSeqlenK.data_ptr(),
-                                          {1},
-					  seqlen_type);
-  auto te_actualSeqlenO = makeTransformerEngineTensor(actualSeqlenO.data_ptr(),
+  auto te_MNKOverride = makeTransformerEngineTensor(MNKOverride.data_ptr(),
                                           {1},
 					  seqlen_type);
 
@@ -100,6 +101,8 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
 		  te_M.data(),
 		  te_ZInv.data(),
 		  te_O.data(),
+		  te_DropoutSeed.data(),
+		  te_DropoutOffset.data(),
 	          te_descaleQ.data(),
 	          te_descaleK.data(),
 	          te_descaleV.data(),
@@ -110,9 +113,7 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
 	          te_amaxO.data(),
 	          te_QKVRaggedOffset.data(),
 	          te_ORaggedOffset.data(),
-	          te_actualSeqlenQ.data(),
-	          te_actualSeqlenK.data(),
-	          te_actualSeqlenO.data(),
+	          te_MNKOverride.data(),
                   te_workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
 
