@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""FP8 utilies for TransformerEngine"""
+"""FP8 utilities for TransformerEngine"""
 from contextlib import contextmanager
 from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union

@@ -10,6 +10,7 @@ from .module import LayerNorm
 from .transformer import DotProductAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
+from .export import onnx_export
 from .distributed import checkpoint
 # Register custom op symbolic ONNX functions
 from .te_onnx_extensions import (

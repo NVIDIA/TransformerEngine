@@ -42,6 +42,8 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
+from .export import is_in_onnx_export_mode
+
 _flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
@@ -440,6 +442,9 @@ class DotProductAttention(torch.nn.Module):
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
         ):
+            use_flash_attention = False
+
+        if is_in_onnx_export_mode():
             use_flash_attention = False
 
         if use_flash_attention:
