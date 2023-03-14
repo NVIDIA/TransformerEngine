@@ -21,9 +21,11 @@ with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
 
 os.environ["CUDA_HOME"] = "/jliu/cuda_builds/cuda12.1"
-os.environ["CUDNN_HOME"] = "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1"
+#os.environ["CUDNN_HOME"] = "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1"
+os.environ["CUDNN_HOME"] = "/code/fmha/debug_cudnn"
 os.environ["PATH"] = "/jliu/cuda_builds/cuda12.1/bin:"+os.environ["PATH"]
-os.environ["LD_LIBRARY_PATH"] = "/jliu/cuda_builds/cuda12.1/lib64:/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64:"+os.environ["LD_LIBRARY_PATH"]
+#os.environ["LD_LIBRARY_PATH"] = "/jliu/cuda_builds/cuda12.1/lib64:/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64:"+os.environ["LD_LIBRARY_PATH"]
+os.environ["LD_LIBRARY_PATH"] = "/jliu/cuda_builds/cuda12.1/lib64:/code/fmha/debug_cudnn/lib64:"+os.environ["LD_LIBRARY_PATH"]
 os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 print("CUDA_HOME: ",os.environ["CUDA_HOME"])
 print("CUDNN_HOME: ",os.environ["CUDNN_HOME"])
@@ -91,11 +93,12 @@ def make_abs_path(l):
     return [os.path.join(path, p) for p in l]
 
 
+    #"/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/include",
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
     "/jliu/cuda_builds/cuda12.1/include",
-    "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/include",
+    "/code/fmha/debug_cudnn/include",
     "/code/fmha/gitlab/cudnn_frontend/include",
 ]
 include_dirs = make_abs_path(include_dirs)
@@ -222,7 +225,8 @@ if framework in ("all", "pytorch"):
             },
             include_dirs=include_dirs,
             library_dirs=["jliu/cuda_builds/cuda12.1/lib64", 
-                "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64"],
+                "/code/fmha/debug_cudnn/lib64/"],
+                #"/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/lib64"],
             libraries = ['cudnn'],
         )
     )
@@ -294,11 +298,12 @@ class CMakeBuildExtension(build_ext, object):
         )
         build_dir = os.path.abspath(build_dir)
 
+            #"-DCMAKE_CUDNN_HOME=/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1",
         cmake_args = [
             "-GNinja",
             "-DCMAKE_BUILD_TYPE=" + config,
             "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
-            "-DCMAKE_CUDNN_HOME=/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1",
+            "-DCMAKE_CUDNN_HOME=/code/fmha/debug_cudnn",
             "-DCMAKE_CUDNN_FRONTEND_HOME=/code/fmha/gitlab/cudnn_frontend",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
