@@ -9,3 +9,4 @@ Framework-specific API
 .. toctree::
 
     pytorch
+    jax

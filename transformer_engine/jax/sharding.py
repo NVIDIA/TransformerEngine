@@ -36,11 +36,11 @@ class ShardingResource:
     Parameters
     ----------
     dp_resource : str, default = None
-        axis name in Mesh used to shard batch along.
-        if it is None, then disabling data parallelism.
+        The axis name in Mesh used to shard batches along.
+        If it is None, then data parallelism is disabled.
     tp_resource : str, default = None
-        axis name in Mesh used to split model tensor along.
-        if it is None, then disabling tensor parallelism.
+        The axis name in Mesh used to split the hidden dimensions along.
+        If it is None, then tensor parallelism is disabled.
     """
     dp_resource: str = None
     tp_resource: str = None
@@ -71,12 +71,19 @@ def global_shard_resource() -> ShardingResource:
 
 
 class MajorShardingType(Enum):
-    """
+    r"""
     The major sharding type to indicate sharding pattern.
-    `SINGLE` means single process training.
-    `DP` means data parallel traiing.
-    `TP` means tensor parallel traiing.
-    `DPTP` means data and tensor parallel traiing.
+
+    Values
+    ----------
+    SINGLE:
+        Single process training.
+    DP:
+        Data parallel training.
+    TP:
+        Standard tensor parallel training.
+    DPTP:
+        Data and Standard tensor parallel training.
     """
     SINGLE = 0
     DP = 1
@@ -87,12 +94,21 @@ class MajorShardingType(Enum):
 class ShardingType(Enum):
     """
     The sharding type to indicate sharding pattern.
-    `SINGLE` means no sharding.
-    `DP` means sharding along data parallelism.
-    `TP_COL` means sharding along column-split tensor parallelism.
-    `TP_ROW` means sharding along row-split tensor parallelism.
-    `DP_TP_COL` means sharding along data and column-split tensor parallelism.
-    `DP_TP_ROW` means sharding along data and row-split tensor parallelism.
+
+    Values
+    ----------
+    SINGLE:
+        No sharding.
+    DP:
+        Sharding along data parallelism.
+    TP_COL:
+        Sharding along column-split tensor parallelism.
+    TP_ROW:
+        Sharding along row-split tensor parallelism.
+    DP_TP_COL:
+        Sharding along data and column-split tensor parallelism.
+    DP_TP_ROW:
+        Sharding along data and row-split tensor parallelism.
     """
     SINGLE = (MajorShardingType.SINGLE, "single")
     DP = (MajorShardingType.DP, "dp")
