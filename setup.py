@@ -96,7 +96,7 @@ include_dirs = [
     "transformer_engine/pytorch/csrc",
     "/jliu/cuda_builds/cuda12.1/include",
     "/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1/include",
-    "/code/fmha/cudnn_frontend/include",
+    "/code/fmha/gitlab/cudnn_frontend/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
@@ -299,7 +299,7 @@ class CMakeBuildExtension(build_ext, object):
             "-DCMAKE_BUILD_TYPE=" + config,
             "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
             "-DCMAKE_CUDNN_HOME=/jliu/cudnn_builds/debug_cudnn_v8.9_cuda_12.1",
-            "-DCMAKE_CUDNN_FRONTEND_HOME=/code/fmha/cudnn_frontend",
+            "-DCMAKE_CUDNN_FRONTEND_HOME=/code/fmha/gitlab/cudnn_frontend",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
         cmake_args = cmake_args + self.dlfw_flags
