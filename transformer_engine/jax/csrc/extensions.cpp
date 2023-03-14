@@ -53,7 +53,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
 
-    pybind11::enum_<DType>(m, "DType")
+    pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
         .value("kInt32", DType::kInt32)
         .value("kFloat32", DType::kFloat32)
