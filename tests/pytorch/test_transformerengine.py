@@ -102,6 +102,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=torch.float32, requires_grad=True
     ).cuda()
+    te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = (
         torch.rand(
             (
@@ -119,14 +120,19 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
         _disable_wgrads(block)
 
     use_fp8 = fp8_recipe is not None
-    with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
+    with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
         with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
             te_out = block(te_inp_hidden_states, te_inp_attn_mask)
         loss = te_out.sum()
 
-    assert te_out.dtype == dtype
     loss.backward()
     torch.cuda.synchronize()
+
+    assert te_out.dtype == dtype, "AMP wrong output type."
+    assert te_inp_hidden_states.grad.dtype == torch.float32, "AMP wrong dgrad type."
+    for name, p in block.named_parameters():
+        if p.requires_grad:
+            assert p.grad.dtype == torch.float32, f"AMP wrong wgrad type for {name}."
 
 
 def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
