@@ -6,14 +6,11 @@
 
 #include "common.h"
 
-void cudnn_flash_attn_fwd(
+std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout,
                 at::Tensor &QKV,
-                at::Tensor &M,
-                at::Tensor &ZInv,
-                at::Tensor &O,
                 at::Tensor &descaleQKV,
                 at::Tensor &descaleS,
                 at::Tensor &descaleO,
@@ -23,7 +20,7 @@ void cudnn_flash_attn_fwd(
                 at::Tensor &amaxO,
                 at::Tensor &QKVRaggedOffset,
                 at::Tensor &ORaggedOffset,
-                at::Tensor &PhiloxUnpacked);
+                at::Generator &rng_gen);
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,

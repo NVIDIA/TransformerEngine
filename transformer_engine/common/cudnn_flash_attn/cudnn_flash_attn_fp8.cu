@@ -2034,6 +2034,7 @@ void nvte_cudnn_flash_attn_fwd(
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
+		//at::PhiloxCudaState philox_args, 
   NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
