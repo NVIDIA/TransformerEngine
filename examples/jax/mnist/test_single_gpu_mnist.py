@@ -91,7 +91,7 @@ def apply_model(state, images, labels, var_collect, rngs=None):
 
 @partial(jax.jit, static_argnums=2)
 def update_model(state, grads, use_fp8):
-    "Update model params and FP8 meta."
+    """Update model params and FP8 meta."""
     state = state.apply_gradients(grads=grads[PARAMS_KEY])
     if use_fp8:
         grads = te.update_fp8_metas(grads)

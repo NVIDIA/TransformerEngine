@@ -6,6 +6,7 @@ import argparse
 import os
 import unittest
 from functools import partial
+from pdb import set_trace
 
 import jax
 import jax.numpy as jnp
@@ -17,12 +18,21 @@ from cuda import cudart
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
+from jax.experimental import mesh_utils
+from jax.experimental.pjit import pjit
 
 import transformer_engine.jax as te
 
 PARAMS_KEY = 'params'
+PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
+NUM_GPU = 8
+
+
+def num_gpu_is_enough():
+    """Check if the machine has 8 GPUs."""
+    return len(jax.local_devices()) >= NUM_GPU
 
 
 def gpu_has_fp8():
@@ -70,9 +80,9 @@ class Net(nn.Module):
         return x
 
 
-@jax.jit
 def apply_model(state, inputs, labels, var_collect, rngs=None):
     """Computes gradients, loss and accuracy for a single batch."""
+    print("\napply_model****\n")
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, disable_dropout, rngs=rngs)
@@ -93,17 +103,20 @@ def apply_model(state, inputs, labels, var_collect, rngs=None):
     return grads, loss, accuracy
 
 
-@partial(jax.jit, static_argnums=2)
 def update_model(state, grads, use_fp8):
     """Update model params and FP8 meta."""
-    state = state.apply_gradients(grads=grads[PARAMS_KEY])
+    print("\nupdate_model****\n")
+    var_collect, grads = grads.pop(PARAMS_KEY)
+    state = state.apply_gradients(grads=grads)
+    del grads
     if use_fp8:
-        grads = te.update_fp8_metas(grads)
-    return state, grads
+        var_collect = te.update_fp8_metas(var_collect)
+    return state, var_collect
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
+def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, apply_fn, update_fn):
     """Train for a single epoch."""
+    print("\ntrain_epoch****\n")
     train_ds_size = len(train_ds['sentence'])
     steps_per_epoch = train_ds_size // batch_size
     perms = jax.random.permutation(rngs[INPUT_KEY], train_ds_size)
@@ -115,8 +128,8 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
     for perm in perms:
         batch_inputs = train_ds['sentence'][perm, ...]
         batch_labels = train_ds['label'][perm, ...]
-        grads, loss, accuracy = apply_model(state, batch_inputs, batch_labels, var_collect, rngs)
-        state, var_collect = update_model(state, grads, use_fp8)
+        grads, loss, accuracy = apply_fn(state, batch_inputs, batch_labels, var_collect, rngs)
+        state, var_collect = update_fn(state, grads, use_fp8)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -125,7 +138,7 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_model(state, test_ds, batch_size, var_collect):
+def eval_model(state, test_ds, batch_size, var_collect, apply_fn):
     """Evaluation loop."""
     test_ds_size = len(test_ds['sentence'])
     num_steps = test_ds_size // batch_size
@@ -137,7 +150,7 @@ def eval_model(state, test_ds, batch_size, var_collect):
         batch_end = batch_start + batch_size
         batch_inputs = test_ds['sentence'][batch_start:batch_end]
         batch_labels = test_ds['label'][batch_start:batch_end]
-        _, loss, accuracy = apply_model(state, batch_inputs, batch_labels, var_collect)
+        _, loss, accuracy = apply_fn(state, batch_inputs, batch_labels, var_collect, None)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -147,6 +160,7 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 
 def data_preprocess(dataset, vocab, word_id, max_seq_len):
+    """Convert tokens to numbers."""
     nltk.download('punkt')
     dataset_size = len(dataset['sentence'])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
@@ -190,59 +204,148 @@ def check_fp8(state, var_collect, input_shape, label_shape):
                                     jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
 
 
+def get_params_pspec(rules, params_axes, abstract_variables):
+    """Refer params to create params partition spec"""
+    mapping_rules = {}
+    for key, value in rules:
+        mapping_rules[key] = value
+
+    params_pspec = jax.tree_map(
+        lambda x: jax.sharding.PartitionSpec(*(mapping_rules[key] for key in x)), params_axes)
+    params = abstract_variables[PARAMS_KEY]
+
+    my_dict = {}
+    for op in params:
+        if op not in params_pspec:
+            sub_dict = {}
+            for op_attr in params[op]:
+                sub_dict[op_attr] = jax.sharding.PartitionSpec()
+            my_dict[op] = sub_dict
+
+    fixed_my_dict = FrozenDict({**params_pspec, **my_dict})
+    params_pspec = fixed_my_dict
+    return params_pspec
+
+
+def get_state_pspec(state, params_pspec):
+    """Refer params_pspec to create state partition spec"""
+
+    def replace_params(x):
+        return params_pspec if isinstance(x, FrozenDict) else None
+
+    state_pspec = jax.tree_map(replace_params, state, is_leaf=lambda x: isinstance(x, FrozenDict))
+    return state_pspec
+
+
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     print(args)
+    assert args.batch_size % NUM_GPU == 0
+    assert args.test_batch_size % NUM_GPU == 0
 
     if args.use_fp8:
         assert gpu_has_fp8(), "GPU needs to support FP8."
 
-    train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
-    rng = jax.random.PRNGKey(args.seed)
-    rng, params_rng = jax.random.split(rng)
-    rng, dropout_rng = jax.random.split(rng)
-    init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
+    device_mesh = mesh_utils.create_device_mesh((NUM_GPU,))
+    dp_mesh_axis_name = 'data'
 
-    input_shape = [args.batch_size, args.max_seq_len]
-    label_shape = [args.batch_size]
+    with jax.sharding.Mesh(devices=device_mesh, axis_names=(dp_mesh_axis_name,)):
 
-    with te.fp8_autocast(enabled=args.use_fp8):
-        encoder = Net(num_embed)
-        var_collect = encoder.init(init_rngs, jnp.empty(input_shape, dtype=jnp.int32))
-        tx = optax.adamw(args.lr)
-        state = train_state.TrainState.create(apply_fn=encoder.apply,
-                                              params=var_collect[PARAMS_KEY],
-                                              tx=tx)
+        train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
+        rng = jax.random.PRNGKey(args.seed)
+        rng, params_rng = jax.random.split(rng)
+        rng, dropout_rng = jax.random.split(rng)
+        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
 
-        if args.use_fp8:
-            check_fp8(state, var_collect, input_shape, label_shape)
+        input_shape = [args.batch_size, args.max_seq_len]
+        label_shape = [args.batch_size]
 
-        if args.dry_run:
-            apply_model(state,
-                        jnp.zeros(input_shape, dtype=jnp.int32),
-                        jnp.zeros(label_shape, dtype=jnp.bfloat16),
-                        var_collect,
-                        rngs={DROPOUT_KEY: dropout_rng})
-            print("PASSED")
-            return None
+        with te.fp8_autocast(args.use_fp8,
+                             sharding_resource=te.ShardingResource(dp_mesh_axis_name)):
 
-        for epoch in range(1, args.epochs + 1):
-            rng, input_rng = jax.random.split(rng)
-            rng, dropout_rng = jax.random.split(rng)
-            rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+            encoder = Net(num_embed)
 
-            state, train_loss, train_accuracy, var_collect = train_epoch(
-                state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8)
-            test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size, var_collect)
+            abstract_variables = jax.eval_shape(encoder.init, init_rngs,
+                                                jnp.empty(input_shape, dtype=jnp.int32))
+            print("abstract_variables****\n", abstract_variables, "\n****\n")
 
-            print(f"Epoch: {epoch:>2} "
-                  f"Train Loss: {train_loss:.6f} "
-                  f"Train Accuracy: {train_accuracy:.6f} "
-                  f"Test Loss: {test_loss:.6f} "
-                  f"Test Accuracy: {test_accuracy:.6f} ")
+            params_axes = nn.partitioning.get_axis_names(abstract_variables[PARAMS_AXES_KEY])
+            print("params_axes****\n", params_axes, "\n****\n")
 
-    return [train_loss, train_accuracy, test_loss, test_accuracy]
+            rules = te.extend_logical_axis_rules(tuple())
+            params_pspec = get_params_pspec(rules, params_axes, abstract_variables)
+            print("params_pspec****\n", params_pspec, "\n****\n")
+
+            with nn.partitioning.axis_rules(rules):
+                in_shardings = (None, None)
+                out_shardings = FrozenDict({key: params_pspec if key is PARAMS_KEY else None \
+                                            for key in abstract_variables})
+                print("out_shardings****\n", out_shardings, "\n****\n")
+
+                var_collect = pjit(encoder.init,
+                                   in_axis_resources=in_shardings,
+                                   out_axis_resources=out_shardings)(init_rngs,
+                                                                     jnp.zeros(input_shape,
+                                                                               dtype=jnp.int32))
+                print("var_collect****\n", var_collect, "\n****\n")
+
+            optimizer = optax.adamw(args.lr)
+            var_collect, params = var_collect.pop(PARAMS_KEY)
+            state = train_state.TrainState.create(apply_fn=encoder.apply,
+                                                  params=params,
+                                                  tx=optimizer)
+            print("state****\n", state, "\n****\n")
+
+            state_pspec = get_state_pspec(state, params_pspec)
+            print("state_pspec****\n", state_pspec, "\n****\n")
+
+            inputs_pspec = jax.sharding.PartitionSpec(dp_mesh_axis_name, None)
+            labels_pspec = jax.sharding.PartitionSpec(dp_mesh_axis_name,)
+
+            # def apply_model(state, inputs, labels, var_collect, rngs=None):
+            #     -> grads, loss, accuracy
+            pjit_apply_model = pjit(apply_model,
+                                    in_shardings=(state_pspec, inputs_pspec, labels_pspec, None,
+                                                  None),
+                                    out_shardings=(None, None, None))
+
+            # def update_model(state, grads, use_fp8):
+            #    -> state, var_collect
+            pjit_update_model = pjit(update_model,
+                                     in_shardings=(state_pspec, None),
+                                     out_shardings=(None, None),
+                                     static_argnums=2)
+            print("\nfinish setup****\n")
+
+            if args.use_fp8:
+                check_fp8(state, var_collect, input_shape, label_shape)
+
+            if args.dry_run:
+                rngs = {DROPOUT_KEY: dropout_rng}    #pjit doesn't support kargs
+                pjit_apply_model(state, jnp.zeros(input_shape, dtype=jnp.int32),
+                                 jnp.zeros(label_shape, dtype=jnp.bfloat16), var_collect, rngs)
+                print("PASSED")
+                return None
+
+            for epoch in range(1, args.epochs + 1):
+                rng, input_rng = jax.random.split(rng)
+                rng, dropout_rng = jax.random.split(rng)
+                rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+
+                state, train_loss, train_accuracy, var_collect = train_epoch(
+                    state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8,
+                    pjit_apply_model, pjit_update_model)
+
+                test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size,
+                                                      var_collect, pjit_apply_model)
+
+                print(f"Epoch: {epoch:>2} "
+                      f"Train Loss: {train_loss:.6f} "
+                      f"Train Accuracy: {train_accuracy:.6f} "
+                      f"Test Loss: {test_loss:.6f} "
+                      f"Test Accuracy: {test_accuracy:.6f} ")
+
+            return [train_loss, train_accuracy, test_loss, test_accuracy]
 
 
 def encoder_parser(args):
@@ -307,10 +410,12 @@ class TestEncoder(unittest.TestCase):
         cls.args = encoder_parser(["--epochs", "3"])
         cls.desired = train_and_evaluate(cls.args)
 
+    @unittest.skipIf(not num_gpu_is_enough(), reason='Need 8 GPUs')
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         assert self.desired[1] > 0.7 and self.desired[3] > 0.68
 
+    @unittest.skipIf(not num_gpu_is_enough(), reason='Need 8 GPUs')
     @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
