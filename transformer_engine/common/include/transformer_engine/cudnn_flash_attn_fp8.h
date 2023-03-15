@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_CUDNN_FLASH_ATTN_FP8_H_
 
 #include "transformer_engine.h"
+#include <cstdint>
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,23 +32,18 @@ enum class MHA_Matrix {
     O_Matrix            = 6, // final output
 };
 
-void nvte_cudnn_flash_attn_fwd(const NVTETensor QKV,
+void nvte_cudnn_flash_attn_fwd(
+                int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout,
+                const NVTETensor QKV,
                 const NVTETensor M,
                 const NVTETensor ZInv,
+                const NVTETensor S,
                 const NVTETensor O,
-                const NVTETensor DropoutSeed,
-                const NVTETensor DropoutOffset,
-                const NVTETensor DescaleQ,
-                const NVTETensor DescaleK,
-                const NVTETensor DescaleV,
-                const NVTETensor DescaleS,
-                const NVTETensor ScaleS,
-                const NVTETensor ScaleO,
-                const NVTETensor AmaxS,
-                const NVTETensor AmaxO,
-                const NVTETensor QKVRaggedOffset,
-                const NVTETensor ORaggedOffset,
-                const NVTETensor MNKOverride,
+                int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+                uint64_t *PhiloxUnpacked,
                 NVTETensor workspace,
                 cudaStream_t stream);
 

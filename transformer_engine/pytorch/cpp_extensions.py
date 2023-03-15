@@ -7,53 +7,119 @@ from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_extensions as tex
 from .constants import TE_DType
+import math
+
+def check_tensor(x: torch.Tensor):
+    assert (
+            x.is_cuda and x.is_contiguous()
+            ), f"Tensor needs to be on CUDA and contiguous."
+
+def check_qkv(qkv: torch.Tensor):
+    assert (
+            qkv.dtype is torch.uint8
+            and qkv.dim() == 4
+            and qkv.shape[1] == 3
+            ), f"QKV needs to be in [total_seqs x 3 x num_heads x head_dim] and FP8."
+    
+def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
+    check_tensor(stats)
+    assert (
+            stats.dtype is torch.uint8
+            and stats.dim() == 4
+            and stats.shape == torch.Size([b, h, s, 1])
+            ), f"Tensor needs to be in [b, h, s, 1] and FP8."
+
+def check_cu_seqlens(cu_seqlens: torch.Tensor):
+    check_tensor(cu_seqlens)
+    assert (
+            cu_seqlens.dtype is torch.int32
+            and cu_seqlens.dim() == 1
+            ), f"cu_seqlens needs to be an int32 scalar."
+
+def check_scalar(scalar: torch.Tensor):
+    check_tensor(scalar)
+    assert (
+            scalar.dtype is torch.float32
+            and scalar.dim() <= 1
+            and scalar.numel() == 1
+            ), f"Tensor needs to be a float32 scalar."
+
+def check_seed(philox_unpacked: torch.Tensor):
+    check_tensor(philox_unpacked)
+    assert (
+            philox_unpacked.dtype is torch.int64
+            and philox_unpacked.numel() == 2
+            ), f"Philox tensor should have two int64s."
 
 def cudnn_flash_attn_fwd(
-    QKV: torch.Tensor,
-    M: torch.Tensor,
-    ZInv: torch.Tensor,
-    O: torch.Tensor,
-    DropoutSeed: torch.Tensor,
-    DropoutOffset: torch.Tensor,
-    descaleQ: torch.Tensor,
-    descaleK: torch.Tensor,
-    descaleV: torch.Tensor,
-    descaleS: torch.Tensor,
-    scaleS: torch.Tensor,
-    scaleO: torch.Tensor,
-    amaxS: torch.Tensor,
-    amaxO: torch.Tensor,
-    QKVRaggedOffset: torch.Tensor,
-    ORaggedOffset: torch.Tensor,
-    MNKOverride: torch.Tensor,
-) -> torch.Tensor:
+    qkv: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    d_scale_qkv: torch.Tensor,
+    q_scale_s: torch.Tensor,
+    q_scale_o: torch.Tensor,
+    amax_s: torch.Tensor,
+    amax_o: torch.Tensor,
+    d_scale_s: torch.Tensor,
+    d_scale_o: torch.Tensor,
+    p_dropout: float,
+    max_seq_len: int,
+    is_training: bool,
+    set_zero: bool,
+    rng_gen: torch.Generator = None,
+) -> Tuple[Union[torch.Tensor, None], ...]:
 
-    b, s_q, _, h, d = QKV.shape
-    qkv_type = TE_DType[QKV.dtype]
-    misc_type = qkv_type
-    seqlen_type = TE_DType[torch.int32]
+    check_qkv(qkv)
+    check_cu_seqlens(cu_seqlens)
+    check_scalar(d_scale_qkv)
+    check_scalar(q_scale_o)
+    check_scalar(amax_s)
+    check_scalar(amax_o)
 
-    tex.cudnn_flash_attn_fwd(QKV,
+    assert max_seq_len <= 512, f"max_seq_len must be <= 512."
+    b = cu_seqlens.numel() - 1
+    assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
+
+    total_seqs = qkv.size(0)
+    h = qkv.size(2)
+    d = qkv.size(3)
+    scale_q_k = 1.0 / math.sqrt(d)
+
+    M = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
+    ZInv = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
+    O = torch.empty([total_seqs, h, d], dtype = torch.uint8, device = "cuda")
+    QKVRaggedOffset = cu_seqlens * 3 * h * d
+    ORaggedOffset = cu_seqlens * h * d
+
+    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda");
+    if set_zero:
+        O.zero_()
+
+#    qkv_type = TE_DType[qkv.dtype]
+#    scale_amax_type = TE_DType[d_scale_qkv.dtype] 
+#    seqlen_philox_type = TE_DType[cu_seqlens.dtype]
+#             qkv_type,
+#             scale_amax_type,
+#             seqlen_philox_type,
+
+    tex.cudnn_flash_attn_fwd(
+             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout,
+             qkv,
              M,
              ZInv,
              O,
-             qkv_type,
-             descaleQ,
-             descaleK,
-             descaleV,
-             descaleS,
-             scaleS,
-             scaleO,
-             amaxS,
-             amaxO,
-             misc_type,
+             d_scale_qkv,
+             d_scale_s,
+             d_scale_o,
+             q_scale_s,
+             q_scale_o,
+             amax_s,
+             amax_o,
              QKVRaggedOffset,
              ORaggedOffset,
-             MNKOverride,
-             DropoutSeed,
-             DropoutOffset,
-             seqlen_type,
+             philox_unpacked,
     )
+
+    return O, M, ZInv, philox_unpacked 
 
 def fp8_gemm(
     A: torch.Tensor,
