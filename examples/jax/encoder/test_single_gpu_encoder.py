@@ -303,7 +303,7 @@ class TestEncoder(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Run Encoder without Transformer Engine"""
+        """Run Encoder from Transformer Engine with BF16"""
         cls.args = encoder_parser(["--epochs", "3"])
         cls.desired = train_and_evaluate(cls.args)
 
