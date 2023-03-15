@@ -290,9 +290,9 @@ basic_transformer = BasicTransformer(
 )
 
 y = basic_transformer(x, attention_mask=None)
-print(y[-1])
 
 if tl_type in (0, 1):
+  print("Running in the native TF:")
   speedometer(
       basic_transformer,
       x,
@@ -319,26 +319,26 @@ for v0, v1 in zip(basic_transformer.variables, te_transformer.variables):
   v1.assign(v0)
   tf.debugging.assert_near(v1, v0)
 
-with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-  y_te = te_transformer(x, attention_mask=None)
-print(y_te[-1])
-
-if tl_type in (0, 3):
-  speedometer(
-      te_transformer,
-      x,
-      forward_kwargs = { "attention_mask": None, "training": True },
-      fp8_autocast_kwargs = { "enabled": True, "fp8_recipe": fp8_recipe },
-  )
-
 y_te = te_transformer(x, attention_mask=None)
-print(y_te[-1])
 
 if tl_type in (0, 2):
+  print("Running in the TE:")
   speedometer(
       te_transformer,
       x,
       forward_kwargs = { "attention_mask": None, "training": True },
       fp8_autocast_kwargs = { "enabled": False, "fp8_recipe": None },
+  )
+
+with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  y_te = te_transformer(x, attention_mask=None)
+
+if tl_type in (0, 3):
+  print("Running in the TE with fp8:")
+  speedometer(
+      te_transformer,
+      x,
+      forward_kwargs = { "attention_mask": None, "training": True },
+      fp8_autocast_kwargs = { "enabled": True, "fp8_recipe": fp8_recipe },
   )
 
