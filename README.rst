@@ -33,30 +33,12 @@ layer as well as framework agnostic library in C++ including structs and kernels
 Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
 simplifying for the users.
 
-Support Matrix:
 
-+-----------+-----------+
-| Framework | Status    |
-+===========+===========+
-|  pyTorch  | Supported |
-+-----------+-----------+
-|    JAX    | Supported |
-+-----------+-----------+
+Examples
+--------
 
-
-
-Transformer Engine in Action
-----------------------------
-
-General Steps
-^^^^^^^^^^^^^
-1. Import modules/layers provided by Transformer Engine to construct models.
-2. Run training steps inside `fp8_autocast` with specified FP8 training recipe.
-3. Update FP8 metas if needed.
-
-
-pyTorch Examples
-^^^^^^^^^^^^^^^^
+pyTorch
+^^^^^^^
 
 .. code-block:: python
 
@@ -84,8 +66,8 @@ pyTorch Examples
   loss.backward()
 
 
-JAX Examples
-^^^^^^^^^^^^
+JAX
+^^^
 
 .. code-block:: python
 
@@ -130,7 +112,7 @@ JAX Examples
 Highlights
 ----------
 
-* Easy-to-use Transformer Engine's modules enabling building of the Transformer layers with FP8 support
+* Easy-to-use modules enabling building of the Transformer layers with FP8 support
   on H100 GPUs.
 * Optimizations (e.g. fused kernels) for Transformer models across all precisions and NVIDIA GPU
   architectures.
@@ -170,7 +152,7 @@ While the more granular modules in Transformer Engine allow building any Transfo
 the `TransformerLayer` API of Transformer Engine is flexible enough to build multiple major
 variations of Transformers.
 
-NOTE: To avoid lengthy, we only show pyTorch's examples below. For the usage of `TransformerLayer`
+NOTE: For simplicity, we only show pyTorch examples below. For the usage of `TransformerLayer`
 of all supported frameworks, refer to `examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
 
 GPT
