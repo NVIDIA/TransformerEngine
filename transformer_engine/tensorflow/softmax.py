@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Fused scaled masked softmax functions"""
 
 from typing import Callable

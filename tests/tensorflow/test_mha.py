@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Tests for the MHA layer."""
 from __future__ import absolute_import
 from __future__ import division

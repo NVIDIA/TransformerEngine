@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Top level Transformer Engine PyTorch modules"""
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable

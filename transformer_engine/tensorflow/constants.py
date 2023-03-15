@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Enums for e2e transformer"""
 import tensorflow as tf
 import transformer_engine_tensorflow as tex

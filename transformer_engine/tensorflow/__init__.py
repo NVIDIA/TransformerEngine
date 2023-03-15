@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Transformer Engine bindings for Tensorflow"""
 from .constants import TE_DType
 from .fp8 import fp8_autocast

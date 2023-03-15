@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """FP8 utilies for TransformerEngine"""
 from contextlib import contextmanager
 from typing import Optional, Dict, Any
