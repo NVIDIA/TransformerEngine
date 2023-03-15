@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 import tensorflow as tf
 import transformer_engine_tensorflow as tex
 
-from .recipe import DelayedScaling, Format
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 _FP8_ENABLED = False
 _FP8_RECIPE = None

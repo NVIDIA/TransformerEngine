@@ -6,8 +6,8 @@ from .module import LayerNorm
 from .module import LayerNormDense
 from .module import LayerNormMLP
 from .module import get_stream_id
-from .recipe import DelayedScaling
-from .recipe import Format
+from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import Format
 
 from .transformer import MultiHeadAttention
 from .transformer import TransformerLayer
