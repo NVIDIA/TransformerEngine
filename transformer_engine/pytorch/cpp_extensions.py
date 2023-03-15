@@ -84,13 +84,13 @@ def cudnn_flash_attn_fwd(
     d = qkv.size(3)
     scale_q_k = 1.0 / math.sqrt(d)
 
-    M = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
-    ZInv = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
-    O = torch.empty([total_seqs, h, d], dtype = torch.uint8, device = "cuda")
+#    M = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
+#    ZInv = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
+#    O = torch.empty([total_seqs, h, d], dtype = torch.uint8, device = "cuda")
     QKVRaggedOffset = cu_seqlens * 3 * h * d
     ORaggedOffset = cu_seqlens * h * d
 
-    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda");
+#    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda");
     if set_zero:
         O.zero_()
 
@@ -101,12 +101,9 @@ def cudnn_flash_attn_fwd(
 #             scale_amax_type,
 #             seqlen_philox_type,
 
-    tex.cudnn_flash_attn_fwd(
+    O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
              b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout,
              qkv,
-             M,
-             ZInv,
-             O,
              d_scale_qkv,
              d_scale_s,
              d_scale_o,
@@ -116,8 +113,12 @@ def cudnn_flash_attn_fwd(
              amax_o,
              QKVRaggedOffset,
              ORaggedOffset,
-             philox_unpacked,
+             rng_gen,
     )
+             #M,
+             #ZInv,
+             #O,
+             #philox_unpacked,
 
     return O, M, ZInv, philox_unpacked 
 

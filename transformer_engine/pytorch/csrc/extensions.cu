@@ -6,14 +6,44 @@
 
 #include "extensions.h"
 
-void cudnn_flash_attn_fwd(
+// from /usr/local/lib/python3.8/dist-packages/torch/include/ATen/cuda/detail/UnpackRaw.cuh
+//std::tuple<uint64_t, uint64_t>
+std::vector<uint64_t>
+//std::vector<uint64_t*>
+unpack(at::PhiloxCudaState arg) {
+  if (arg.captured_) {
+    // static_cast avoids "warning: invalid narrowing conversion from "long" to "unsigned long".
+    // *(arg.offset_.ptr) is a broadcast load of a single int64_t to the entire kernel.
+    // For most threads' reads it will hit in cache, so it shouldn't hurt performance.
+    //return std::make_tuple(static_cast<uint64_t>(*arg.seed_.ptr), static_cast<uint64_t>(*(arg.offset_.ptr) + arg.offset_intragraph_));
+    std::vector<uint64_t> v = {static_cast<uint64_t>(*arg.seed_.ptr), static_cast<uint64_t>(*(arg.offset_.ptr) + arg.offset_intragraph_)};
+    //std::vector<uint64_t*> v = {static_cast<uint64_t*>(arg.seed_.ptr), static_cast<uint64_t*>(arg.offset_.ptr + arg.offset_intragraph_)};
+    return v;
+  } else {
+    //return std::make_tuple(arg.seed_.val, arg.offset_.val);
+    //std::vector<uint64_t*> v = {static_cast<uint64_t*>(arg.seed_.ptr), static_cast<uint64_t*>(arg.offset_.ptr)};
+    std::vector<uint64_t> v = {arg.seed_.val, arg.offset_.val};
+    return v;
+  }
+}
+
+at::PhiloxCudaState init_philox_state(
+		at::CUDAGeneratorImpl* gen,
+		int64_t max_seq_len,
+		int64_t threads_per_cta)
+{
+  at::PhiloxCudaState philox_args;
+  size_t elts_per_thread = (max_seq_len * max_seq_len + threads_per_cta - 1)/threads_per_cta ;
+  std::lock_guard<std::mutex> lock(gen->mutex_);
+  philox_args = gen->philox_cuda_state(elts_per_thread);
+  return philox_args;
+}
+
+std::vector<at::Tensor> cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
 		float scale_q_k, float p_dropout,
 		at::Tensor &QKV,
-	        at::Tensor &M,
-	        at::Tensor &ZInv,
-	        at::Tensor &O,
 	        at::Tensor &descaleQKV,
 	        at::Tensor &descaleS,
 	        at::Tensor &descaleO,
@@ -23,8 +53,14 @@ void cudnn_flash_attn_fwd(
 	        at::Tensor &amaxO,
 	        at::Tensor &QKVRaggedOffset,
 	        at::Tensor &ORaggedOffset,
-                at::Tensor &PhiloxUnpacked
+                at::Generator &rng_gen
 ) {
+                //at::Generator &rng_gen,
+	        //at::Tensor &M,
+	        //at::Tensor &ZInv,
+	        //at::Tensor &O,
+	        //at::Tensor &PhiloxUnpacked
+                //c10::optional<at::Generator> &rng_gen,
   // QKV: b x s_q * 3 * h * d
   //size_t b = static_cast<size_t>(QKV.size(0));
   //size_t s_q = static_cast<size_t>(QKV.size(1));
@@ -40,6 +76,11 @@ void cudnn_flash_attn_fwd(
                                           QKV_type, nullptr, nullptr,
 					  descaleQKV.data_ptr()
 					  );
+  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  auto M = torch::empty({b, h, max_seq_len, 1 }, options);
+  auto ZInv = torch::empty({ b, h, max_seq_len, 1 }, options);
+  auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
+
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
 
@@ -54,17 +95,28 @@ void cudnn_flash_attn_fwd(
 		  			  amaxS.data_ptr(), scaleS.data_ptr(),
                                           descaleS.data_ptr());
 		  			  
-  //init_philox_state(gen);
-  //void init_philox_state(at::CUDAGeneratorImpl* gen){
-  //      // See Note [Acquire lock when using random generators]
-  //      std::lock_guard<std::mutex> lock(gen->mutex_);
-  //      params.philox_args = gen->philox_cuda_state(elts_per_thread);
-  //  }
-
   //auto te_QKVRaggedOffset = makeTransformerEngineTensor(QKVRaggedOffset);
   //auto te_ORaggedOffset = makeTransformerEngineTensor(ORaggedOffset);
   //auto te_PhiloxUnpacked = makeTransformerEngineTensor(PhiloxUnpacked);
 
+  auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+		  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+  int64_t threads_per_cta = 128;
+  at::PhiloxCudaState philox_args = init_philox_state(gen, max_seq_len, threads_per_cta);
+  auto seeds = unpack(philox_args);
+  //auto philox_unpacked = at::Tensor(seeds, options.dtype(torch::kInt64));
+  //at::Tensor philox_unpacked = torch::from_blob(std::vector{std::get<0>(seeds), std::get<1>(seeds)}, {2}, options.dtype(torch::kInt64));
+  at::Tensor philox_unpacked = torch::from_blob(seeds.data(), {2}, options.dtype(torch::kInt64));
+  //auto philox_unpacked = torch::empty({2}, options.dtype(torch::kInt64));
+//  auto seeds = at::cuda::philox::unpack(philox_args);
+
+  //PhiloxUnpacked = at::cuda::philox::unpack(philox_args);
+////  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+////  auto PhiloxUnpacked = torch::empty({2}, options.dtype(torch::kInt64));
+//  PhiloxUnpacked.data_ptr()[0] = seed;
+//  PhiloxUnpacked.data_ptr()[1] = offset;
+
+  
   TensorWrapper workspace;
 
   // This call populates workspace tensors with the required config
@@ -79,9 +131,10 @@ void cudnn_flash_attn_fwd(
 		  te_O.data(),
 	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
 	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
-		  reinterpret_cast<uint64_t*>(PhiloxUnpacked.data_ptr()),
+		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+		  //philox_args,
 	          //te_QKVRaggedOffset.data(),
 	          //te_ORaggedOffset.data(),
 		  //te_PhiloxUnpacked.data(),
@@ -105,10 +158,12 @@ void cudnn_flash_attn_fwd(
 		  te_O.data(),
 	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
 	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
-		  reinterpret_cast<uint64_t*>(PhiloxUnpacked.data_ptr()),
+		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+		  //philox_args,
 
+  return {O, M, ZInv, philox_unpacked};
 }
 
 void te_gemm(at::Tensor A,
