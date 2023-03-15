@@ -54,13 +54,13 @@ def get_workspace():
     return _cublas_workspace
 
 
-def get_autocast_bias(dtype, bias_var, use_bias):
+def get_autocast_bias(dtype, bias_var, use_bias, use_fp8):
     """Get casted bias for fp8 gemm."""
     if not use_bias:
         return None
     with autocast_variable.enable_auto_cast_variables(dtype):
         bias = bias_var.value()
-    if bias.dtype == tf.float32:
+    if use_fp8 and bias.dtype == tf.float32:
         bias = tf.cast(bias, dtype=tf.bfloat16)
     return bias
 
@@ -532,7 +532,8 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             # Use value() to convert from Variable to EagerTensor
             kernel_val = kernel_var.value()
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias
+                self._compute_dtype_object, bias_var, self.use_bias,
+                use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -581,7 +582,8 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
             # Use value() to convert from Variable to EagerTensor
             kernel_val = kernel_var.value()
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias
+                self._compute_dtype_object, bias_var, self.use_bias,
+                use_fp8=True,
             )
 
             if not override_linear_precision.wgrad:
@@ -1027,7 +1029,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             )
 
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias
+                self._compute_dtype_object, bias_var, self.use_bias,
+                use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -1126,7 +1129,8 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
                 )
 
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias
+                self._compute_dtype_object, bias_var, self.use_bias,
+                use_fp8=True,
             )
 
             weight_fp8, weight_t_fp8 = fp8_cast_transpose_fused_wrapper(
@@ -1533,10 +1537,12 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             )
 
             fc1_bias = get_autocast_bias(
-                self._compute_dtype_object, fc1_bias_var, use_bias=True
+                self._compute_dtype_object, fc1_bias_var, use_bias=True,
+                use_fp8=False,
             )
             fc2_bias = get_autocast_bias(
-                self._compute_dtype_object, fc2_bias_var, self.use_bias
+                self._compute_dtype_object, fc2_bias_var, self.use_bias,
+                use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -1679,10 +1685,12 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 )
 
             fc1_bias = get_autocast_bias(
-                self._compute_dtype_object, fc1_bias_var, use_bias=True
+                self._compute_dtype_object, fc1_bias_var, use_bias=True,
+                use_fp8=True,
             )
             fc2_bias = get_autocast_bias(
-                self._compute_dtype_object, fc2_bias_var, self.use_bias
+                self._compute_dtype_object, fc2_bias_var, self.use_bias,
+                use_fp8=True,
             )
 
             fc1_weight_fp8, fc1_weight_t_fp8 = fp8_cast_transpose_fused_wrapper(
