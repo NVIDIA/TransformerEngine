@@ -7,5 +7,5 @@ set -e
 : ${TE_PATH:=/opt/transformerengine}
 
 pip install pytest==6.2.5 onnxruntime==1.13.1
-pytest -v -s $TE_PATH/tests/pytorch/test_transformerengine.py
+pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py
 NVTE_FLASH_ATTN=0 pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py
