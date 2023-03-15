@@ -1365,7 +1365,7 @@ cudnn_fa_fprop_fp8(int64_t b,
 	cache.insert({descriptor, plan});
         return plan;
         
-	};
+	}; // end of get_plan
 
 	auto plan = get_plan(fa_fprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
@@ -1928,23 +1928,17 @@ cudnn_fa_bprop_fp8(int64_t b,
 
 } // namespace cudnn_flash_attn
 
-void cudnn_fa_fwd(const Tensor *inputQKV,
+void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout,
+		const Tensor *inputQKV,
 		const Tensor *inputM,
                 const Tensor *inputZInv,
+                const Tensor *inputS,
                 const Tensor *inputO,
-  		const Tensor *inputDropoutSeed,
-  		const Tensor *inputDropoutOffset,
-                const Tensor *inputDescaleQ,
-                const Tensor *inputDescaleK,
-                const Tensor *inputDescaleV,
-                const Tensor *inputDescaleS,
-                const Tensor *inputScaleS,
-                const Tensor *inputScaleO,
-                const Tensor *inputAmaxS,
-                const Tensor *inputAmaxO,
-                const Tensor *inputQKVRaggedOffset,
-                const Tensor *inputORaggedOffset,
-		const Tensor *inputMNKOverride,
+		int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+		uint64_t *PhiloxUnpacked,
                 void* workspace,
                 size_t workspaceSize,
                 cudaStream_t stream
@@ -1952,34 +1946,39 @@ void cudnn_fa_fwd(const Tensor *inputQKV,
   void* devPtrQKV = inputQKV->data.dptr;
   void* devPtrM = inputM->data.dptr;
   void* devPtrZInv = inputZInv->data.dptr;
+//  void* devPtrS = inputS->data.dptr;
   void* devPtrO = inputO->data.dptr;
-  void* devPtrDropoutSeed = inputDropoutSeed->data.dptr;
-  void* devPtrDropoutOffset = inputDropoutOffset->data.dptr;
-  void* devPtrDescaleQ = inputDescaleQ->data.dptr;
-  void* devPtrDescaleK = inputDescaleK->data.dptr;
-  void* devPtrDescaleV = inputDescaleV->data.dptr;
-  void* devPtrDescaleS = inputDescaleS->data.dptr;
-  void* devPtrScaleS = inputScaleS->data.dptr;
-  void* devPtrScaleO = inputScaleO->data.dptr;
-  void* devPtrAmaxS = inputAmaxS->data.dptr;
-  void* devPtrAmaxO = inputAmaxO->data.dptr;
-  void* devPtrQKVRaggedOffset = inputQKVRaggedOffset->data.dptr;
-  void* devPtrORaggedOffset = inputORaggedOffset->data.dptr;
-  void* devPtrMNKOverride = inputMNKOverride->data.dptr;
-  const int64_t b = inputQKV->data.shape[0];
-  const int64_t s_q = inputQKV->data.shape[1];
-  const int64_t s_kv = s_q;
-  const int64_t h = inputQKV->data.shape[3];
-  const int64_t d = inputQKV->data.shape[4];
+  void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
+  void* devPtrORaggedOffset = (void *)ORaggedOffset;
+  void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
+  void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
+  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleS = inputS->scale_inv.dptr;
+  void* devPtrScaleS = inputS->scale.dptr;
+  void* devPtrScaleO = inputO->scale.dptr;
+  void* devPtrAmaxO = inputO->amax.dptr;
+  void* devPtrAmaxS = inputS->amax.dptr;
+  //const int64_t b = inputQKV->data.shape[0];
+  //const int64_t s_q = inputQKV->data.shape[1];
+  //const int64_t s_kv = s_q;
+  //const int64_t h = inputQKV->data.shape[3];
+  //const int64_t d = inputQKV->data.shape[4];
+  void* devPtrMNKOverride = nullptr;
   const DType QKV_type = inputQKV->data.dtype;
-  const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
-  float dropoutProbability = 1.0f;
+  //const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
+  //float dropoutProbability = 1.0f;
   MHA_Layout layout = MHA_Layout::QKV_INTERLEAVED;
 
-  if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (s_q <= 512))
+//  uint64_t seed = PhiloxUnpacked[0];
+//  uint64_t offset = PhiloxUnpacked[1];
+//		  seed, offset,
+  if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, s_q, s_kv, d, attnScale, dropoutProbability, layout, 
+    cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, max_seq_len, max_seq_len, d,
+		scale_q_k, p_dropout, layout, 
                 devPtrQKV,
                 devPtrM,
                 devPtrZInv,
@@ -2003,11 +2002,11 @@ void cudnn_fa_fwd(const Tensor *inputQKV,
 #endif
 
   }
-  else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16)) && (s_q <= 512))
+  else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16)) && (max_seq_len <= 512))
   {
     printf("TO DO: call bf16/fp16 version of cudnn flash attn fwd \n");
   }
-  else if (s_q > 512)
+  else if (max_seq_len > 512)
   {
     printf("TO DO: call Julien version of cudnn flash attn fwd \n");
   }
@@ -2020,23 +2019,18 @@ void cudnn_fa_fwd(const Tensor *inputQKV,
 
 } // namespace transformer_engine
 
-void nvte_cudnn_flash_attn_fwd(const NVTETensor QKV,
+void nvte_cudnn_flash_attn_fwd(
+		int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout,
+		const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
+                const NVTETensor S,
                 const NVTETensor O,
-                const NVTETensor DropoutSeed,
-                const NVTETensor DropoutOffset,
-                const NVTETensor DescaleQ,
-                const NVTETensor DescaleK,
-                const NVTETensor DescaleV,
-                const NVTETensor DescaleS,
-                const NVTETensor ScaleS,
-                const NVTETensor ScaleO,
-                const NVTETensor AmaxS,
-                const NVTETensor AmaxO,
-                const NVTETensor QKVRaggedOffset,
-                const NVTETensor ORaggedOffset,
-		const NVTETensor MNKOverride,
+		int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+                uint64_t *PhiloxUnpacked,
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
@@ -2045,30 +2039,14 @@ void nvte_cudnn_flash_attn_fwd(const NVTETensor QKV,
   const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
   const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
   const Tensor *inputZInv = reinterpret_cast<const Tensor*>(ZInv);
+  const Tensor *inputS = reinterpret_cast<const Tensor*>(S);
   const Tensor *inputO = reinterpret_cast<const Tensor*>(O);
-  const Tensor *inputDropoutSeed = reinterpret_cast<const Tensor*>(DropoutSeed);
-  const Tensor *inputDropoutOffset = reinterpret_cast<const Tensor*>(DropoutOffset);
-  const Tensor *inputDescaleQ = reinterpret_cast<const Tensor*>(DescaleQ);
-  const Tensor *inputDescaleK = reinterpret_cast<const Tensor*>(DescaleK);
-  const Tensor *inputDescaleV = reinterpret_cast<const Tensor*>(DescaleV);
-  const Tensor *inputDescaleS = reinterpret_cast<const Tensor*>(DescaleS);
-  const Tensor *inputScaleS = reinterpret_cast<const Tensor*>(ScaleS);
-  const Tensor *inputScaleO = reinterpret_cast<const Tensor*>(ScaleO);
-  const Tensor *inputAmaxS = reinterpret_cast<const Tensor*>(AmaxS);
-  const Tensor *inputAmaxO = reinterpret_cast<const Tensor*>(AmaxO);
-  const Tensor *inputQKVRaggedOffset = reinterpret_cast<const Tensor*>(QKVRaggedOffset);
-  const Tensor *inputORaggedOffset = reinterpret_cast<const Tensor*>(ORaggedOffset);
-  const Tensor *inputMNKOverride = reinterpret_cast<const Tensor*>(MNKOverride);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
-  cudnn_fa_fwd(inputQKV, inputM, inputZInv, inputO,
-  		  inputDropoutSeed,
-  		  inputDropoutOffset,
-		  inputDescaleQ, inputDescaleK, inputDescaleV, inputDescaleS,
-		  inputScaleS, inputScaleO,
-		  inputAmaxS, inputAmaxO,
-		  inputQKVRaggedOffset, inputORaggedOffset,
-		  inputMNKOverride,
+  cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout,
+		  inputQKV, inputM, inputZInv, inputS, inputO,
+		  QKVRaggedOffset, ORaggedOffset,
+		  PhiloxUnpacked,
 		  wspace->data.dptr,
 		  wspace->data.shape[0],
 		  stream);

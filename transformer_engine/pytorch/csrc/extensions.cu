@@ -6,112 +6,85 @@
 
 #include "extensions.h"
 
-void cudnn_flash_attn_fwd(at::Tensor QKV,
-	     at::Tensor M,
-	     at::Tensor ZInv,
-	     at::Tensor O,
-	     transformer_engine::DType QKV_type,
-	     at::Tensor descaleQ,
-	     at::Tensor descaleK,
-	     at::Tensor descaleV,
-	     at::Tensor descaleS,
-	     at::Tensor scaleS,
-	     at::Tensor scaleO,
-	     at::Tensor amaxS,
-	     at::Tensor amaxO,
-	     transformer_engine::DType misc_type,
-	     at::Tensor QKVRaggedOffset,
-	     at::Tensor ORaggedOffset,
-	     at::Tensor MNKOverride,
-	     at::Tensor DropoutSeed,
-	     at::Tensor DropoutOffset,
-	     transformer_engine::DType seqlen_type
+void cudnn_flash_attn_fwd(
+		int64_t b, int64_t max_seq_len,
+		int64_t total_seqs, int64_t h, int64_t d,
+		float scale_q_k, float p_dropout,
+		at::Tensor &QKV,
+	        at::Tensor &M,
+	        at::Tensor &ZInv,
+	        at::Tensor &O,
+	        at::Tensor &descaleQKV,
+	        at::Tensor &descaleS,
+	        at::Tensor &descaleO,
+	        at::Tensor &scaleS,
+	        at::Tensor &scaleO,
+	        at::Tensor &amaxS,
+	        at::Tensor &amaxO,
+	        at::Tensor &QKVRaggedOffset,
+	        at::Tensor &ORaggedOffset,
+                at::Tensor &PhiloxUnpacked
 ) {
   // QKV: b x s_q * 3 * h * d
-  size_t b = static_cast<size_t>(QKV.size(0));
-  size_t s_q = static_cast<size_t>(QKV.size(1));
-  size_t s_kv = s_q;
-  size_t h = static_cast<size_t>(QKV.size(3));
-  size_t d = static_cast<size_t>(QKV.size(4));
+  //size_t b = static_cast<size_t>(QKV.size(0));
+  //size_t s_q = static_cast<size_t>(QKV.size(1));
+  //size_t s_kv = s_q;
+  //size_t h = static_cast<size_t>(QKV.size(3));
+  //size_t d = static_cast<size_t>(QKV.size(4));
 
   using namespace transformer_engine;
+
+  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
-                                          {b, s_q, 3, h, d},
-                                          QKV_type);
-  auto te_M = makeTransformerEngineTensor(M.data_ptr(),
-                                          {b, h, s_q},
-                                          QKV_type);
-  auto te_ZInv = makeTransformerEngineTensor(ZInv.data_ptr(),
-                                          {b, h, s_q},
-                                          QKV_type);
+                                          {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
+                                          QKV_type, nullptr, nullptr,
+					  descaleQKV.data_ptr()
+					  );
+  auto te_M = makeTransformerEngineTensor(M);
+  auto te_ZInv = makeTransformerEngineTensor(ZInv);
+
+  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
-                                          {b, s_q, h, d},
-                                          QKV_type);
+                                          {(size_t)total_seqs, (size_t)h, (size_t)d},
+                                          O_type, amaxO.data_ptr(), scaleO.data_ptr(),
+					  descaleO.data_ptr());
 
-  auto te_descaleQ = makeTransformerEngineTensor(descaleQ.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_descaleK = makeTransformerEngineTensor(descaleK.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_descaleV = makeTransformerEngineTensor(descaleV.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_descaleS = makeTransformerEngineTensor(descaleS.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_scaleS = makeTransformerEngineTensor(scaleS.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_scaleO = makeTransformerEngineTensor(scaleO.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_amaxO = makeTransformerEngineTensor(amaxO.data_ptr(),
-                                          {1},
-					  misc_type);
-  auto te_amaxS = makeTransformerEngineTensor(amaxS.data_ptr(),
-                                          {1},
-					  misc_type);
+  transformer_engine::DType S_type = GetTransformerEngineDType(descaleS.scalar_type());
+  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, S_type,
+		  			  amaxS.data_ptr(), scaleS.data_ptr(),
+                                          descaleS.data_ptr());
+		  			  
+  //init_philox_state(gen);
+  //void init_philox_state(at::CUDAGeneratorImpl* gen){
+  //      // See Note [Acquire lock when using random generators]
+  //      std::lock_guard<std::mutex> lock(gen->mutex_);
+  //      params.philox_args = gen->philox_cuda_state(elts_per_thread);
+  //  }
 
-  auto te_DropoutSeed = makeTransformerEngineTensor(DropoutSeed.data_ptr(),
-                                          {1},
-                                          seqlen_type);
-  auto te_DropoutOffset = makeTransformerEngineTensor(DropoutOffset.data_ptr(),
-                                          {1},
-                                          seqlen_type);
-
-  auto te_QKVRaggedOffset = makeTransformerEngineTensor(QKVRaggedOffset.data_ptr(),
-                                          {b+1},
-					  seqlen_type);
-  auto te_ORaggedOffset = makeTransformerEngineTensor(ORaggedOffset.data_ptr(),
-                                          {b+1},
-					  seqlen_type);
-  auto te_MNKOverride = makeTransformerEngineTensor(MNKOverride.data_ptr(),
-                                          {1},
-					  seqlen_type);
+  //auto te_QKVRaggedOffset = makeTransformerEngineTensor(QKVRaggedOffset);
+  //auto te_ORaggedOffset = makeTransformerEngineTensor(ORaggedOffset);
+  //auto te_PhiloxUnpacked = makeTransformerEngineTensor(PhiloxUnpacked);
 
   TensorWrapper workspace;
 
   // This call populates workspace tensors with the required config
-  nvte_cudnn_flash_attn_fwd(te_QKV.data(),
+  nvte_cudnn_flash_attn_fwd(
+		  b, max_seq_len,
+		  total_seqs, h, d,
+		  scale_q_k, p_dropout,
+		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
+	          te_S.data(),
 		  te_O.data(),
-		  te_DropoutSeed.data(),
-		  te_DropoutOffset.data(),
-	          te_descaleQ.data(),
-	          te_descaleK.data(),
-	          te_descaleV.data(),
-	          te_descaleS.data(),
-	          te_scaleS.data(),
-	          te_scaleO.data(),
-	          te_amaxS.data(),
-	          te_amaxO.data(),
-	          te_QKVRaggedOffset.data(),
-	          te_ORaggedOffset.data(),
-	          te_MNKOverride.data(),
+	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+		  reinterpret_cast<uint64_t*>(PhiloxUnpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+	          //te_QKVRaggedOffset.data(),
+	          //te_ORaggedOffset.data(),
+		  //te_PhiloxUnpacked.data(),
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(),
@@ -121,26 +94,20 @@ void cudnn_flash_attn_fwd(at::Tensor QKV,
                                             workspace.shape(),
                                             workspace.dtype());
   // Actual call to kernel
-  nvte_cudnn_flash_attn_fwd(te_QKV.data(),
+  nvte_cudnn_flash_attn_fwd(
+		  b, max_seq_len,
+		  total_seqs, h, d,
+		  scale_q_k, p_dropout,
+		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
+	          te_S.data(),
 		  te_O.data(),
-		  te_DropoutSeed.data(),
-		  te_DropoutOffset.data(),
-	          te_descaleQ.data(),
-	          te_descaleK.data(),
-	          te_descaleV.data(),
-	          te_descaleS.data(),
-	          te_scaleS.data(),
-	          te_scaleO.data(),
-	          te_amaxS.data(),
-	          te_amaxO.data(),
-	          te_QKVRaggedOffset.data(),
-	          te_ORaggedOffset.data(),
-	          te_MNKOverride.data(),
+	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+		  reinterpret_cast<uint64_t*>(PhiloxUnpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
-
 
 }
 
