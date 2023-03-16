@@ -26,6 +26,19 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   }
 }
 
+MHA_Layout get_mha_layout(const int layout) {
+  switch (layout) {
+    case 0:
+      return MHA_Layout::NOT_INTERLEAVED;
+    case 1:
+      return MHA_Layout::QKV_INTERLEAVED;
+    case 2:
+      return MHA_Layout::KV_INTERLEAVED;
+    default:
+      NVTE_ERROR("Invalid layout");
+  }
+}
+
 namespace transformer_engine {
 namespace cudnn_flash_attn {
 
@@ -155,8 +168,8 @@ struct FADescriptor {
   float attnScale;
   float dropoutProbability;
   MHA_Layout layout;
-  std::int64_t seed;
-  std::int64_t offset;
+  std::uint64_t seed;
+  std::uint64_t offset;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FADescriptor &rhs) const {
@@ -1196,15 +1209,18 @@ cudnn_fa_fprop_fp8(int64_t b,
                 void* devPtrQKVRaggedOffset,
                 void* devPtrORaggeDOffset,
                 void* devPtrMNKOverride,
-                cudnnDataType_t tensorType) {
+                cudnnDataType_t tensorType,
+		void* workspace_ptr,
+		uint64_t*  workspace_size)
+{
                 
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-	int64_t seed = *static_cast<int64_t*>(devPtrDropoutSeed);
-	int64_t offset = *static_cast<int64_t*>(devPtrDropoutOffset);
+	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
+	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1370,13 +1386,22 @@ cudnn_fa_fprop_fp8(int64_t b,
 	auto plan = get_plan(fa_fprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-        auto workspace_size = plan.getWorkspaceSize();
+        //auto workspace_size = plan.getWorkspaceSize();
+        auto wspace_size = plan.getWorkspaceSize();
         std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
 
-        void* workspace_ptr = nullptr;
-        if (workspace_size > 0) {
-            NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-        }
+	if (workspace_ptr == nullptr)
+	{
+	  *workspace_size = wspace_size;	
+	  return; // not executing
+	}
+	else  // begin execution
+	{
+
+        //void* workspace_ptr = nullptr;
+        //if (workspace_size > 0) {
+        //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+        //}
 
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
         void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
@@ -1416,13 +1441,14 @@ cudnn_fa_fprop_fp8(int64_t b,
         std::cout << "variantPack " << variantPack.describe() << std::endl;
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
         NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-        if (workspace_size > 0) {
-            NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        }
+        //if (workspace_size > 0) {
+        //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+        //}
 
         NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
 
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
+	} // end of execution
 
     } catch (cudnn_frontend::cudnnException& e) {
         struct cudaDeviceProp prop;
@@ -1477,15 +1503,18 @@ cudnn_fa_bprop_fp8(int64_t b,
                 void* devPtrQKVRaggedOffset,
                 void* devPtrORaggeDOffset,
                 void* devPtrMNKOverride,
-                cudnnDataType_t tensorType) {
+                cudnnDataType_t tensorType,
+		void* workspace_ptr,
+		uint64_t*  workspace_size)
+{
 
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-	int64_t seed = *static_cast<int64_t*>(devPtrDropoutSeed);
-	int64_t offset = *static_cast<int64_t*>(devPtrDropoutOffset);
+	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
+	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1835,13 +1864,22 @@ cudnn_fa_bprop_fp8(int64_t b,
 	auto plan = get_plan(fa_bprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-        auto workspace_size = plan.getWorkspaceSize();
+        //auto workspace_size = plan.getWorkspaceSize();
+        auto wspace_size = plan.getWorkspaceSize();
         std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
 
-        void* workspace_ptr = nullptr;
-        if (workspace_size > 0) {
-            NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-        }
+	if (workspace_ptr == nullptr)
+	{
+	  *workspace_size = wspace_size;	
+	  return; // not executing
+	}
+	else  // begin execution
+	{
+
+        //void* workspace_ptr = nullptr;
+        //if (workspace_size > 0) {
+        //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+        //}
 
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
         void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
@@ -1902,13 +1940,15 @@ cudnn_fa_bprop_fp8(int64_t b,
         std::cout << "variantPack " << variantPack.describe() << std::endl;
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
         NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-        if (workspace_size > 0) {
-            NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        }
+        //if (workspace_size > 0) {
+        //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+        //}
 
         NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
 
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
+
+	} // end of execution
 
     } catch (cudnn_frontend::cudnnException& e) {
         struct cudaDeviceProp prop;
@@ -1927,10 +1967,56 @@ cudnn_fa_bprop_fp8(int64_t b,
 #endif
 
 } // namespace cudnn_flash_attn
-
+//cudnn_fa_bprop_fp8(int64_t b, 
+//                int64_t h, 
+//                int64_t s_q,
+//                int64_t s_kv,
+//                int64_t d,
+//                float attnScale,
+//                float attnScale_dS_K,
+//                float attnScale_dSTranspose_Q,
+//                float dropoutProbability,
+//                MHA_Layout layout,
+//                void* devPtrQKV,
+//                void* devPtrKTranspose, 
+//                void* devPtrM,
+//                void* devPtrZInv,
+//                void* devPtrO,
+//                void* devPtrdO,
+//                void* devPtrdQKV,
+//                void* devPtrDropoutSeed,
+//                void* devPtrDropoutOffset,
+//                void* devPtrDescaleQ,
+//                void* devPtrDescaleK,
+//                void* devPtrDescaleV,
+//                void* devPtrDescaleO,
+//                void* devPtrDescaledO,
+//                void* devPtrDescaleS,
+//                void* devPtrDescaledS,
+//                void* devPtrScaleS,
+//                void* devPtrScaledS,
+//                void* devPtrScaledQ,
+//                void* devPtrScaledK,
+//                void* devPtrScaledV,
+//                void* devPtrAmaxdS,
+//                void* devPtrAmaxdQ,
+//                void* devPtrAmaxdK,
+//                void* devPtrAmaxdV,
+//                void* devPtrQKVRaggedOffset,
+//                void* devPtrORaggeDOffset,
+//                void* devPtrMNKOverride,
+//                cudnnDataType_t tensorType,
+//		void* workspace_ptr,
+//		uint64_t*  workspace_size)
+//
+//void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
+//                int64_t total_seqs, int64_t h, int64_t d,
+//                float scale_q_k, float p_dropout, int qkv_layout,
+//                float attnScale_dS_K,
+//                float attnScale_dSTranspose_Q,
 void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout,
+                float scale_q_k, float p_dropout, int qkv_layout,
 		const Tensor *inputQKV,
 		const Tensor *inputM,
                 const Tensor *inputZInv,
@@ -1939,8 +2025,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 		int64_t *QKVRaggedOffset,
                 int64_t *ORaggedOffset,
 		uint64_t *PhiloxUnpacked,
-                void* workspace,
-                size_t workspaceSize,
+                Tensor *workspace,
                 cudaStream_t stream
 ) {
   void* devPtrQKV = inputQKV->data.dptr;
@@ -1961,9 +2046,8 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   void* devPtrAmaxS = inputS->amax.dptr;
   void* devPtrMNKOverride = nullptr;
   const DType QKV_type = inputQKV->data.dtype;
-  //const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
-  //float dropoutProbability = 1.0f;
-  MHA_Layout layout = MHA_Layout::QKV_INTERLEAVED;
+  MHA_Layout layout = get_mha_layout(qkv_layout);
+  uint64_t workspace_size = 0;
 
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
@@ -1987,7 +2071,17 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
                 devPtrQKVRaggedOffset,
                 devPtrORaggedOffset,
 		devPtrMNKOverride,
-                get_cudnn_dtype(QKV_type));
+                get_cudnn_dtype(QKV_type),
+		workspace->data.dptr,
+		&workspace_size);
+
+    if (workspace->data.dptr == nullptr)
+    {
+      workspace->data.dtype = transformer_engine::DType::kByte;
+      workspace->data.shape = {workspace_size};
+      return;
+    }
+
 #else
     printf("Error: CUDNN_VERSION must be >= 8900! \n");
 #endif
@@ -2013,7 +2107,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 void nvte_cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout,
+                float scale_q_k, float p_dropout, int qkv_layout,
 		const NVTETensor QKV,
 		const NVTETensor M,
                 const NVTETensor ZInv,
@@ -2035,12 +2129,13 @@ void nvte_cudnn_flash_attn_fwd(
   const Tensor *inputO = reinterpret_cast<const Tensor*>(O);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
-  cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout,
+  cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
 		  inputQKV, inputM, inputZInv, inputS, inputO,
 		  QKVRaggedOffset, ORaggedOffset,
 		  PhiloxUnpacked,
-		  wspace->data.dptr,
-		  wspace->data.shape[0],
+		  wspace,
 		  stream);
+		  //wspace->data.dptr,
+		  //wspace->data.shape[0],
 
 }

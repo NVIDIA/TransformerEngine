@@ -40,7 +40,7 @@ at::PhiloxCudaState init_philox_state(
 std::vector<at::Tensor> cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
-		float scale_q_k, float p_dropout,
+		float scale_q_k, float p_dropout, int qkv_layout,
 		at::Tensor &QKV,
 	        at::Tensor &descaleQKV,
 	        at::Tensor &descaleS,
@@ -98,7 +98,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
-		  scale_q_k, p_dropout,
+		  scale_q_k, p_dropout, qkv_layout,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
@@ -121,7 +121,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
-		  scale_q_k, p_dropout,
+		  scale_q_k, p_dropout, qkv_layout,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
