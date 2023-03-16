@@ -7,14 +7,11 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import self_fmha_fwd, self_fmha_bwd
 from .cpp_extensions import cross_fmha_fwd, cross_fmha_bwd
+from .cpp_extensions import self_fmha_fwd, self_fmha_bwd
+from .sharding import get_fmha_sharding_meta
 from .sharding import ShardingType
-# from .sharding import get_elementwise_sharding_meta
-# from .sharding import get_dot_sharding_meta, get_fp8_meta_sharding_meta
-# from .sharding import is_dp_enabled, is_tp_enabled, merge_axis_resources
-from .sharding import is_dp_enabled
-# from .sharding import xmap_runner
+from .sharding import xmap_runner
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -28,15 +25,12 @@ def self_fmha(qkv: jnp.ndarray,
               scaling_factor: float,
               dropout_probability: float,
               is_causal_masking: bool,
-              sharding_type: ShardingType = ShardingType.SINGLE,
-              dp_dim_index: int = 0):
+              sharding_type: ShardingType = ShardingType.SINGLE):
     """
     Self multi-head attention wrapper
     """
     assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
         "FMHA does not support row-split tensor parallelism currently."
-
-    assert dp_dim_index is not None    # TODO(rewang): remove this
 
     if sharding_type is ShardingType.SINGLE:
         output = _self_fmha(qkv,
@@ -46,36 +40,49 @@ def self_fmha(qkv: jnp.ndarray,
                             seed=seed,
                             scaling_factor=scaling_factor,
                             dropout_probability=dropout_probability,
-                            is_causal_masking=is_causal_masking,
-                            sharding_type=sharding_type,
-                            dp_axis_name="")
+                            is_causal_masking=is_causal_masking)
     else:
-        raise NotImplementedError
+        dp_axis_name = "batch"
+        tp_axis_name = "model"
+
+        inputs = [qkv, bias, q_seqlen, kv_seqlen]
+        batch, seqlen, _, num_head, head_dim = qkv.shape
+        output_shape = [batch, seqlen, num_head, head_dim]
+        sharding_meta = get_fmha_sharding_meta(sharding_type, [x.shape for x in inputs],
+                                               [output_shape],
+                                               dp_dims=([0, None, 0, 0], [0]),
+                                               tp_dims=([3, 1, None, None], [2]),
+                                               dp_axis_name=dp_axis_name,
+                                               tp_axis_name=tp_axis_name)
+
+        inputs_ = tuple(
+            jnp.reshape(x, new_shape) for x, new_shape in zip(inputs, sharding_meta.input_shapes))
+
+        partial_self_fmha = partial(_self_fmha,
+                                    seed=seed,
+                                    scaling_factor=scaling_factor,
+                                    dropout_probability=dropout_probability,
+                                    is_causal_masking=is_causal_masking)
+
+        output_ = xmap_runner(partial_self_fmha, sharding_meta.in_axes, sharding_meta.out_axes[0],
+                              sharding_meta.axis_resources, inputs_)
+
+        output = jnp.reshape(output_, sharding_meta.output_shapes[0])
 
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7))
 def _self_fmha(qkv: jnp.ndarray, bias: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
                seed: int, scaling_factor: float, dropout_probability: float,
-               is_causal_masking: bool, sharding_type: ShardingType, dp_axis_name: str):
+               is_causal_masking: bool):
     output, _ = _self_fmha_fwd(qkv, bias, q_seqlen, kv_seqlen, seed, scaling_factor,
-                               dropout_probability, is_causal_masking, sharding_type, dp_axis_name)
+                               dropout_probability, is_causal_masking)
     return output
 
 
-def _self_fmha_fwd(
-        qkv,
-        bias,
-        q_seqlen,
-        kv_seqlen,
-        seed,
-        scaling_factor,
-        dropout_probability,
-        is_causal_masking,
-        sharding_type,    # pylint: disable=unused-argument
-        dp_axis_name    # pylint: disable=unused-argument
-):
+def _self_fmha_fwd(qkv, bias, q_seqlen, kv_seqlen, seed, scaling_factor, dropout_probability,
+                   is_causal_masking):
     output, softmax_aux = self_fmha_fwd(qkv, bias, q_seqlen, kv_seqlen, seed, scaling_factor,
                                         dropout_probability, is_causal_masking)
     return output, (softmax_aux, qkv, q_seqlen, kv_seqlen)
@@ -86,8 +93,6 @@ def _self_fmha_bwd(
         scaling_factor,
         dropout_probability,
         is_causal_masking,
-        sharding_type,
-        dp_axis_name,
         ctx,
         grad):
     softmax_aux, qkv, q_seqlen, kv_seqlen = ctx
@@ -112,11 +117,6 @@ def _self_fmha_bwd(
                         dtype=jnp.float32).astype(grad.dtype)
     grad_beta = _reshape_softmax(grad_beta, 1, max_seqlen, num_head)
 
-    # TODO(rewang): is it needed?
-    if is_dp_enabled(sharding_type.value[0]):
-        grad_qkv = jax.lax.psum(grad_qkv, dp_axis_name)
-        grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
-
     return grad_qkv, grad_beta, None, None
 
 
@@ -131,15 +131,12 @@ def cross_fmha(q: jnp.ndarray,
                scaling_factor: float,
                dropout_probability: float,
                is_causal_masking: bool,
-               sharding_type: ShardingType = ShardingType.SINGLE,
-               dp_dim_index: int = 0):
+               sharding_type: ShardingType = ShardingType.SINGLE):
     """
     Cross multi-head attention wrapper
     """
     assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
         "FMHA does not support row-split tensor parallelism currently."
-
-    assert dp_dim_index is not None    # TODO(rewang): remove this
 
     if sharding_type is ShardingType.SINGLE:
         output = _cross_fmha(q,
@@ -149,36 +146,48 @@ def cross_fmha(q: jnp.ndarray,
                              seed=seed,
                              scaling_factor=scaling_factor,
                              dropout_probability=dropout_probability,
-                             is_causal_masking=is_causal_masking,
-                             sharding_type=sharding_type,
-                             dp_axis_name="")
+                             is_causal_masking=is_causal_masking)
     else:
-        raise NotImplementedError
+        dp_axis_name = "batch"
+        tp_axis_name = "model"
+
+        inputs = [q, kv, q_seqlen, kv_seqlen]
+        output_shape = q.shape
+        sharding_meta = get_fmha_sharding_meta(sharding_type, [x.shape for x in inputs],
+                                               [output_shape],
+                                               dp_dims=([0, 0, 0, 0], [0]),
+                                               tp_dims=([2, 3, None, None], [2]),
+                                               dp_axis_name=dp_axis_name,
+                                               tp_axis_name=tp_axis_name)
+
+        inputs_ = tuple(
+            jnp.reshape(x, new_shape) for x, new_shape in zip(inputs, sharding_meta.input_shapes))
+
+        partial_cross_fmha = partial(_cross_fmha,
+                                     seed=seed,
+                                     scaling_factor=scaling_factor,
+                                     dropout_probability=dropout_probability,
+                                     is_causal_masking=is_causal_masking)
+
+        output_ = xmap_runner(partial_cross_fmha, sharding_meta.in_axes, sharding_meta.out_axes[0],
+                              sharding_meta.axis_resources, inputs_)
+
+        output = jnp.reshape(output_, sharding_meta.output_shapes[0])
 
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7))
 def _cross_fmha(q: jnp.ndarray, kv: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
                 seed: int, scaling_factor: float, dropout_probability: float,
-                is_causal_masking: bool, sharding_type: ShardingType, dp_axis_name: str):
+                is_causal_masking: bool):
     output, _ = _cross_fmha_fwd(q, kv, q_seqlen, kv_seqlen, seed, scaling_factor,
-                                dropout_probability, is_causal_masking, sharding_type, dp_axis_name)
+                                dropout_probability, is_causal_masking)
     return output
 
 
-def _cross_fmha_fwd(
-        q,
-        kv,
-        q_seqlen,
-        kv_seqlen,
-        seed,
-        scaling_factor,
-        dropout_probability,
-        is_causal_masking,
-        sharding_type,    # pylint: disable=unused-argument
-        dp_axis_name    # pylint: disable=unused-argument
-):
+def _cross_fmha_fwd(q, kv, q_seqlen, kv_seqlen, seed, scaling_factor, dropout_probability,
+                    is_causal_masking):
     output, softmax_aux = cross_fmha_fwd(q, kv, q_seqlen, kv_seqlen, seed, scaling_factor,
                                          dropout_probability, is_causal_masking)
     return output, (softmax_aux, q, kv, q_seqlen, kv_seqlen)
@@ -189,8 +198,6 @@ def _cross_fmha_bwd(
         scaling_factor,
         dropout_probability,
         is_causal_masking,
-        sharding_type,
-        dp_axis_name,
         ctx,
         grad):
     softmax_aux, q, kv, q_seqlen, kv_seqlen = ctx
@@ -208,19 +215,12 @@ def _cross_fmha_bwd(
                                         dropout_probability=dropout_probability,
                                         is_causal_masking=is_causal_masking)
 
-    # TODO(rewang): is it needed?
-    if is_dp_enabled(sharding_type.value[0]):
-        grad_q = jax.lax.psum(grad_q, dp_axis_name)
-        grad_kv = jax.lax.psum(grad_kv, dp_axis_name)
-        grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
-
     return grad_q, grad_kv, None, None
 
 
 _cross_fmha.defvjp(_cross_fmha_fwd, _cross_fmha_bwd)
 
 
-# TODO(rewang): refactor
 def _reshape_softmax(S, b, s, h, warps_m=1, warps_n=4):
     # This should not expose to public
     m = s if s == 128 else 16
