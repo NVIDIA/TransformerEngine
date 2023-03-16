@@ -27,7 +27,6 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
 import torch
 from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 import torch._C._onnx as _C_onnx
-from torch import _C
 import transformer_engine_extensions as tex
 
 
