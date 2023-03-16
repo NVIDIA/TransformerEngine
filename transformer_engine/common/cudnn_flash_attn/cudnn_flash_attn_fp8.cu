@@ -1946,7 +1946,6 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   void* devPtrQKV = inputQKV->data.dptr;
   void* devPtrM = inputM->data.dptr;
   void* devPtrZInv = inputZInv->data.dptr;
-//  void* devPtrS = inputS->data.dptr;
   void* devPtrO = inputO->data.dptr;
   void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
@@ -1960,20 +1959,12 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   void* devPtrScaleO = inputO->scale.dptr;
   void* devPtrAmaxO = inputO->amax.dptr;
   void* devPtrAmaxS = inputS->amax.dptr;
-  //const int64_t b = inputQKV->data.shape[0];
-  //const int64_t s_q = inputQKV->data.shape[1];
-  //const int64_t s_kv = s_q;
-  //const int64_t h = inputQKV->data.shape[3];
-  //const int64_t d = inputQKV->data.shape[4];
   void* devPtrMNKOverride = nullptr;
   const DType QKV_type = inputQKV->data.dtype;
   //const float attnScale = static_cast<float>(1.0 / sqrt(static_cast<double>(d)));
   //float dropoutProbability = 1.0f;
   MHA_Layout layout = MHA_Layout::QKV_INTERLEAVED;
 
-//  uint64_t seed = PhiloxUnpacked[0];
-//  uint64_t offset = PhiloxUnpacked[1];
-//		  seed, offset,
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
@@ -2034,7 +2025,7 @@ void nvte_cudnn_flash_attn_fwd(
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
-		//at::PhiloxCudaState philox_args, 
+
   NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);

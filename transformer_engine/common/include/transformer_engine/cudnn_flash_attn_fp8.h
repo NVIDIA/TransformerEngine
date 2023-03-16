@@ -9,8 +9,6 @@
 
 #include "transformer_engine.h"
 #include <cstdint>
-//#include <ATen/cuda/CUDAGeneratorImpl.h>
-//#include <ATen/cuda/CUDAGraphsUtils.cuh>
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,7 +46,6 @@ void nvte_cudnn_flash_attn_fwd(
                 uint64_t *PhiloxUnpacked,
                 NVTETensor workspace,
                 cudaStream_t stream);
-		//at::PhiloxCudaState philox_args,
 
 #ifdef __cplusplus
 }  // extern "C"
