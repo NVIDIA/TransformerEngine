@@ -51,7 +51,7 @@ from .utils import (
     divide,
     get_default_init_method,
     cast_if_needed,
-    check_modulo_16,
+    check_dim_for_fp8_forward_exec,
 )
 from .distributed import (
     set_tensor_model_parallel_attributes,
@@ -684,8 +684,8 @@ class _LayerNormLinear(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1414,8 +1414,8 @@ class _Linear(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -2030,8 +2030,8 @@ class _LayerNormMLP(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, fc1_weight, fc2_weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, fc1_weight, fc2_weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 

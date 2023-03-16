@@ -179,6 +179,8 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
 
 
-def check_modulo_16(*tensors: Tuple[torch.Tensor, ...]) -> bool:
-    """Check if each dimension of given tensors is divisible by 16."""
-    return all(all(n % 16 == 0 for n in t.shape) for t in tensors)
+def check_dim_for_fp8_forward_exec(*tensors: Tuple[torch.Tensor, ...]) -> bool:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
+    return all(not t.shape[0] % 8 and not t.shape[1] % 16 for t in tensors)
