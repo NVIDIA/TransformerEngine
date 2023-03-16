@@ -41,7 +41,7 @@ def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[
 
 def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     """
-    Extend the given Flax logical axis rules with the pre-defined TransformerLayer's
+    Extend the given Flax logical axis rules with the predefined TransformerLayer's
     logical axis rules.
 
     .. note::
@@ -185,53 +185,55 @@ class MultiHeadAttention(nn.Module):
     Parameters
     ----------
     head_dim : int
-        the hidden dimension of each attention heads.
+        The hidden dimension of each attention head.
     num_heads : int
-        the number of attention heads
+        The number of attention heads
     dropout_rate : float, default = 0.0
-        dropout probability for the dropout op during multi-head attention.
+        Dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
-        the key in given RNGs via flax.linen.Module.apply that
-        for generate Dropout masks in the core attention.
+        The key in given RNGs via flax.linen.Module.apply that is used
+        to generate Dropout masks in the core attention.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
-        indicate the type of layer normalization.
+        Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
-        a value added to the denominator of layer normalization for numerical stability.
+        A value added to the denominator of layer normalization for numerical stability.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
-        used for initializing weights of QKV and Output projection weights.
+        Used for initializing the QKV and Output projection weights.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     use_bias: bool, default = False
-        indicate whether to enable bias shifting for QKVO projections.
-        if set to False, the layer will not learn additive biases.
+        Indicate whether or not to enable bias shifting for QKVO projections.
+        If set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias of QKVO projections, only works when :attr:`use_bias=True`.
+        Used for initializing bias of QKVO projections, only used when :attr:`use_bias=True`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     apply_residual_connection_post_layernorm : bool, default = False
-        indicate if apply residual connection with the output of layer normalization.
+        Indicate if apply residual connection with the output of layer normalization.
     output_layernorm : bool, default = False
-        indicate if apply a layer normalization in the end of MHA.
+        Indicate if apply a layer normalization at the end of MHA.
     attn_type: AttentionType, defult = AttentionType.PADDING
-        indicate the format of the attentino mask in the core attention.
+        Indicate the format of the attention mask in the core attention.
 
     Optimization parameters
     -----------------------
     dtype :jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     fuse_qkv: bool, default = True
-        if set to True, this module exposes a single fused
+        If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
+        Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     scale_attn_logits: bool, default = False
-        indicate whether to scale attention logits.
-        if set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
+        Indicate whether to scale attention logits.
+        If set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
         else :math:`Q*K`
     scaled_query_init: bool, default = `True`
-        whether to scale WQ on initilization by :math:`\sqrt{head_dim}`
+        Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
     float32_logits : bool, default = False
-        whether to compute attention logits in float32.
+        Whether to compute attention logits in float32.
     """
 
     head_dim: int
@@ -267,7 +269,31 @@ class MultiHeadAttention(nn.Module):
                  *,
                  decode: bool = False,
                  deterministic: bool = False) -> Array:
-        """Applies multi-head dot product attention on the input data."""
+        """
+        MultiHeadAttention Layer:
+        [Query, Key, Value projection] -> Dot Product Attention -> Output projection.
+
+        Parameters
+        ----------
+        inputs_q : jax.numpy.ndarray
+            Input tensor for query projection.
+        inputs_kv : jax.numpy.ndarray
+            Input tensor for key/value projection.
+        mask : jax.numpy.ndarray, default = None
+            Boolean tensor used to mask out self-attention softmax input.
+        bias : jax.numpy.ndarray, default = None
+            A tensor used to shift self-attention softmax input.
+        *
+        decode : bool,default = False
+            Indicate whether to prepare and use an autoregressive cache.
+        deterministic : bool,default = False
+            Disable dropout layers if set to True.
+
+        Returns
+        -------
+        outputs : jax.numpy.ndarray
+            Output tensors.
+        """
 
         depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
 
@@ -512,21 +538,21 @@ class RelativePositionBiases(nn.Module):
     Parameters
     ----------
     num_buckets : int
-        the number of buckets to bucket distances between key and query positions into.
+        The number of buckets to bucket distances between key and query positions into.
     max_distance : int
-        the maximum distance before everything is lumped into the last
+        The maximum distance before everything is lumped into the last
         distance bucket.
     num_attention_heads : int
-        number of attention heads in the transformer layer.
+        Number of attention heads in the transformer layer.
     embedding_init : Initializer, default = flax.linen.linear.default_embed_init
-        used for initializing relative embedding tables.
+        Used for initializing relative embedding tables.
     embedding_axes : Tuple[str, ...], default = ('heads', 'relpos_buckets')
-        the name of axes used to shard embedding attention bias with a corresponding mesh.
+        The name of axes used to shard embedding attention bias with a corresponding mesh.
 
     Optimization parameters
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     """
     num_buckets: int
     max_distance: int
@@ -543,11 +569,11 @@ class RelativePositionBiases(nn.Module):
         Parameters
         ----------
         q_seqlen : int
-            the sequence length of query.
+            The sequence length of query.
         k_seqlen : int
-            the sequence length of key.
+            The sequence length of key.
         bidirectional : bool, default = True
-            indicate whether to allow positive memory-query relative position
+            Indicate whether to allow positive memory-query relative position
             embeddings.
 
         Returns
@@ -598,7 +624,16 @@ class RelativePositionBiases(nn.Module):
 
 
 class TransformerLayerType(Enum):
-    """TransformerLayerType."""
+    r"""
+    TransformerLayerType is an Enum class to specify a type of TransformerLayer
+
+    Values
+    ----------
+    ENCODER:
+        Encoder type of TransformerLayer.
+    DECODER:
+        Decoder type of TransformerLayer.
+    """
     ENCODER = "encoder"
     DECODER = "decoder"
 
@@ -612,56 +647,59 @@ class TransformerLayer(nn.Module):
     Parameters
     ----------
     hidden_size: int, default = 512
-        the hidden size of each input sample.
+        The hidden size of each input sample.
     mlp_hidden_size: int, default = 2048
-        intermediate size to which input samples are projected.
+        Intermediate size to which input samples are projected.
     num_attention_heads: int, default = 8
-        number of attention heads in the transformer layer.
+        Number of attention heads in the transformer layer.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
-        indicate the type of layer normalization.
+        Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
-        a value added to the denominator of layer normalization for numerical stability.
+        A value added to the denominator of layer normalization for numerical stability.
     hidden_dropout: float, default = 0.1
-        dropout probability for the dropout op after FC2 layer.
+        Dropout probability for the dropout op after FC2 layer.
     hidden_dropout_dims: Sequence[int], default = ()
-        dimensions that will share the same dropout mask for hidden
+        Dimensions that will share the same dropout mask for hidden
     attention_dropout: float, default = 0.1
-        dropout probability for the dropout op during multi-head attention.
+        Dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
-        the key in given RNGs via flax.linen.Module.apply that for
-        generate Dropout masks in the Multi-Head Attention.
+        The key in given RNGs via flax.linen.Module.apply that for
+        generating Dropout masks in the Multi-Head Attention.
     mha_kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
-        used for initializing weights of QKV and Output projection weights.
+        Used for initializing weights of QKV and Output projection weights.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     mlp_kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        used for initializing weights of FC1 and FC2 layers.
+        Used for initializing weights of FC1 and FC2 layers.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     mlp_activations: Sequence[str], default = ('relu', )
-        the sequence of activation functions to apply after the first linear transformation.
+        The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     use_bias: bool, default = False
-        indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
-        if set to False, the layer will not learn additive biases.
+        Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
+        If set to False, the layer will not learn additive biases.
     bias_init: Initializer, default = flax.linen.initializers.zeros
-        used for initializing bias of QKVO projections,
-        FC1 and FC2, only works when :attr:`use_bias=True`.
+        Used for initializing bias of QKVO projections,
+        FC1 and FC2. It is only used when :attr:`use_bias=True`.
+        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     apply_residual_connection_post_layernorm: bool, default = False
-        if set to True, residual connections are taken from the output
+        If set to True, residual connections are taken from the output
         of layer norm (default is taken from input of layer norm)
     output_layernorm: bool, default = False
-        if set to True, layer normalization is applied on the output side,
+        If set to True, layer normalization is applied on the output side,
         after the final dropout-add. default behavior is to apply layer
         normalization on the input side, before the QKV transformation.
     float32_attention_logits: bool, default = False
-        if set to True, attention logits are executed in jax.numpy.float32.
+        If set to True, attention logits are executed in jax.numpy.float32.
     layer_type: TransformerLayerType, default = TransformerLayerType.ENCODER
-        if set to TransformerLayerType.DECODER, an additional cross-attention block
+        If set to TransformerLayerType.DECODER, an additional cross-attention block
         is added after self-attention.this can be used for structures like `T5`
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     enable_relative_embedding: bool, default = True
-        whether to enable relative embedding as shifting of attention logits.
+        Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
-        the module for relative embedding execution, only works when
+        The module for relative embedding execution, only used when
         :attr:`enable_relative_embedding=True`. Default is None, which will create
         an instance of RelativePositionBiases if :attr:`enable_relative_embedding=True`.
         Default: RelativePositionBiases( num_buckets=32, max_distance=128,
@@ -672,24 +710,24 @@ class TransformerLayer(nn.Module):
     Optimization parameters
     -----------------------
     dtype :jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+        The data type used to allocate the initial parameters.
     drop_path: float, default = 0.0
-        when > 0.0, applies stochastic depth per sample in the main
+        When > 0.0, applies stochastic depth per sample in the main
         path of the residual block.
     fuse_qkv_params: bool, default = True
-        if set to True, `TransformerLayer` module exposes a single fused
+        If set to True, `TransformerLayer` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
     transpose_batch_sequence : bool, default = True
-        indicate whether the input tensors were switched axis of batch
+        Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     scale_attn_logits: bool, default = False
-        indicate whether to scale attention logits.
+        Indicate whether to scale attention logits.
         if set to True, :math:`\frac{Q}{\sqrt{head_dim}*K}`,
         else :math:`Q*K`
     scaled_query_init: bool, default = `True`
-        whether to scale WQ on initilization by :math:`\sqrt{head_dim}`
+        Whether to scale WQ on initialization by :math:`\sqrt{head_dim}`
     """
 
     hidden_size: int = 512
@@ -752,7 +790,7 @@ class TransformerLayer(nn.Module):
             Boolean tensor used to mask out cross-attention softmax input when
             :attr:`layer_type=TransformerLayerType.DECODER`.
         deterministic: bool, default = False
-            Disables dropout layers if set to True.
+            Disable dropout layers if set to True.
         decode: bool,default = False
             Indicate whether to prepare and use an autoregressive cache
             in Multi-head attention (MHA).
@@ -764,7 +802,7 @@ class TransformerLayer(nn.Module):
         Returns
         -------
         outputs : jax.numpy.ndarray
-            Output tensors of this transformer block.
+            Output tensors.
         """
         assert self.layer_type in TransformerLayerType, \
                 "layer_type should be one of TransformerLayerType" \
