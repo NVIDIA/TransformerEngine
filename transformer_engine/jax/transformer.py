@@ -337,8 +337,37 @@ class MultiHeadAttention(nn.Module):
         first_sharding_type, second_sharding_type = infer_sharding_type()
 
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
+        q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
+        kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
+        fmha_supported_seqlen = [128, 256, 384, 512]
         use_fmha = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
-            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16]
+            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
+            q_seqlen in fmha_supported_seqlen and kv_seqlen in fmha_supported_seqlen
+
+        if not use_fmha:
+            reason = ""
+            if decode:
+                reason += f"required decode=False but got {decode}, "
+            if self.transpose_batch_sequence:
+                reason += f"required transpose_batch_sequence=False " \
+                          f"but got {self.transpose_batch_sequence}, "
+            if self.fuse_qkv:
+                reason += f"required fuse_qkv=True but got {self.fuse_qkv}, "
+            if self.dropout_rate != 0:
+                # TODO(rewang): add dropout support
+                reason += f"required no dropout but got dropout_rate={self.dropout_rate}, "
+            if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
+                reason += f"required dtype equal to bfloat16 or float16 " \
+                          f"but got dtype={canonicalize_dtype}, "
+            if q_seqlen not in fmha_supported_seqlen:
+                reason += f"required q_seqlen in {fmha_supported_seqlen} but got {q_seqlen=}, "
+            if kv_seqlen not in fmha_supported_seqlen:
+                reason += f"required kv_seqlen in {fmha_supported_seqlen} but got {kv_seqlen=}, "
+            print(
+                f"Fused multi-head attention is not enabled, " \
+                f"{reason} fall back to unfused multi-head attention",
+                flush=True
+            )
 
         residual = inputs_q
         if self.fuse_qkv:
