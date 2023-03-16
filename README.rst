@@ -108,6 +108,34 @@ JAX
         # Update FP8 metas
         other_variables = te.update_fp8_metas(other_grads)
 
+.. code-block:: python
+
+  import tensorflow as tf
+  import transformer_engine.tensorflow as te
+  from transformer_engine.common import recipe
+  
+  # Set dimensions.
+  in_features = 768
+  out_features = 3072
+  hidden_size = 2048
+  
+  # Initialize model and inputs.
+  model = te.Dense(out_features, use_bias=True)
+  inp = tf.random.normal((hidden_size, in_features))
+  
+  optimizer = tf.keras.optimizers.Adam(0.001)
+  
+  # Create FP8 recipe. Note: All input args are optional.
+  fp8_recipe = recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
+  
+  with tf.GradientTape(persistent=True) as tape:
+      # Enables autocasting for the forward pass
+      with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+          out = model(inp)
+      loss = tf.reduce_sum(out)
+  grads = tape.gradient(loss, model.trainable_variables)
+  optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
 
 Highlights
 ----------
