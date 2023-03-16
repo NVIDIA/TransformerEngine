@@ -32,9 +32,17 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 
+include(FetchContent)
+FetchContent_Declare(
+    cudnn-frontend
+    GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
+    GIT_TAG        8f488bd41229aa0a3d5f7c0168f59e4d69c618ee # release v0.8
+)
+FetchContent_Populate(cudnn-frontend)
+
 set_source_files_properties(fused_mha/cudnn_fmha.cu
                             PROPERTIES
-                            INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
+                            INCLUDE_DIRECTORIES "${cudnn-frontend_SOURCE_DIR}/include")
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
