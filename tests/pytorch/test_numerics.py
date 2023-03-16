@@ -20,6 +20,7 @@ from transformer_engine.pytorch import (
     LayerNormMLP,
     TransformerLayer,
 )
+from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
 
 seed = 1234
@@ -247,4 +248,86 @@ def test_gpt_selective_activation_recompute(dtype, bs, model):
 
     outputs = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False)
     outputs_recompute = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=True)
+    assert_all_equal(outputs, outputs_recompute)
+
+
+def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
+    reset_rng_states()
+
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    te_inp_hidden_states.retain_grad()
+    te_inp_attn_mask = (
+        torch.rand(
+            (
+                1,
+                1,
+                config.seq_len,
+                config.seq_len,
+            )
+        )
+        .cuda()
+        .bool()
+    )
+
+    if recompute:
+        te_out = te_checkpoint(
+            block,
+            False, # distribute_saved_activations
+            get_dummy_cuda_rng_tracker,
+            None, # tp_group
+            te_inp_hidden_states,
+            te_inp_attn_mask,
+            checkpoint_core_attention=False,
+        )
+    else:
+        te_out = block(
+            te_inp_hidden_states,
+            te_inp_attn_mask,
+            checkpoint_core_attention=False,
+        )
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    outputs = [te_out, te_inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_full_activation_recompute(dtype, bs, model):
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    block = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    outputs = _test_e2e_full_recompute(block, bs, dtype, config, recompute=False)
+    outputs_recompute = _test_e2e_full_recompute(block, bs, dtype, config, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
