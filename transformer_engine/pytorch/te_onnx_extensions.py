@@ -24,7 +24,6 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
 """
 
 
-from typing import Sequence, Tuple
 import torch
 from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 from torch.onnx._internal import jit_utils
