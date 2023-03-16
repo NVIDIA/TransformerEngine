@@ -45,8 +45,10 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     logical axis rules.
 
     .. note::
-        We currently only support single, data parallelism and standard tensor parallelism
-        logical axis rules for performance reasons.
+        We currently only support logical axis rules for single GPU training, data parallel
+        training and 1D-sharding tensor parallel training.
+        Refer to `Figure 3 in` `Megatron-LM tensor parallel <https://arxiv.org/pdf/1909.08053.pdf>`_
+        for 1D-sharding tensor parallelism.
 
     .. warning::
         Please make sure ShardingResource is set via fp8_autocast before calling this function.
