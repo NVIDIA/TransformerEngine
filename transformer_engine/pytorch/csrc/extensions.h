@@ -9,7 +9,7 @@
 std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
+                float scale_q_k, float p_dropout, int qkv_layout, bool set_zero,
                 at::Tensor &QKV,
                 at::Tensor &descaleQKV,
                 at::Tensor &descaleS,
@@ -21,6 +21,30 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 at::Tensor &QKVRaggedOffset,
                 at::Tensor &ORaggedOffset,
                 at::Generator &rng_gen);
+
+at::Tensor cudnn_flash_attn_bwd(
+                int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout, int qkv_layout, bool set_zero,
+                at::Tensor &QKV,
+                at::Tensor &dO,
+                at::Tensor &O,
+                at::Tensor &M,
+                at::Tensor &ZInv,
+                at::Tensor &descaleQKV,
+                at::Tensor &descaleS,
+                at::Tensor &descaleO,
+                at::Tensor &descale_dO,
+                at::Tensor &descale_dS,
+                at::Tensor &descale_dQKV,
+                at::Tensor &scaleS,
+                at::Tensor &scale_dS,
+                at::Tensor &scale_dQKV,
+                at::Tensor &amax_dS,
+                at::Tensor &amax_dQKV,
+                at::Tensor &QKVRaggedOffset,
+                at::Tensor &ORaggedOffset,
+                at::Tensor &philox_unpacked);
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,

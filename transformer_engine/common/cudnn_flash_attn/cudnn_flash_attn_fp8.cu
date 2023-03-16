@@ -2102,6 +2102,121 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 
 }
 
+void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout, int qkv_layout,
+		const Tensor *inputQKV,
+		const Tensor *input_dQKV,
+		const Tensor *inputM,
+                const Tensor *inputZInv,
+                const Tensor *inputS,
+                const Tensor *input_dS,
+                const Tensor *inputO,
+                const Tensor *input_dO,
+		int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+		uint64_t *PhiloxUnpacked,
+                Tensor *workspace,
+                cudaStream_t stream
+) {
+  void* devPtrQKV = inputQKV->data.dptr;
+  void* devPtrdQKV = input_dQKV->data.dptr;
+  void* devPtrM = inputM->data.dptr;
+  void* devPtrZInv = inputZInv->data.dptr;
+  void* devPtrO = inputO->data.dptr;
+  void* devPtrdO = input_dO->data.dptr;
+  void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
+  void* devPtrORaggedOffset = (void *)ORaggedOffset;
+  void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
+  void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
+  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleO = inputO->scale_inv.dptr;
+  void* devPtrDescaledO = input_dO->scale_inv.dptr;
+  void* devPtrDescaleS = inputS->scale_inv.dptr;
+  void* devPtrDescaledS = input_dS->scale_inv.dptr;
+  void* devPtrScaleS = inputS->scale.dptr;
+  void* devPtrScaledS = input_dS->scale.dptr;
+  void* devPtrScaledQ = input_dQKV->scale.dptr;
+  void* devPtrScaledK = input_dQKV->scale.dptr;
+  void* devPtrScaledV = input_dQKV->scale.dptr;
+  void* devPtrAmaxdS = input_dS->amax.dptr;
+  void* devPtrAmaxdQ = input_dQKV->amax.dptr;
+  void* devPtrAmaxdK = input_dQKV->amax.dptr;
+  void* devPtrAmaxdV = input_dQKV->amax.dptr;
+  void* devPtrMNKOverride = nullptr;
+  const DType QKV_type = inputQKV->data.dtype;
+  MHA_Layout layout = get_mha_layout(qkv_layout);
+  uint64_t workspace_size = 0;
+
+  void* devPtrKTranspose = nullptr; 
+
+  if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
+  {
+#if (CUDNN_VERSION >= 8900)
+    cudnn_flash_attn::cudnn_fa_bprop_fp8(b, h, max_seq_len, max_seq_len, d,
+		scale_q_k, scale_q_k, scale_q_k, 
+		p_dropout, layout, 
+                devPtrQKV,
+                devPtrKTranspose, 
+                devPtrM,
+                devPtrZInv,
+                devPtrO,
+                devPtrdO,
+                devPtrdQKV,
+                devPtrDropoutSeed,
+                devPtrDropoutOffset,
+                devPtrDescaleQ,
+                devPtrDescaleK,
+                devPtrDescaleV,
+                devPtrDescaleO,
+                devPtrDescaledO,
+                devPtrDescaleS,
+                devPtrDescaledS,
+                devPtrScaleS,
+                devPtrScaledS,
+                devPtrScaledQ,
+                devPtrScaledK,
+                devPtrScaledV,
+                devPtrAmaxdS,
+                devPtrAmaxdQ,
+                devPtrAmaxdK,
+                devPtrAmaxdV,
+                devPtrQKVRaggedOffset,
+                devPtrORaggedOffset,
+		devPtrMNKOverride,
+                get_cudnn_dtype(QKV_type),
+		workspace->data.dptr,
+		&workspace_size);
+
+    if (workspace->data.dptr == nullptr)
+    {
+      workspace->data.dtype = transformer_engine::DType::kByte;
+      workspace->data.shape = {workspace_size};
+      return;
+    }
+
+#else
+    printf("Error: CUDNN_VERSION must be >= 8900! \n");
+#endif
+
+  }
+  else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16)) && (max_seq_len <= 512))
+  {
+    printf("TO DO: call bf16/fp16 version of cudnn flash attn bwd \n");
+  }
+  else if (max_seq_len > 512)
+  {
+    printf("TO DO: call Julien version of cudnn flash attn bwd \n");
+  }
+  else
+  {
+    NVTE_ERROR("Invalid combination of data type and sequence length! \n");
+  }
+
+}
+
 } // namespace transformer_engine
 
 void nvte_cudnn_flash_attn_fwd(
@@ -2131,6 +2246,48 @@ void nvte_cudnn_flash_attn_fwd(
 
   cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
 		  inputQKV, inputM, inputZInv, inputS, inputO,
+		  QKVRaggedOffset, ORaggedOffset,
+		  PhiloxUnpacked,
+		  wspace,
+		  stream);
+		  //wspace->data.dptr,
+		  //wspace->data.shape[0],
+
+}
+
+void nvte_cudnn_flash_attn_bwd(
+		int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout, int qkv_layout,
+		const NVTETensor QKV,
+		const NVTETensor dQKV,
+		const NVTETensor M,
+                const NVTETensor ZInv,
+                const NVTETensor S,
+                const NVTETensor dS,
+                const NVTETensor O,
+                const NVTETensor dO,
+		int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+                uint64_t *PhiloxUnpacked,
+		NVTETensor workspace,
+		cudaStream_t stream
+) {
+
+  NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
+  using namespace transformer_engine;
+  const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
+  const Tensor *input_dQKV = reinterpret_cast<const Tensor*>(dQKV);
+  const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
+  const Tensor *inputZInv = reinterpret_cast<const Tensor*>(ZInv);
+  const Tensor *inputS = reinterpret_cast<const Tensor*>(S);
+  const Tensor *input_dS = reinterpret_cast<const Tensor*>(dS);
+  const Tensor *inputO = reinterpret_cast<const Tensor*>(O);
+  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
+  Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
+
+  cudnn_fa_bwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
+		  inputQKV, input_dQKV, inputM, inputZInv, inputS, input_dS, inputO, input_dO,
 		  QKVRaggedOffset, ORaggedOffset,
 		  PhiloxUnpacked,
 		  wspace,
