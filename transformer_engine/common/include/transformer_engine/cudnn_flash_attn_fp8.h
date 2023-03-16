@@ -47,6 +47,24 @@ void nvte_cudnn_flash_attn_fwd(
                 NVTETensor workspace,
                 cudaStream_t stream);
 
+void nvte_cudnn_flash_attn_bwd(
+                int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float scale_q_k, float p_dropout, int qkv_layout,
+                const NVTETensor QKV,
+                const NVTETensor dQKV,
+                const NVTETensor M,
+                const NVTETensor ZInv,
+                const NVTETensor S,
+                const NVTETensor dS,
+                const NVTETensor O,
+                const NVTETensor dO,
+                int64_t *QKVRaggedOffset,
+                int64_t *ORaggedOffset,
+                uint64_t *PhiloxUnpacked,
+                NVTETensor workspace,
+                cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

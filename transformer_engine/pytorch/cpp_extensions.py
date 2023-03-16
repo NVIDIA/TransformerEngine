@@ -15,12 +15,20 @@ def check_tensor(x: torch.Tensor):
             ), f"Tensor needs to be on CUDA and contiguous."
 
 def check_qkv(qkv: torch.Tensor):
+    check_tensor(qkv)
     assert (
             qkv.dtype is torch.uint8
             and qkv.dim() == 4
             and qkv.shape[1] == 3
             ), f"QKV needs to be in [total_seqs x 3 x num_heads x head_dim] and FP8."
     
+def check_o(o: torch.Tensor):
+    check_tensor(o)
+    assert (
+            o.dtype is torch.uint8
+            and o.dim() == 3
+            ), f"O needs to be a 3D FP8 tensor."
+
 def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
     check_tensor(stats)
     assert (
@@ -100,9 +108,9 @@ def cudnn_flash_attn_fwd(
     QKVRaggedOffset = cu_seqlens * 3 * h * d
     ORaggedOffset = cu_seqlens * h * d
 
-#    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda");
-    if set_zero:
-        O.zero_()
+#    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda")
+#    if set_zero:
+#        O.zero_()
 
 #    qkv_type = TE_DType[qkv.dtype]
 #    scale_amax_type = TE_DType[d_scale_qkv.dtype] 
@@ -113,7 +121,7 @@ def cudnn_flash_attn_fwd(
 
     qkv_layout = get_mha_layout(qkv_layout)
     O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
-             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
+             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
              qkv,
              d_scale_qkv,
              d_scale_s,
@@ -132,6 +140,84 @@ def cudnn_flash_attn_fwd(
              #philox_unpacked,
 
     return O, M, ZInv, philox_unpacked 
+
+def cudnn_flash_attn_bwd(
+    dO: torch.Tensor,
+    qkv: torch.Tensor,
+    O: torch.Tensor,
+    M: torch.Tensor,
+    ZInv: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    d_scale_qkv: torch.Tensor,
+    d_scale_s: torch.Tensor,
+    d_scale_o: torch.Tensor,
+    d_scale_do: torch.Tensor,
+    q_scale_s: torch.Tensor,
+    q_scale_dp: torch.Tensor,
+    q_scale_dqkv: torch.Tensor,
+    amax_ds: torch.Tensor,
+    amax_dqkv: torch.Tensor,
+    d_scale_ds: torch.Tensor,
+    d_scale_dqkv: torch.Tensor,
+    p_dropout: float,
+    max_seq_len: int,
+    set_zero: bool,
+    all_e5m2: bool,
+    philox_unpacked: torch.Tensor,
+    qkv_layout: str = "qkv_interleaved",
+) -> Tuple[Union[torch.Tensor, None], ...]:
+
+    check_o(O)
+    check_o(dO)
+    check_qkv(qkv)
+
+    assert max_seq_len <= 512, f"max_seq_len must be <= 512."
+    b = cu_seqlens.numel() - 1
+    assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
+
+    total_seqs = qkv.size(0)
+    h = qkv.size(2)
+    d = qkv.size(3)
+    scale_q_k = 1.0 / math.sqrt(d)
+
+    check_stats(M, b, h, max_seq_len)
+    check_stats(ZInv, b, h, max_seq_len)
+    check_seed(philox_unpacked)
+
+    #dQtmp = torch.empty([b, h, max_seq_len, d], dtype = torch.float32, device="cuda")
+    #dQKV = torch.empty_like(qkv)
+
+    #if set_zero:
+    #    dQKV.zero_()
+
+    QKVRaggedOffset = cu_seqlens * 3 * h * d
+    ORaggedOffset = cu_seqlens * h * d
+    qkv_layout = get_mha_layout(qkv_layout)
+    dQKV = tex.cudnn_flash_attn_bwd(
+             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
+             qkv,
+             dO,
+             O,
+             M,
+             ZInv,
+             amax_ds,
+             amax_dqkv,
+             d_scale_qkv,
+             d_scale_s,
+             d_scale_o,
+             d_scale_do,
+             d_scale_ds,
+             d_scale_dqkv,
+             q_scale_s,
+             q_scale_ds,
+             q_scale_dqkv,
+             QKVRaggedOffset,
+             ORaggedOffset,
+             philox_unpacked,
+    )
+             #dQtmp,
+
+    return dQKV
 
 def fp8_gemm(
     A: torch.Tensor,
