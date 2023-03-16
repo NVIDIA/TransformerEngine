@@ -35,7 +35,7 @@ enum class MHA_Matrix {
 void nvte_cudnn_flash_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout,
+                float scale_q_k, float p_dropout, int qkv_layout,
                 const NVTETensor QKV,
                 const NVTETensor M,
                 const NVTETensor ZInv,

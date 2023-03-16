@@ -51,6 +51,15 @@ def check_seed(philox_unpacked: torch.Tensor):
             and philox_unpacked.numel() == 2
             ), f"Philox tensor should have two int64s."
 
+def get_mha_layout(qkv_layout: str):
+    qkv_layout = qkv_layout.lower()
+    if qkv_layout == "not_interleaved":
+        return 0
+    elif qkv_layout == "qkv_interleaved":
+        return 1 
+    elif qkv_layout == "kv_interleaved":
+        return 2 
+
 def cudnn_flash_attn_fwd(
     qkv: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -66,6 +75,7 @@ def cudnn_flash_attn_fwd(
     is_training: bool,
     set_zero: bool,
     rng_gen: torch.Generator = None,
+    qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     check_qkv(qkv)
@@ -101,8 +111,9 @@ def cudnn_flash_attn_fwd(
 #             scale_amax_type,
 #             seqlen_philox_type,
 
+    qkv_layout = get_mha_layout(qkv_layout)
     O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
-             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout,
+             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
              qkv,
              d_scale_qkv,
              d_scale_s,
