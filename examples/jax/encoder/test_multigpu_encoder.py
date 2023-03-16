@@ -3,10 +3,8 @@
 # See LICENSE for license information.
 """ Encoder training on single GPU"""
 import argparse
-import os
 import unittest
 from functools import partial
-from pdb import set_trace
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +21,7 @@ from jax.experimental.pjit import pjit
 
 import transformer_engine.jax as te
 
+DEVICE_DP_AXIS = 'device'
 PARAMS_KEY = 'params'
 PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
@@ -63,26 +62,24 @@ class Net(nn.Module):
                              dropout_rng_name=DROPOUT_KEY,
                              layer_type=te.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
-                             transpose_batch_sequence=False,
                              dtype=jnp.bfloat16)
 
         x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
-        x = te.LayerNorm(dtype=jnp.bfloat16)(x)
+        x = te.LayerNorm(sharding_type=te.ShardingType.DP, dtype=jnp.bfloat16)(x)
         x = nn.Dropout(rate=0.1)(x, deterministic=disable_dropout)
 
         for _ in range(3):
             x = te_Encoder()(x, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
-        x = te.DenseGeneral(features=768, dtype=jnp.bfloat16)(x)
+        x = te.DenseGeneral(features=768, sharding_type=te.ShardingType.DP, dtype=jnp.bfloat16)(x)
         x = jnp.tanh(x)
-        x = te.DenseGeneral(features=2, dtype=jnp.bfloat16)(x)
+        x = te.DenseGeneral(features=2, sharding_type=te.ShardingType.DP, dtype=jnp.bfloat16)(x)
         return x
 
 
 def apply_model(state, inputs, labels, var_collect, rngs=None):
     """Computes gradients, loss and accuracy for a single batch."""
-    print("\napply_model****\n")
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, disable_dropout, rngs=rngs)
@@ -105,7 +102,6 @@ def apply_model(state, inputs, labels, var_collect, rngs=None):
 
 def update_model(state, grads, use_fp8):
     """Update model params and FP8 meta."""
-    print("\nupdate_model****\n")
     var_collect, grads = grads.pop(PARAMS_KEY)
     state = state.apply_gradients(grads=grads)
     del grads
@@ -116,7 +112,6 @@ def update_model(state, grads, use_fp8):
 
 def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, apply_fn, update_fn):
     """Train for a single epoch."""
-    print("\ntrain_epoch****\n")
     train_ds_size = len(train_ds['sentence'])
     steps_per_epoch = train_ds_size // batch_size
     perms = jax.random.permutation(rngs[INPUT_KEY], train_ds_size)
@@ -204,26 +199,22 @@ def check_fp8(state, var_collect, input_shape, label_shape):
                                     jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
 
 
-def get_params_pspec(rules, params_axes, abstract_variables):
+def get_params_pspec(sharding_rules, abs_var_collect):
     """Refer params to create params partition spec"""
-    mapping_rules = {}
-    for key, value in rules:
-        mapping_rules[key] = value
+    rules_dict = {}
+    for key, value in sharding_rules:
+        rules_dict[key] = value
 
-    params_pspec = jax.tree_map(
-        lambda x: jax.sharding.PartitionSpec(*(mapping_rules[key] for key in x)), params_axes)
-    params = abstract_variables[PARAMS_KEY]
+    def to_device_axis(logical_axis):
+        partitions = [rules_dict[key] for key in logical_axis]
+        return jax.sharding.PartitionSpec(*partitions)
 
-    my_dict = {}
-    for op in params:
-        if op not in params_pspec:
-            sub_dict = {}
-            for op_attr in params[op]:
-                sub_dict[op_attr] = jax.sharding.PartitionSpec()
-            my_dict[op] = sub_dict
+    params_axes_pspec = jax.tree_map(
+        to_device_axis, nn.partitioning.get_axis_names(abs_var_collect[PARAMS_AXES_KEY]))
 
-    fixed_my_dict = FrozenDict({**params_pspec, **my_dict})
-    params_pspec = fixed_my_dict
+    params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
+
+    params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
     return params_pspec
 
 
@@ -240,16 +231,16 @@ def get_state_pspec(state, params_pspec):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
-    assert args.batch_size % NUM_GPU == 0
-    assert args.test_batch_size % NUM_GPU == 0
+    assert num_gpu_is_enough(), "Need 8 GPUs to run"
+    assert args.batch_size % NUM_GPU == 0, "Batch size needs to be multiple of 8"
+    assert args.test_batch_size % NUM_GPU == 0, "Test batch size needs to be multiple of 8"
 
     if args.use_fp8:
         assert gpu_has_fp8(), "GPU needs to support FP8."
 
     device_mesh = mesh_utils.create_device_mesh((NUM_GPU,))
-    dp_mesh_axis_name = 'data'
 
-    with jax.sharding.Mesh(devices=device_mesh, axis_names=(dp_mesh_axis_name,)):
+    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)):
 
         train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
         rng = jax.random.PRNGKey(args.seed)
@@ -260,62 +251,35 @@ def train_and_evaluate(args):
         input_shape = [args.batch_size, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(args.use_fp8,
-                             sharding_resource=te.ShardingResource(dp_mesh_axis_name)):
-
+        with te.fp8_autocast(args.use_fp8, sharding_resource=te.ShardingResource(DEVICE_DP_AXIS)):
             encoder = Net(num_embed)
+            abs_var_collect = jax.eval_shape(encoder.init, init_rngs,
+                                             jnp.empty(input_shape, dtype=jnp.int32))
+            sharding_rules = te.extend_logical_axis_rules(tuple())
+            params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
 
-            abstract_variables = jax.eval_shape(encoder.init, init_rngs,
-                                                jnp.empty(input_shape, dtype=jnp.int32))
-            print("abstract_variables****\n", abstract_variables, "\n****\n")
-
-            params_axes = nn.partitioning.get_axis_names(abstract_variables[PARAMS_AXES_KEY])
-            print("params_axes****\n", params_axes, "\n****\n")
-
-            rules = te.extend_logical_axis_rules(tuple())
-            params_pspec = get_params_pspec(rules, params_axes, abstract_variables)
-            print("params_pspec****\n", params_pspec, "\n****\n")
-
-            with nn.partitioning.axis_rules(rules):
-                in_shardings = (None, None)
-                out_shardings = FrozenDict({key: params_pspec if key is PARAMS_KEY else None \
-                                            for key in abstract_variables})
-                print("out_shardings****\n", out_shardings, "\n****\n")
-
-                var_collect = pjit(encoder.init,
-                                   in_axis_resources=in_shardings,
-                                   out_axis_resources=out_shardings)(init_rngs,
-                                                                     jnp.zeros(input_shape,
-                                                                               dtype=jnp.int32))
-                print("var_collect****\n", var_collect, "\n****\n")
+            in_shardings = (None, None)
+            out_shardings = FrozenDict({key: params_pspec if key is PARAMS_KEY else None \
+                                        for key in abs_var_collect})
+            pjit_encoder_init = pjit(encoder.init, in_shardings, out_shardings)
+            var_collect = pjit_encoder_init(init_rngs, jnp.zeros(input_shape, dtype=jnp.int32))
 
             optimizer = optax.adamw(args.lr)
             var_collect, params = var_collect.pop(PARAMS_KEY)
             state = train_state.TrainState.create(apply_fn=encoder.apply,
                                                   params=params,
                                                   tx=optimizer)
-            print("state****\n", state, "\n****\n")
-
             state_pspec = get_state_pspec(state, params_pspec)
-            print("state_pspec****\n", state_pspec, "\n****\n")
+            inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
+            labels_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS,)
 
-            inputs_pspec = jax.sharding.PartitionSpec(dp_mesh_axis_name, None)
-            labels_pspec = jax.sharding.PartitionSpec(dp_mesh_axis_name,)
+            in_shardings = (state_pspec, inputs_pspec, labels_pspec, None, None)
+            out_shardings = (None, None, None)
+            pjit_apply_model = pjit(apply_model, in_shardings, out_shardings)
 
-            # def apply_model(state, inputs, labels, var_collect, rngs=None):
-            #     -> grads, loss, accuracy
-            pjit_apply_model = pjit(apply_model,
-                                    in_shardings=(state_pspec, inputs_pspec, labels_pspec, None,
-                                                  None),
-                                    out_shardings=(None, None, None))
-
-            # def update_model(state, grads, use_fp8):
-            #    -> state, var_collect
-            pjit_update_model = pjit(update_model,
-                                     in_shardings=(state_pspec, None),
-                                     out_shardings=(None, None),
-                                     static_argnums=2)
-            print("\nfinish setup****\n")
+            in_shardings = (state_pspec, None)
+            out_shardings = (None, None)
+            pjit_update_model = pjit(update_model, in_shardings, out_shardings, static_argnums=2)
 
             if args.use_fp8:
                 check_fp8(state, var_collect, input_shape, label_shape)

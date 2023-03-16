@@ -153,11 +153,11 @@ def get_datasets():
     return train_ds, test_ds
 
 
-def check_fp8(state, var_collect, input_shape, output_shape):
+def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
     assert "Float8" in str(
         jax.make_jaxpr(apply_model)(state, jnp.empty(input_shape, dtype=jnp.bfloat16),
-                                    jnp.empty(output_shape, dtype=jnp.bfloat16), var_collect))
+                                    jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
 
 
 def train_and_evaluate(args):
@@ -176,7 +176,7 @@ def train_and_evaluate(args):
     init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
 
     input_shape = [args.batch_size, IMAGE_H, IMAGE_W, IMAGE_C]
-    output_shape = [args.batch_size]
+    label_shape = [args.batch_size]
 
     with te.fp8_autocast(enabled=args.use_fp8):
         cnn = Net(args.use_te)
@@ -187,11 +187,11 @@ def train_and_evaluate(args):
                                               tx=tx)
 
         if args.use_fp8:
-            check_fp8(state, var_collect, input_shape, output_shape)
+            check_fp8(state, var_collect, input_shape, label_shape)
 
         if args.dry_run:
             apply_model(state, jnp.empty(input_shape, dtype=jnp.bfloat16),
-                        jnp.empty(output_shape, dtype=jnp.bfloat16), var_collect,
+                        jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect,
                         {DROPOUT_KEY: dropout_rng})
             print("PASSED")
             return None

@@ -219,7 +219,7 @@ class LayerNorm(nn.Module):
     -----------------------
     dtype : jax.numpy.dtype, default  = jax.numpy.float32
         the data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
+    transpose_batch_sequence : bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -233,7 +233,7 @@ class LayerNorm(nn.Module):
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ('embed',)
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     sharding_type: ShardingType = ShardingType.SINGLE
 
     @nn.compact
