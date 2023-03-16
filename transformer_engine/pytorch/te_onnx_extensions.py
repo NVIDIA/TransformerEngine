@@ -161,80 +161,6 @@ def onnx_te_gemm(
     return output
 
 
-@symbolic_helper.parse_args("v", "is", "v", "v", "f", "v")
-def layer_norm_workaround(
-    g: jit_utils.GraphContext,
-    inp: _C.Value,
-    normalized_shape: Sequence[int],
-    weight: _C.Value,
-    bias: _C.Value,
-    eps: float,
-    apply_war: bool,
-) -> Tuple[_C.Value, _C.Value, _C.Value]:
-    """
-    layer_norm_workaround is a temporary workaround to an ONNX Runtime bug:
-        https://github.com/microsoft/onnxruntime/issues/15021
-    Seems like ORT is performing template-matching for LN and incorrectly concludes
-    that it doesn't have a kernel for FP32 LN. The work-around adds the addition of
-    fake_zero which is meant to prevent the template matching while keeping the graph
-    virtually unchanged. This also requires `do_constant_folding=False` in
-    `torch.onnx.export`.
-    The code is taken from
-    https://github.com/pytorch/pytorch/blob/1ab883797a2b3b54677574ce98e897b19fbbecec/torch/onnx/symbolic_opset9.py#L2764
-    """
-
-    axes = [-i for i in range(len(normalized_shape), 0, -1)]
-
-    two_cst = symbolic_helper._generate_wrapped_number(g, 2.0)
-    eps_cst = symbolic_helper._generate_wrapped_number(g, eps)
-
-    mean = g.op("ReduceMean", inp, axes_i=axes)
-    numerator = torch.onnx.symbolic_opset9.sub(g, inp, mean)
-
-    # Cast it to eps dtype to avoid precision loss
-    is_type_half = (
-        _type_utils.JitScalarType.from_value(numerator)
-        == _type_utils.JitScalarType.HALF
-    )
-    if is_type_half:
-        eps_dtype = _type_utils.JitScalarType.from_value(eps_cst)
-        numerator = g.op(
-            "Cast", numerator, to_i=_type_utils.JitScalarType(eps_dtype).onnx_type()
-        )
-
-    # variance = e((x - e(x))^2), and (x - e(x)) is the numerator in the layer_norm formula
-    variance = g.op(
-        "ReduceMean",
-        torch.onnx.symbolic_opset9.pow(g, numerator, two_cst), axes_i=axes)
-    denominator = torch.onnx.symbolic_opset9.sqrt(g, g.op("Add", variance, eps_cst))
-    normalized = g.op("Div", numerator, denominator)
-
-    if apply_war:
-        fake_zero = symbolic_helper._generate_wrapped_number(g, 0.00000001)
-        normalized = g.op("Add", normalized, fake_zero)
-
-    # Cast back to input type as eps related ops are all done
-    if is_type_half:
-        inp_dtype = _type_utils.JitScalarType.from_value(inp)
-        normalized = g.op(
-            "Cast", normalized, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type()
-        )
-
-    if not (weight is None or symbolic_helper._is_none(weight)):
-        normalized = torch.onnx.symbolic_opset9.mul(g, normalized, weight)
-    if not (bias is None or symbolic_helper._is_none(bias)):
-        normalized = torch.onnx.symbolic_opset9.add(g, normalized, bias)
-
-    if is_type_half:
-        denominator = g.op(
-            "Cast", denominator, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type()
-        )
-        rdenominator = g.op("Reciprocal", denominator)
-    else:
-        rdenominator = torch.onnx.symbolic_opset9.reciprocal(g, denominator)
-    return normalized, mean, rdenominator
-
-
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "b")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
                            scale_inv, fp8_tensor, otype, zero_centered_gamma):
@@ -268,14 +194,15 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     if not is_fp32:
         inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
-    ln, _, _ = layer_norm_workaround(
+    ln = torch.onnx.symbolic_opset9.layer_norm(
         g,
         inputs,
         normalized_shape,
         weight,
         bias,
         eps,
-        not is_fp32)
+        False # cudnn_enable (not relevant)
+    )
 
     if not is_fp32:
         ln = g.op("Cast", ln, to_i=_type_utils.JitScalarType(input_dtype).onnx_type())
