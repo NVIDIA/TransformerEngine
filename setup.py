@@ -79,6 +79,7 @@ def make_abs_path(l):
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
+    "/usr/local/mpi/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
@@ -86,6 +87,7 @@ pytorch_sources = [
     "transformer_engine/pytorch/csrc/extensions.cu",
     "transformer_engine/pytorch/csrc/common.cu",
     "transformer_engine/pytorch/csrc/ts_fp8_op.cpp",
+#    "transformer_engine/pytorch/csrc/comm_gemm_overlap.cu",
 ]
 pytorch_sources = make_abs_path(pytorch_sources)
 
@@ -158,7 +160,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
     @staticmethod
     def install_requires():
-        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
+        return []#"flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
 
 class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):

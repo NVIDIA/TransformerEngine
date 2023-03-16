@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include "extensions.h"
-
+#include "comm_gemm_overlap.h"
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -921,6 +921,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+
+  py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
+    .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool>())
+    .def("rs", &ubuf::UbufCommOverlap::rs)
+    .def("ag", &ubuf::UbufCommOverlap::ag)
+    .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
+    .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
+    .def("split_overlap_ag", &ubuf::UbufCommOverlap::split_overlap_ag)
+    .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
+    .def("gemm", &ubuf::UbufCommOverlap::gemm);
+
+  //py::class_<UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
+  //  .def(py::init<torch::Tensor&, int, int, int, int, bool>())
+  //  .def("split_overlap_ag", &UbufP2PCommOverlap::split_overlap_ag)
+  //  .def("split_overlap_rs", &UbufP2PCommOverlap::split_overlap_rs)
+  //  .def("gemm", &UbufP2PCommOverlap::gemm)
+  //  .def("copy_input_to_ubuf", &UbufP2PCommOverlap::copy_input_to_ubuf)
+  //  .def("test_p2p_exchange", &UbufP2PCommOverlap::test_p2p_exchange)
+  //  .def("test_send_recv", &UbufP2PCommOverlap::test_send_recv);
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)
