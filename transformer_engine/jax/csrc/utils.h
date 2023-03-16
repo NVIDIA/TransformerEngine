@@ -10,6 +10,7 @@
 #include <pybind11/pybind11.h>
 
 #include <cstdint>
+#include <mutex>  // NOLINT [build/c++11]
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -78,6 +79,23 @@ class cudaDevicePropertiesManager {
  private:
     bool prop_queried_ = false;
     cudaDeviceProp prop_;
+};
+
+class cudnnExecutionPlanManager {
+ public:
+    static cudnnExecutionPlanManager &Instance() {
+        static thread_local cudnnExecutionPlanManager instance;
+        return instance;
+    }
+
+    cudnnHandle_t GetCudnnHandle() {
+        static std::once_flag flag;
+        std::call_once(flag, [&] { cudnnCreate(&handle_); });
+        return handle_;
+    }
+
+ private:
+    cudnnHandle_t handle_;
 };
 
 }  // namespace jax
