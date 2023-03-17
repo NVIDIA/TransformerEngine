@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Build'
         run: |
-          apt-get update && apt-get install -y ninja-dev pybind11-dev
+          apt-get update && apt-get install -y ninja-build pybind11-dev
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'

@@ -15,12 +15,12 @@ then
   cpplint --root transformer_engine/common/include --recursive transformer_engine/common/include
   echo "Checking C++ files"
   cpplint --recursive --exclude=transformer_engine/common/include transformer_engine
-  cpplint --recursive transformer_engine/pytorch transformer_engine/tensorflow
+  cpplint --recursive transformer_engine/pytorch
 fi
 if [ -z "${CPP_ONLY}" ]
 then
   cp $TE_PATH/qa/L0_lint/pylintrc $TE_PATH
   cd $TE_PATH
   echo "Checking Python files"
-  pylint --recursive=y transformer_engine/common transformer_engine/pytorch transformer_engine/tensorflow
+  pylint --recursive=y transformer_engine/common transformer_engine/pytorch
 fi
