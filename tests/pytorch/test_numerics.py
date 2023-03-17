@@ -4,10 +4,12 @@
 
 import os
 import contextlib
-from typing import List
+from typing import List, Optional
 import pytest
 
 import torch
+import torch.nn as nn
+from torch.nn import Parameter
 from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
 
@@ -15,12 +17,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
-from transformer_engine.pytorch import (
-    LayerNormLinear,
-    Linear,
-    LayerNormMLP,
-    TransformerLayer,
-)
+from transformer_engine.pytorch import Linear, LayerNormLinear, TransformerLayer
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
 
@@ -31,13 +28,6 @@ torch.cuda.manual_seed(seed)
 # Record initial RNG state from script run.
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
-
-
-def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
-    """Ensures two lists are equal."""
-    assert len(l1) == len(l2), "Unequal number of outputs."
-    for t1, t2 in zip(l1, l2):
-        assert torch.equal(t1, t2), "Output mismatch."
 
 
 class ModelConfig:
@@ -59,6 +49,24 @@ param_types = [torch.float32, torch.bfloat16, torch.float16]
 batch_sizes = [1, 2]
 
 all_boolean = [True, False]
+
+
+def get_causal_attn_mask(sq: int) -> torch.Tensor:
+    return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
+
+
+def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
+    """Ensures two lists are equal."""
+    assert len(l1) == len(l2), "Unequal number of outputs."
+    for t1, t2 in zip(l1, l2):
+        assert torch.equal(t1, t2), "Output mismatch."
+
+
+def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
+    """Ensures two lists are equal."""
+    assert len(l1) == len(l2), "Unequal number of outputs."
+    for t1, t2 in zip(l1, l2):
+        assert torch.allclose(t1, t2, atol=atol), "Outputs not close enough."
 
 
 def _set_cuda_rng_state(new_state, device=-1):
@@ -181,6 +189,66 @@ def get_dummy_cuda_rng_tracker():
     return _DUMMY_CUDA_RNG_STATE_TRACKER
 
 
+class TorchLayerNormLinear(nn.Module):
+    def __init__(self, in_features: int, out_features: int, eps: float, bias: bool = True):
+        super().__init__()
+        self.layernorm = nn.LayerNorm(in_features, eps=eps)
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(self.layernorm(x))
+
+
+class TorchMHA(nn.Module):
+    def __init__(self, hidden_size: int, num_attention_heads: int):
+        super().__init__()
+        self.mhsa = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_attention_heads,
+            dropout=0.1,
+            bias=True,
+            batch_first=False,
+        )
+
+    def forward(self, x, attn_mask=None):
+        return self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
+
+
+class TorchMLP(nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_size, 4 * hidden_size)
+        self.gelu = nn.GELU(approximate="tanh")
+        self.fc2 = nn.Linear(4 * hidden_size, hidden_size)
+
+    def forward(self, x):
+        return self.fc2(self.gelu(self.fc1(x)))
+
+
+class TorchGPT(nn.Module):
+    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(hidden_size, eps=eps)
+        self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
+        self.ln_2 = nn.LayerNorm(hidden_size, eps=eps)
+        self.mlp = TorchMLP(hidden_size)
+        self.resid_attn_dropout = nn.Dropout(0.1)
+        self.resid_mlp_dropout = nn.Dropout(0.1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        a = self.ln_1(x)
+        b, _ = self.causal_attn(a, attn_mask)
+        x = x + self.resid_attn_dropout(b)
+        m = self.ln_2(x)
+        n = self.mlp(m)
+        x = x + self.resid_mlp_dropout(n)
+        return x
+
+
 def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
     reset_rng_states()
 
@@ -188,18 +256,7 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     te_out = block(
         te_inp_hidden_states,
@@ -259,18 +316,7 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     if recompute:
         te_out = te_checkpoint(
@@ -365,18 +411,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     block = _test_e2e_checkpointing_get_model(config, dtype)
 
@@ -439,3 +474,195 @@ def test_gpt_checkpointing(dtype, bs, model):
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
     assert_all_equal(outputs, outputs_recompute)
+
+
+def _test_e2e_gpt_accuracy(block, bs, dtype, config):
+    reset_rng_states()
+
+    inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    inp_hidden_states.retain_grad()
+    inp_attn_mask = get_causal_attn_mask(config.seq_len)
+
+    out = block(inp_hidden_states, inp_attn_mask)
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_accuracy(dtype, bs, model):
+    config = model_configs[model]
+
+    te_gpt = (
+        TransformerLayer(
+            hidden_size=config.hidden_size,
+            ffn_hidden_size=4 * config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            attention_dropout=0.1,
+            hidden_dropout=0.1,
+            fuse_qkv_params=True,
+            qkv_weight_interleaved=False,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_gpt = (
+        TorchGPT(
+            config.hidden_size,
+            config.eps,
+            config.num_attention_heads,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_gpt.ln_1.weight = Parameter(
+            te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone()
+        )
+        torch_gpt.ln_1.bias = Parameter(te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
+        torch_gpt.causal_attn.mhsa.in_proj_weight = Parameter(
+            te_gpt.self_attention.layernorm_qkv.weight.clone()
+        )
+        torch_gpt.causal_attn.mhsa.in_proj_bias = Parameter(
+            te_gpt.self_attention.layernorm_qkv.bias.clone()
+        )
+        torch_gpt.causal_attn.mhsa.out_proj.weight = Parameter(
+            te_gpt.self_attention.proj.weight.clone()
+        )
+        torch_gpt.causal_attn.mhsa.out_proj.bias = Parameter(
+            te_gpt.self_attention.proj.bias.clone()
+        )
+        torch_gpt.ln_2.weight = Parameter(te_gpt.layernorm_mlp.layer_norm_weight.clone())
+        torch_gpt.ln_2.bias = Parameter(te_gpt.layernorm_mlp.layer_norm_bias.clone())
+        torch_gpt.mlp.fc1.weight = Parameter(te_gpt.layernorm_mlp.fc1_weight.clone())
+        torch_gpt.mlp.fc1.bias = Parameter(te_gpt.layernorm_mlp.fc1_bias.clone())
+        torch_gpt.mlp.fc2.weight = Parameter(te_gpt.layernorm_mlp.fc2_weight.clone())
+        torch_gpt.mlp.fc2.bias = Parameter(te_gpt.layernorm_mlp.fc2_bias.clone())
+
+    te_outputs = _test_e2e_gpt_accuracy(te_gpt, bs, dtype, config)
+    torch_outputs = _test_e2e_gpt_accuracy(torch_gpt, bs, dtype, config)
+    # Check output.
+    if dtype == torch.bfloat16:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+
+
+def _test_e2e_accuracy(block, bs, dtype, config):
+    reset_rng_states()
+
+    inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    inp_hidden_states.retain_grad()
+
+    out = block(inp_hidden_states)
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_linear_accuracy(dtype, bs, model):
+    config = model_configs[model]
+
+    te_linear = (
+        Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_linear = (
+        torch.nn.Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=True,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_linear.weight = Parameter(te_linear.weight.clone())
+        torch_linear.bias = Parameter(te_linear.bias.clone())
+
+    te_outputs = _test_e2e_accuracy(te_linear, bs, dtype, config)
+    torch_outputs = _test_e2e_accuracy(torch_linear, bs, dtype, config)
+    assert_allclose(te_outputs, torch_outputs, 1e-5)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_layernorm_linear_accuracy(dtype, bs, model):
+    config = model_configs[model]
+
+    te_ln_linear = (
+        LayerNormLinear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.eps,
+            bias=True,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_ln_linear = (
+        TorchLayerNormLinear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.eps,
+            bias=True,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_ln_linear.layernorm.weight = Parameter(te_ln_linear.layer_norm_weight.clone())
+        torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.layer_norm_bias.clone())
+        torch_ln_linear.linear.weight = Parameter(te_ln_linear.weight.clone())
+        torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
+
+    te_outputs = _test_e2e_accuracy(te_ln_linear, bs, dtype, config)
+    torch_outputs = _test_e2e_accuracy(torch_ln_linear, bs, dtype, config)
+    # Check output.
+    if dtype == torch.bfloat16:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
