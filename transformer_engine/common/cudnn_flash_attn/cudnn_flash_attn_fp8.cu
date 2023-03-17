@@ -10,6 +10,7 @@
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
+  printf("cudnn get type %d\n",(int)t);
   switch (t) {
     case DType::kFloat16:
       return CUDNN_DATA_HALF;
@@ -1192,6 +1193,8 @@ cudnn_fa_fprop_fp8(int64_t b,
                 float attnScale,
                 float dropoutProbability,
                 MHA_Layout layout,
+		uint64_t seed,
+		uint64_t offset,
                 void* devPtrQKV, 
                 void* devPtrM,
                 void* devPtrZInv,  
@@ -1214,13 +1217,16 @@ cudnn_fa_fprop_fp8(int64_t b,
 		uint64_t*  workspace_size)
 {
                 
+    printf("=============== sample fprop ==============\n");
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
-	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
+        printf(" enter try ------------ \n");
+	//uint64_t seed = static_cast<uint64_t>(*devPtrDropoutSeed);
+	//uint64_t offset = static_cast<uint64_t>(*devPtrDropoutOffset);
+        printf(" get seed offset ------------ \n");
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1236,9 +1242,11 @@ cudnn_fa_fprop_fp8(int64_t b,
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fa_fprop_cache;
 
+        printf(" before get_plan ------------ \n");
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
 
+        printf(" cached? ------------ \n");
         // if hit, return
         auto it = cache.find(descriptor);
         if (it != cache.end()) {
@@ -1246,10 +1254,12 @@ cudnn_fa_fprop_fp8(int64_t b,
           return plan;
         }
 
+        printf(" none cached ------------ \n");
 	// otherwise, build the op_graph and the plan. Then update cache
         std::vector<cudnn_frontend::Operation const*> all_ops;
         std::vector<cudnn_frontend::Operation> ops;
 
+        printf(" offsets ------------ \n");
         // Ragged tensors have b + 1 elements
         int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
         int64_t raggedStride [4] = {1, 1, 1, 1};
@@ -1257,15 +1267,18 @@ cudnn_fa_fprop_fp8(int64_t b,
         auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
         auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
 
+        printf(" mnk ------------ \n");
         int64_t seqlen_dim [4] =  {b, 1, 1, 1};
         int64_t seqlen_stride [4] = {1, 1, 1, 1};
         // Create override tensors
-        auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
+        auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
 
+        printf(" share ------------ \n");
         // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
         std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
         std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
 
+        printf(" get strides ------------ \n");
         // Create Q and K tensors that are used in different places
         int64_t q_dim [4] = {b, h, s_q, d};
         int64_t q_stride [4];
@@ -1275,9 +1288,11 @@ cudnn_fa_fprop_fp8(int64_t b,
         int64_t k_stride [4];
         generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
 
+        printf(" q/k ------------ \n");
         auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
         auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
 
+        printf(" q/k bmm ------------ \n");
         // Q * K.T
         auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
@@ -1383,6 +1398,8 @@ cudnn_fa_fprop_fp8(int64_t b,
         
 	}; // end of get_plan
 
+        printf(" after get_plan ------------ \n");
+
 	auto plan = get_plan(fa_fprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
@@ -1393,11 +1410,13 @@ cudnn_fa_fprop_fp8(int64_t b,
 	if (workspace_ptr == nullptr)
 	{
 	  *workspace_size = wspace_size;	
+          printf(" nullptr return ------------ \n");
 	  return; // not executing
 	}
 	else  // begin execution
 	{
 
+          printf(" not nullptr execute ------------ \n");
         //void* workspace_ptr = nullptr;
         //if (workspace_size > 0) {
         //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
@@ -1444,6 +1463,7 @@ cudnn_fa_fprop_fp8(int64_t b,
         //if (workspace_size > 0) {
         //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
         //}
+        printf(" after execute ------------ \n");
 
         NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
 
@@ -1451,6 +1471,7 @@ cudnn_fa_fprop_fp8(int64_t b,
 	} // end of execution
 
     } catch (cudnn_frontend::cudnnException& e) {
+        printf(" catch cuddn ------------ \n");
         struct cudaDeviceProp prop;
         NVTE_CHECK_CUDA(cudaGetDeviceProperties( &prop, 0 ));
         
@@ -1475,6 +1496,8 @@ cudnn_fa_bprop_fp8(int64_t b,
                 float attnScale_dSTranspose_Q,
                 float dropoutProbability,
                 MHA_Layout layout,
+		uint64_t seed,
+		uint64_t offset,
                 void* devPtrQKV,
                 void* devPtrKTranspose, 
                 void* devPtrM,
@@ -1513,8 +1536,8 @@ cudnn_fa_bprop_fp8(int64_t b,
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
-	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
+//	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
+//	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1547,14 +1570,18 @@ cudnn_fa_bprop_fp8(int64_t b,
         // Ragged tensors have b + 1 elements
         int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
         int64_t raggedStride [4] = {1, 1, 1, 1};
+
+	printf("RaggedOffsets ------ \n");
         // Create offset tensors
         auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
         auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
 
+	printf("RaggedOffsets share ------ \n");
         // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
         std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
         std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
 
+	printf("get strides ------ \n");
         // Create Q and K tensors that are used in different places
         int64_t q_dim [4] = {b, h, s_q, d};
         int64_t q_stride [4];
@@ -1564,12 +1591,14 @@ cudnn_fa_bprop_fp8(int64_t b,
         int64_t k_stride [4];
         generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
 
+	printf("q/k Tensor ------ \n");
         auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
         auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
 
         int64_t scale_dim [4] = {1, 1, 1, 1};
         int64_t scale_stride [4] = {1, 1, 1, 1};
 
+	printf("descale q/k/do/ds Tensor ------ \n");
         // Create descale Q K dO dS global tensors since they are used in multiple places
         auto descaleQTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleQ"], scale_dim, scale_stride, false, false);
         auto descaleKTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleK"], scale_dim, scale_stride, false, false);
@@ -1578,9 +1607,11 @@ cudnn_fa_bprop_fp8(int64_t b,
 
         int64_t seqlen_dim [4] =  {b, 1, 1, 1};
         int64_t seqlen_stride [4] = {1, 1, 1, 1};
+	printf("mnk Tensor ------ int32 \n"); 
         // Create MNK override tensor
         auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
 
+	printf("o/do Tensor ------ \n");
         int64_t O_dim [4] =  {b, h, s_q, d};
         int64_t O_stride [4];
         generateMHAStrides(b, h, s_q, s_kv, d, O_stride, layout, MHA_Matrix::O_Matrix);
@@ -1589,6 +1620,7 @@ cudnn_fa_bprop_fp8(int64_t b,
         // dO is used in multiple places and E5M2
         auto dOTensor = tensor_create_with_offset(CUDNN_DATA_FP8_E5M2, tensor_name_to_uid["dO"], O_dim, O_stride, false, false, ORaggedOffsetTensorPtr);
 
+	printf("qk/attn Tensor ------ \n");
         // Q * K.T
         auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
@@ -1618,6 +1650,7 @@ cudnn_fa_bprop_fp8(int64_t b,
                                                 ops,
                                                 2001 /*UID offset*/);
 
+	printf("softmax backward ------ \n");
         auto beforeDropout_QKt_Tensor = createSoftmaxBackward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor);
 
         int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
@@ -2017,43 +2050,59 @@ cudnn_fa_bprop_fp8(int64_t b,
 void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		const Tensor *inputQKV,
-		const Tensor *inputM,
-                const Tensor *inputZInv,
-                const Tensor *inputS,
-                const Tensor *inputO,
+		uint64_t seed, uint64_t offset,
+		Tensor *inputQKV,
+		Tensor *inputM,
+                Tensor *inputZInv,
+                Tensor *inputS,
+                Tensor *inputO,
 		int64_t *QKVRaggedOffset,
                 int64_t *ORaggedOffset,
 		uint64_t *PhiloxUnpacked,
                 Tensor *workspace,
                 cudaStream_t stream
 ) {
+		//uint64_t *PhiloxUnpacked_CPU,
+                //int64_t *ActualSeqlens,
+  printf("===================== cudnn fa fwd ============== \n");
   void* devPtrQKV = inputQKV->data.dptr;
+  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+
   void* devPtrM = inputM->data.dptr;
   void* devPtrZInv = inputZInv->data.dptr;
+
+  void* devPtrAmaxS = inputS->amax.dptr;
+  void* devPtrScaleS = inputS->scale.dptr;
+  void* devPtrDescaleS = inputS->scale_inv.dptr;
+
   void* devPtrO = inputO->data.dptr;
+  void* devPtrAmaxO = inputO->amax.dptr;
+  void* devPtrScaleO = inputO->scale.dptr;
+//  void* devPtrDescaleO = inputO->scale_inv.dptr;
+
   void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
   void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
   void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleS = inputS->scale_inv.dptr;
-  void* devPtrScaleS = inputS->scale.dptr;
-  void* devPtrScaleO = inputO->scale.dptr;
-  void* devPtrAmaxO = inputO->amax.dptr;
-  void* devPtrAmaxS = inputS->amax.dptr;
   void* devPtrMNKOverride = nullptr;
+//  void* devPtrMNKOverride = (void *)ActualSeqlens;
+
   const DType QKV_type = inputQKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
   uint64_t workspace_size = 0;
 
+//  uint64_t seed = static_cast<uint64_t>(*PhiloxUnpacked_CPU);
+//  uint64_t offset = static_cast<uint64_t>(*(PhiloxUnpacked_CPU+1));
+
+  printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
+    printf(" select fp8 ------------ \n");
     cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, max_seq_len, max_seq_len, d,
-		scale_q_k, p_dropout, layout, 
+		scale_q_k, p_dropout, layout, seed, offset,
                 devPtrQKV,
                 devPtrM,
                 devPtrZInv,
@@ -2077,6 +2126,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 
     if (workspace->data.dptr == nullptr)
     {
+      printf(" workspace size %ld \n",workspace_size);
       workspace->data.dtype = transformer_engine::DType::kByte;
       workspace->data.shape = {workspace_size};
       return;
@@ -2098,6 +2148,8 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   else
   {
     NVTE_ERROR("Invalid combination of data type and sequence length! \n");
+    printf(" else branch ------------ \n");
+    printf("QKV_type is %d \n",(int)QKV_type);
   }
 
 }
@@ -2105,6 +2157,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
+		uint64_t seed, uint64_t offset,
 		const Tensor *inputQKV,
 		const Tensor *input_dQKV,
 		const Tensor *inputM,
@@ -2119,45 +2172,58 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 Tensor *workspace,
                 cudaStream_t stream
 ) {
+  printf("===================== cudnn fa bwd ============== \n");
   void* devPtrQKV = inputQKV->data.dptr;
+  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
+  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+
   void* devPtrdQKV = input_dQKV->data.dptr;
+  void* devPtrAmaxdQ = input_dQKV->amax.dptr;
+  void* devPtrAmaxdK = input_dQKV->amax.dptr;
+  void* devPtrAmaxdV = input_dQKV->amax.dptr;
+  void* devPtrScaledQ = input_dQKV->scale.dptr;
+  void* devPtrScaledK = input_dQKV->scale.dptr;
+  void* devPtrScaledV = input_dQKV->scale.dptr;
+//  void* devPtrDescaledQ = input_dQKV->scale_inv.dptr;
+//  void* devPtrDescaledK = input_dQKV->scale_inv.dptr;
+//  void* devPtrDescaledV = input_dQKV->scale_inv.dptr;
+
   void* devPtrM = inputM->data.dptr;
   void* devPtrZInv = inputZInv->data.dptr;
+
+  void* devPtrScaleS = inputS->scale.dptr;
+  void* devPtrDescaleS = inputS->scale_inv.dptr;
+  void* devPtrAmaxdS = input_dS->amax.dptr;
+  void* devPtrScaledS = input_dS->scale.dptr;
+  void* devPtrDescaledS = input_dS->scale_inv.dptr;
+
   void* devPtrO = inputO->data.dptr;
+  void* devPtrDescaleO = inputO->scale_inv.dptr;
   void* devPtrdO = input_dO->data.dptr;
+  void* devPtrDescaledO = input_dO->scale_inv.dptr;
+
   void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
   void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
   void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleO = inputO->scale_inv.dptr;
-  void* devPtrDescaledO = input_dO->scale_inv.dptr;
-  void* devPtrDescaleS = inputS->scale_inv.dptr;
-  void* devPtrDescaledS = input_dS->scale_inv.dptr;
-  void* devPtrScaleS = inputS->scale.dptr;
-  void* devPtrScaledS = input_dS->scale.dptr;
-  void* devPtrScaledQ = input_dQKV->scale.dptr;
-  void* devPtrScaledK = input_dQKV->scale.dptr;
-  void* devPtrScaledV = input_dQKV->scale.dptr;
-  void* devPtrAmaxdS = input_dS->amax.dptr;
-  void* devPtrAmaxdQ = input_dQKV->amax.dptr;
-  void* devPtrAmaxdK = input_dQKV->amax.dptr;
-  void* devPtrAmaxdV = input_dQKV->amax.dptr;
   void* devPtrMNKOverride = nullptr;
+
   const DType QKV_type = inputQKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
   uint64_t workspace_size = 0;
 
   void* devPtrKTranspose = nullptr; 
 
+  printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
+    printf(" select fp8 ------------ \n");
     cudnn_flash_attn::cudnn_fa_bprop_fp8(b, h, max_seq_len, max_seq_len, d,
 		scale_q_k, scale_q_k, scale_q_k, 
 		p_dropout, layout, 
+		seed, offset,
                 devPtrQKV,
                 devPtrKTranspose, 
                 devPtrM,
@@ -2223,35 +2289,44 @@ void nvte_cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		const NVTETensor QKV,
-		const NVTETensor M,
-                const NVTETensor ZInv,
-                const NVTETensor S,
-                const NVTETensor O,
+		uint64_t seed, uint64_t offset,
+		NVTETensor QKV,
+		NVTETensor M,
+                NVTETensor ZInv,
+                NVTETensor S,
+                NVTETensor O,
 		int64_t *QKVRaggedOffset,
                 int64_t *ORaggedOffset,
                 uint64_t *PhiloxUnpacked,
 		NVTETensor workspace,
 		cudaStream_t stream
 ) {
+                //uint64_t *PhiloxUnpacked_CPU,
+                //int64_t *ActualSeqlens,
 
+  printf("============= NVTE fwd ========== \n");
   NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
-  const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
-  const Tensor *inputZInv = reinterpret_cast<const Tensor*>(ZInv);
-  const Tensor *inputS = reinterpret_cast<const Tensor*>(S);
-  const Tensor *inputO = reinterpret_cast<const Tensor*>(O);
+  Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
+  Tensor *inputM = reinterpret_cast<Tensor*>(M);
+  Tensor *inputZInv = reinterpret_cast<Tensor*>(ZInv);
+  Tensor *inputS = reinterpret_cast<Tensor*>(S);
+  Tensor *inputO = reinterpret_cast<Tensor*>(O);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
+  printf(" calling cudnn fwd ------------ \n");
   cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  inputQKV, inputM, inputZInv, inputS, inputO,
 		  QKVRaggedOffset, ORaggedOffset,
 		  PhiloxUnpacked,
 		  wspace,
 		  stream);
+                  //PhiloxUnpacked_CPU,
+                  //ActualSeqlens,
 		  //wspace->data.dptr,
 		  //wspace->data.shape[0],
+  printf(" end calling cudnn fwd ------------ \n");
 
 }
 
@@ -2259,14 +2334,15 @@ void nvte_cudnn_flash_attn_bwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		const NVTETensor QKV,
-		const NVTETensor dQKV,
-		const NVTETensor M,
-                const NVTETensor ZInv,
-                const NVTETensor S,
-                const NVTETensor dS,
-                const NVTETensor O,
-                const NVTETensor dO,
+		uint64_t seed, uint64_t offset,
+		NVTETensor QKV,
+		NVTETensor dQKV,
+		NVTETensor M,
+                NVTETensor ZInv,
+                NVTETensor S,
+                NVTETensor dS,
+                NVTETensor O,
+                NVTETensor dO,
 		int64_t *QKVRaggedOffset,
                 int64_t *ORaggedOffset,
                 uint64_t *PhiloxUnpacked,
@@ -2274,19 +2350,21 @@ void nvte_cudnn_flash_attn_bwd(
 		cudaStream_t stream
 ) {
 
+  printf("============= NVTE fwd ========== \n");
   NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
   using namespace transformer_engine;
-  const Tensor *inputQKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *input_dQKV = reinterpret_cast<const Tensor*>(dQKV);
-  const Tensor *inputM = reinterpret_cast<const Tensor*>(M);
-  const Tensor *inputZInv = reinterpret_cast<const Tensor*>(ZInv);
-  const Tensor *inputS = reinterpret_cast<const Tensor*>(S);
-  const Tensor *input_dS = reinterpret_cast<const Tensor*>(dS);
-  const Tensor *inputO = reinterpret_cast<const Tensor*>(O);
-  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
+  Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
+  Tensor *input_dQKV = reinterpret_cast<Tensor*>(dQKV);
+  Tensor *inputM = reinterpret_cast<Tensor*>(M);
+  Tensor *inputZInv = reinterpret_cast<Tensor*>(ZInv);
+  Tensor *inputS = reinterpret_cast<Tensor*>(S);
+  Tensor *input_dS = reinterpret_cast<Tensor*>(dS);
+  Tensor *inputO = reinterpret_cast<Tensor*>(O);
+  Tensor *input_dO = reinterpret_cast<Tensor*>(dO);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
   cudnn_fa_bwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  inputQKV, input_dQKV, inputM, inputZInv, inputS, input_dS, inputO, input_dO,
 		  QKVRaggedOffset, ORaggedOffset,
 		  PhiloxUnpacked,

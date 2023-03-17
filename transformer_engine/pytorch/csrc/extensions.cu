@@ -6,7 +6,7 @@
 
 #include "extensions.h"
 
-void unpack(at::Tensor &philox_unpacked, at::PhiloxCudaState arg)
+void unpack(at::PhiloxCudaState arg, at::Tensor &philox_unpacked)
 {
   auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
   if (arg.captured_) {
@@ -41,50 +41,58 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
 		float scale_q_k, float p_dropout, int qkv_layout, bool set_zero,
-		at::Tensor &QKV,
-	        at::Tensor &descaleQKV,
-	        at::Tensor &descaleS,
-	        at::Tensor &descaleO,
-	        at::Tensor &scaleS,
-	        at::Tensor &scaleO,
-	        at::Tensor &amaxS,
-	        at::Tensor &amaxO,
-	        at::Tensor &QKVRaggedOffset,
-	        at::Tensor &ORaggedOffset,
-                at::Generator &rng_gen
+		at::Tensor QKV,
+                transformer_engine::DType QKV_type,
+	        at::Tensor descaleQKV,
+	        at::Tensor descaleS,
+	        at::Tensor descaleO,
+	        at::Tensor scaleS,
+	        at::Tensor scaleO,
+	        at::Tensor amaxS,
+	        at::Tensor amaxO,
+	        at::Tensor QKVRaggedOffset,
+	        at::Tensor ORaggedOffset,
+		c10::optional<at::Generator> &rng_gen
 ) {
+	        //at::Tensor &ActualSeqlens,
 
   using namespace transformer_engine;
 
-  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
+  printf("================     extensions.cu ============== \n");
+//  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
                                           {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
                                           QKV_type, nullptr, nullptr,
 					  descaleQKV.data_ptr()
 					  );
+  printf(" QKV --------\n");
+
   auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   auto M = torch::empty({b, h, max_seq_len, 1 }, options);
   auto ZInv = torch::empty({ b, h, max_seq_len, 1 }, options);
-  at::Tensor O;
-  if (set_zero)
-    O = torch::zeros({total_seqs, h, d}, options.dtype(torch::kByte));
-  else
-    O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
-
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
 
-  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
-  auto te_O = makeTransformerEngineTensor(O.data_ptr(),
-                                          {(size_t)total_seqs, (size_t)h, (size_t)d},
-                                          O_type, amaxO.data_ptr(), scaleO.data_ptr(),
-					  descaleO.data_ptr());
+  printf(" M ZInv --------\n");
 
-  transformer_engine::DType S_type = GetTransformerEngineDType(descaleS.scalar_type());
-  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, S_type,
+//  transformer_engine::DType S_type = GetTransformerEngineDType(descaleS.scalar_type());
+  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
 		  			  amaxS.data_ptr(), scaleS.data_ptr(),
                                           descaleS.data_ptr());
+  printf(" S --------\n");
 		  			  
+  auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
+  if (set_zero)
+  {
+    O.zero_();
+  }
+//  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
+  auto te_O = makeTransformerEngineTensor(O.data_ptr(),
+                                          {(size_t)total_seqs, (size_t)h, (size_t)d},
+                                          QKV_type, amaxO.data_ptr(), scaleO.data_ptr(),
+					  descaleO.data_ptr());
+  printf(" O --------\n");
+
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
 		  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   int64_t threads_per_cta = 128;
@@ -93,16 +101,24 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 //  auto seeds = unpack(philox_args);
 //  at::Tensor philox_unpacked = torch::from_blob(seeds.data(), {2}, options.dtype(torch::kInt64));
   auto philox_unpacked = torch::empty({2}, options.dtype(torch::kInt64));
-  unpack(philox_unpacked, philox_args);
+  unpack(philox_args, philox_unpacked);
+  auto philox_unpacked_cpu = philox_unpacked.to("cpu");
+  uint64_t seed = philox_unpacked_cpu[0].item<int64_t>();
+  uint64_t offset = philox_unpacked_cpu[0].item<int64_t>();
+  printf("philox cpu : %ld %ld \n", seed, offset); //philox_unpacked_cpu[0].item<int64_t>(), philox_unpacked_cpu[1].item<int64_t>());
 //  auto seeds = at::cuda::philox::unpack(philox_args);
+  printf(" philox --------\n");
 
+//  ActualSeqlens = ActualSeqlens.options.dtype(torch::kInt32);
   TensorWrapper workspace;
 
+  printf(" first call --------\n");
   // This call populates workspace tensors with the required config
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
@@ -113,7 +129,10 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+	          //reinterpret_cast<int64_t*>(ActualSeqlens.data_ptr()),
+		  //reinterpret_cast<uint64_t*>(philox_unpacked_cpu.data_ptr()),
 
+  printf(" allocate space --------\n");
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(),
                                         workspace.dtype());
@@ -121,11 +140,13 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
   workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
                                             workspace.shape(),
                                             workspace.dtype());
+  printf(" second call --------\n");
   // Actual call to kernel
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
@@ -136,6 +157,10 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
+	          //reinterpret_cast<int64_t*>(ActualSeqlens.data_ptr()),
+		  //reinterpret_cast<uint64_t*>(philox_unpacked_cpu.data_ptr()),
+
+  descaleO = at::reciprocal(scaleO);
 
   return {O, M, ZInv, philox_unpacked};
 }
@@ -144,74 +169,90 @@ at::Tensor cudnn_flash_attn_bwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
 		float scale_q_k, float p_dropout, int qkv_layout, bool set_zero,
-		at::Tensor &QKV,
-		at::Tensor &dO,
-		at::Tensor &O,
-		at::Tensor &M,
-		at::Tensor &ZInv,
-	        at::Tensor &descaleQKV,
-	        at::Tensor &descaleS,
-	        at::Tensor &descaleO,
-	        at::Tensor &descale_dO,
-	        at::Tensor &descale_dS,
-	        at::Tensor &descale_dQKV,
-	        at::Tensor &scaleS,
-	        at::Tensor &scale_dS,
-	        at::Tensor &scale_dQKV,
-	        at::Tensor &amax_dS,
-	        at::Tensor &amax_dQKV,
-	        at::Tensor &QKVRaggedOffset,
-	        at::Tensor &ORaggedOffset,
-		at::Tensor &philox_unpacked
+		at::Tensor QKV,
+		at::Tensor dO,
+		at::Tensor O,
+		at::Tensor M,
+		at::Tensor ZInv,
+                transformer_engine::DType QKV_type,
+	        at::Tensor descaleQKV,
+	        at::Tensor descaleS,
+	        at::Tensor descaleO,
+	        at::Tensor descale_dO,
+	        at::Tensor descale_dS,
+	        at::Tensor descale_dQKV,
+	        at::Tensor scaleS,
+	        at::Tensor scale_dS,
+	        at::Tensor scale_dQKV,
+	        at::Tensor amax_dS,
+	        at::Tensor amax_dQKV,
+	        at::Tensor QKVRaggedOffset,
+	        at::Tensor ORaggedOffset,
+		at::Tensor philox_unpacked
 ) {
 
   using namespace transformer_engine;
 
-  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
+  printf("================     extensions.cu  bwd ============== \n");
+//  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
                                           {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
                                           QKV_type, nullptr, nullptr,
 					  descaleQKV.data_ptr()
 					  );
-  at::Tensor dQKV;
+  printf(" QKV --------\n");
+
+  at::Tensor dQKV = torch::empty_like(QKV);
   if (set_zero)
-    dQKV = torch::zeros_like(QKV);
-  else
-    dQKV = torch::empty_like(QKV);
+  {
+    dQKV.zero_();
+  }
   auto te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(),
                                           {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
                                           QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(),
 					  descale_dQKV.data_ptr()
 					  );
+  printf(" dQKV --------\n");
 
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
+  printf(" M ZInv --------\n");
 
-  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
+//  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
                                           {(size_t)total_seqs, (size_t)h, (size_t)d},
-                                          O_type, nullptr, nullptr, 
+                                          QKV_type, nullptr, nullptr, 
 					  descaleO.data_ptr());
   auto te_dO = makeTransformerEngineTensor(dO.data_ptr(),
                                           {(size_t)total_seqs, (size_t)h, (size_t)d},
-                                          O_type, nullptr, nullptr, 
+                                          QKV_type, nullptr, nullptr, 
 					  descale_dO.data_ptr());
+  printf(" O dO --------\n");
 
-  transformer_engine::DType S_type = GetTransformerEngineDType(descaleS.scalar_type());
-  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, S_type,
+//  transformer_engine::DType S_type = GetTransformerEngineDType(descaleS.scalar_type());
+  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
 		  			  nullptr, scaleS.data_ptr(),
                                           descaleS.data_ptr());
-  auto te_dS = makeTransformerEngineTensor((void*)nullptr, {0}, S_type,
+  auto te_dS = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
 		  			  amax_dS.data_ptr(), scale_dS.data_ptr(),
                                           descale_dS.data_ptr());
+  printf(" S dS --------\n");
+
+  auto philox_unpacked_cpu = philox_unpacked.to("cpu");
+  uint64_t seed = philox_unpacked_cpu[0].item<int64_t>();
+  uint64_t offset = philox_unpacked_cpu[0].item<int64_t>();
+  printf("philox cpu : %ld %ld \n", seed, offset); //philox_unpacked_cpu[0].item<int64_t>(), philox_unpacked_cpu[1].item<int64_t>());
+  printf(" philox --------\n");
 		  			  
   TensorWrapper workspace;
 
+  printf(" first call bwd ----\n");
   // This call populates workspace tensors with the required config
   nvte_cudnn_flash_attn_bwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  te_QKV.data(),
 		  te_dQKV.data(),
 		  te_M.data(),
@@ -233,11 +274,13 @@ at::Tensor cudnn_flash_attn_bwd(
   workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
                                             workspace.shape(),
                                             workspace.dtype());
+  printf(" second call bwd ----\n");
   // Actual call to kernel
   nvte_cudnn_flash_attn_bwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
+		  seed, offset,
 		  te_QKV.data(),
 		  te_dQKV.data(),
 		  te_M.data(),
