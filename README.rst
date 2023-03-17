@@ -14,7 +14,7 @@ Transformer Engine (TE) is a library for accelerating Transformer models on NVID
 using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
 memory utilization in both training and inference. TE provides a collection of highly optimized
 building blocks for popular Transformer architectures and an automatic mixed precision-like API that
-can be used seamlessly with your own framework-specific code. TE also includes a framework agnostic 
+can be used seamlessly with your own framework-specific code. TE also includes a framework agnostic
 C++ API that can be integrated with other deep learning libraries to enable FP8 support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for

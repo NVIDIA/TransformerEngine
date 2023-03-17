@@ -7,6 +7,7 @@ name: 'Build documentation'
 on:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 jobs:
   build_docs:
     runs-on: ubuntu-latest
