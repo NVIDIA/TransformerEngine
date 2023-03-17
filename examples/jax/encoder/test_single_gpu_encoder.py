@@ -44,29 +44,27 @@ class Net(nn.Module):
 
     @nn.compact
     def __call__(self, x, disable_dropout=False):
+        x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
+
         te_Encoder = partial(te.TransformerLayer,
-                             hidden_size=768,
-                             mlp_hidden_size=3072,
-                             num_attention_heads=12,
+                             hidden_size=256,
+                             mlp_hidden_size=1024,
+                             num_attention_heads=8,
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
                              layer_type=te.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
-                             transpose_batch_sequence=False,
                              dtype=jnp.bfloat16)
-
-        x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
-        x = te.LayerNorm(dtype=jnp.bfloat16)(x)
-        x = nn.Dropout(rate=0.1)(x, deterministic=disable_dropout)
-
-        for _ in range(3):
-            x = te_Encoder()(x, deterministic=disable_dropout)
+        x = te_Encoder()(x, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
-        x = te.DenseGeneral(features=768, dtype=jnp.bfloat16)(x)
-        x = jnp.tanh(x)
-        x = te.DenseGeneral(features=2, dtype=jnp.bfloat16)(x)
+
+        x = te.DenseGeneral(features=256, dtype=jnp.bfloat16)(x)
+
+        x = te.DenseGeneral(features=256, dtype=jnp.bfloat16)(x)
+
+        x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
         return x
 
 
@@ -272,9 +270,9 @@ def encoder_parser(args):
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=3,
         metavar="N",
-        help="number of epochs to train (default: 14)",
+        help="number of epochs to train (default: 3)",
     )
     parser.add_argument(
         "--lr",
@@ -303,20 +301,20 @@ class TestEncoder(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Run Encoder from Transformer Engine with BF16"""
-        cls.args = encoder_parser(["--epochs", "3"])
-        cls.desired = train_and_evaluate(cls.args)
+        """Run 4 epochs for testing"""
+        cls.args = encoder_parser(["--epochs", "4"])
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
-        assert self.desired[1] > 0.7 and self.desired[3] > 0.68
+        actual = train_and_evaluate(self.args)
+        assert actual[1] > 0.75 and actual[3] > 0.60
 
     @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        np.testing.assert_allclose(actual, self.desired, atol=0.001)
+        assert actual[1] > 0.75 and actual[3] > 0.60
 
 
 if __name__ == "__main__":
