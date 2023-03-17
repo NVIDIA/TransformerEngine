@@ -151,6 +151,10 @@ class FusedScaleMaskSoftmax(tf.keras.Model):
             return tf.reshape(probs, inp.shape)
         # input is 4D tensor (b, np, sq, sk)
         if mask is not None:
+            # The mask defined in TE kernels are different from TF. In TE, the
+            # mask specifies 1 to mask out and 0 to keep.
+            mask = tf.math.logical_not(mask)
+
             ndims = len(mask.shape)
             assert ndims <= 4, "mask ndims should be <= 4"
             if len(mask.shape) < 4:

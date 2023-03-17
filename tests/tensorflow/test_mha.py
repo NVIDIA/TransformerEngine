@@ -111,7 +111,7 @@ class MultiHeadAttentionKeras(tf.keras.Model):
         matmul_qk = tf.einsum('FBNE,TBNE->BNFT', q, k)
         scaled_attn_logits = matmul_qk / tf.math.sqrt(dk)
         if mask is not None:
-            scaled_attn_logits = tf.where(mask, -10000.0, scaled_attn_logits)
+            scaled_attn_logits = tf.where(mask, scaled_attn_logits, -10000.0)
 
         # [B, N, F, T]
         attention_weights = tf.nn.softmax(scaled_attn_logits, axis=-1)
