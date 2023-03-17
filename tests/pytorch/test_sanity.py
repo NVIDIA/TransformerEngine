@@ -86,7 +86,9 @@ fp8_recipes = [
     ),
 ]
 
-param_types = [torch.float32, torch.bfloat16, torch.float16]
+param_types = [torch.float32, torch.float16]
+if torch.cuda.is_bf16_supported():
+    param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
 

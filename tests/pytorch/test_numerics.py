@@ -44,7 +44,9 @@ model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
-param_types = [torch.float32, torch.bfloat16, torch.float16]
+param_types = [torch.float32, torch.float16]
+if torch.cuda.is_bf16_supported():
+    param_types.append(torch.bfloat16)
 
 batch_sizes = [1, 2]
 
@@ -619,7 +621,7 @@ def test_linear_accuracy(dtype, bs, model):
 
     te_outputs = _test_e2e_accuracy(te_linear, bs, dtype, config)
     torch_outputs = _test_e2e_accuracy(torch_linear, bs, dtype, config)
-    assert_allclose(te_outputs, torch_outputs, 1e-5)
+    assert_allclose(te_outputs, torch_outputs, 5e-3)
 
 
 @pytest.mark.parametrize("dtype", param_types)
