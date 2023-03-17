@@ -5,11 +5,11 @@
 """Transformer."""
 
 from contextlib import nullcontext
+from typing import Callable, Optional, Tuple, Union
+import os
+
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
-from typing import Callable, Optional, Tuple, Union
-
-import os
 import tensorflow as tf
 
 from transformer_engine.tensorflow import (

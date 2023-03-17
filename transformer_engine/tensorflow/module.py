@@ -3,11 +3,9 @@
 # See LICENSE for license information.
 
 """Top level Transformer Engine PyTorch modules"""
+from typing import Union, Callable
 from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
-from tensorflow.python.framework import load_library
-from tensorflow.python.platform import resource_loader
-from typing import Union, Callable
 
 import tensorflow as tf
 import transformer_engine_tensorflow as tex
@@ -30,8 +28,8 @@ from .jit import (
     bgrad_dgelu_fused,
 )
 
-stream_lib = load_library.load_op_library(
-    resource_loader.get_path_to_datafile(
+stream_lib = tf.load_op_library(
+    tf.compat.v1.resource_loader.get_path_to_datafile(
         tf.sysconfig.get_lib() + "/../lib_get_stream.so"
     )
 )
