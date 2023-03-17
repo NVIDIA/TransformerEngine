@@ -52,9 +52,9 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 	        at::Tensor amaxO,
 	        at::Tensor QKVRaggedOffset,
 	        at::Tensor ORaggedOffset,
+	        at::Tensor ActualSeqlens,
 		c10::optional<at::Generator> &rng_gen
 ) {
-	        //at::Tensor &ActualSeqlens,
 
   using namespace transformer_engine;
 
@@ -102,10 +102,12 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 //  at::Tensor philox_unpacked = torch::from_blob(seeds.data(), {2}, options.dtype(torch::kInt64));
   auto philox_unpacked = torch::empty({2}, options.dtype(torch::kInt64));
   unpack(philox_args, philox_unpacked);
+
+
   auto philox_unpacked_cpu = philox_unpacked.to("cpu");
   uint64_t seed = philox_unpacked_cpu[0].item<int64_t>();
   uint64_t offset = philox_unpacked_cpu[0].item<int64_t>();
-  printf("philox cpu : %ld %ld \n", seed, offset); //philox_unpacked_cpu[0].item<int64_t>(), philox_unpacked_cpu[1].item<int64_t>());
+  printf("need to delete: philox cpu : %ld %ld \n", seed, offset); //philox_unpacked_cpu[0].item<int64_t>(), philox_unpacked_cpu[1].item<int64_t>());
 //  auto seeds = at::cuda::philox::unpack(philox_args);
   printf(" philox --------\n");
 
@@ -114,22 +116,22 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 
   printf(" first call --------\n");
   // This call populates workspace tensors with the required config
+		  //seed, offset,
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
 	          te_S.data(),
 		  te_O.data(),
-	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ActualSeqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
-	          //reinterpret_cast<int64_t*>(ActualSeqlens.data_ptr()),
 		  //reinterpret_cast<uint64_t*>(philox_unpacked_cpu.data_ptr()),
 
   printf(" allocate space --------\n");
@@ -142,22 +144,22 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                                             workspace.dtype());
   printf(" second call --------\n");
   // Actual call to kernel
+		  //seed, offset,
   nvte_cudnn_flash_attn_fwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  te_QKV.data(),
 		  te_M.data(),
 		  te_ZInv.data(),
 	          te_S.data(),
 		  te_O.data(),
-	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ActualSeqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
-	          //reinterpret_cast<int64_t*>(ActualSeqlens.data_ptr()),
 		  //reinterpret_cast<uint64_t*>(philox_unpacked_cpu.data_ptr()),
 
   descaleO = at::reciprocal(scaleO);
@@ -188,6 +190,7 @@ at::Tensor cudnn_flash_attn_bwd(
 	        at::Tensor amax_dQKV,
 	        at::Tensor QKVRaggedOffset,
 	        at::Tensor ORaggedOffset,
+	        at::Tensor ActualSeqlens,
 		at::Tensor philox_unpacked
 ) {
 
@@ -248,11 +251,11 @@ at::Tensor cudnn_flash_attn_bwd(
 
   printf(" first call bwd ----\n");
   // This call populates workspace tensors with the required config
+		  //seed, offset,
   nvte_cudnn_flash_attn_bwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  te_QKV.data(),
 		  te_dQKV.data(),
 		  te_M.data(),
@@ -261,8 +264,9 @@ at::Tensor cudnn_flash_attn_bwd(
 	          te_dS.data(),
 		  te_O.data(),
 		  te_dO.data(),
-	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ActualSeqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());
@@ -276,11 +280,11 @@ at::Tensor cudnn_flash_attn_bwd(
                                             workspace.dtype());
   printf(" second call bwd ----\n");
   // Actual call to kernel
+		  //seed, offset,
   nvte_cudnn_flash_attn_bwd(
 		  b, max_seq_len,
 		  total_seqs, h, d,
 		  scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  te_QKV.data(),
 		  te_dQKV.data(),
 		  te_M.data(),
@@ -289,8 +293,9 @@ at::Tensor cudnn_flash_attn_bwd(
 	          te_dS.data(),
 		  te_O.data(),
 		  te_dO.data(),
-	          reinterpret_cast<int64_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int64_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+	          reinterpret_cast<int32_t*>(ActualSeqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(philox_unpacked.data_ptr()),
                   workspace.data(),
 		  at::cuda::getCurrentCUDAStream());

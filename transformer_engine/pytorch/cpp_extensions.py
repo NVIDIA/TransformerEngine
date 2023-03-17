@@ -16,6 +16,7 @@ def check_tensor(x: torch.Tensor):
 
 def check_qkv(qkv: torch.Tensor):
     check_tensor(qkv)
+    print('qkv type ',qkv.dtype)
     assert (
             qkv.dtype is torch.int8
             and qkv.dim() == 4
@@ -25,17 +26,17 @@ def check_qkv(qkv: torch.Tensor):
 def check_o(o: torch.Tensor):
     check_tensor(o)
     assert (
-            o.dtype is torch.int8
+            o.dtype is torch.uint8 or torch.int8
             and o.dim() == 3
-            ), f"O needs to be a 3D FP8 tensor."
+            ), f"O needs to be a 3D FP8 tensor."+str(o.dtype)
 
 def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
     check_tensor(stats)
     assert (
-            stats.dtype is torch.int8
+            stats.dtype is torch.float32
             and stats.dim() == 4
             and stats.shape == torch.Size([b, h, s, 1])
-            ), f"Tensor needs to be in [b, h, s, 1] and FP8."
+            ), f"Tensor needs to be in [b, h, s, 1] and float32."
 
 def check_cu_seqlens(cu_seqlens: torch.Tensor):
     check_tensor(cu_seqlens)
@@ -100,9 +101,9 @@ def cudnn_flash_attn_fwd(
     b = cu_seqlens.numel() - 1
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
     #actual_seqlens = (cu_seqlens[1:]-cu_seqlens[:-1]).to(dtype=torch.int32) 
-    #actual_seqlens = cu_seqlens[1:]-cu_seqlens[:-1]
-    #print('actual seqlens ',actual_seqlens,cu_seqlens)
-    print('cu_seqlens ',cu_seqlens)
+    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    print('actual seqlens ',actual_seqlens,cu_seqlens)
+    #print('cu_seqlens ',cu_seqlens)
 
     total_seqs = qkv.size(0)
     h = qkv.size(2)
@@ -141,9 +142,9 @@ def cudnn_flash_attn_fwd(
              amax_o,
              QKVRaggedOffset,
              ORaggedOffset,
+             actual_seqlens,
              rng_gen,
     )
-             #actual_seqlens,
              #rng_gen_new,
              #M,
              #ZInv,
@@ -186,12 +187,15 @@ def cudnn_flash_attn_bwd(
     assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
+    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    print('actual seqlens ',actual_seqlens,cu_seqlens)
 
     total_seqs = qkv.size(0)
     h = qkv.size(2)
     d = qkv.size(3)
     scale_q_k = 1.0 / math.sqrt(d)
 
+    print('M shape ',M.shape, ZInv.shape)
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
     check_seed(philox_unpacked)
@@ -226,6 +230,7 @@ def cudnn_flash_attn_bwd(
              q_scale_dqkv,
              QKVRaggedOffset,
              ORaggedOffset,
+             actual_seqlens,
              philox_unpacked,
     )
              #dQtmp,
@@ -425,6 +430,7 @@ def fp8_cast_transpose_bgrad_fused(
     otype: tex.DType,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cast + Transpose + BGRAD with FP8 output"""
+    print('fp8_cast_transpose_bgrad_fused otype',otype)
     return tex.fused_cast_transpose_bgrad(
         inp,
         fp8_meta_tensor.scale[fp8_tensor],

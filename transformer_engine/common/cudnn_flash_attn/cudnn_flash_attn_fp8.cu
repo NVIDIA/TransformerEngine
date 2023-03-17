@@ -169,8 +169,8 @@ struct FADescriptor {
   float attnScale;
   float dropoutProbability;
   MHA_Layout layout;
-  std::uint64_t seed;
-  std::uint64_t offset;
+  void* seed;
+  void* offset;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FADescriptor &rhs) const {
@@ -206,7 +206,7 @@ std::unordered_map<std::string, int> tensor_name_to_uid = {
     {"M",                           18},
     {"Z",                           19},
     {"descaleQ",                    20},
-    {"descaleK",                    21}, 
+    {"descaleK",                    21},
     {"descaleV",                    22},
     {"descaleS",                    23},
     {"scaleS",                      24},
@@ -246,13 +246,13 @@ bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
     return false;
 }
 
-static cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const * dim, 
+static cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const * dim,
                                 int64_t const * stride, bool is_virtual, bool is_value) {
     int nbDims = 4;
     auto tensor_created = cudnn_frontend::TensorBuilder()
             .setDim(nbDims, dim)
             .setStride(nbDims, stride)
-            .setId(id) 
+            .setId(id)
             .setAlignment(16) // 16B alignment is needed to run a tensor core engine
             .setDataType(type)
             .setVirtual(is_virtual)
@@ -262,13 +262,13 @@ static cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, in
     return tensor_created;
 };
 
-static cudnn_frontend::Tensor tensor_create_with_offset(cudnnDataType_t type, int64_t id, int64_t const * dim, 
+static cudnn_frontend::Tensor tensor_create_with_offset(cudnnDataType_t type, int64_t id, int64_t const * dim,
                                 int64_t const * stride, bool is_virtual, bool is_value, std::shared_ptr<cudnn_frontend::Tensor>& raggedOffset) {
     int nbDims = 4;
     auto tensor_created = cudnn_frontend::TensorBuilder()
             .setDim(nbDims, dim)
             .setStride(nbDims, stride)
-            .setId(id) 
+            .setId(id)
             .setAlignment(16) // 16B alignment is needed to run a tensor core engine
             .setDataType(type)
             .setVirtual(is_virtual)
@@ -284,12 +284,12 @@ static cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnP
             .setMode(mode)
             .setComputeType(type)
             .build();
-    
+
     std::cout << pw_desc_created.describe() << std::endl;
     return pw_desc_created;
-} 
+}
 
-static cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &yDesc, 
+static cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &yDesc,
                                                     cudnn_frontend::PointWiseDesc const &pwDesc) {
     auto pw_op_created = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
                         .setxDesc(xDesc)
@@ -300,7 +300,7 @@ static cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const
     return pw_op_created;
 }
 
-static cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc, 
+static cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
                                                     cudnn_frontend::Tensor const &yDesc, cudnn_frontend::PointWiseDesc const &pwDesc) {
     auto pw_op_created = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
                         .setxDesc(xDesc)
@@ -312,18 +312,18 @@ static cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor cons
     return pw_op_created;
 }
 
-//static cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc, cudnn_frontend::Tensor const &tDesc, 
-//                                            cudnn_frontend::Tensor const &yDesc, cudnn_frontend::PointWiseDesc const &pwDesc) {
-//    auto pw_op_created = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-//                        .setxDesc(xDesc)
-//                        .setbDesc(bDesc)
-//                        .settDesc(tDesc)
-//                        .setyDesc(yDesc)
-//                        .setpwDesc(pwDesc)
-//                        .build();
-//    std::cout << pw_op_created.describe() << std::endl;
-//    return pw_op_created;
-//}
+static cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc, cudnn_frontend::Tensor const &tDesc,
+                                            cudnn_frontend::Tensor const &yDesc, cudnn_frontend::PointWiseDesc const &pwDesc) {
+    auto pw_op_created = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
+                        .setxDesc(xDesc)
+                        .setbDesc(bDesc)
+                        .settDesc(tDesc)
+                        .setyDesc(yDesc)
+                        .setpwDesc(pwDesc)
+                        .build();
+    std::cout << pw_op_created.describe() << std::endl;
+    return pw_op_created;
+}
 
 static cudnn_frontend::Tensor
 createAmax(const std::string& amax_tensor_name,
@@ -354,7 +354,7 @@ createAmax(const std::string& amax_tensor_name,
         return amaxTensor;
 }
 
-static cudnn_frontend::Tensor 
+static cudnn_frontend::Tensor
 createScale(cudnn_frontend::Tensor& prevBlockOutputTensor,
             const std::string& scale_tensor_name,
             cudnnDataType_t tensorType,
@@ -392,7 +392,7 @@ createScale(cudnn_frontend::Tensor& prevBlockOutputTensor,
     return afterScaleKTensor;
 }
 
-static cudnn_frontend::Tensor 
+static cudnn_frontend::Tensor
 createScale(cudnn_frontend::Tensor& prevBlockOutputTensor,
             const cudnn_frontend::Tensor& scaleTensor,
             cudnnDataType_t tensorType,
@@ -425,7 +425,7 @@ createScale(cudnn_frontend::Tensor& prevBlockOutputTensor,
     return afterScaleTensor;
 }
 
-static cudnn_frontend::Tensor 
+static cudnn_frontend::Tensor
 createScaleWithOffset(cudnn_frontend::Tensor& prevBlockOutputTensor,
             const std::string& scale_tensor_name,
             cudnnDataType_t tensorType,
@@ -476,12 +476,13 @@ createScaleWithOffset(cudnn_frontend::Tensor& prevBlockOutputTensor,
 }
 
 static cudnn_frontend::Tensor
-createSoftmaxForward(int64_t b, 
-                     int64_t h, 
+createSoftmaxForward(int64_t b,
+                     int64_t h,
                      int64_t s_q,
                      int64_t s_kv,
                      std::vector<cudnn_frontend::Operation>& ops,
-                     cudnn_frontend::Tensor& prevBlockOutputTensor) {
+                     cudnn_frontend::Tensor& prevBlockOutputTensor,
+                     bool isTraining) {
 
     int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -490,7 +491,7 @@ createSoftmaxForward(int64_t b,
     int64_t afterReduction_stride [4] = {h * s_q, s_q, 1, 1};
 
     // max (x) (M tensor)
-    auto afterMaxReductionTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["M"], afterReduction_dim, afterReduction_stride, false, false); // not virtual
+    auto afterMaxReductionTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["M"], afterReduction_dim, afterReduction_stride, !isTraining, false); // not virtual if training is true, virtual if training is false
     // x - max(x)
     auto afterSubtractionTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 151, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
     // e^(x - max(x))
@@ -498,7 +499,7 @@ createSoftmaxForward(int64_t b,
     // sum (e^(x - max(x))) (Z tensor)
     auto zTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["Z"], afterReduction_dim, afterReduction_stride, true, false); // is virtual
     // 1 / sum (e^(x - max(x))) (Z_INV tensor)
-    auto zInvTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["Z_INV"], afterReduction_dim, afterReduction_stride, false, false); // not virtual
+    auto zInvTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["Z_INV"], afterReduction_dim, afterReduction_stride, !isTraining, false); // not virtual if training is true, virtual if training is false
     // Final softmax output (After exponent * Z_INV)
     auto beforeDropoutTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 153, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
 
@@ -568,60 +569,14 @@ createSoftmaxForward(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createSoftmaxBackward(int64_t b, 
-                     int64_t h, 
-                     int64_t s_q,
-                     int64_t s_kv,
-                     std::vector<cudnn_frontend::Operation>& ops,
-                     cudnn_frontend::Tensor& dyTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0, "Softmax backward constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
-
-    int64_t dx_dim [4] = {b, h, s_q, s_kv};
-    int64_t dx_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
-
-    int64_t M_Z_dim [4] = {b, h, s_q, 1};
-    int64_t M_Z_stride [4] = {h * s_q, s_q, 1, 1};
-
-    // creating all tensors
-    auto MTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["M"], M_Z_dim, M_Z_stride, false, false); // not virtual
-    auto ZInvTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["Z_INV"], M_Z_dim, M_Z_stride, false, false); // not virtual
-    auto dxAfterSubtractionTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 252, dx_dim, dx_stride, true, false); // is virtual
-    auto dxAfterExponentiation = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 253, dx_dim, dx_stride, true, false); // is virtual
-    auto dxBeforeDropout_QKt_Tensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 254, dx_dim, dx_stride, true, false); // is virtual
-
-    // creating all ops
-    // sub (dy - M)
-    auto subtractionDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
-    auto subtractionOp = binary_pw_op_create(dyTensor, MTensor, dxAfterSubtractionTensor, subtractionDesc);
-
-    // Define the exponent descriptor
-    auto exponentDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_EXP);
-
-    // Create a exponent Node. (exp(dy - M))
-    auto exponentOp = unary_pw_op_create(dxAfterSubtractionTensor, dxAfterExponentiation, exponentDesc);
-
-    // Define the pw multiply descriptor
-    auto multiplyDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
-
-    // Create a multiply Node.  (exp(dy - M) * Z_INV
-    auto mutliplyOp = binary_pw_op_create(dxAfterExponentiation, ZInvTensor, dxBeforeDropout_QKt_Tensor, multiplyDesc);
-
-    ops.push_back(std::move(subtractionOp));
-    ops.push_back(std::move(exponentOp));
-    ops.push_back(std::move(mutliplyOp));
-
-    return dxBeforeDropout_QKt_Tensor;
-}
-
-static cudnn_frontend::Tensor
-createDropoutForward(int64_t b, 
-              int64_t h, 
+createDropoutForward(int64_t b,
+              int64_t h,
               int64_t s_q,
               int64_t s_kv,
               double probability,
               std::vector<cudnn_frontend::Operation>& ops,
               cudnn_frontend::Tensor& beforeDropoutTensor) {
-    
+
     cudnn_frontend::throw_if(ops.size() == 0, "Dropout DAG constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
 
     int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
@@ -639,7 +594,7 @@ createDropoutForward(int64_t b,
     auto beforeDropoutScaleTensor = cudnn_frontend::TensorBuilder()
             .setDim(4, afterBMM1_dim)
             .setStride(4, afterBMM1_stride)
-            .setId(tensor_name_to_uid["VIRTUAL"] + 201) 
+            .setId(tensor_name_to_uid["VIRTUAL"] + 201)
             .setAlignment(16) // 16B alignment is needed to run a tensor core engine
             .setDataType(CUDNN_DATA_FLOAT)
             .setVirtual(true)
@@ -688,15 +643,15 @@ createDropoutForward(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createDropoutBackward(int64_t b, 
-              int64_t h, 
+createDropoutBackward(int64_t b,
+              int64_t h,
               int64_t s_q,
               int64_t s_kv,
               double probability,
               std::vector<cudnn_frontend::Operation>& ops,
               cudnn_frontend::Tensor& beforeDropoutTensor,
               cudnn_frontend::Tensor& dropoutMaskTensor) {
-    
+
     cudnn_frontend::throw_if(ops.size() == 0, "Dropout DAG constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
 
     int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
@@ -712,7 +667,7 @@ createDropoutBackward(int64_t b,
     auto beforeDropoutScaleTensor = cudnn_frontend::TensorBuilder()
             .setDim(4, afterBMM1_dim)
             .setStride(4, afterBMM1_stride)
-            .setId(tensor_name_to_uid["VIRTUAL"] + 201) 
+            .setId(tensor_name_to_uid["VIRTUAL"] + 201)
             .setAlignment(16) // 16B alignment is needed to run a tensor core engine
             .setDataType(CUDNN_DATA_FLOAT)
             .setVirtual(true)
@@ -761,8 +716,54 @@ createDropoutBackward(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createQKBMM(int64_t b, 
-           int64_t h, 
+createSoftmaxBackward(int64_t b,
+                     int64_t h,
+                     int64_t s_q,
+                     int64_t s_kv,
+                     std::vector<cudnn_frontend::Operation>& ops,
+                     cudnn_frontend::Tensor& dyTensor) {
+    cudnn_frontend::throw_if(ops.size() == 0, "Softmax backward constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
+
+    int64_t dx_dim [4] = {b, h, s_q, s_kv};
+    int64_t dx_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
+
+    int64_t M_Z_dim [4] = {b, h, s_q, 1};
+    int64_t M_Z_stride [4] = {h * s_q, s_q, 1, 1};
+
+    // creating all tensors
+    auto MTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["M"], M_Z_dim, M_Z_stride, false, false); // not virtual
+    auto ZInvTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["Z_INV"], M_Z_dim, M_Z_stride, false, false); // not virtual
+    auto dxAfterSubtractionTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 252, dx_dim, dx_stride, true, false); // is virtual
+    auto dxAfterExponentiation = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 253, dx_dim, dx_stride, true, false); // is virtual
+    auto dxBeforeDropout_QKt_Tensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 254, dx_dim, dx_stride, true, false); // is virtual
+
+    // creating all ops
+    // sub (dy - M)
+    auto subtractionDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
+    auto subtractionOp = binary_pw_op_create(dyTensor, MTensor, dxAfterSubtractionTensor, subtractionDesc);
+
+    // Define the exponent descriptor
+    auto exponentDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_EXP);
+
+    // Create a exponent Node. (exp(dy - M))
+    auto exponentOp = unary_pw_op_create(dxAfterSubtractionTensor, dxAfterExponentiation, exponentDesc);
+
+    // Define the pw multiply descriptor
+    auto multiplyDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
+
+    // Create a multiply Node.
+    auto mutliplyOp = binary_pw_op_create(dxAfterExponentiation, ZInvTensor, dxBeforeDropout_QKt_Tensor, multiplyDesc);
+
+    ops.push_back(std::move(subtractionOp));
+    ops.push_back(std::move(exponentOp));
+    ops.push_back(std::move(mutliplyOp));
+
+    return dxBeforeDropout_QKt_Tensor;
+}
+
+static cudnn_frontend::Tensor
+createQKBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -786,7 +787,7 @@ createQKBMM(int64_t b,
 
     // first GEMM output
     auto afterQKTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 1, s_dim, s_stride, true, false); // is virtual
-    
+
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder()
                                     .setComputeType(CUDNN_DATA_FLOAT)
@@ -821,8 +822,8 @@ createQKBMM(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createSVBMM(int64_t b, 
-           int64_t h, 
+createSVBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -842,7 +843,7 @@ createSVBMM(int64_t b,
     int64_t o_dim [4] =  {b, h, s_q, d};
     int64_t o_stride [4];
     generateMHAStrides(b, h, s_q, s_kv, d, o_stride, layout, MHA_Matrix::O_Matrix);
-    
+
     auto vTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["V"], v_dim, v_stride, false, false, QKVRaggedOffsetTensor);
     // second fprop GEMM output
     auto oTensor = tensor_create(tensorType, tensor_name_to_uid["VIRTUAL"] + 300, o_dim, o_stride, true, false); // is virtual
@@ -869,8 +870,8 @@ createSVBMM(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createSdOBMM(int64_t b, 
-           int64_t h, 
+createSdOBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -884,10 +885,10 @@ createSdOBMM(int64_t b,
 
     int64_t s_dim_transpose [4] =  {b, h, s_kv, s_q};
     int64_t s_stride_transpose [4] = {h * s_kv * s_q, s_kv * s_q, 1, s_kv};
-    
+
     int64_t v_dim [4] =  {b, h, s_kv, d};
     int64_t v_stride [4] = {h * s_kv * d, d, h * d, 1};
-    
+
     auto sTransposeTensor = tensor_create(tensorType, tensor_name_to_uid["VIRTUAL"] + 499, s_dim_transpose, s_stride_transpose, true, false); // is virtual
     // S.T * dO
     auto dVTensor_before_dequan_S = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 500, v_dim, v_stride, true, false); // is virtual
@@ -924,8 +925,8 @@ createSdOBMM(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createdOVBMM(int64_t b, 
-           int64_t h, 
+createdOVBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -956,7 +957,7 @@ createdOVBMM(int64_t b,
 
     // dO * V.T
     auto afterdOVTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 600, s_dim, s_stride, true, false); // is virtual
-    
+
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder()
                                             .setComputeType(CUDNN_DATA_FLOAT)
@@ -991,8 +992,8 @@ createdOVBMM(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createdOAndORowReductionChain(int64_t b, 
-           int64_t h, 
+createdOAndORowReductionChain(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -1011,7 +1012,7 @@ createdOAndORowReductionChain(int64_t b,
     auto O_dO_after_pointwise_multiply = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 700, o_dim, o_stride, true, false); // is virtual
     auto O_dO_after_dropout_scale = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 701, o_dim, o_stride, true, false); // is virtual
     auto O_dO_after_rowsum = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 702, o_dim_row_sum, o_dim_row_sum_stride, true, false); // is virtual
-    
+
     // Define the pw multiply descriptor
     auto multiplyDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
 
@@ -1045,8 +1046,8 @@ createdOAndORowReductionChain(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createBiasSubtractionSoftmaxMulChain(int64_t b, 
-           int64_t h, 
+createBiasSubtractionSoftmaxMulChain(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -1076,13 +1077,13 @@ createBiasSubtractionSoftmaxMulChain(int64_t b,
 
     ops.push_back(std::move(sub_op));
     ops.push_back(std::move(mutliply_op));
-    
+
     return S_mul_dS_minus_O_dO;
 }
 
 static cudnn_frontend::Tensor
-createdSKBMM(int64_t b, 
-           int64_t h, 
+createdSKBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -1096,7 +1097,7 @@ createdSKBMM(int64_t b,
     int64_t after_dSK_stride [4] = {h * s_kv * d, d, h * d, 1};
     // dS * K
     auto After_dS_K = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 875, after_dSK_dim, after_dSK_stride, true, false); // is virtual
-    
+
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder()
                                     .setComputeType(CUDNN_DATA_FLOAT)
@@ -1122,8 +1123,8 @@ createdSKBMM(int64_t b,
 }
 
 static cudnn_frontend::Tensor
-createdSQBMM(int64_t b, 
-           int64_t h, 
+createdSQBMM(int64_t b,
+           int64_t h,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
@@ -1150,7 +1151,7 @@ createdSQBMM(int64_t b,
 
     // dS.T * Q
     auto After_dSTranspose_Q = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 651, after_dSTranspose_Q_dim, after_dSTranspose_Q_stride, true, false); // is virtual
-    
+
     // Create reshape node for V -> V.T
     auto reshape_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
                             .setxDesc(dSTensor)
@@ -1184,20 +1185,21 @@ createdSQBMM(int64_t b,
     return After_dSTranspose_Q;
 }
 
-void 
-cudnn_fa_fprop_fp8(int64_t b, 
-                int64_t h, 
+		//uint64_t seed,
+		//uint64_t offset,
+void
+cudnn_fa_fprop_fp8(int64_t b,
+                int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
                 int64_t d,
                 float attnScale,
+                bool isTraining,
                 float dropoutProbability,
                 MHA_Layout layout,
-		uint64_t seed,
-		uint64_t offset,
-                void* devPtrQKV, 
+                void* devPtrQKV,
                 void* devPtrM,
-                void* devPtrZInv,  
+                void* devPtrZInv,
                 void* devPtrO,
                 void* devPtrDropoutSeed,
                 void* devPtrDropoutOffset,
@@ -1214,19 +1216,14 @@ cudnn_fa_fprop_fp8(int64_t b,
                 void* devPtrMNKOverride,
                 cudnnDataType_t tensorType,
 		void* workspace_ptr,
-		uint64_t*  workspace_size)
+		uint64_t* workspace_size)
 {
-                
-    printf("=============== sample fprop ==============\n");
+
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-        printf(" enter try ------------ \n");
-	//uint64_t seed = static_cast<uint64_t>(*devPtrDropoutSeed);
-	//uint64_t offset = static_cast<uint64_t>(*devPtrDropoutOffset);
-        printf(" get seed offset ------------ \n");
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1235,249 +1232,242 @@ cudnn_fa_fprop_fp8(int64_t b,
 			      attnScale,
                               dropoutProbability,
                               layout,
-                              seed,
-                              offset,
+                              devPtrDropoutSeed,
+                              devPtrDropoutOffset,
                               tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fa_fprop_cache;
 
-        printf(" before get_plan ------------ \n");
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
 
-        printf(" cached? ------------ \n");
-        // if hit, return
-        auto it = cache.find(descriptor);
-        if (it != cache.end()) {
-          auto plan = it->second;
-          return plan;
-        }
+            // if hit, return
+            auto it = cache.find(descriptor);
+            if (it != cache.end()) {
+              auto plan = it->second;
+              return plan;
+            }
 
-        printf(" none cached ------------ \n");
-	// otherwise, build the op_graph and the plan. Then update cache
-        std::vector<cudnn_frontend::Operation const*> all_ops;
-        std::vector<cudnn_frontend::Operation> ops;
+	    // otherwise, build the op_graph and the plan. Then update cache
+            std::vector<cudnn_frontend::Operation const*> all_ops;
+            std::vector<cudnn_frontend::Operation> ops;
 
-        printf(" offsets ------------ \n");
-        // Ragged tensors have b + 1 elements
-        int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
-        int64_t raggedStride [4] = {1, 1, 1, 1};
-        // Create offset tensors
-        auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
-        auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
+            cudnn_frontend::throw_if(dropoutProbability != 0.0f && !isTraining, "Dropout probability should be 0.0f for inference mode", CUDNN_STATUS_BAD_PARAM);
+            cudnn_frontend::throw_if(dropoutProbability == 1.0f, "Dropout probability cannot be 1.0", CUDNN_STATUS_BAD_PARAM);
 
-        printf(" mnk ------------ \n");
-        int64_t seqlen_dim [4] =  {b, 1, 1, 1};
-        int64_t seqlen_stride [4] = {1, 1, 1, 1};
-        // Create override tensors
-        auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
+            // Ragged tensors have b + 1 elements
+            int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
+            int64_t raggedStride [4] = {1, 1, 1, 1};
+            // Create offset tensors
+            auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
+            auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
 
-        printf(" share ------------ \n");
-        // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
-        std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
-        std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
+            int64_t seqlen_dim [4] =  {b, 1, 1, 1};
+            int64_t seqlen_stride [4] = {1, 1, 1, 1};
+            // Create override tensors
+            auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
 
-        printf(" get strides ------------ \n");
-        // Create Q and K tensors that are used in different places
-        int64_t q_dim [4] = {b, h, s_q, d};
-        int64_t q_stride [4];
-        generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
+            // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
+            std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
+            std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
 
-        int64_t k_dim [4] =  {b, h, s_kv, d};
-        int64_t k_stride [4];
-        generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
+            // Create Q and K tensors that are used in different places
+            int64_t q_dim [4] = {b, h, s_q, d};
+            int64_t q_stride [4];
+            generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
 
-        printf(" q/k ------------ \n");
-        auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
-        auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
+            int64_t k_dim [4] =  {b, h, s_kv, d};
+            int64_t k_stride [4];
+            generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
 
-        printf(" q/k bmm ------------ \n");
-        // Q * K.T
-        auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
+            auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
+            auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
+
+            // Q * K.T
+            auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
 
-        // QK.T * attn scale
-        auto AfterAttnScale_before_dequan_Q_tensor = createScale(afterQKTensor, // input tensor
-                                                                "AttnScale", // scale tensor
-                                                                CUDNN_DATA_FLOAT,  // output tensor type
-                                                                true, // output is virtual
-                                                                true, // scale is by value
-                                                                ops);
+            // QK.T * attn scale
+            auto AfterAttnScale_before_dequan_Q_tensor = createScale(afterQKTensor, // input tensor
+                                                                    "AttnScale", // scale tensor
+                                                                    CUDNN_DATA_FLOAT,  // output tensor type
+                                                                    true, // output is virtual
+                                                                    true, // scale is by value
+                                                                    ops);
 
-        // QK.T * attn scale * dequant_Q
-        auto AfterAttnScale_before_dequan_K_tensor = createScale(AfterAttnScale_before_dequan_Q_tensor, // input tensor
-                                                                "descaleQ", // scale tensor
-                                                                CUDNN_DATA_FLOAT, // output tensor type
-                                                                true, // output is virtual
-                                                                false, // scale is by value
-                                                                ops);
+            // QK.T * attn scale * dequant_Q
+            auto AfterAttnScale_before_dequan_K_tensor = createScale(AfterAttnScale_before_dequan_Q_tensor, // input tensor
+                                                                    "descaleQ", // scale tensor
+                                                                    CUDNN_DATA_FLOAT, // output tensor type
+                                                                    true, // output is virtual
+                                                                    false, // scale is by value
+                                                                    ops);
 
-        // QK.T * attn scale * dequant_Q * dequant_K
-        auto AfterAttnScale_tensor = createScale(AfterAttnScale_before_dequan_K_tensor, // input tensor
-                                                "descaleK", // scale tensor
-                                                CUDNN_DATA_FLOAT, // output tensor type
-                                                true, // output is virtual
-                                                false, // scale is by value
-                                                ops);
-
-
-        auto BeforeDropoutTensor = createSoftmaxForward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor);
-
-        auto AfterDropout_before_quan_S = createDropoutForward(b, h, s_q, s_kv, dropoutProbability, ops, BeforeDropoutTensor);
-
-        // Amax for S
-        createAmax("amaxS", BeforeDropoutTensor, ops);
-
-        // After softmax * dropout * scale S -> fp8 input to next bmm with V
-        auto AfterMultiplyDropout = createScale(AfterDropout_before_quan_S, // input tensor
-                                                "scaleS", // scale tensor
-                                                tensorType, // output tensor type
-                                                true, // output is virtual
-                                                false, // scale is by value
-                                                ops);
-
-        // After softmax * Dropout * V
-        auto OTensor_before_dequan_S_tensor = createSVBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, AfterMultiplyDropout, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
-
-        // O * dequant_S
-        auto OTensor_before_dequan_V_tensor = createScale(OTensor_before_dequan_S_tensor, // input tensor
-                                                        "descaleS", // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops);
-
-        // O * dequant_S * dequant_V
-        auto OTensor_before_quan_O_tensor = createScale(OTensor_before_dequan_V_tensor, // input tensor
-                                                        "descaleV", // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops);
-
-        // O * dequant_S * dequant_V * scale O
-        auto OTensor = createScaleWithOffset(OTensor_before_quan_O_tensor, // input tensor
-                            "scaleO", // scale tensor
-                            tensorType, // output tensor type
-                            false, // output not virtual
-                            false, // scale is by value
-                            ops,
-                            ORaggedOffsetTensorPtr, // ragged offset
-                            "O" /*Output tensor name*/);
-
-        // Amax for O
-        createAmax("amaxO", OTensor_before_quan_O_tensor, ops);
-
-        std::cout << "Total ops created: " << ops.size() << std::endl;
-
-        for (unsigned int i = 0; i < ops.size(); i++) {
-            all_ops.push_back(&ops[i]);
-        }
-
-        // Create an Operation Graph
-        auto opGraph = cudnn_frontend::OperationGraphBuilder()
-                           .setHandle(handle_)
-                           .setOperationGraph(all_ops.size(), all_ops.data())
-                           .build();
+            // QK.T * attn scale * dequant_Q * dequant_K
+            auto AfterAttnScale_tensor = createScale(AfterAttnScale_before_dequan_K_tensor, // input tensor
+                                                    "descaleK", // scale tensor
+                                                    CUDNN_DATA_FLOAT, // output tensor type
+                                                    true, // output is virtual
+                                                    false, // scale is by value
+                                                    ops);
 
 
-        cudnn_frontend::EngineConfigList filtered_configs;
-        auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
+            auto BeforeDropoutTensor = createSoftmaxForward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor, isTraining);
 
-        if (filtered_configs.size() == 0) {
-            cudnn_frontend::set_error_and_throw_exception(
-                    nullptr,
-                    CUDNN_STATUS_NOT_SUPPORTED,
-                    "run_mha_fprop: No config returned by the heuristics");
-        }   
+            auto AfterDropout_before_quan_S = createDropoutForward(b, h, s_q, s_kv, dropoutProbability, ops, BeforeDropoutTensor);
 
-        auto plan = cudnn_frontend::ExecutionPlanBuilder().setHandle(handle_).setEngineConfig(filtered_configs[0], opGraph.getTag()).build();
-	cache.insert({descriptor, plan});
-        return plan;
-        
+            // Amax for S
+            createAmax("amaxS", BeforeDropoutTensor, ops);
+
+            // After softmax * dropout * scale S -> fp8 input to next bmm with V
+            auto AfterMultiplyDropout = createScale(AfterDropout_before_quan_S, // input tensor
+                                                    "scaleS", // scale tensor
+                                                    tensorType, // output tensor type
+                                                    true, // output is virtual
+                                                    false, // scale is by value
+                                                    ops);
+
+            // After softmax * Dropout * V
+            auto OTensor_before_dequan_S_tensor = createSVBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, AfterMultiplyDropout, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
+
+            // O * dequant_S
+            auto OTensor_before_dequan_V_tensor = createScale(OTensor_before_dequan_S_tensor, // input tensor
+                                                            "descaleS", // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
+                                                            true, // output is virtual
+                                                            false, // scale is by value
+                                                            ops);
+
+            // O * dequant_S * dequant_V
+            auto OTensor_before_quan_O_tensor = createScale(OTensor_before_dequan_V_tensor, // input tensor
+                                                            "descaleV", // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
+                                                            true, // output is virtual
+                                                            false, // scale is by value
+                                                            ops);
+
+            // O * dequant_S * dequant_V * scale O
+            auto OTensor = createScaleWithOffset(OTensor_before_quan_O_tensor, // input tensor
+                                "scaleO", // scale tensor
+                                tensorType, // output tensor type
+                                false, // output not virtual
+                                false, // scale is by value
+                                ops,
+                                ORaggedOffsetTensorPtr, // ragged offset
+                                "O");
+
+            // Amax for O
+            createAmax("amaxO", OTensor_before_quan_O_tensor, ops);
+
+            std::cout << "Total ops created: " << ops.size() << std::endl;
+
+            for (unsigned int i = 0; i < ops.size(); i++) {
+                all_ops.push_back(&ops[i]);
+            }
+
+            // Create an Operation Graph
+            auto opGraph = cudnn_frontend::OperationGraphBuilder()
+                               .setHandle(handle_)
+                               .setOperationGraph(all_ops.size(), all_ops.data())
+                               .build();
+
+
+            cudnn_frontend::EngineConfigList filtered_configs;
+            auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
+
+            if (filtered_configs.size() == 0) {
+                cudnn_frontend::set_error_and_throw_exception(
+                        nullptr,
+                        CUDNN_STATUS_NOT_SUPPORTED,
+                        "run_mha_fprop: No config returned by the heuristics");
+            }
+
+            auto plan = cudnn_frontend::ExecutionPlanBuilder().setHandle(handle_).setEngineConfig(filtered_configs[0], opGraph.getTag()).build();
+	    cache.insert({descriptor, plan});
+            return plan;
+
 	}; // end of get_plan
-
-        printf(" after get_plan ------------ \n");
 
 	auto plan = get_plan(fa_fprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-        //auto workspace_size = plan.getWorkspaceSize();
+	//auto workspace_size = plan.getWorkspaceSize();
         auto wspace_size = plan.getWorkspaceSize();
         std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
 
 	if (workspace_ptr == nullptr)
 	{
-	  *workspace_size = wspace_size;	
-          printf(" nullptr return ------------ \n");
-	  return; // not executing
+	    *workspace_size = wspace_size;
+	    printf("workspace siez is %ld, %ld \n",wspace_size,*workspace_size);
+	    return; // not executing
 	}
 	else  // begin execution
 	{
 
-          printf(" not nullptr execute ------------ \n");
-        //void* workspace_ptr = nullptr;
-        //if (workspace_size > 0) {
-        //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-        //}
+            //void* workspace_ptr = nullptr;
+            //if (workspace_size > 0) {
+            //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+            //}
 
-        void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
-        void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
-        void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
+            void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
+            void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
+            void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
 
-        float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p) 
-        
-        // add all the data pointers to be used in the variant pack
-        std::set<std::pair<uint64_t, void*>> data_ptrs;
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleO"], devPtrScaleO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxO"], devPtrAmaxO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxS"], devPtrAmaxS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
+            float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
 
-        auto variantPack  = cudnn_frontend::VariantPackBuilder()
-                               .setWorkspacePointer(workspace_ptr)
-                               .setDataPointers(data_ptrs)
-                               .build();
-        std::cout << "variantPack " << variantPack.describe() << std::endl;
-        cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-        //if (workspace_size > 0) {
-        //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        //}
-        printf(" after execute ------------ \n");
+            std::set<std::pair<uint64_t, void*>> data_ptrs;
+            // add all the data pointers to be used in the variant pack
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleO"], devPtrScaleO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxO"], devPtrAmaxO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxS"], devPtrAmaxS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
 
-        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+            // If training, then we need to write out M and Z_INV
+            if (isTraining) {
+                data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
+                data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
+            }
 
-        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
+            auto variantPack  = cudnn_frontend::VariantPackBuilder()
+                                   .setWorkspacePointer(workspace_ptr)
+                                   .setDataPointers(data_ptrs)
+                                   .build();
+            std::cout << "variantPack " << variantPack.describe() << std::endl;
+            cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
+            NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+            //if (workspace_size > 0) {
+            //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+            //}
+
+            NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+
+            cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 	} // end of execution
 
     } catch (cudnn_frontend::cudnnException& e) {
-        printf(" catch cuddn ------------ \n");
         struct cudaDeviceProp prop;
         NVTE_CHECK_CUDA(cudaGetDeviceProperties( &prop, 0 ));
-        
+
         // this example is only for GA100 cards (cudnn Version >= 8700) and GH100 cards (cudnn Version >= 8800)
         if (!((prop.major == 8 && prop.minor == 0) || (prop.major == 9 && prop.minor == 0 && CUDNN_VERSION >= 8800)) && (e.getCudnnStatus() == CUDNN_STATUS_ARCH_MISMATCH || e.getCudnnStatus() == CUDNN_STATUS_NOT_SUPPORTED)) {
-            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl; 
+            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl;
         }  else {
             std::cout << "[ERROR] Exception " << e.what() << std::endl;
             //CHECK(false);
@@ -1485,21 +1475,18 @@ cudnn_fa_fprop_fp8(int64_t b,
     }
 }
 
-void 
-cudnn_fa_bprop_fp8(int64_t b, 
-                int64_t h, 
+		//uint64_t seed,
+		//uint64_t offset,
+void
+cudnn_fa_bprop_fp8(int64_t b,
+                int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
                 int64_t d,
                 float attnScale,
-                float attnScale_dS_K,
-                float attnScale_dSTranspose_Q,
                 float dropoutProbability,
                 MHA_Layout layout,
-		uint64_t seed,
-		uint64_t offset,
                 void* devPtrQKV,
-                void* devPtrKTranspose, 
                 void* devPtrM,
                 void* devPtrZInv,
                 void* devPtrO,
@@ -1528,7 +1515,7 @@ cudnn_fa_bprop_fp8(int64_t b,
                 void* devPtrMNKOverride,
                 cudnnDataType_t tensorType,
 		void* workspace_ptr,
-		uint64_t*  workspace_size)
+		uint64_t* workspace_size)
 {
 
     cudnnHandle_t handle_;
@@ -1536,8 +1523,6 @@ cudnn_fa_bprop_fp8(int64_t b,
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 
-//	uint64_t seed = *static_cast<uint64_t*>(devPtrDropoutSeed);
-//	uint64_t offset = *static_cast<uint64_t*>(devPtrDropoutOffset);
 	FADescriptor descriptor{b,
                               h,
                               s_q,
@@ -1546,450 +1531,444 @@ cudnn_fa_bprop_fp8(int64_t b,
 			      attnScale,
                               static_cast<float>(dropoutProbability),
                               layout,
-                              seed,
-                              offset,
+                              devPtrDropoutSeed,
+                              devPtrDropoutOffset,
                               tensorType};
 
-        using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
+	using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fa_bprop_cache;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
 
-        // if hit, return
-        auto it = cache.find(descriptor);
-        if (it != cache.end()) {
-          auto plan = it->second;
-          return plan;
-        }
+            // if hit, return
+            auto it = cache.find(descriptor);
+            if (it != cache.end()) {
+              auto plan = it->second;
+              return plan;
+            }
 
+	    // otherwise, build the op_graph and the plan. Then update cache
+            std::vector<cudnn_frontend::Operation const*> all_ops;
+            std::vector<cudnn_frontend::Operation> ops;
 
-        std::vector<cudnn_frontend::Operation const*> all_ops;
-        std::vector<cudnn_frontend::Operation> ops;
+            cudnn_frontend::throw_if(dropoutProbability == 1.0f, "Dropout probability cannot be 1.0", CUDNN_STATUS_BAD_PARAM);
 
-        // Ragged tensors have b + 1 elements
-        int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
-        int64_t raggedStride [4] = {1, 1, 1, 1};
+            // Ragged tensors have b + 1 elements
+            int64_t raggedDim [4] =  {b + 1, 1, 1, 1};
+            int64_t raggedStride [4] = {1, 1, 1, 1};
+            // Create offset tensors
+            auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
+            auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
 
-	printf("RaggedOffsets ------ \n");
-        // Create offset tensors
-        auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["QKV_RAGGED"], raggedDim, raggedStride, false, false);
-        auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT64, tensor_name_to_uid["O_RAGGED"], raggedDim, raggedStride, false, false);
+            // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
+            std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
+            std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
 
-	printf("RaggedOffsets share ------ \n");
-        // Create shared ptrs to ragged offset tensors for multiple tensors to use ragged offset
-        std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(QKVOffsetTensor));
-        std::shared_ptr<cudnn_frontend::Tensor> ORaggedOffsetTensorPtr = std::make_shared<cudnn_frontend::Tensor>(std::move(ORaggedOffsetTensor));
+            // Create Q and K tensors that are used in different places
+            int64_t q_dim [4] = {b, h, s_q, d};
+            int64_t q_stride [4];
+            generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
 
-	printf("get strides ------ \n");
-        // Create Q and K tensors that are used in different places
-        int64_t q_dim [4] = {b, h, s_q, d};
-        int64_t q_stride [4];
-        generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
+            int64_t k_dim [4] =  {b, h, s_kv, d};
+            int64_t k_stride [4];
+            generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
 
-        int64_t k_dim [4] =  {b, h, s_kv, d};
-        int64_t k_stride [4];
-        generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
+            auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
+            auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
 
-	printf("q/k Tensor ------ \n");
-        auto qTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["Q"], q_dim, q_stride, false, false, QKVRaggedOffsetTensorPtr);
-        auto kTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["K"], k_dim, k_stride, false, false, QKVRaggedOffsetTensorPtr);
+            int64_t scale_dim [4] = {1, 1, 1, 1};
+            int64_t scale_stride [4] = {1, 1, 1, 1};
 
-        int64_t scale_dim [4] = {1, 1, 1, 1};
-        int64_t scale_stride [4] = {1, 1, 1, 1};
+            // Create attnScale tensor for multiple ops to use
+            auto attnScaleTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["AttnScale"], scale_dim, scale_stride, false, true); // is by value
 
-	printf("descale q/k/do/ds Tensor ------ \n");
-        // Create descale Q K dO dS global tensors since they are used in multiple places
-        auto descaleQTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleQ"], scale_dim, scale_stride, false, false);
-        auto descaleKTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleK"], scale_dim, scale_stride, false, false);
-        auto descaledOTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaledO"], scale_dim, scale_stride, false, false);
-        auto descaledSTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaledS"], scale_dim, scale_stride, false, false);
+            // Create descale Q K dO dS global tensors since they are used in multiple places
+            auto descaleQTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleQ"], scale_dim, scale_stride, false, false);
+            auto descaleKTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaleK"], scale_dim, scale_stride, false, false);
+            auto descaledOTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaledO"], scale_dim, scale_stride, false, false);
+            auto descaledSTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["descaledS"], scale_dim, scale_stride, false, false);
 
-        int64_t seqlen_dim [4] =  {b, 1, 1, 1};
-        int64_t seqlen_stride [4] = {1, 1, 1, 1};
-	printf("mnk Tensor ------ int32 \n"); 
-        // Create MNK override tensor
-        auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
+            int64_t seqlen_dim [4] =  {b, 1, 1, 1};
+            int64_t seqlen_stride [4] = {1, 1, 1, 1};
+            // Create MNK override tensor
+            auto seqlenMNKTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["MNK_OVERRIDE"], seqlen_dim, seqlen_stride, false, false);
 
-	printf("o/do Tensor ------ \n");
-        int64_t O_dim [4] =  {b, h, s_q, d};
-        int64_t O_stride [4];
-        generateMHAStrides(b, h, s_q, s_kv, d, O_stride, layout, MHA_Matrix::O_Matrix);
-        // Create O and loss tensor
-        auto OTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["O"], O_dim, O_stride, false, false, ORaggedOffsetTensorPtr);
-        // dO is used in multiple places and E5M2
-        auto dOTensor = tensor_create_with_offset(CUDNN_DATA_FP8_E5M2, tensor_name_to_uid["dO"], O_dim, O_stride, false, false, ORaggedOffsetTensorPtr);
+            int64_t O_dim [4] =  {b, h, s_q, d};
+            int64_t O_stride [4];
+            generateMHAStrides(b, h, s_q, s_kv, d, O_stride, layout, MHA_Matrix::O_Matrix);
+            // Create O and loss tensor
+            auto OTensor = tensor_create_with_offset(tensorType, tensor_name_to_uid["O"], O_dim, O_stride, false, false, ORaggedOffsetTensorPtr);
+            // dO is used in multiple places and E5M2
+            auto dOTensor = tensor_create_with_offset(CUDNN_DATA_FP8_E5M2, tensor_name_to_uid["dO"], O_dim, O_stride, false, false, ORaggedOffsetTensorPtr);
 
-	printf("qk/attn Tensor ------ \n");
-        // Q * K.T
-        auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
+            // Q * K.T
+            auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
-        // QK.T * attn scale
-        auto AfterAttnScale_before_dequan_Q_tensor = createScale(afterQKTensor, // input tensor
-                                                                "AttnScale", // scale tensor
-                                                                CUDNN_DATA_FLOAT,  // output tensor type
-                                                                true, // output is virtual
-                                                                true, // scale is by value
-                                                                ops);
+            // QK.T * attn scale
+            auto AfterAttnScale_before_dequan_Q_tensor = createScale(afterQKTensor, // input tensor
+                                                                    attnScaleTensor, // scale tensor
+                                                                    CUDNN_DATA_FLOAT,  // output tensor type
+                                                                    true, // output is virtual
+                                                                    true, // scale is by value
+                                                                    ops,
+                                                                    1999 /*UID offset*/);
 
-        // QK.T * attn scale * dequant_Q
-        auto AfterAttnScale_before_dequan_K_tensor = createScale(AfterAttnScale_before_dequan_Q_tensor, // input tensor
-                                                                descaleQTensor, // scale tensor
-                                                                CUDNN_DATA_FLOAT, // output tensor type
-                                                                true, // output is virtual
-                                                                false, // scale is by value
-                                                                ops,
-                                                                2000 /*UID offset*/);
+            // QK.T * attn scale * dequant_Q
+            auto AfterAttnScale_before_dequan_K_tensor = createScale(AfterAttnScale_before_dequan_Q_tensor, // input tensor
+                                                                    descaleQTensor, // scale tensor
+                                                                    CUDNN_DATA_FLOAT, // output tensor type
+                                                                    true, // output is virtual
+                                                                    false, // scale is by value
+                                                                    ops,
+                                                                    2000 /*UID offset*/);
 
-        // QK.T * attn scale * dequant_Q * dequant_K
-        auto AfterAttnScale_tensor = createScale(AfterAttnScale_before_dequan_K_tensor, // input tensor
-                                                descaleKTensor, // scale tensor
-                                                CUDNN_DATA_FLOAT, // output tensor type
-                                                true, // output is virtual
-                                                false, // scale is by value
-                                                ops,
-                                                2001 /*UID offset*/);
+            // QK.T * attn scale * dequant_Q * dequant_K
+            auto AfterAttnScale_tensor = createScale(AfterAttnScale_before_dequan_K_tensor, // input tensor
+                                                    descaleKTensor, // scale tensor
+                                                    CUDNN_DATA_FLOAT, // output tensor type
+                                                    true, // output is virtual
+                                                    false, // scale is by value
+                                                    ops,
+                                                    2001 /*UID offset*/);
 
-	printf("softmax backward ------ \n");
-        auto beforeDropout_QKt_Tensor = createSoftmaxBackward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor);
+            auto beforeDropout_QKt_Tensor = createSoftmaxBackward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor);
 
-        int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
-        int64_t afterBMM1_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
+            int64_t afterBMM1_dim [4] = {b, h, s_q, s_kv};
+            int64_t afterBMM1_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
 
-        // mask for the dropout. Used in different places
-        auto dropoutMaskTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 200, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
+            // mask for the dropout. Used in different places
+            auto dropoutMaskTensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 200, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
 
-        auto AfterDropout_before_quan_S = createDropoutBackward(b, h, s_q, s_kv, dropoutProbability, ops, beforeDropout_QKt_Tensor, dropoutMaskTensor);
+            auto AfterDropout_before_quan_S = createDropoutBackward(b, h, s_q, s_kv, dropoutProbability, ops, beforeDropout_QKt_Tensor, dropoutMaskTensor);
 
-        // After softmax * scale S -> fp8 input to next bmm with V
-        auto AfterMultiply = createScale(AfterDropout_before_quan_S, // input tensor
-                                                "scaleS", // scale tensor
-                                                tensorType, // output tensor type
-                                                true, // output is virtual
-                                                false, // scale is by value
-                                                ops);
+            // After softmax * scale S -> fp8 input to next bmm with V
+            auto AfterMultiply = createScale(AfterDropout_before_quan_S, // input tensor
+                                                    "scaleS", // scale tensor
+                                                    tensorType, // output tensor type
+                                                    true, // output is virtual
+                                                    false, // scale is by value
+                                                    ops);
 
-        // After softmax * dO
-        auto dVTensor_before_dequan_S = createSdOBMM(b, h, s_q, s_kv, d, tensorType, ops, AfterMultiply, dOTensor, seqlenMNKTensor);
+            // After softmax * dO
+            auto dVTensor_before_dequan_S = createSdOBMM(b, h, s_q, s_kv, d, tensorType, ops, AfterMultiply, dOTensor, seqlenMNKTensor);
 
-        // O * dequant_S
-        auto dVTensor_before_dequan_dO = createScale(dVTensor_before_dequan_S, // input tensor
-                                                        "descaleS", // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops);
-
-        // O * dequant_S * dequant_dO
-        auto dVTensor_before_quan_dV = createScale(dVTensor_before_dequan_dO, // input tensor
-                                                        descaledOTensor, // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops,
-                                                        2002 /*UID offset*/);
-
-        // O * dequant_S * dequant_dO * scale dV
-        auto dVTensor = createScaleWithOffset(dVTensor_before_quan_dV, // input tensor
-                            "scaledV", // scale tensor
-                            CUDNN_DATA_FP8_E5M2, // output tensor type
-                            false, // output not virtual
-                            false, // scale is by value
-                            ops,
-                            QKVRaggedOffsetTensorPtr, // ragged offset
-                            "dV" /*Output tensor name*/);
-
-        // Amax for dV
-        createAmax("amaxdV", dVTensor_before_quan_dV, ops);
-
-        auto dS_before_dequan_dO_Tensor = createdOVBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, dOTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
-
-    
-        // dS * dequant_dO
-        auto dS_before_dequan_V = createScale(dS_before_dequan_dO_Tensor, // input tensor
-                                                        descaledOTensor, // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops,
-                                                        2003 /*UID offset*/);
-
-        // O * dequant_S * dequant_dV
-        auto dS_after_dequan = createScale(dS_before_dequan_V, // input tensor
-                                                        "descaleV", // scale tensor
-                                                        CUDNN_DATA_FLOAT, // output tensor type
-                                                        true, // output is virtual
-                                                        false, // scale is by value
-                                                        ops);
-
-        // RNG Multiply
-        auto beforeDropoutScale_dOVt_Tensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 350, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
-        // After dropout mask and scale
-        auto dS_after_dropout = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 351, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
-
-        // Define the multiply mask descriptor
-        auto mulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
-
-        // Create a multiply mask Node.
-        auto maskMul_op = binary_pw_op_create(dS_after_dequan, dropoutMaskTensor, beforeDropoutScale_dOVt_Tensor, mulDesc);
-
-        ops.push_back(std::move(maskMul_op));
-
-        // scale after dropout for dO and O chain
-        auto dropoutScale_dOVt_OdO_Tensor = tensor_create(tensorType, tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], scale_dim, scale_stride, false, true); // is by value
-
-        // Create a multiply dropout scale Node.
-        auto mul_dropout_scale_op = binary_pw_op_create(beforeDropoutScale_dOVt_Tensor, dropoutScale_dOVt_OdO_Tensor, dS_after_dropout, mulDesc);
-
-        ops.push_back(std::move(mul_dropout_scale_op));
-
-        // O * dequant_O
-        auto O_after_dequan_Tensor = createScale(OTensor, // input tensor
-                                        "descaleO", // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops);
-
-        // dO * dequant_dO
-        auto dO_after_dequan_Tensor = createScale(dOTensor, // input tensor
-                                        descaledOTensor, // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops,
-                                        2004 /*UID offset*/);
-
-        
-        // row reduction sum[(dO * dequant_dO) * (O * dequant_O) * (1 - p)]
-        auto O_dO_after_rowsum = createdOAndORowReductionChain(b, h, s_q, s_kv, d, layout, ops, O_after_dequan_Tensor, dO_after_dequan_Tensor, dropoutScale_dOVt_OdO_Tensor);
-
-        // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S
-        auto S_mul_dS_minus_O_dO = createBiasSubtractionSoftmaxMulChain(b, h, s_q, s_kv, d, layout, ops, dS_after_dropout, AfterDropout_before_quan_S, O_dO_after_rowsum);
-
-        
-
-        // S_mul_dS_minus_O_dO * scaledS
-        auto S_mul_dS_minus_O_dO_after_quan_dS = createScale(S_mul_dS_minus_O_dO, // input tensor
-                                                            "scaledS", // scale tensor
-                                                            CUDNN_DATA_FP8_E5M2, // output tensor type
+            // O * dequant_S
+            auto dVTensor_before_dequan_dO = createScale(dVTensor_before_dequan_S, // input tensor
+                                                            "descaleS", // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
                                                             true, // output is virtual
                                                             false, // scale is by value
                                                             ops);
 
-        // Amax for dS
-        createAmax("amaxdS", S_mul_dS_minus_O_dO, ops);
+            // O * dequant_S * dequant_dO
+            auto dVTensor_before_quan_dV = createScale(dVTensor_before_dequan_dO, // input tensor
+                                                            descaledOTensor, // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
+                                                            true, // output is virtual
+                                                            false, // scale is by value
+                                                            ops,
+                                                            2002 /*UID offset*/);
 
-        // dS @ K
-        auto After_dS_K = createdSKBMM(b, h, s_q, s_kv, d, ops, S_mul_dS_minus_O_dO_after_quan_dS, kTensor, seqlenMNKTensor);
+            // O * dequant_S * dequant_dO * scale dV
+            auto dVTensor = createScaleWithOffset(dVTensor_before_quan_dV, // input tensor
+                                "scaledV", // scale tensor
+                                CUDNN_DATA_FP8_E5M2, // output tensor type
+                                false, // output not virtual
+                                false, // scale is by value
+                                ops,
+                                QKVRaggedOffsetTensorPtr, // ragged offset
+                                "dV" /*Output tensor name*/);
 
+            // Amax for dV
+            createAmax("amaxdV", dVTensor_before_quan_dV, ops);
 
-        // (dS * K) * attn scale ds_K
-        auto AfterAttnScale_dS_K_before_dequan_dS = createScale(After_dS_K, // input tensor
-                                        "AttnScale_dS_K", // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        true, // scale is by value
-                                        ops);
-
-        // (dS * K) * attn scale ds_K * descale dS
-        auto AfterAttnScale_dS_K_before_dequan_K = createScale(AfterAttnScale_dS_K_before_dequan_dS, // input tensor
-                                        descaledSTensor, // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops,
-                                        2005 /*UID offset*/);
-
-        // (dS * K) * attn scale ds_K * descale dS * descale K
-        auto AfterAttnScale_dS_K_before_quan_dQ = createScale(AfterAttnScale_dS_K_before_dequan_K, // input tensor
-                                        descaleKTensor, // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops,
-                                        2006 /*UID offset*/);
-
-        // (dS * K) * attn scale ds_K * descale dS * descale K * scale dQ
-        auto dQ = createScaleWithOffset(AfterAttnScale_dS_K_before_quan_dQ, // input tensor
-                            "scaledQ", // scale tensor
-                            CUDNN_DATA_FP8_E5M2, // output tensor type
-                            false, // output not virtual
-                            false, // scale is by value
-                            ops,
-                            QKVRaggedOffsetTensorPtr, // ragged offset
-                            "dQ" /*Output tensor name*/);
-
-        // Amax for dQ
-        createAmax("amaxdQ", AfterAttnScale_dS_K_before_quan_dQ, ops);
-
-        // dS.T @ Q
-        auto After_dSTranspose_Q = createdSQBMM(b, h, s_q, s_kv, d, layout, ops, S_mul_dS_minus_O_dO_after_quan_dS, qTensor, seqlenMNKTensor);
-
-        // (dS.T @ Q) * attn scale ds.T_Q
-        auto AfterAttnScale_dSTranspose_Q_before_dequan_dS = createScale(After_dSTranspose_Q, // input tensor
-                                        "AttnScale_dSTranspose_Q", // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        true, // scale is by value
-                                        ops);
-
-        // (dS.T * Q) * attn scale dS.T_Q * descale dS
-        auto AfterAttnScale_dSTranspose_Q_before_dequan_Q = createScale(AfterAttnScale_dSTranspose_Q_before_dequan_dS, // input tensor
-                                        descaledSTensor, // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops,
-                                        2007 /*UID offset*/);
-
-        // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q
-        auto AfterAttnScale_dSTranspose_Q_before_quan_dK = createScale(AfterAttnScale_dSTranspose_Q_before_dequan_Q, // input tensor
-                                        descaleQTensor, // scale tensor
-                                        CUDNN_DATA_FLOAT, // output tensor type
-                                        true, // output is virtual
-                                        false, // scale is by value
-                                        ops,
-                                        2008 /*UID offset*/);
-
-        // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q * scale dK
-        auto dK = createScaleWithOffset(AfterAttnScale_dSTranspose_Q_before_quan_dK, // input tensor
-                            "scaledK", // scale tensor
-                            CUDNN_DATA_FP8_E5M2, // output tensor type
-                            false, // output not virtual
-                            false, // scale is by value
-                            ops,
-                            QKVRaggedOffsetTensorPtr, // ragged offset
-                            "dK" /*Output tensor name*/);
-
-        // Amax for dK
-        createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, ops);
-
-        std::cout << "Total ops created: " << ops.size() << std::endl;
-
-        for (unsigned int i = 0; i < ops.size(); i++) {
-            all_ops.push_back(&ops[i]);
-        }
-
-        // Create an Operation Graph
-        auto opGraph = cudnn_frontend::OperationGraphBuilder()
-                           .setHandle(handle_)
-                           .setOperationGraph(all_ops.size(), all_ops.data())
-                           .build();
+            auto dS_before_dequan_dO_Tensor = createdOVBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, dOTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
 
-        cudnn_frontend::EngineConfigList filtered_configs;
-        auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
+            // dS * dequant_dO
+            auto dS_before_dequan_V = createScale(dS_before_dequan_dO_Tensor, // input tensor
+                                                            descaledOTensor, // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
+                                                            true, // output is virtual
+                                                            false, // scale is by value
+                                                            ops,
+                                                            2003 /*UID offset*/);
 
-        if (filtered_configs.size() == 0) {
-            cudnn_frontend::set_error_and_throw_exception(
-                    nullptr,
-                    CUDNN_STATUS_NOT_SUPPORTED,
-                    "run_mha_bprop: No config returned by the heuristics");
-        }   
+            // O * dequant_S * dequant_dV
+            auto dS_after_dequan = createScale(dS_before_dequan_V, // input tensor
+                                                            "descaleV", // scale tensor
+                                                            CUDNN_DATA_FLOAT, // output tensor type
+                                                            true, // output is virtual
+                                                            false, // scale is by value
+                                                            ops);
 
-        auto plan = cudnn_frontend::ExecutionPlanBuilder().setHandle(handle_).setEngineConfig(filtered_configs[0], opGraph.getTag()).build();
-	cache.insert({descriptor, plan});
-        return plan;
-        
+            // RNG Multiply
+            auto beforeDropoutScale_dOVt_Tensor = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 350, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
+            // After dropout mask and scale
+            auto dS_after_dropout = tensor_create(CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 351, afterBMM1_dim, afterBMM1_stride, true, false); // is virtual
+
+            // Define the multiply mask descriptor
+            auto mulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
+
+            // Create a multiply mask Node.
+            auto maskMul_op = binary_pw_op_create(dS_after_dequan, dropoutMaskTensor, beforeDropoutScale_dOVt_Tensor, mulDesc);
+
+            ops.push_back(std::move(maskMul_op));
+
+            // scale after dropout for dO and O chain
+            auto dropoutScale_dOVt_OdO_Tensor = tensor_create(tensorType, tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], scale_dim, scale_stride, false, true); // is by value
+
+            // Create a multiply dropout scale Node.
+            auto mul_dropout_scale_op = binary_pw_op_create(beforeDropoutScale_dOVt_Tensor, dropoutScale_dOVt_OdO_Tensor, dS_after_dropout, mulDesc);
+
+            ops.push_back(std::move(mul_dropout_scale_op));
+
+            // O * dequant_O
+            auto O_after_dequan_Tensor = createScale(OTensor, // input tensor
+                                            "descaleO", // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops);
+
+            // dO * dequant_dO
+            auto dO_after_dequan_Tensor = createScale(dOTensor, // input tensor
+                                            descaledOTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops,
+                                            2004 /*UID offset*/);
+
+
+            // row reduction sum[(dO * dequant_dO) * (O * dequant_O) * (1 - p)]
+            auto O_dO_after_rowsum = createdOAndORowReductionChain(b, h, s_q, s_kv, d, layout, ops, O_after_dequan_Tensor, dO_after_dequan_Tensor, dropoutScale_dOVt_OdO_Tensor);
+
+            // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S
+            auto S_mul_dS_minus_O_dO = createBiasSubtractionSoftmaxMulChain(b, h, s_q, s_kv, d, layout, ops, dS_after_dropout, AfterDropout_before_quan_S, O_dO_after_rowsum);
+
+
+
+            // S_mul_dS_minus_O_dO * scaledS
+            auto S_mul_dS_minus_O_dO_after_quan_dS = createScale(S_mul_dS_minus_O_dO, // input tensor
+                                                                "scaledS", // scale tensor
+                                                                CUDNN_DATA_FP8_E5M2, // output tensor type
+                                                                true, // output is virtual
+                                                                false, // scale is by value
+                                                                ops);
+
+            // Amax for dS
+            createAmax("amaxdS", S_mul_dS_minus_O_dO, ops);
+
+            // dS @ K
+            auto After_dS_K = createdSKBMM(b, h, s_q, s_kv, d, ops, S_mul_dS_minus_O_dO_after_quan_dS, kTensor, seqlenMNKTensor);
+
+
+            // (dS * K) * attn scale ds_K
+            auto AfterAttnScale_dS_K_before_dequan_dS = createScale(After_dS_K, // input tensor
+                                            attnScaleTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            true, // scale is by value
+                                            ops,
+                                            2005 /*UID offset*/);
+
+            // (dS * K) * attn scale ds_K * descale dS
+            auto AfterAttnScale_dS_K_before_dequan_K = createScale(AfterAttnScale_dS_K_before_dequan_dS, // input tensor
+                                            descaledSTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops,
+                                            2006 /*UID offset*/);
+
+            // (dS * K) * attn scale ds_K * descale dS * descale K
+            auto AfterAttnScale_dS_K_before_quan_dQ = createScale(AfterAttnScale_dS_K_before_dequan_K, // input tensor
+                                            descaleKTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops,
+                                            2007 /*UID offset*/);
+
+            // (dS * K) * attn scale ds_K * descale dS * descale K * scale dQ
+            auto dQ = createScaleWithOffset(AfterAttnScale_dS_K_before_quan_dQ, // input tensor
+                                "scaledQ", // scale tensor
+                                CUDNN_DATA_FP8_E5M2, // output tensor type
+                                false, // output not virtual
+                                false, // scale is by value
+                                ops,
+                                QKVRaggedOffsetTensorPtr, // ragged offset
+                                "dQ");
+
+            // Amax for dQ
+            createAmax("amaxdQ", AfterAttnScale_dS_K_before_quan_dQ, ops);
+
+            // dS.T @ Q
+            auto After_dSTranspose_Q = createdSQBMM(b, h, s_q, s_kv, d, layout, ops, S_mul_dS_minus_O_dO_after_quan_dS, qTensor, seqlenMNKTensor);
+
+            // (dS.T @ Q) * attn scale ds.T_Q
+            auto AfterAttnScale_dSTranspose_Q_before_dequan_dS = createScale(After_dSTranspose_Q, // input tensor
+                                            attnScaleTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            true, // scale is by value
+                                            ops,
+                                            2008 /*UID offset*/);
+
+            // (dS.T * Q) * attn scale dS.T_Q * descale dS
+            auto AfterAttnScale_dSTranspose_Q_before_dequan_Q = createScale(AfterAttnScale_dSTranspose_Q_before_dequan_dS, // input tensor
+                                            descaledSTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops,
+                                            2009 /*UID offset*/);
+
+            // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q
+            auto AfterAttnScale_dSTranspose_Q_before_quan_dK = createScale(AfterAttnScale_dSTranspose_Q_before_dequan_Q, // input tensor
+                                            descaleQTensor, // scale tensor
+                                            CUDNN_DATA_FLOAT, // output tensor type
+                                            true, // output is virtual
+                                            false, // scale is by value
+                                            ops,
+                                            2010 /*UID offset*/);
+
+            // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q * scale dK
+            auto dK = createScaleWithOffset(AfterAttnScale_dSTranspose_Q_before_quan_dK, // input tensor
+                                "scaledK", // scale tensor
+                                CUDNN_DATA_FP8_E5M2, // output tensor type
+                                false, // output not virtual
+                                false, // scale is by value
+                                ops,
+                                QKVRaggedOffsetTensorPtr, // ragged offset
+                                "dK");
+
+            // Amax for dK
+            createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, ops);
+
+            std::cout << "Total ops created: " << ops.size() << std::endl;
+
+            for (unsigned int i = 0; i < ops.size(); i++) {
+                all_ops.push_back(&ops[i]);
+            }
+
+            // Create an Operation Graph
+            auto opGraph = cudnn_frontend::OperationGraphBuilder()
+                               .setHandle(handle_)
+                               .setOperationGraph(all_ops.size(), all_ops.data())
+                               .build();
+
+
+            cudnn_frontend::EngineConfigList filtered_configs;
+            auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
+
+            if (filtered_configs.size() == 0) {
+                cudnn_frontend::set_error_and_throw_exception(
+                        nullptr,
+                        CUDNN_STATUS_NOT_SUPPORTED,
+                        "run_mha_bprop: No config returned by the heuristics");
+            }
+
+            auto plan = cudnn_frontend::ExecutionPlanBuilder().setHandle(handle_).setEngineConfig(filtered_configs[0], opGraph.getTag()).build();
+	    cache.insert({descriptor, plan});
+            return plan;
 	};
 
 	auto plan = get_plan(fa_bprop_cache, descriptor);
         std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-        //auto workspace_size = plan.getWorkspaceSize();
+	//auto workspace_size = plan.getWorkspaceSize();
         auto wspace_size = plan.getWorkspaceSize();
         std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
 
 	if (workspace_ptr == nullptr)
 	{
-	  *workspace_size = wspace_size;	
-	  return; // not executing
+	    *workspace_size = wspace_size;
+	    printf("workspace siez is %ld, %ld \n",wspace_size,*workspace_size);
+	    return; // not executing
 	}
 	else  // begin execution
 	{
 
-        //void* workspace_ptr = nullptr;
-        //if (workspace_size > 0) {
-        //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-        //}
-
-        void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
-        void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
-        void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
-        
-        void* devPtrdQ = (void *) devPtrdQKV; // dQ points to the top of dQKV
-        void* devPtrdK = (void *)(static_cast<int8_t*>(devPtrdQKV) + h * d); // dK is at an offset of h * d
-        void* devPtrdV = (void *)(static_cast<int8_t*>(devPtrdQKV) + 2 * h * d); // dV is at an offset of 2 * h * d
-
-        // add all the data pointers to be used in the variant pack
-        std::set<std::pair<uint64_t, void*>> data_ptrs;
-        float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
-        float dropoutScale_dOVt_OdO = 1.0f - dropoutProbability; // (1 - p)
-
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrKTranspose));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V_TRANSPOSE"], devPtrV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dQ"], devPtrdQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dK"], devPtrdK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dV"], devPtrdV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dO"], devPtrdO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale_dS_K"], &attnScale_dS_K));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale_dSTranspose_Q"], &attnScale_dSTranspose_Q));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], &dropoutScale_dOVt_OdO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledS"], devPtrDescaledS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleO"], devPtrDescaleO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledO"], devPtrDescaledO));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledS"], devPtrScaledS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledQ"], devPtrScaledQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledK"], devPtrScaledK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledV"], devPtrScaledV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdS"], devPtrAmaxdS));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdQ"], devPtrAmaxdQ));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdK"], devPtrAmaxdK));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdV"], devPtrAmaxdV));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
-        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
-
-        auto variantPack  = cudnn_frontend::VariantPackBuilder()
-                               .setWorkspacePointer(workspace_ptr)
-                               .setDataPointers(data_ptrs)
-                               .build();
-        std::cout << "variantPack " << variantPack.describe() << std::endl;
-        cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-        //if (workspace_size > 0) {
-        //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        //}
-
-        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
-
-        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
-
+            //void* workspace_ptr = nullptr;
+            //if (workspace_size > 0) {
+            //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+            //}
+    
+            void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
+            void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
+            void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
+    
+            void* devPtrdQ = (void *) devPtrdQKV; // dQ points to the top of dQKV
+            void* devPtrdK = (void *)(static_cast<int8_t*>(devPtrdQKV) + h * d); // dK is at an offset of h * d
+            void* devPtrdV = (void *)(static_cast<int8_t*>(devPtrdQKV) + 2 * h * d); // dV is at an offset of 2 * h * d
+    
+            std::set<std::pair<uint64_t, void*>> data_ptrs;
+            float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
+            float dropoutScale_dOVt_OdO = 1.0f - dropoutProbability; // (1 - p)
+            // add all the data pointers to be used in the variant pack
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V_TRANSPOSE"], devPtrV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dQ"], devPtrdQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dK"], devPtrdK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dV"], devPtrdV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dO"], devPtrdO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], &dropoutScale_dOVt_OdO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledS"], devPtrDescaledS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleO"], devPtrDescaleO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledO"], devPtrDescaledO));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledS"], devPtrScaledS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledQ"], devPtrScaledQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledK"], devPtrScaledK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledV"], devPtrScaledV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdS"], devPtrAmaxdS));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdQ"], devPtrAmaxdQ));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdK"], devPtrAmaxdK));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdV"], devPtrAmaxdV));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
+    
+            auto variantPack  = cudnn_frontend::VariantPackBuilder()
+                                   .setWorkspacePointer(workspace_ptr)
+                                   .setDataPointers(data_ptrs)
+                                   .build();
+            std::cout << "variantPack " << variantPack.describe() << std::endl;
+            cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
+            NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+            //if (workspace_size > 0) {
+            //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+            //}
+    
+            NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+    
+            cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 	} // end of execution
 
     } catch (cudnn_frontend::cudnnException& e) {
         struct cudaDeviceProp prop;
         NVTE_CHECK_CUDA(cudaGetDeviceProperties( &prop, 0 ));
-        
+
         // this example is only for GA100 cards (cudnn Version >= 8700) and GH100 cards (cudnn Version >= 8800)
         if (!((prop.major == 8 && prop.minor == 0) || (prop.major == 9 && prop.minor == 0 && CUDNN_VERSION >= 8800)) && (e.getCudnnStatus() == CUDNN_STATUS_ARCH_MISMATCH || e.getCudnnStatus() == CUDNN_STATUS_NOT_SUPPORTED)) {
-            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl; 
+            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl;
         }  else {
             std::cout << "[ERROR] Exception " << e.what() << std::endl;
             //CHECK(false);
@@ -2047,17 +2026,18 @@ cudnn_fa_bprop_fp8(int64_t b,
 //                float scale_q_k, float p_dropout, int qkv_layout,
 //                float attnScale_dS_K,
 //                float attnScale_dSTranspose_Q,
+		//uint64_t seed, uint64_t offset,
 void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
 		Tensor *inputQKV,
 		Tensor *inputM,
                 Tensor *inputZInv,
                 Tensor *inputS,
                 Tensor *inputO,
-		int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+		int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+		int32_t *ActualSeqlens,
 		uint64_t *PhiloxUnpacked,
                 Tensor *workspace,
                 cudaStream_t stream
@@ -2086,8 +2066,8 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
   void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
   void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-  void* devPtrMNKOverride = nullptr;
-//  void* devPtrMNKOverride = (void *)ActualSeqlens;
+//  void* devPtrMNKOverride = devPtrQKVRaggedOffset; //nullptr;
+  void* devPtrMNKOverride = (void *)ActualSeqlens;
 
   const DType QKV_type = inputQKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
@@ -2096,13 +2076,15 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 //  uint64_t seed = static_cast<uint64_t>(*PhiloxUnpacked_CPU);
 //  uint64_t offset = static_cast<uint64_t>(*(PhiloxUnpacked_CPU+1));
 
-  printf(" before conditions ------------ %ld, %ld \n",seed, offset);
+  //printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
     printf(" select fp8 ------------ \n");
+    bool isTraining = true;
+		//seed, offset,
     cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, max_seq_len, max_seq_len, d,
-		scale_q_k, p_dropout, layout, seed, offset,
+		scale_q_k, isTraining, p_dropout, layout, 
                 devPtrQKV,
                 devPtrM,
                 devPtrZInv,
@@ -2154,10 +2136,10 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 
 }
 
+		//uint64_t seed, uint64_t offset,
 void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
 		const Tensor *inputQKV,
 		const Tensor *input_dQKV,
 		const Tensor *inputM,
@@ -2166,8 +2148,9 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 const Tensor *input_dS,
                 const Tensor *inputO,
                 const Tensor *input_dO,
-		int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+		int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+                int32_t *ActualSeqlens,
 		uint64_t *PhiloxUnpacked,
                 Tensor *workspace,
                 cudaStream_t stream
@@ -2207,25 +2190,25 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
   void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
   void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-  void* devPtrMNKOverride = nullptr;
+  void* devPtrMNKOverride = (void *)ActualSeqlens; //nullptr;
 
   const DType QKV_type = inputQKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
   uint64_t workspace_size = 0;
 
-  void* devPtrKTranspose = nullptr; 
+  //void* devPtrKTranspose = nullptr; 
 
-  printf(" before conditions ------------ %ld, %ld \n",seed, offset);
+  //printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
     printf(" select fp8 ------------ \n");
+		//seed, offset,
     cudnn_flash_attn::cudnn_fa_bprop_fp8(b, h, max_seq_len, max_seq_len, d,
-		scale_q_k, scale_q_k, scale_q_k, 
-		p_dropout, layout, 
-		seed, offset,
+		scale_q_k,
+		p_dropout, 
+		layout, 
                 devPtrQKV,
-                devPtrKTranspose, 
                 devPtrM,
                 devPtrZInv,
                 devPtrO,
@@ -2285,18 +2268,19 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
 
 } // namespace transformer_engine
 
+		//uint64_t seed, uint64_t offset,
 void nvte_cudnn_flash_attn_fwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
 		NVTETensor QKV,
 		NVTETensor M,
                 NVTETensor ZInv,
                 NVTETensor S,
                 NVTETensor O,
-		int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+		int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+                int32_t *ActualSeqlens,
                 uint64_t *PhiloxUnpacked,
 		NVTETensor workspace,
 		cudaStream_t stream
@@ -2315,10 +2299,10 @@ void nvte_cudnn_flash_attn_fwd(
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
   printf(" calling cudnn fwd ------------ \n");
+		  //seed, offset,
   cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  inputQKV, inputM, inputZInv, inputS, inputO,
-		  QKVRaggedOffset, ORaggedOffset,
+		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
 		  PhiloxUnpacked,
 		  wspace,
 		  stream);
@@ -2330,11 +2314,11 @@ void nvte_cudnn_flash_attn_fwd(
 
 }
 
+		//uint64_t seed, uint64_t offset,
 void nvte_cudnn_flash_attn_bwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
 		NVTETensor QKV,
 		NVTETensor dQKV,
 		NVTETensor M,
@@ -2343,8 +2327,9 @@ void nvte_cudnn_flash_attn_bwd(
                 NVTETensor dS,
                 NVTETensor O,
                 NVTETensor dO,
-		int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+		int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+                int32_t *ActualSeqlens,
                 uint64_t *PhiloxUnpacked,
 		NVTETensor workspace,
 		cudaStream_t stream
@@ -2363,10 +2348,10 @@ void nvte_cudnn_flash_attn_bwd(
   Tensor *input_dO = reinterpret_cast<Tensor*>(dO);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
+		  //seed, offset,
   cudnn_fa_bwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
-		  seed, offset,
 		  inputQKV, input_dQKV, inputM, inputZInv, inputS, input_dS, inputO, input_dO,
-		  QKVRaggedOffset, ORaggedOffset,
+		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
 		  PhiloxUnpacked,
 		  wspace,
 		  stream);
