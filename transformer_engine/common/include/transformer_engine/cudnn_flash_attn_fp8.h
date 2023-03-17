@@ -36,25 +36,24 @@ void nvte_cudnn_flash_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
                 NVTETensor QKV,
                 NVTETensor M,
                 NVTETensor ZInv,
                 NVTETensor S,
                 NVTETensor O,
-                int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+                int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+		int32_t *ActualSeqlens,
                 uint64_t *PhiloxUnpacked,
                 NVTETensor workspace,
                 cudaStream_t stream);
-		//int64_t *ActualSeqlens,
+		//uint64_t seed, uint64_t offset,
                 //uint64_t *PhiloxUnpacked_CPU,
 
 void nvte_cudnn_flash_attn_bwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		uint64_t seed, uint64_t offset,
                 const NVTETensor QKV,
                 const NVTETensor dQKV,
                 const NVTETensor M,
@@ -63,11 +62,13 @@ void nvte_cudnn_flash_attn_bwd(
                 const NVTETensor dS,
                 const NVTETensor O,
                 const NVTETensor dO,
-                int64_t *QKVRaggedOffset,
-                int64_t *ORaggedOffset,
+                int32_t *QKVRaggedOffset,
+                int32_t *ORaggedOffset,
+		int32_t *ActualSeqlens,
                 uint64_t *PhiloxUnpacked,
                 NVTETensor workspace,
                 cudaStream_t stream);
+		//uint64_t seed, uint64_t offset,
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -21,8 +21,8 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 at::Tensor amaxO,
                 at::Tensor QKVRaggedOffset,
                 at::Tensor ORaggedOffset,
+		at::Tensor ActualSeqlens,
                 c10::optional<at::Generator> &rng_gen);
-		//at::Tensor &ActualSeqlens,
 
 std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 int64_t b, int64_t max_seq_len,
@@ -39,6 +39,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                 at::Tensor amaxO,
                 at::Tensor QKVRaggedOffset,
                 at::Tensor ORaggedOffset,
+		at::Tensor ActualSeqlens,
                 c10::optional<at::Generator> &rng_gen);
 
 void te_gemm(at::Tensor A,

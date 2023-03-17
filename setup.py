@@ -291,7 +291,8 @@ class CMakeBuildExtension(build_ext, object):
         print("Building CMake extensions!")
 
         cmake_bin = get_cmake_bin()
-        config = "Debug" if self.debug else "Release"
+        #config = "Debug" if self.debug else "Release"
+        config = "Debug"
 
         ext_name = self.extensions[0].name
         build_dir = self.get_ext_fullpath(ext_name).replace(
