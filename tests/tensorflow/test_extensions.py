@@ -183,7 +183,8 @@ class ExtensionsTest(test.TestCase):
         mask_operator = tf.linalg.LinearOperatorLowerTriangular(
             tf.ones((F, F), dtype=tf.bool))
         mask = mask_operator.to_dense()
-        y_ref = tf.keras.layers.Softmax(axis=-1)(scale * x, mask)
+        mask_output = tf.where(mask, scale * x, -10000.0)
+        y_ref = tf.nn.softmax(mask_output, axis=-1)
 
         y = tex.scaled_upper_triang_masked_softmax_forward(x, scale, stream_id)
 
@@ -204,7 +205,8 @@ class ExtensionsTest(test.TestCase):
 
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(x)
-            y = tf.keras.layers.Softmax(axis=-1)(scale * x, mask)
+            mask_output = tf.where(mask, scale * x, -10000.0)
+            y = tf.nn.softmax(mask_output, axis=-1)
             y = tf.cast(y, dtype=tf.half)
             loss = y * dy
         dx_ref = tape.gradient(loss, x)

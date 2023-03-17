@@ -108,6 +108,9 @@ JAX
         # Update FP8 metas
         other_variables = te.update_fp8_metas(other_grads)
 
+TensorFlow
+^^^^^^^^^^
+
 .. code-block:: python
 
   import tensorflow as tf

@@ -10,7 +10,7 @@ def attention_mask_func(
     attention_scores: tf.Tensor, attention_mask: tf.Tensor
 ) -> tf.Tensor:
     """Get attention mask"""
-    return tf.where(attention_mask, -10000.0, attention_scores)
+    return tf.where(attention_mask, attention_scores, -10000.0)
 
 
 def ensure_divisibility(numerator: int, denominator: int) -> None:

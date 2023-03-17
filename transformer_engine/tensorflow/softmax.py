@@ -16,6 +16,19 @@ THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
 
 
+_default_causal_mask = {}
+
+def _get_default_causal_mask(sq: int) -> tf.Tensor:
+    """Return the causal upper triangular mask for softmax input"""
+    if sq not in _default_causal_mask:
+        # In TF, the mask specifies 1 to keep and 0 to mask. In "causal" mask
+        # mode, we compute the softmax of the lower triangular.
+        mask_operator = tf.linalg.LinearOperatorLowerTriangular(
+            tf.ones((sq, sq), dtype=tf.bool))
+        mask = mask_operator.to_dense()
+        _default_causal_mask[sq] = mask
+    return _default_causal_mask[sq]
+
 class FusedScaleMaskSoftmax(tf.keras.Model):
     """
     fused operation: scaling + mask + softmax
@@ -154,6 +167,10 @@ class FusedScaleMaskSoftmax(tf.keras.Model):
 
         if self.scale is not None:
             inp = inp * self.scale
+
+        if self.attn_mask_type == "causal":
+            mask = _get_default_causal_mask(inp.shape[2])
+
         mask_output = self.mask_func(inp, mask) if mask is not None else inp
         probs = tf.nn.softmax(mask_output, axis=-1)
 
