@@ -4,13 +4,21 @@
 
 """
 This file contains tests for exporting TransformerEngine models to ONNX.
+
+The purpose of these tests is validation that TE models are converted to their correct ONNX
+representation. Toward this end, each test captures the output of a TE module forward pass,
+converts the TE module to ONNX, and uses ONNX Runtime (ORT) to execute the ONNX graph and
+validate the output against TE's output.
+
+Until FP8 is introduced to the ONNX standard, FP8 QuantizeLinear/DequantizeLinear is implemented
+using custom ORT operations.
 """
+
 
 import os
 import pytest
 import warnings
 import numpy as np
-import math
 import onnxruntime as ort
 import torch
 from torch import nn as nn
@@ -76,7 +84,7 @@ def do_export(
                           opset_version=opset,
                           input_names=input_names,
                           output_names=output_names,
-                          do_constant_folding=True,
+                          do_constant_folding=False,
                           operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
@@ -114,8 +122,20 @@ def validate_result(
     rtol: float=1.e-5, # np.isclose default rtol
     max_errors_printed: int=10,
     is_fp8: bool=False,
+    allow_cnt_errors: int=0,
 ):
-    """Validate the outputs of an ONNX model vs. ONNX Runtime."""
+    """Compare the outputs of a Transformer Engine (TE) module vs the outputs of its ONNX
+    representation using ONNX Runtime (ORT) and ensure they are close.
+
+    The purpose of the output comparison is to validate that TE models are converted to
+    their correct ONNX representation by testing that TE and ORT outputs match within some
+    small threshold (allowing for finite precision errors).
+
+    Argument `allow_cnt_errors` reduces test failure noise due to spurious errors by ignoring,
+    a very small number (0-3) of outliers. This is fine to do because these outliers are due to
+    small kernel implementation differences between TE and ORT and do not imply an incorrect ONNX
+    representation (the tests assume both ORT or TE kernels are correct).
+    """
 
     def create_ort_session(fname: str, is_fp8: bool):
         def load_custom_ops(session_opts: ort.SessionOptions):
@@ -126,13 +146,15 @@ def validate_result(
             print("registered custom FP8 Q/DQ ops!")
 
         """Create an ONNX Runtime session for validation."""
+        # Workaround an ORT limitation. See https://github.com/microsoft/onnxruntime/issues/15021
+        kwargs = {"disabled_optimizers": ["LayerNormFusion"]}
+
         if is_fp8:
             sess_options = ort.SessionOptions()
             load_custom_ops(sess_options)
-            # Model loading successfully indicates that the custom op node could be resolved successfully
-            s = ort.InferenceSession(fname, sess_options=sess_options)
-        else:
-            s = ort.InferenceSession(fname)
+            kwargs["sess_options"] = sess_options
+
+        s = ort.InferenceSession(fname, **kwargs)
         return s
 
     def create_ort_input_dict(session, inps):
@@ -174,7 +196,8 @@ def validate_result(
             for loc in mismatched_ids[:nb_vals]:
                 ref = te_output[loc]
                 print(f"{onnx_output[loc]} -- {te_output[loc]} err={abs_err[loc]} > {atol + rtol * abs(ref)}")
-            raise ValueError(f"Output validation of {fname} failed with {len(mismatched_ids)} errors")
+            if len(mismatched_ids) > allow_cnt_errors:
+                raise ValueError(f"Output validation of {fname} failed with {len(mismatched_ids)} errors")
 
 
 def create_meta(scale_factor: float, size: int=1):
@@ -502,8 +525,8 @@ def test_export_layernorm(
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, use_fp8=use_fp8)
     if precision not in (torch.bfloat16, ):
-        # TODO: FP32 has a small threshold (1e-5)
-        validate_result(fname, inp, model, atol=4e-3, is_fp8=use_fp8)
+        validate_result(
+            fname, inp, model, atol=1e-4, is_fp8=use_fp8, allow_cnt_errors=3)
 
 
 @skip_FP8

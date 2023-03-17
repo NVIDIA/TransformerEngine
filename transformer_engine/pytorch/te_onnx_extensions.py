@@ -23,10 +23,12 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
     TypeError: 'torch._C.Value' object is not subscriptable
 """
 
+
 import torch
-from torch.onnx import symbolic_helper, register_custom_op_symbolic
+from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 import torch._C._onnx as _C_onnx
 import transformer_engine_extensions as tex
+
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
@@ -179,8 +181,16 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        one = g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64, device="cuda"))
+        one = g.op("Constant", value_t=torch.tensor([1.], dtype=torch.float, device="cuda"))
         weight = g.op("Add", weight, one)
+
+    # TE computes LN using float32 precision so wrap the LN subgraph with
+    # conversion to/from float32.
+    input_dtype = _type_utils.JitScalarType.from_value(inputs)
+    is_fp32 = input_dtype == _type_utils.JitScalarType.FLOAT
+    if not is_fp32:
+        inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
+
     ln = torch.onnx.symbolic_opset9.layer_norm(
         g,
         inputs,
@@ -190,6 +200,9 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
         eps,
         False # cudnn_enable (not relevant)
     )
+
+    if not is_fp32:
+        ln = g.op("Cast", ln, to_i=_type_utils.JitScalarType(input_dtype).onnx_type())
     return ln
 
 
