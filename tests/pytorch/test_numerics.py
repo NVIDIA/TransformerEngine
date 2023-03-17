@@ -559,14 +559,15 @@ def test_gpt_accuracy(dtype, bs, model):
 
     te_outputs = _test_e2e_gpt_accuracy(te_gpt, bs, dtype, config)
     torch_outputs = _test_e2e_gpt_accuracy(torch_gpt, bs, dtype, config)
+
     # Check output.
-    if dtype == torch.bfloat16:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
-    else:
+    if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
-def _test_e2e_accuracy(block, bs, dtype, config):
+def _test_granular_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
@@ -619,9 +620,14 @@ def test_linear_accuracy(dtype, bs, model):
         torch_linear.weight = Parameter(te_linear.weight.clone())
         torch_linear.bias = Parameter(te_linear.bias.clone())
 
-    te_outputs = _test_e2e_accuracy(te_linear, bs, dtype, config)
-    torch_outputs = _test_e2e_accuracy(torch_linear, bs, dtype, config)
-    assert_allclose(te_outputs, torch_outputs, 5e-3)
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_linear, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -661,10 +667,11 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
         torch_ln_linear.linear.weight = Parameter(te_ln_linear.weight.clone())
         torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
 
-    te_outputs = _test_e2e_accuracy(te_ln_linear, bs, dtype, config)
-    torch_outputs = _test_e2e_accuracy(torch_ln_linear, bs, dtype, config)
+    te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
+
     # Check output.
-    if dtype == torch.bfloat16:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
-    else:
+    if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
