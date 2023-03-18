@@ -21,7 +21,7 @@ from jax.experimental.pjit import pjit
 
 import transformer_engine.jax as te
 
-DEVICE_DP_AXIS = 'device'
+DEVICE_DP_AXIS = 'data'
 PARAMS_KEY = 'params'
 PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
@@ -209,8 +209,9 @@ def get_params_pspec(sharding_rules, abs_var_collect):
         partitions = [rules_dict[key] for key in logical_axis]
         return jax.sharding.PartitionSpec(*partitions)
 
+    params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
     params_axes_pspec = jax.tree_map(
-        to_device_axis, nn.partitioning.get_axis_names(abs_var_collect[PARAMS_AXES_KEY]))
+        to_device_axis, nn.partitioning.get_axis_names(params_axes))
 
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
 
