@@ -89,7 +89,7 @@ def cudnn_flash_attn_fwd(
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     print("============== cpp_extension ============ ")
-    print("entering fwd ")
+    #print("entering fwd ")
     check_qkv(qkv)
     check_cu_seqlens(cu_seqlens)
     check_scalar(d_scale_qkv)
@@ -102,7 +102,7 @@ def cudnn_flash_attn_fwd(
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
     #actual_seqlens = (cu_seqlens[1:]-cu_seqlens[:-1]).to(dtype=torch.int32) 
     actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    print('actual seqlens ',actual_seqlens,cu_seqlens)
+    #print('actual seqlens ',actual_seqlens,cu_seqlens)
     #print('cu_seqlens ',cu_seqlens)
 
     total_seqs = qkv.size(0)
@@ -129,7 +129,7 @@ def cudnn_flash_attn_fwd(
 
     qkv_layout = get_mha_layout(qkv_layout)
     #rng_gen_new = torch.Generator(device="cuda") if not rng_gen else rng_gen
-    print("before calling ext fwd ")
+    #print("before calling ext fwd ")
     O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
              b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
              qkv, qkv_dtype,
@@ -188,14 +188,14 @@ def cudnn_flash_attn_bwd(
     b = cu_seqlens.numel() - 1
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
     actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    print('actual seqlens ',actual_seqlens,cu_seqlens)
+    #print('actual seqlens ',actual_seqlens,cu_seqlens)
 
     total_seqs = qkv.size(0)
     h = qkv.size(2)
     d = qkv.size(3)
     scale_q_k = 1.0 / math.sqrt(d)
 
-    print('M shape ',M.shape, ZInv.shape)
+    #print('M shape ',M.shape, ZInv.shape)
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
     check_seed(philox_unpacked)

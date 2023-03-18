@@ -231,7 +231,8 @@ struct TypeInfo{
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+	    printf(" ------------------ dtype is %d \n",(int)dtype); \
+            NVTE_ERROR("Invalid type. "); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                 \

@@ -147,6 +147,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
 
 size_t product(const std::vector<size_t> &shape);
 
+size_t product(const NVTEShape &shape);
+
 
 at::Tensor allocateSpace(const NVTEShape &shape,
                          const transformer_engine::DType type,
