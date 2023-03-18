@@ -200,7 +200,6 @@ transpose_dbias_kernel(const Param param,
 
     partial_dbias.store_to(my_partial_dbias_tile, my_id_in_warp);
   }
-
 }
 
 template <int nvec_in, int nvec_out, typename Param>
@@ -356,7 +355,6 @@ transpose_dbias_kernel_notaligned(const Param param,
       partial_dbias.store_to(my_partial_dbias_tile, my_id_in_warp);
     }
   }
-
 }
 
 constexpr size_t reduce_dbias_num_threads = 256;
@@ -457,7 +455,8 @@ void fp8_transpose_dbias(const Tensor &input,
   NVTE_CHECK(transposed_output->data.shape[0] == row_length, "Wrong dimension of T output.");
   NVTE_CHECK(transposed_output->data.shape[1] == num_rows, "Wrong dimension of T output.");
 
-  NVTE_CHECK(transposed_output->data.dtype == input.data.dtype, "T output must have the same type as input.");
+  NVTE_CHECK(transposed_output->data.dtype == input.data.dtype,
+                           "T output must have the same type as input.");
   NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dbias->data.dtype, BiasType,
