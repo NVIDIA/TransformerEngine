@@ -87,6 +87,14 @@ size_t product(const std::vector<size_t> &shape) {
     return ret;
 }
 
+size_t product(const NVTEShape &shape) {
+    size_t ret = 1;
+    for (size_t i = 0; i < shape.ndim; ++i) {
+      ret *= shape.data[i];
+    }
+    return ret;
+}
+
 
 at::Tensor allocateSpace(const NVTEShape &shape,
                          const transformer_engine::DType type,

@@ -8,6 +8,7 @@
 #include <cudnn_frontend.h>
 #include "../common.h"
 
+static bool debug = false;
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   printf("cudnn get type %d\n",(int)t);
@@ -258,7 +259,7 @@ static cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, in
             .setVirtual(is_virtual)
             .setByValue(is_value)
             .build();
-    std::cout << tensor_created.describe() << std::endl;
+    if (debug) std::cout << tensor_created.describe() << std::endl;
     return tensor_created;
 };
 
@@ -275,7 +276,7 @@ static cudnn_frontend::Tensor tensor_create_with_offset(cudnnDataType_t type, in
             .setByValue(is_value)
             .setRaggedOffset(raggedOffset)
             .build();
-    std::cout << tensor_created.describe() << std::endl;
+    if (debug) std::cout << tensor_created.describe() << std::endl;
     return tensor_created;
 };
 
@@ -285,7 +286,7 @@ static cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnP
             .setComputeType(type)
             .build();
 
-    std::cout << pw_desc_created.describe() << std::endl;
+    if (debug) std::cout << pw_desc_created.describe() << std::endl;
     return pw_desc_created;
 }
 
@@ -296,7 +297,7 @@ static cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    std::cout << pw_op_created.describe() << std::endl;
+    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -308,7 +309,7 @@ static cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor cons
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    std::cout << pw_op_created.describe() << std::endl;
+    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -321,7 +322,7 @@ static cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor con
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    std::cout << pw_op_created.describe() << std::endl;
+    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -341,7 +342,7 @@ createAmax(const std::string& amax_tensor_name,
                                   .setMathPrecision(CUDNN_DATA_FLOAT)
                                   .setReductionOp(CUDNN_REDUCE_TENSOR_AMAX)
                                   .build();
-        std::cout << redunctionDesc.describe() << std::endl;
+        if (debug) std::cout << redunctionDesc.describe() << std::endl;
 
         // Create a reduction amax Node.
         auto reduction_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -349,7 +350,7 @@ createAmax(const std::string& amax_tensor_name,
                                 .setyDesc(amaxTensor)
                                 .setreductionDesc(redunctionDesc)
                                 .build();
-        std::cout << reduction_op.describe() << std::endl;
+        if (debug) std::cout << reduction_op.describe() << std::endl;
         ops.push_back(std::move(reduction_op));
         return amaxTensor;
 }
@@ -508,7 +509,7 @@ createSoftmaxForward(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_MAX)
                                 .build();
-    std::cout << reductionMaxDesc.describe() << std::endl;
+    if (debug) std::cout << reductionMaxDesc.describe() << std::endl;
 
     // Create a reduction max Node.
     auto reductionMax_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -516,7 +517,7 @@ createSoftmaxForward(int64_t b,
                                 .setyDesc(afterMaxReductionTensor)
                                 .setreductionDesc(reductionMaxDesc)
                                 .build();
-    std::cout << reductionMax_op.describe() << std::endl;
+    if (debug) std::cout << reductionMax_op.describe() << std::endl;
 
     // Define the subtract descriptor
     auto subtractDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
@@ -535,7 +536,7 @@ createSoftmaxForward(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_ADD)
                                 .build();
-    std::cout << reductionAddDesc.describe() << std::endl;
+    if (debug) std::cout << reductionAddDesc.describe() << std::endl;
 
     // Create a reduction add Node.
     auto reductionAdd_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -544,7 +545,7 @@ createSoftmaxForward(int64_t b,
                                 .setreductionDesc(reductionAddDesc)
                                 .build();
 
-    std::cout << reductionAdd_op.describe() << std::endl;
+    if (debug) std::cout << reductionAdd_op.describe() << std::endl;
 
     // Define the reciprocal descriptor
     auto reciprocalDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_RECIPROCAL);
@@ -611,7 +612,7 @@ createDropoutForward(int64_t b,
                                 .setRngDistribution(CUDNN_RNG_DISTRIBUTION_BERNOULLI)
                                 .setBernoulliDistProbability(1.0 - probability)
                                 .build();
-    std::cout << rngDesc.describe() << std::endl;
+    if (debug) std::cout << rngDesc.describe() << std::endl;
 
     // Create a rng Node.
     auto rng_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
@@ -621,7 +622,7 @@ createDropoutForward(int64_t b,
                                 .setRngDesc(rngDesc)
                                 .build();
 
-    std::cout << rng_op.describe() << std::endl;
+    if (debug) std::cout << rng_op.describe() << std::endl;
 
     // Define the multiply mask descriptor
     auto maskMulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
@@ -684,7 +685,7 @@ createDropoutBackward(int64_t b,
                                 .setRngDistribution(CUDNN_RNG_DISTRIBUTION_BERNOULLI)
                                 .setBernoulliDistProbability(1.0 - probability)
                                 .build();
-    std::cout << rngDesc.describe() << std::endl;
+    if (debug) std::cout << rngDesc.describe() << std::endl;
 
     // Create a rng Node.
     auto rng_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
@@ -694,7 +695,7 @@ createDropoutBackward(int64_t b,
                                 .setRngDesc(rngDesc)
                                 .build();
 
-    std::cout << rng_op.describe() << std::endl;
+    if (debug) std::cout << rng_op.describe() << std::endl;
 
     // Define the multiply mask descriptor
     auto maskMulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
@@ -793,7 +794,7 @@ createQKBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(-2000000)
                                     .build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create reshape node for K -> K.T
     auto reshape_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
@@ -801,7 +802,7 @@ createQKBMM(int64_t b,
                             .setyDesc(kTransposeTensor)
                             .build();
 
-    std::cout << reshape_op.describe() << std::endl;
+    if (debug) std::cout << reshape_op.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -813,7 +814,7 @@ createQKBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -850,7 +851,7 @@ createSVBMM(int64_t b,
 
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder().setComputeType(CUDNN_DATA_FLOAT).build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -862,7 +863,7 @@ createSVBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(matmulOp));
 
@@ -904,7 +905,7 @@ createSdOBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(0)
                                     .build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -916,7 +917,7 @@ createSdOBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -963,7 +964,7 @@ createdOVBMM(int64_t b,
                                             .setComputeType(CUDNN_DATA_FLOAT)
                                             .setPaddingValue(0)
                                             .build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create reshape node for V -> V.T
     auto reshape_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
@@ -971,7 +972,7 @@ createdOVBMM(int64_t b,
                             .setyDesc(vTransposeTensor)
                             .build();
 
-    std::cout << reshape_op.describe() << std::endl;
+    if (debug) std::cout << reshape_op.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -983,7 +984,7 @@ createdOVBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -1027,7 +1028,7 @@ createdOAndORowReductionChain(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_ADD)
                                 .build();
-    std::cout << reductionAddDesc.describe() << std::endl;
+    if (debug) std::cout << reductionAddDesc.describe() << std::endl;
 
     // Create a reduction add Node.
     auto reductionAdd_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -1036,7 +1037,7 @@ createdOAndORowReductionChain(int64_t b,
                                 .setreductionDesc(reductionAddDesc)
                                 .build();
 
-    std::cout << reductionAdd_op.describe() << std::endl;
+    if (debug) std::cout << reductionAdd_op.describe() << std::endl;
 
     ops.push_back(std::move(mutliply_op));
     ops.push_back(std::move(dropout_scale_multiply_op));
@@ -1103,7 +1104,7 @@ createdSKBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(0)
                                     .build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1115,7 +1116,7 @@ createdSKBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(matmulOp));
 
@@ -1158,14 +1159,14 @@ createdSQBMM(int64_t b,
                             .setyDesc(dSTransposeTensor)
                             .build();
 
-    std::cout << reshape_op.describe() << std::endl;
+    if (debug) std::cout << reshape_op.describe() << std::endl;
 
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder()
                                             .setComputeType(CUDNN_DATA_FLOAT)
                                             .setPaddingValue(0)
                                             .build();
-    std::cout << matmulDesc.describe() << std::endl;
+    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1177,7 +1178,7 @@ createdSQBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    std::cout << matmulOp.describe() << std::endl;
+    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -1246,9 +1247,11 @@ cudnn_fa_fprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
+	      printf("cache hit\n");
               return plan;
             }
 
+	    printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -1390,21 +1393,45 @@ cudnn_fa_fprop_fp8(int64_t b,
 	}; // end of get_plan
 
 	auto plan = get_plan(fa_fprop_cache, descriptor);
-        std::cout << "Plan tag: " << plan.getTag() << std::endl;
+        if (debug) std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-	//auto workspace_size = plan.getWorkspaceSize();
-        auto wspace_size = plan.getWorkspaceSize();
-        std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
+	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
+        //auto wspace_size = plan.getWorkspaceSize();
+        if (debug) std::cout << plan.describe() << " requires workspace " << *workspace_size << std::endl;
 
+	//if (*workspace_size > 0)
+	//{
+	//    if (workspace_ptr == nullptr)
+	//    {
+	//        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	//        return;
+        //    }
+	//}
+        //else if (*workspace_size == 0)
+        //{
+        //  return;
+        //}
 	if (workspace_ptr == nullptr)
 	{
-	    *workspace_size = wspace_size;
-	    printf("workspace siez is %ld, %ld \n",wspace_size,*workspace_size);
-	    return; // not executing
-	}
-	else  // begin execution
+	    if (*workspace_size > 0)
+	    {
+	        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	        return;
+            }
+            else if (*workspace_size == 0)
+                return;
+        }
+	//if (workspace_ptr == nullptr)
+	//{
+	//    *workspace_size = wspace_size;
+	//    printf("workspace is nullptr, size is %ld \n",*workspace_size);
+	//    return; // not executing
+	//}
+	//else  // begin execution
 	{
 
+	    //printf("workspace is not nullptr, execute fwd \n");
+	    printf("workspace is not nullptr or workspace size is 0, execute fwd \n");
             //void* workspace_ptr = nullptr;
             //if (workspace_size > 0) {
             //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
@@ -1529,7 +1556,7 @@ cudnn_fa_bprop_fp8(int64_t b,
                               s_kv,
                               d,
 			      attnScale,
-                              static_cast<float>(dropoutProbability),
+                              dropoutProbability,
                               layout,
                               devPtrDropoutSeed,
                               devPtrDropoutOffset,
@@ -1545,9 +1572,11 @@ cudnn_fa_bprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
+	      printf("cache hit\n");
               return plan;
             }
 
+	    printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -1877,21 +1906,45 @@ cudnn_fa_bprop_fp8(int64_t b,
 	};
 
 	auto plan = get_plan(fa_bprop_cache, descriptor);
-        std::cout << "Plan tag: " << plan.getTag() << std::endl;
+        if (debug) std::cout << "Plan tag: " << plan.getTag() << std::endl;
 
-	//auto workspace_size = plan.getWorkspaceSize();
-        auto wspace_size = plan.getWorkspaceSize();
-        std::cout << plan.describe() << " requires workspace " << workspace_size << std::endl;
+	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
+        //auto wspace_size = plan.getWorkspaceSize();
+        if (debug) std::cout << plan.describe() << " requires workspace " << *workspace_size << std::endl;
 
+	//if (*workspace_size > 0)
+	//{
+	//    if (workspace_ptr == nullptr)
+	//    {
+	//        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	//        return;
+        //    }
+	//}
+        //else if (*workspace_size == 0)
+        //{
+        //  return;
+        //}
 	if (workspace_ptr == nullptr)
 	{
-	    *workspace_size = wspace_size;
-	    printf("workspace siez is %ld, %ld \n",wspace_size,*workspace_size);
-	    return; // not executing
-	}
-	else  // begin execution
+	    if (*workspace_size > 0)
+	    {
+	        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	        return;
+            }
+            else if (*workspace_size == 0)
+                return;
+        }
+	//if (workspace_ptr == nullptr)
+	//{
+	//    *workspace_size = wspace_size;
+	//    printf("workspace is nullptr, size is %ld \n",*workspace_size);
+	//    return; // not executing
+	//}
+	//else  // begin execution
 	{
 
+	    //printf("workspace is not nullptr, execute bwd \n");
+	    printf("workspace is not nullptr or workspace size is 0, execute bwd \n");
             //void* workspace_ptr = nullptr;
             //if (workspace_size > 0) {
             //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
@@ -1979,53 +2032,6 @@ cudnn_fa_bprop_fp8(int64_t b,
 #endif
 
 } // namespace cudnn_flash_attn
-//cudnn_fa_bprop_fp8(int64_t b, 
-//                int64_t h, 
-//                int64_t s_q,
-//                int64_t s_kv,
-//                int64_t d,
-//                float attnScale,
-//                float attnScale_dS_K,
-//                float attnScale_dSTranspose_Q,
-//                float dropoutProbability,
-//                MHA_Layout layout,
-//                void* devPtrQKV,
-//                void* devPtrKTranspose, 
-//                void* devPtrM,
-//                void* devPtrZInv,
-//                void* devPtrO,
-//                void* devPtrdO,
-//                void* devPtrdQKV,
-//                void* devPtrDropoutSeed,
-//                void* devPtrDropoutOffset,
-//                void* devPtrDescaleQ,
-//                void* devPtrDescaleK,
-//                void* devPtrDescaleV,
-//                void* devPtrDescaleO,
-//                void* devPtrDescaledO,
-//                void* devPtrDescaleS,
-//                void* devPtrDescaledS,
-//                void* devPtrScaleS,
-//                void* devPtrScaledS,
-//                void* devPtrScaledQ,
-//                void* devPtrScaledK,
-//                void* devPtrScaledV,
-//                void* devPtrAmaxdS,
-//                void* devPtrAmaxdQ,
-//                void* devPtrAmaxdK,
-//                void* devPtrAmaxdV,
-//                void* devPtrQKVRaggedOffset,
-//                void* devPtrORaggeDOffset,
-//                void* devPtrMNKOverride,
-//                cudnnDataType_t tensorType,
-//		void* workspace_ptr,
-//		uint64_t*  workspace_size)
-//
-//void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
-//                int64_t total_seqs, int64_t h, int64_t d,
-//                float scale_q_k, float p_dropout, int qkv_layout,
-//                float attnScale_dS_K,
-//                float attnScale_dSTranspose_Q,
 		//uint64_t seed, uint64_t offset,
 void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
@@ -2106,13 +2112,31 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 		workspace->data.dptr,
 		&workspace_size);
 
-    if (workspace->data.dptr == nullptr)
+    if (workspace_size > 0)
     {
-      printf(" workspace size %ld \n",workspace_size);
-      workspace->data.dtype = transformer_engine::DType::kByte;
-      workspace->data.shape = {workspace_size};
-      return;
+        if (workspace->data.dptr == nullptr)
+        {
+            printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
+	    workspace->data.shape = { workspace_size };
+	    workspace->data.dtype = DType::kByte;
+            return;
+        }
     }
+    else if (workspace_size == 0)
+    {
+            printf("workspace size required is 0 return to allocate \n");
+	    //workspace->data.dptr == nullptr;
+	    workspace->data.shape = { 1 };
+	    workspace->data.dtype = DType::kByte;
+            return;
+    }
+    //if (workspace->data.dptr == nullptr)
+    //{
+    //  printf(" workspace size %ld \n",workspace_size);
+    //  workspace->data.dtype = transformer_engine::DType::kByte;
+    //  workspace->data.shape = {workspace_size};
+    //  return;
+    //}
 
 #else
     printf("Error: CUDNN_VERSION must be >= 8900! \n");
@@ -2140,14 +2164,14 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float scale_q_k, float p_dropout, int qkv_layout,
-		const Tensor *inputQKV,
-		const Tensor *input_dQKV,
-		const Tensor *inputM,
-                const Tensor *inputZInv,
-                const Tensor *inputS,
-                const Tensor *input_dS,
-                const Tensor *inputO,
-                const Tensor *input_dO,
+		Tensor *inputQKV,
+		Tensor *input_dQKV,
+		Tensor *inputM,
+                Tensor *inputZInv,
+                Tensor *inputS,
+                Tensor *input_dS,
+                Tensor *inputO,
+                Tensor *input_dO,
 		int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
                 int32_t *ActualSeqlens,
@@ -2239,12 +2263,30 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
 		workspace->data.dptr,
 		&workspace_size);
 
-    if (workspace->data.dptr == nullptr)
+    if (workspace_size > 0)
     {
-      workspace->data.dtype = transformer_engine::DType::kByte;
-      workspace->data.shape = {workspace_size};
-      return;
+        if (workspace->data.dptr == nullptr)
+        {
+            printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
+	    workspace->data.shape = { workspace_size };
+	    workspace->data.dtype = DType::kByte;
+            return;
+        }
     }
+    else if (workspace_size == 0)
+    {
+            printf("workspace size required is 0 return to allocate \n");
+	    //workspace->data.dptr == nullptr;
+	    workspace->data.shape = { 1 };
+	    workspace->data.dtype = DType::kByte;
+            return;
+    }
+    //if (workspace->data.dptr == nullptr)
+    //{
+    //  workspace->data.dtype = transformer_engine::DType::kByte;
+    //  workspace->data.shape = {workspace_size};
+    //  return;
+    //}
 
 #else
     printf("Error: CUDNN_VERSION must be >= 8900! \n");
@@ -2296,7 +2338,7 @@ void nvte_cudnn_flash_attn_fwd(
   Tensor *inputZInv = reinterpret_cast<Tensor*>(ZInv);
   Tensor *inputS = reinterpret_cast<Tensor*>(S);
   Tensor *inputO = reinterpret_cast<Tensor*>(O);
-  Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   printf(" calling cudnn fwd ------------ \n");
 		  //seed, offset,
@@ -2304,7 +2346,7 @@ void nvte_cudnn_flash_attn_fwd(
 		  inputQKV, inputM, inputZInv, inputS, inputO,
 		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
 		  PhiloxUnpacked,
-		  wspace,
+		  wkspace,
 		  stream);
                   //PhiloxUnpacked_CPU,
                   //ActualSeqlens,
@@ -2346,14 +2388,14 @@ void nvte_cudnn_flash_attn_bwd(
   Tensor *input_dS = reinterpret_cast<Tensor*>(dS);
   Tensor *inputO = reinterpret_cast<Tensor*>(O);
   Tensor *input_dO = reinterpret_cast<Tensor*>(dO);
-  Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
 		  //seed, offset,
   cudnn_fa_bwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
 		  inputQKV, input_dQKV, inputM, inputZInv, inputS, input_dS, inputO, input_dO,
 		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
 		  PhiloxUnpacked,
-		  wspace,
+		  wkspace,
 		  stream);
 		  //wspace->data.dptr,
 		  //wspace->data.shape[0],
