@@ -555,7 +555,7 @@ void cast_transpose_dbias(const Tensor &input,
   NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
   NVTE_CHECK(dbias->data.shape == std::vector<size_t>{ row_length }, "Wrong shape of DBias.");
 
-  printf("--------------- before doing the switches ------------- \n");
+  //printf("--------------- before doing the switches ------------- \n");
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(cast_output->data.dtype, OutputType,
       constexpr int itype_size = sizeof(InputType);

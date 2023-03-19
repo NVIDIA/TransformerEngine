@@ -89,6 +89,7 @@ def cudnn_flash_attn_fwd(
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     print("============== cpp_extension ============ ")
+    print("qkv_dtype ",qkv_dtype)
     #print("entering fwd ")
     check_qkv(qkv)
     check_cu_seqlens(cu_seqlens)
