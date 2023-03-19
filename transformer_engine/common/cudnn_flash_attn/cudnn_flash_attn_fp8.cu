@@ -20,8 +20,10 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
     case DType::kBFloat16:
       return CUDNN_DATA_BFLOAT16;
     case DType::kFloat8E4M3:
+      printf(" type DType::kFloat8E4M3 \n");
       return CUDNN_DATA_FP8_E4M3;
     case DType::kFloat8E5M2:
+      printf(" type DType::kFloat8E5M2 \n");
       return CUDNN_DATA_FP8_E5M2;
     default:
       NVTE_ERROR("Invalid type");
@@ -1247,11 +1249,11 @@ cudnn_fa_fprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
-	      printf("cache hit\n");
+	      if (debug) printf("cache hit\n");
               return plan;
             }
 
-	    printf("cache not hit\n");
+	    if (debug) printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -1363,7 +1365,7 @@ cudnn_fa_fprop_fp8(int64_t b,
             // Amax for O
             createAmax("amaxO", OTensor_before_quan_O_tensor, ops);
 
-            std::cout << "Total ops created: " << ops.size() << std::endl;
+            if (debug) std::cout << "Total ops created: " << ops.size() << std::endl;
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
@@ -1415,7 +1417,7 @@ cudnn_fa_fprop_fp8(int64_t b,
 	{
 	    if (*workspace_size > 0)
 	    {
-	        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	        if (debug) printf("workspace is nullptr, size required is %ld \n",*workspace_size);
 	        return;
             }
             else if (*workspace_size == 0)
@@ -1431,7 +1433,7 @@ cudnn_fa_fprop_fp8(int64_t b,
 	{
 
 	    //printf("workspace is not nullptr, execute fwd \n");
-	    printf("workspace is not nullptr or workspace size is 0, execute fwd \n");
+	    if (debug) printf("workspace is not nullptr or workspace size is 0, execute fwd \n");
             //void* workspace_ptr = nullptr;
             //if (workspace_size > 0) {
             //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
@@ -1476,7 +1478,7 @@ cudnn_fa_fprop_fp8(int64_t b,
                                    .setWorkspacePointer(workspace_ptr)
                                    .setDataPointers(data_ptrs)
                                    .build();
-            std::cout << "variantPack " << variantPack.describe() << std::endl;
+            if (debug) std::cout << "variantPack " << variantPack.describe() << std::endl;
             cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
             NVTE_CHECK_CUDA(cudaDeviceSynchronize());
             //if (workspace_size > 0) {
@@ -1572,11 +1574,11 @@ cudnn_fa_bprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
-	      printf("cache hit\n");
+	      if (debug) printf("cache hit\n");
               return plan;
             }
 
-	    printf("cache not hit\n");
+	    if (debug) printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -1877,7 +1879,7 @@ cudnn_fa_bprop_fp8(int64_t b,
             // Amax for dK
             createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, ops);
 
-            std::cout << "Total ops created: " << ops.size() << std::endl;
+            if (debug) std::cout << "Total ops created: " << ops.size() << std::endl;
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
@@ -1928,7 +1930,7 @@ cudnn_fa_bprop_fp8(int64_t b,
 	{
 	    if (*workspace_size > 0)
 	    {
-	        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
+	        if (debug) printf("workspace is nullptr, size required is %ld \n",*workspace_size);
 	        return;
             }
             else if (*workspace_size == 0)
@@ -1944,7 +1946,7 @@ cudnn_fa_bprop_fp8(int64_t b,
 	{
 
 	    //printf("workspace is not nullptr, execute bwd \n");
-	    printf("workspace is not nullptr or workspace size is 0, execute bwd \n");
+	    if (debug) printf("workspace is not nullptr or workspace size is 0, execute bwd \n");
             //void* workspace_ptr = nullptr;
             //if (workspace_size > 0) {
             //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
@@ -2003,7 +2005,7 @@ cudnn_fa_bprop_fp8(int64_t b,
                                    .setWorkspacePointer(workspace_ptr)
                                    .setDataPointers(data_ptrs)
                                    .build();
-            std::cout << "variantPack " << variantPack.describe() << std::endl;
+            if (debug) std::cout << "variantPack " << variantPack.describe() << std::endl;
             cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
             NVTE_CHECK_CUDA(cudaDeviceSynchronize());
             //if (workspace_size > 0) {
@@ -2086,7 +2088,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    printf(" select fp8 ------------ \n");
+    if (debug) printf(" select fp8 ------------ \n");
     bool isTraining = true;
 		//seed, offset,
     cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, max_seq_len, max_seq_len, d,
@@ -2116,7 +2118,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
     {
         if (workspace->data.dptr == nullptr)
         {
-            printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
+            if (debug) printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
 	    workspace->data.shape = { workspace_size };
 	    workspace->data.dtype = DType::kByte;
             return;
@@ -2124,7 +2126,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
     }
     else if (workspace_size == 0)
     {
-            printf("workspace size required is 0 return to allocate \n");
+            if (debug) printf("workspace size required is 0 return to allocate \n");
 	    //workspace->data.dptr == nullptr;
 	    workspace->data.shape = { 1 };
 	    workspace->data.dtype = DType::kByte;
@@ -2154,8 +2156,8 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   else
   {
     NVTE_ERROR("Invalid combination of data type and sequence length! \n");
-    printf(" else branch ------------ \n");
-    printf("QKV_type is %d \n",(int)QKV_type);
+    if (debug) printf(" else branch ------------ \n");
+    if (debug) printf("QKV_type is %d \n",(int)QKV_type);
   }
 
 }
@@ -2226,7 +2228,7 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    printf(" select fp8 ------------ \n");
+    if (debug) printf(" select fp8 ------------ \n");
 		//seed, offset,
     cudnn_flash_attn::cudnn_fa_bprop_fp8(b, h, max_seq_len, max_seq_len, d,
 		scale_q_k,
@@ -2267,7 +2269,7 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
     {
         if (workspace->data.dptr == nullptr)
         {
-            printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
+            if (debug) printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
 	    workspace->data.shape = { workspace_size };
 	    workspace->data.dtype = DType::kByte;
             return;
@@ -2275,7 +2277,7 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
     }
     else if (workspace_size == 0)
     {
-            printf("workspace size required is 0 return to allocate \n");
+            if (debug) printf("workspace size required is 0 return to allocate \n");
 	    //workspace->data.dptr == nullptr;
 	    workspace->data.shape = { 1 };
 	    workspace->data.dtype = DType::kByte;
@@ -2340,7 +2342,7 @@ void nvte_cudnn_flash_attn_fwd(
   Tensor *inputO = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  printf(" calling cudnn fwd ------------ \n");
+  if (debug) printf(" calling cudnn fwd ------------ \n");
 		  //seed, offset,
   cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
 		  inputQKV, inputM, inputZInv, inputS, inputO,
@@ -2352,7 +2354,7 @@ void nvte_cudnn_flash_attn_fwd(
                   //ActualSeqlens,
 		  //wspace->data.dptr,
 		  //wspace->data.shape[0],
-  printf(" end calling cudnn fwd ------------ \n");
+  if (debug) printf(" end calling cudnn fwd ------------ \n");
 
 }
 

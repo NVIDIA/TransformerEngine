@@ -60,8 +60,9 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 
   using namespace transformer_engine;
 
-  printf("================     extensions.cu ============== \n");
+  printf("================ extensions.cu ============== \n");
 //  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
+  printf("QKV_type %d \n",(int)QKV_type);
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
                                           {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
                                           QKV_type, nullptr, nullptr,
@@ -83,7 +84,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                                           descaleS.data_ptr());
   if (debug) printf(" S --------\n");
 		  			  
-  auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
+  auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kInt8));
   if (set_zero)
   {
     O.zero_();
@@ -108,7 +109,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 
   auto philox_unpacked_cpu = philox_unpacked.to("cpu");
   uint64_t seed = philox_unpacked_cpu[0].item<int64_t>();
-  uint64_t offset = philox_unpacked_cpu[0].item<int64_t>();
+  uint64_t offset = philox_unpacked_cpu[1].item<int64_t>();
   printf("need to delete: philox cpu : %ld %ld \n", seed, offset); //philox_unpacked_cpu[0].item<int64_t>(), philox_unpacked_cpu[1].item<int64_t>());
 //  auto seeds = at::cuda::philox::unpack(philox_args);
   if (debug) printf(" philox --------\n");
@@ -116,7 +117,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 //  ActualSeqlens = ActualSeqlens.options.dtype(torch::kInt32);
   TensorWrapper workspace;
 
-  printf(" ------------ first call nvte fwd --------\n");
+  if (debug) printf(" ------------ first call nvte fwd --------\n");
   // This call populates workspace tensors with the required config
 		  //seed, offset,
   nvte_cudnn_flash_attn_fwd(
@@ -148,7 +149,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
                                               workspace.dtype());
   }
 
-  printf(" ------------ second call nvte fwd --------\n");
+  if (debug) printf(" ------------ second call nvte fwd --------\n");
   // Actual call to kernel
 		  //seed, offset,
   nvte_cudnn_flash_attn_fwd(
@@ -255,7 +256,7 @@ at::Tensor cudnn_flash_attn_bwd(
 		  			  
   TensorWrapper workspace;
 
-  printf(" ------------ first call nvte bwd --------\n");
+  if (debug) printf(" ------------ first call nvte bwd --------\n");
   // This call populates workspace tensors with the required config
 		  //seed, offset,
   nvte_cudnn_flash_attn_bwd(
@@ -289,7 +290,7 @@ at::Tensor cudnn_flash_attn_bwd(
                                               workspace.dtype());
   }
 
-  printf(" ------------ second call nvte bwd --------\n");
+  if (debug) printf(" ------------ second call nvte bwd --------\n");
   // Actual call to kernel
 		  //seed, offset,
   nvte_cudnn_flash_attn_bwd(
