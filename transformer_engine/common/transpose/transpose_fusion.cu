@@ -14,15 +14,13 @@
 
 namespace transformer_engine {
 
-template <bool full_tile, int nvec_in, int nvec_out,
+template <int nvec_in, int nvec_out,
           typename IVec, typename OVec, typename CVec, typename CType>
 inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
-                                                             OVec (&out_trans)[nvec_in],
-                                                             CVec &out_dbias,  // NOLINT(*)
-                                                             const size_t stride,
-                                                             const CType scale_inv,
-                                                             const int dbias_shfl_src_lane,
-                                                             const bool valid_store) {
+                                                    OVec (&out_trans)[nvec_in],
+                                                    CVec &out_dbias,  // NOLINT(*)
+                                                    const CType scale_inv,
+                                                    const int dbias_shfl_src_lane) {
   using T = typename OVec::type;
   using OVecC = Vec<T, nvec_in>;
 
@@ -30,7 +28,6 @@ inline __device__ void transpose_regs_partial_dbias(const IVec (&in)[nvec_out],
 
 #pragma unroll
   for (unsigned int i = 0; i < nvec_out; ++i) {
-    OVecC out_cast;
 #pragma unroll
     for (unsigned int j = 0; j < nvec_in; ++j) {
       const CType tmp = static_cast<CType>(in[i].data.elt[j]) * scale_inv;
@@ -149,13 +146,12 @@ transpose_dbias_kernel(const Param param,
       }
     }
     OVec out_trans[nvec_in];  // NOLINT(*)
-    transpose_regs_partial_dbias<true>(in[current_in ^ 1], out_trans,
-                                                partial_dbias,
-                                                stride, scale_inv,
-                                                (my_id_in_warp + i +
-                                                 warp_id_in_tile * n_iterations) %
-                                                THREADS_PER_WARP,
-                                                true);
+    transpose_regs_partial_dbias(
+                    in[current_in ^ 1],
+                    out_trans,
+                    partial_dbias,
+                    scale_inv,
+                    (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
 
 #pragma unroll
     for (unsigned int j = 0; j < nvec_in; ++j) {
@@ -299,13 +295,12 @@ transpose_dbias_kernel_notaligned(const Param param,
     OVec out_trans[nvec_in];  // NOLINT(*)
     const bool valid_store = my_place < tile_length &&
                              warp_id_in_tile * n_iterations + i < tile_height;
-    transpose_regs_partial_dbias<false>(in[current_in ^ 1], out_trans,
-                                                partial_dbias,
-                                                stride, scale_inv,
-                                                (my_id_in_warp + i +
-                                                 warp_id_in_tile * n_iterations) %
-                                                THREADS_PER_WARP,
-                                                valid_store);
+    transpose_regs_partial_dbias(
+                    in[current_in ^ 1],
+                    out_trans,
+                    partial_dbias,
+                    scale_inv,
+                    (my_id_in_warp + i + warp_id_in_tile * n_iterations) % THREADS_PER_WARP);
 
 #pragma unroll
     for (unsigned int j = 0; j < nvec_in; ++j) {
@@ -527,6 +522,7 @@ void nvte_fp8_transpose_dbias(const NVTETensor input,
                                NVTETensor dbias,
                                NVTETensor workspace,
                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fp8_transpose_dbias);
   using namespace transformer_engine;
   fp8_transpose_dbias(*reinterpret_cast<const Tensor*>(input),
                        reinterpret_cast<Tensor*>(transposed_output),
