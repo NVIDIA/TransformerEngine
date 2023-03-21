@@ -6,8 +6,64 @@
 
 #include "extensions.h"
 #include <vector>
+#include <ATen/Dispatch.h>
+#include <string>
+#include <ATen/native/DispatchStub.h>
+#include <c10/macros/Macros.h>
+//#include <ATen/TensorIndexing.h>
 
 static bool debug = false;
+
+constexpr int block_size = 512;
+constexpr int ctas_per_sm = 4;
+
+template <typename scalar_t>
+__global__ void
+__launch_bounds__(block_size)
+mha_fill_kernel(scalar_t* out_tensor,
+		const int32_t* const start_row,
+		const size_t num_rows) {
+    //if (threadIdx.x ==0) 
+    //	    printf("scalar_t is %d bytes\n", sizeof(out_tensor[0]));
+    //std::string(scalar_t));
+    //	printf("scalar_t is %s " type_name<decltype(out_tensor)>()
+    size_t row_stride = gridDim.y * blockDim.x;
+    size_t row_index = blockIdx.x + (size_t)start_row[0];
+    size_t col_index = blockIdx.y * blockDim.x + threadIdx.x;
+    while (row_index < num_rows) {
+	out_tensor[row_index*row_stride + col_index] = 0;
+        row_index += gridDim.x;
+    }
+}
+
+at::Tensor & mha_fill(at::Tensor &self, const at::Tensor &start_index) {
+    auto max_tokens = self.size(0);
+    auto self_2d = self.view({max_tokens, -1});
+    //std::cout << "self 2d type: " << self_2d.scalar_type() << "\n";
+    // std::cout << "new_shape " << self_2d.size(0) << "," << self_2d.size(1) << "\n";
+    auto fcd_size = self_2d.size(1);
+    TORCH_CHECK (self.is_contiguous(), "input not contiguous");
+    TORCH_CHECK (fcd_size % block_size == 0, "input size not aligned to block size");
+    // std::cout << "Device " << self_2d.get_device() << "\n";
+    // std::cout << "#SMs " << at::cuda::getCurrentDeviceProperties()->multiProcessorCount << "\n";
+    const int num_mp = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+    uint64_t num_blk_y = (uint64_t)(fcd_size / block_size);
+    uint64_t num_blk_x = (uint64_t)std::ceil(num_mp * ctas_per_sm / num_blk_y);
+    // std::cout << "grid: " << num_blk_x << "," << num_blk_y << "\n";
+    dim3 dim_grid(num_blk_x, num_blk_y);
+    dim3 dim_block(block_size);
+    //std::cout << "right before self 2d type: " << self_2d.scalar_type() << "\n";
+    //std::cout << "right before self 2d type: " << start_index.scalar_type() << "\n";
+    AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, self_2d.scalar_type(), "mha_padding_fill_", [&]() {
+        //at::ScalarType::Byte, at::ScalarType::Byte, self_2d.scalar_type(), "mha_padding_fill_", [&]() {
+            mha_fill_kernel<<<dim_grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(
+                self_2d.data_ptr<scalar_t>(), static_cast<int32_t*>(start_index.data_ptr()), max_tokens);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
+        });
+    //std::cout << "end of self 2d type: " << self_2d.scalar_type() << "\n";
+    return self;
+}
 
 void unpack(at::PhiloxCudaState arg, at::Tensor &philox_unpacked)
 {
@@ -98,9 +154,16 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
   if (debug) printf(" S --------\n");
 		  			  
   auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
+  //auto cu_seqlens = torch::empty({b+1}, options.dtype(torch::kInt32));
+  //cu_seqlens = at::cumsum(ActualSeqlens, 0);//, torch::dtype(torch::kInt32));
+  //std::cout << "cu_seqlens " << cu_seqlens << cu_seqlens.scalar_type() << std::endl;
+  //auto cu_seqlens_index = cu_seqlens.index({torch::indexing::Slice(-1,torch::indexing::None)});
+  //std::cout << "cu_seqlens_index " << cu_seqlens_index << cu_seqlens_index.scalar_type() << std::endl;
   if (set_zero)
   {
-    O.zero_();
+    //O.zero_();
+    //using namespace torch::indexing;
+    mha_fill(O, at::cumsum(ActualSeqlens, 0).index({torch::indexing::Slice(-1,torch::indexing::None)}));
   }
 //  transformer_engine::DType O_type = GetTransformerEngineDType(O.scalar_type());
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
@@ -257,7 +320,8 @@ at::Tensor cudnn_flash_attn_bwd(
   at::Tensor dQKV = torch::empty_like(QKV);
   if (set_zero)
   {
-    dQKV.zero_();
+    //dQKV.zero_();
+    mha_fill(dQKV, at::cumsum(ActualSeqlens, 0).index({torch::indexing::Slice(-1,torch::indexing::None)}));
   }
   auto te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(),
                                           {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
