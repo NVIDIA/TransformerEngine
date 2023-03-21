@@ -103,8 +103,6 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
             return transformer_engine::DType::kBFloat16;
         case at::kBool:
             return transformer_engine::DType::kByte;
-        case torch::kInt8:
-            return transformer_engine::DType::kByte;
         case torch::kByte:
             return transformer_engine::DType::kByte;
         default:

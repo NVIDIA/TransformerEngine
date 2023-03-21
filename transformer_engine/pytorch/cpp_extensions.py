@@ -16,9 +16,9 @@ def check_tensor(x: torch.Tensor):
 
 def check_qkv(qkv: torch.Tensor):
     check_tensor(qkv)
-    print('qkv type ',qkv.dtype)
+    #print('qkv type ',qkv.dtype)
     assert (
-            qkv.dtype is torch.int8
+            qkv.dtype is torch.uint8
             and qkv.dim() == 4
             and qkv.shape[1] == 3
             ), f"QKV needs to be in [total_seqs x 3 x num_heads x head_dim] and FP8."
@@ -26,9 +26,9 @@ def check_qkv(qkv: torch.Tensor):
 def check_o(o: torch.Tensor):
     check_tensor(o)
     assert (
-            o.dtype is torch.uint8 or torch.int8
+            o.dtype is torch.uint8
             and o.dim() == 3
-            ), f"O needs to be a 3D FP8 tensor."+str(o.dtype)
+            ), f"O needs to be a 3D FP8 tensor."
 
 def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
     check_tensor(stats)
@@ -89,7 +89,7 @@ def cudnn_flash_attn_fwd(
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     print("============== cpp_extension ============ ")
-    print("qkv_dtype ",qkv_dtype)
+    #print("qkv_dtype ",qkv_dtype, qkv.shape)
     #print("entering fwd ")
     check_qkv(qkv)
     check_cu_seqlens(cu_seqlens)
@@ -97,6 +97,13 @@ def cudnn_flash_attn_fwd(
     check_scalar(q_scale_o)
     check_scalar(amax_s)
     check_scalar(amax_o)
+
+    ##qkv_2d = qkv.view([512,3072]).contiguous()
+    #descale_qkv = torch.Tensor([1.0])
+    #qkv_float32 = torch.ops.tex_ts.cast_from_fp8_ts(qkv, descale_qkv, 0, qkv_dtype, tex.DType.kFloat32)
+    #torch.cuda.synchronize()
+    #print('----------- qkv float32 --------')
+    #print(qkv_float32)
 
     assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
@@ -131,6 +138,14 @@ def cudnn_flash_attn_fwd(
     qkv_layout = get_mha_layout(qkv_layout)
     #rng_gen_new = torch.Generator(device="cuda") if not rng_gen else rng_gen
     #print("before calling ext fwd ")
+    print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero: ',
+            b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
+    print('[P] qkv: ', qkv.dtype, qkv_dtype)
+    print('[P] d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o: ',
+            d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o)
+    print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
+    print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
+    print('------- fwd',d_scale_qkv.shape,d_scale_qkv.dtype,d_scale_qkv)
     O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
              b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
              qkv, qkv_dtype,
@@ -146,11 +161,9 @@ def cudnn_flash_attn_fwd(
              actual_seqlens,
              rng_gen,
     )
-             #rng_gen_new,
-             #M,
-             #ZInv,
-             #O,
-             #philox_unpacked,
+    #print('[P] O, M, ZInv, philox_unpacked: ')
+    #print(O[0,:5,:5], M[0,0,:5,0], ZInv[0,0,:5,0], philox_unpacked)
+    #print(O[1,:5,:5], M[1,0,:5,0], ZInv[1,0,:5,0], philox_unpacked)
 
     return O, M, ZInv, philox_unpacked 
 
@@ -176,7 +189,7 @@ def cudnn_flash_attn_bwd(
     p_dropout: float,
     max_seq_len: int,
     set_zero: bool,
-    all_e5m2: bool,
+    all_e5m2: bool, # unused
     philox_unpacked: torch.Tensor,
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -184,6 +197,19 @@ def cudnn_flash_attn_bwd(
     check_o(O)
     check_o(dO)
     check_qkv(qkv)
+
+    x = ['dO', 'qkv', 'O', 'M', 'ZInv']
+    for i in x:
+        print('[P] '+i+': ',eval(i).dtype,eval(i).shape)
+    print('[P] qkv_dtype: ',qkv_dtype)
+    print('[P] cu_seqlens: ',cu_seqlens)
+    print('[P] d_scale_qkv, d_scale_s, d_scale_o, d_scale_do: ',d_scale_qkv, d_scale_s, d_scale_o, d_scale_do) 
+    print('[P] q_scale_s, q_scale_ds, q_scale_dqkv: ',q_scale_s, q_scale_ds, q_scale_dqkv) 
+    print('[P] amax_ds, amax_dqkv: ',amax_ds, amax_dqkv) 
+    print('[P] d_scale_ds, d_scale_dqkv: ',d_scale_ds, d_scale_dqkv) 
+    print('[P] p_dropout, max_seq_len, set_zero, all_e5m2, philox_unpacked, qkv_layout: ',p_dropout, max_seq_len, set_zero, all_e5m2, philox_unpacked, qkv_layout)
+    print(' ')
+    print('------',d_scale_qkv.shape,d_scale_qkv.dtype,d_scale_qkv)
 
     assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
@@ -210,6 +236,10 @@ def cudnn_flash_attn_bwd(
     QKVRaggedOffset = cu_seqlens * 3 * h * d
     ORaggedOffset = cu_seqlens * h * d
     qkv_layout = get_mha_layout(qkv_layout)
+    print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero',
+            b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
+    print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
+    print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
     dQKV = tex.cudnn_flash_attn_bwd(
              b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
              qkv,
@@ -218,8 +248,6 @@ def cudnn_flash_attn_bwd(
              M,
              ZInv,
              qkv_dtype,
-             amax_ds,
-             amax_dqkv,
              d_scale_qkv,
              d_scale_s,
              d_scale_o,
@@ -229,6 +257,8 @@ def cudnn_flash_attn_bwd(
              q_scale_s,
              q_scale_ds,
              q_scale_dqkv,
+             amax_ds,
+             amax_dqkv,
              QKVRaggedOffset,
              ORaggedOffset,
              actual_seqlens,
@@ -413,9 +443,9 @@ def fp8_cast_transpose_fused(
 
     return_outputs = False
     if cast_out is None or transpose_out is None:
-        cast_out = torch.empty_like(inp, dtype=torch.int8)
+        cast_out = torch.empty_like(inp, dtype=torch.uint8)
         transpose_out = torch.empty(
-            inp.shape[1], inp.shape[0], device="cuda", dtype=torch.int8
+            inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8
         )
         return_outputs = True
 
