@@ -77,6 +77,11 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
 
 
 def compute_in_fp32(g, inp, subgraph, cast_outp):
+    """Wrap subgraph with casts to/from FP32 so that its precision is FP32.
+
+    If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`.
+    Then, if `cast_output` is true, cast subgraphs's output back to `inp` data type.
+    """
     inp_dtype = _type_utils.JitScalarType.from_value(inp)
     is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
     if not is_fp32:
@@ -207,7 +212,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
         bias,
         epsilon_f=eps,
         axis_i=axis,
-        # This sets the LN compute precision - use FP32 always as does TE.s
+        # This sets the LN compute precision - use FP32 always as does TE.
         stash_type_i=_C_onnx.TensorProtoDataType.FLOAT,
     )
     return ln
