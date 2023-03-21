@@ -9,9 +9,76 @@
 #include "../common.h"
 
 static bool debug = false;
+
+#include <transformer_engine/cast.h>
+//#include "../common.h"
+#include "../utils.cuh"
+#include "../util/vectorized_pointwise.h"
+
+//namespace detail {
+
+using namespace transformer_engine;
+struct Empty {};
+
+__device__ inline fp32 identity(fp32 value, const Empty&) {
+  return value;
+}
+
+struct DequantizeParam {
+  const fp32 *scale_inv;
+};
+
+__device__ inline fp32 dequantize_func(fp32 value, const DequantizeParam &param) {
+  return value * (*(param.scale_inv));
+}
+
+__global__ void rcp(fp32* in){ //, void* out) {
+if (threadIdx.x==0)
+  in[0] = 1.0f/in[0]; 
+}
+//}  // namespace detail
+
+void fp8_dequantize(void* input,
+		    void* descale_input,
+                    void* output,
+		    size_t N,
+		    transformer_engine::DType itype,
+		    transformer_engine::DType otype,
+                    cudaStream_t stream) {
+//  CheckInputTensor(input, "cast_input");
+//  CheckOutputTensor(*output, "cast_output");
+//  NVTE_CHECK(is_fp8_dtype(input.data.dtype),
+//             "Input must have FP8 type.");
+//
+//  NVTE_CHECK(!is_fp8_dtype(output->data.dtype),
+//             "Output must be in higher precision.");
+//  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+
+//  void* devPtrQKV = inputQKV->data.dptr;
+//  const size_t N = product(input.data.shape);
+//	using namespace transformer_engine;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(itype, IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(otype, OType,
+      constexpr int nvec = 32 / sizeof(OType);
+      //detail::DequantizeParam p;
+      DequantizeParam p;
+      p.scale_inv = reinterpret_cast<const fp32*>(descale_input);
+      //VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
+      VectorizedUnaryKernelLauncher<nvec, DequantizeParam, dequantize_func>(
+          reinterpret_cast<const IType*>(input),
+          reinterpret_cast<OType*>(output),
+          nullptr,
+          nullptr,
+          N,
+          p,
+          stream);
+    );  // NOLINT(*)
+  );  // NOLINT(*)
+}
+
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
-  printf("cudnn get type %d\n",(int)t);
+  //printf("cudnn get type %d\n",(int)t);
   switch (t) {
     case DType::kFloat16:
       return CUDNN_DATA_HALF;
@@ -20,10 +87,10 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
     case DType::kBFloat16:
       return CUDNN_DATA_BFLOAT16;
     case DType::kFloat8E4M3:
-      printf(" type DType::kFloat8E4M3 \n");
+    //  printf(" type DType::kFloat8E4M3 \n");
       return CUDNN_DATA_FP8_E4M3;
     case DType::kFloat8E5M2:
-      printf(" type DType::kFloat8E5M2 \n");
+     // printf(" type DType::kFloat8E5M2 \n");
       return CUDNN_DATA_FP8_E5M2;
     default:
       NVTE_ERROR("Invalid type");
@@ -1221,6 +1288,81 @@ cudnn_fa_fprop_fp8(int64_t b,
 		void* workspace_ptr,
 		uint64_t* workspace_size)
 {
+    printf("--------------- tensors before fprop_fp8 -----------\n");
+//    printf("b %ld, h %ld, s_q %ld, s_kv %ld, d %ld, attnScale %f, dropoutProbability %f, layout %d, tensorType %d\n",
+//		    b, h, s_q, s_kv, d, attnScale, dropoutProbability, (int)layout, (int)tensorType);
+//    uint64_t* hostPtrDropoutSeed = (uint64_t*)calloc(1, sizeof(uint64_t));
+//    uint64_t* hostPtrDropoutOffset = (uint64_t*)calloc(1, sizeof(uint64_t)); 
+//    float* hostPtrDescaleQ = (float*)calloc(1, sizeof(float));
+//    float* hostPtrDescaleK = (float*)calloc(1, sizeof(float));
+//    float* hostPtrDescaleV = (float*)calloc(1, sizeof(float));
+//    float* hostPtrDescaleS = (float*)calloc(1, sizeof(float));
+//    float* hostPtrScaleS = (float*)calloc(1, sizeof(float));
+//    float* hostPtrScaleO = (float*)calloc(1, sizeof(float));
+//    float* hostPtrAmaxO = (float*)calloc(1, sizeof(float));
+//    float* hostPtrAmaxS = (float*)calloc(1, sizeof(float));
+//
+//    cudaMemcpy(hostPtrDropoutSeed, devPtrDropoutSeed, sizeof(hostPtrDropoutSeed[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrDropoutOffset, devPtrDropoutOffset, sizeof(hostPtrDropoutOffset[0]), cudaMemcpyDeviceToHost);
+//
+//    cudaMemcpy(hostPtrDescaleQ, devPtrDescaleQ, sizeof(hostPtrDescaleQ[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrDescaleK, devPtrDescaleK, sizeof(hostPtrDescaleK[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrDescaleV, devPtrDescaleV, sizeof(hostPtrDescaleV[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrDescaleS, devPtrDescaleS, sizeof(hostPtrDescaleS[0]), cudaMemcpyDeviceToHost);
+//
+//    cudaMemcpy(hostPtrScaleS, devPtrScaleS, sizeof(hostPtrScaleS[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrScaleO, devPtrScaleO, sizeof(hostPtrScaleO[0]), cudaMemcpyDeviceToHost);
+//
+//    cudaMemcpy(hostPtrAmaxS, devPtrAmaxS, sizeof(hostPtrAmaxS[0]), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrAmaxO, devPtrAmaxO, sizeof(hostPtrAmaxO[0]), cudaMemcpyDeviceToHost);
+//
+//    cudaDeviceSynchronize();
+//    printf("DropoutSeed %ld, DropoutOffset %ld, DescaleQ %f, DescaleK %f, DescaleV %f, DescaleS %f, ScaleS %f, ScaleO %f, AmaxO %f, AmaxS %f \n", hostPtrDropoutSeed[0], hostPtrDropoutOffset[0], hostPtrDescaleQ[0], hostPtrDescaleK[0], hostPtrDescaleV[0], hostPtrDescaleS[0], hostPtrScaleS[0], hostPtrScaleO[0], hostPtrAmaxO[0], hostPtrAmaxS[0]);
+//
+//    float* hostPtrQKV = (float*)calloc(b*s_q*3*h*d, sizeof(float));
+//    float* hostPtrM = (float*)calloc(b*h*s_q, sizeof(float));
+//    float* hostPtrZInv = (float*)calloc(b*h*s_q, sizeof(float));
+//    float* hostPtrO = (float*)calloc(b*s_q*h*d, sizeof(float));
+//
+//    void* devPtrQKV_deq = nullptr;
+//    void* devPtrO_deq = nullptr;
+//    cudaMalloc((void**)&(devPtrQKV_deq), (b*s_q*3*h*d) * sizeof(float));
+//    cudaMalloc((void**)&(devPtrO_deq), (b*s_q*h*d) * sizeof(float));
+//    size_t NN = b*s_q*3*h*d;
+//    size_t NN_o = b*s_q*h*d;
+//    fp8_dequantize(devPtrQKV, devPtrDescaleQ, devPtrQKV_deq, NN, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
+//    fp8_dequantize(devPtrO, devPtrDescaleQ, devPtrO_deq, NN_o, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
+//    cudaDeviceSynchronize();
+//
+//    cudaMemcpy(hostPtrQKV, devPtrQKV_deq, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
+//    //cudaMemcpy(hostPtrQKV, devPtrQKV, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrM, devPtrM, sizeof(hostPtrM[0])*b*h*s_q, cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrZInv, devPtrZInv, sizeof(hostPtrZInv[0])*b*h*s_q, cudaMemcpyDeviceToHost);
+//    //cudaMemcpy(hostPtrO, devPtrO, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
+//    cudaMemcpy(hostPtrO, devPtrO_deq, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
+//    cudaDeviceSynchronize();
+//
+//    printf("---- QKV --- \n");
+//    for (int i=0; i<2; i++)
+//    for (int l=0; l<2; l++)
+//	    for (int j=0; j<2; j++)
+//		    for (int k=0; k<2; k++)
+//			    printf("(%d, %d, %d, %d): %f \n",i,l,j,k,hostPtrQKV[i*3*h*d + l*h*d +j*d +k]);
+//			    //printf("(%d, 0, %d, %d): %d \n",i,j,k,hostPtrQKV[i][0][j][k]);
+//
+//    printf("---- M, ZInv--- \n");
+//    for (int i=0; i<2; i++)
+//	    for (int j=0; j<2; j++)
+//		    for (int k=0; k<2; k++)
+//			    printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i*h*s_q+j*s_q+k], hostPtrZInv[i*h*s_q+j*s_q+k]);
+//			    //printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i][j][k][0], hostPtrZInv[i][j][k][0]);
+//
+//    printf("---- O --- \n");
+//    for (int i=0; i<2; i++)
+//	    for (int j=0; j<2; j++)
+//		    for (int k=0; k<2; k++)
+//		printf("(%d, %d, %d): %f \n",i,j,k,hostPtrO[i*h*d +j*d +k]);
+//		//printf("(%d, %d): %d \n",i,j,hostPtrO[i][j]);
 
     cudnnHandle_t handle_;
     try {
@@ -1485,6 +1627,52 @@ cudnn_fa_fprop_fp8(int64_t b,
             //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
             //}
 
+	    printf("--------------- tensors after fprop_fp8 -----------\n");
+
+    	//    cudaDeviceSynchronize();
+    	//    fp8_dequantize(devPtrQKV, devPtrDescaleQ, devPtrQKV_deq, NN, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
+
+        //    rcp<<<1,1>>>(static_cast<fp32*>(devPtrScaleO)); //, devPtrDescaleO);
+    	//    fp8_dequantize(devPtrO, devPtrScaleO, devPtrO_deq, NN_o, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
+    	//    cudaDeviceSynchronize();
+
+    	//    cudaMemcpy(hostPtrQKV, devPtrQKV_deq, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
+    	//    //cudaMemcpy(hostPtrQKV, devPtrQKV, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
+    	//    cudaMemcpy(hostPtrM, devPtrM, sizeof(hostPtrM[0])*b*h*s_q, cudaMemcpyDeviceToHost);
+    	//    cudaMemcpy(hostPtrZInv, devPtrZInv, sizeof(hostPtrZInv[0])*b*h*s_q, cudaMemcpyDeviceToHost);
+    	//    //cudaMemcpy(hostPtrO, devPtrO, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
+    	//    cudaMemcpy(hostPtrO, devPtrO_deq, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
+
+
+	//    cudaDeviceSynchronize();
+
+	//    printf("---- QKV --- \n");
+	//    for (int i=0; i<2; i++)
+	//    for (int l=0; l<2; l++)
+	//	    for (int j=0; j<2; j++)
+	//		    for (int k=0; k<2; k++)
+	//			    printf("(%d, %d, %d, %d): %f \n",i,l,j,k,hostPtrQKV[i*3*h*d + l*h*d +j*d +k]);
+	//			    //printf("(%d, 0, %d, %d): %d \n",i,j,k,hostPtrQKV[i][0][j][k]);
+	//
+	//    printf("---- M, ZInv--- \n");
+	//    for (int i=0; i<2; i++)
+	//	    for (int j=0; j<2; j++)
+	//		    for (int k=0; k<2; k++)
+	//			    printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i*h*s_q+j*s_q+k], hostPtrZInv[i*h*s_q+j*s_q+k]);
+	//			    //printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i][j][k][0], hostPtrZInv[i][j][k][0]);
+	//
+	//    printf("---- O --- \n");
+	//    for (int i=0; i<2; i++)
+	//	    for (int j=0; j<2; j++)
+	//		    for (int k=0; k<2; k++)
+	//		printf("(%d, %d, %d): %f \n",i,j,k,hostPtrO[i*h*d +j*d +k]);
+	//		//printf("(%d, %d): %d \n",i,j,hostPtrO[i][j]);
+	//
+	//    if (hostPtrQKV) free(hostPtrQKV);
+	//    if (hostPtrM) free(hostPtrM);
+	//    if (hostPtrZInv) free(hostPtrZInv);
+	//    if (hostPtrO) free(hostPtrO);
+
             NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
 
             cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
@@ -1546,6 +1734,12 @@ cudnn_fa_bprop_fp8(int64_t b,
 		void* workspace_ptr,
 		uint64_t* workspace_size)
 {
+    float* hostPtrAmaxdQ = (float*)calloc(1, sizeof(float));
+    float* hostPtrScaledQ = (float*)calloc(1, sizeof(float));
+    cudaMemcpy(hostPtrScaledQ, devPtrScaledQ, sizeof(hostPtrScaledQ[0]), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hostPtrAmaxdQ, devPtrAmaxdQ, sizeof(hostPtrAmaxdQ[0]), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    printf("before bprop: ScaledQ %f, AmaxdQ %f \n", hostPtrScaledQ[0], hostPtrAmaxdQ[0]);
 
     cudnnHandle_t handle_;
     try {
@@ -2011,6 +2205,12 @@ cudnn_fa_bprop_fp8(int64_t b,
             //if (workspace_size > 0) {
             //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
             //}
+
+    cudaDeviceSynchronize();
+    cudaMemcpy(hostPtrScaledQ, devPtrScaledQ, sizeof(hostPtrScaledQ[0]), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hostPtrAmaxdQ, devPtrAmaxdQ, sizeof(hostPtrAmaxdQ[0]), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    printf("after bprop: ScaledQ %f, AmaxdQ %f \n", hostPtrScaledQ[0], hostPtrAmaxdQ[0]);
     
             NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
     
@@ -2052,7 +2252,7 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
 ) {
 		//uint64_t *PhiloxUnpacked_CPU,
                 //int64_t *ActualSeqlens,
-  printf("===================== cudnn fa fwd ============== \n");
+  //printf("===================== cudnn fa fwd ============== \n");
   void* devPtrQKV = inputQKV->data.dptr;
   void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
   void* devPtrDescaleK = inputQKV->scale_inv.dptr;
@@ -2181,7 +2381,7 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
                 Tensor *workspace,
                 cudaStream_t stream
 ) {
-  printf("===================== cudnn fa bwd ============== \n");
+  //printf("===================== cudnn fa bwd ============== \n");
   void* devPtrQKV = inputQKV->data.dptr;
   void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
   void* devPtrDescaleK = inputQKV->scale_inv.dptr;
@@ -2332,7 +2532,7 @@ void nvte_cudnn_flash_attn_fwd(
                 //uint64_t *PhiloxUnpacked_CPU,
                 //int64_t *ActualSeqlens,
 
-  printf("============= NVTE fwd ========== \n");
+  //printf("============= NVTE fwd ========== \n");
   NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
   Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
@@ -2379,7 +2579,7 @@ void nvte_cudnn_flash_attn_bwd(
 		cudaStream_t stream
 ) {
 
-  printf("============= NVTE fwd ========== \n");
+  printf("============= NVTE bwd ========== \n");
   NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
   using namespace transformer_engine;
   Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
