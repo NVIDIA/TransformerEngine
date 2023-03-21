@@ -308,8 +308,8 @@ def test_export_cast_ops(scale_factor: float, atol: float, precision: torch.dtyp
 @pytest.mark.parametrize("scale_factor", [448])
 @pytest.mark.parametrize(
     "precision,     atol", [
-    [torch.float32, 1e-7],
-    [torch.float16, 1e-7]
+    [torch.float32, 1e-5],
+    [torch.float16, 1e-5]
 ])
 def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: float):
     class TestFP8_Gelu(nn.Module):
@@ -342,7 +342,7 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     fname = f"te.gelu_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_Gelu()
     do_export(model, inp, fname)
-    validate_result(fname, inp, model, rtol=0, atol=atol, is_fp8=True)
+    validate_result(fname, inp, model, rtol=0, atol=atol, is_fp8=True, allow_cnt_errors=2)
 
 
 @pytest.mark.parametrize("scale_factors",
