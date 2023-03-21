@@ -61,7 +61,7 @@ std::vector<at::Tensor> cudnn_flash_attn_fwd(
 
   using namespace transformer_engine;
 
-  printf("================ extensions.cu ============== \n");
+//  printf("================ extensions.cu ============== \n");
 //  transformer_engine::DType QKV_type = GetTransformerEngineDType(QKV.scalar_type());
   //printf("QKV_type %d \n",(int)QKV_type);
 
@@ -222,7 +222,7 @@ at::Tensor cudnn_flash_attn_bwd(
 
   using namespace transformer_engine;
 
-  printf("================   extensions.cu  bwd ============== \n");
+  //printf("================   extensions.cu  bwd ============== \n");
   printf("    before \n");
   std::cout << "descaleQKV 	" <<	descaleQKV 	<< std::endl;
   std::cout << "descaleS 	" <<	descaleS 	<< std::endl;

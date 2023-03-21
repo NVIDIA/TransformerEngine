@@ -88,7 +88,7 @@ def cudnn_flash_attn_fwd(
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-    print("============== cpp_extension ============ ")
+    #print("============== cpp_extension ============ ")
     #print("qkv_dtype ",qkv_dtype, qkv.shape)
     #print("entering fwd ")
     check_qkv(qkv)
