@@ -211,6 +211,24 @@ def fp8_cast_transpose_bgrad_fused(
     )
 
 
+def fp8_transpose_bgrad_fused(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    grad_bias_type: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Transpose + BGRAD with FP8 output"""
+    return tex.fused_fp8_transpose_bgrad(
+        inp,
+        fp8_meta_tensor.scale[fp8_tensor],
+        fp8_meta_tensor.amax_history[0][fp8_tensor],
+        fp8_meta_tensor.scale_inv[fp8_tensor],
+        otype,
+        TE_DType[grad_bias_type],
+    )
+
+
 def fp8_cast_transpose_bgrad_dgelu_fused(
     grad_output: torch.Tensor,
     gelu_input: torch.Tensor,
