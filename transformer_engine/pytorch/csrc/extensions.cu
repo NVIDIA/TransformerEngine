@@ -922,24 +922,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
+  py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
+    .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
+    .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS);
+
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool>())
     .def("rs", &ubuf::UbufCommOverlap::rs)
+//    .def("rs_", &ubuf::UbufCommOverlap::rs_)
     .def("ag", &ubuf::UbufCommOverlap::ag)
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
     .def("split_overlap_ag", &ubuf::UbufCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
-    .def("gemm", &ubuf::UbufCommOverlap::gemm);
+    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
+    .def("get_output", &ubuf::UbufCommOverlap::get_output);
+//    .def("gemm", &ubuf::UbufCommOverlap::gemm);
 
-  //py::class_<UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-  //  .def(py::init<torch::Tensor&, int, int, int, int, bool>())
-  //  .def("split_overlap_ag", &UbufP2PCommOverlap::split_overlap_ag)
-  //  .def("split_overlap_rs", &UbufP2PCommOverlap::split_overlap_rs)
-  //  .def("gemm", &UbufP2PCommOverlap::gemm)
-  //  .def("copy_input_to_ubuf", &UbufP2PCommOverlap::copy_input_to_ubuf)
-  //  .def("test_p2p_exchange", &UbufP2PCommOverlap::test_p2p_exchange)
-  //  .def("test_send_recv", &UbufP2PCommOverlap::test_send_recv);
+  py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
+    .def(py::init<torch::Tensor&, int, int, int, int, bool>())
+    .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
+    .def("split_overlap_rs", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
+    .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
+    .def("test_p2p_exchange", &ubuf::UbufP2PCommOverlap::test_p2p_exchange)
+    .def("test_send_recv", &ubuf::UbufP2PCommOverlap::test_send_recv);
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)

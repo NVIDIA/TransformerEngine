@@ -159,7 +159,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
     @staticmethod
     def install_requires():
-        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
+        return []#"flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
 
 class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):

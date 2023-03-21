@@ -1,9 +1,5 @@
-#ifdef UBBFLOAT
 #include <cuda_bf16.h>
 #define half nv_bfloat16
-#else
-#include <cuda_fp16.h>
-#endif
 #include <transformer_engine/userbuffers.h>
 #include <stdio.h>
 #include <assert.h>
@@ -1281,6 +1277,17 @@ const int blocksize=elements*2;
     callranks_ag(2)
     callranks_ag(4)
     callranks_ag(8)
+}
+
+void allgather2_userbuff_inplace_sliced(const int handler,const int offset,const int elements,communicator* comm,const int slice_id, const int nslices, cudaStream_t stream) {
+  const int op=userbuffers_allreduceop_nonsharp2;
+  const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
+  int peerelements = elements/ar_nvsize;
+  int saverrkernel = comm->use_rr_kernel;
+  comm->use_rr_kernel = 0;
+  allgather2_userbuff_inplace(handler,offset+ar_nvrank*peerelements*(nslices-1)+slice_id*peerelements,elements,comm,stream);
+  comm->use_rr_kernel = saverrkernel;
 }
 
 void reducescatter2_userbuff_inplace(const int handler,const  int offset,const int elements, communicator* comm, cudaStream_t stream) {

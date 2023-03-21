@@ -29,6 +29,8 @@ def fp8_gemm(
     use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
+    ub_algo: tex.UbufOverlapAlgo = None,
+    ub: tex.UbufCommOverlap = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
@@ -55,7 +57,7 @@ def fp8_gemm(
 
     out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
 
-    _ = torch.ops.tex_ts.te_gemm_ts(
+    args = (
         A,
         A_scale_inv,
         A_fp8_tensor,
@@ -77,8 +79,18 @@ def fp8_gemm(
         workspace,
         workspace.shape[0],
         accumulate,
-        use_split_accumulator,
-    )
+        use_split_accumulator)
+    fn = torch.ops.tex_ts.te_gemm_ts
+    _ = fn(*args)
+    if ub_algo is not None:
+        assert ub is not None, 'ub object is None!'
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+            fn = ub.bulk_overlap
+            args = tuple(args + (1,))
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+            fn = ub.bulk_overlap
+            args = tuple(args + (0,))
+    _ = fn(*args)
 
     if return_output:
         if gelu:
@@ -102,6 +114,8 @@ def gemm(
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
+    ub_algo: tex.UbufOverlapAlgo = None,
+    ub: tex.UbufCommOverlap = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
@@ -142,7 +156,7 @@ def gemm(
     else:
         bias_dtype = output_dtype
 
-    _ = torch.ops.tex_ts.te_gemm_ts(
+    args = (
         A,
         empty_tensor,
         fp8_index,
@@ -166,6 +180,16 @@ def gemm(
         accumulate,
         False,  # use_split_accumulator
     )
+    fn = torch.ops.tex_ts.te_gemm_ts
+    if ub_algo is not None:
+        assert ub is not None, 'ub object is None!'
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+            fn = ub.bulk_overlap
+            args = tuple(args + (1,))
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+            fn = ub.bulk_overlap
+            args = tuple(args + (0,))
+    _ = fn(*args)
 
     if return_output:
         return out, grad_bias, gelu_input

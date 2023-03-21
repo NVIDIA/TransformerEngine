@@ -104,7 +104,6 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   int myrank,nranks,cur_dev,ndev;
   MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
   MPI_Comm_size(MPI_COMM_WORLD, &nranks);
-  printf ("world size %d, rank %d\n", nranks, myrank);
   (*comm) -> nranks = nranks;
   (*comm) -> myrank = myrank;
   (*comm) -> free_region = 0;
@@ -123,7 +122,6 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
 
 
 #ifdef MULTINODE
-  printf ("multinode\n");
   for(int i=0;i<userbuffers_op_types;i++)
     (*comm) -> basecounter[i] = 0;
   (*comm) -> head = 0;
@@ -288,7 +286,6 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   sleep(1);
 
 #else
-  printf ("single node\n");
   if(ndev>1) { //all visible devices
     if(cur_dev!=myrank%ndev) printf("%d: device used %d[%d] ,resetting device to %d\n",myrank,cur_dev,ndev,myrank);
 	  CUDACHECK(cudaSetDevice(myrank%ndev));
@@ -299,7 +296,6 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
 
   int divgpus = pipegpus * tensorgpus;
   int datagpus = nranks/divgpus;
-  if (datagpus == 0) datagpus = 1;
   (*comm) -> ar_nvsize = datagpus;
   (*comm) -> ar_firstgpu = myrank - myrank % datagpus;
   (*comm) -> ar_nvrank = myrank - (*comm) -> ar_firstgpu;

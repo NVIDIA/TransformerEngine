@@ -92,6 +92,14 @@ void matmul_cuda(torch::Tensor &input_a,
 
     const float alpha = 1.0;
     const float beta = (grad_accum) ? 1.0 : 0.0;
+
+    float a_scale_val = 1;
+    float b_scale_val = 1;
+    float d_scale_val = 1;
+    float amax_val = 1;
+    void *a_scale_ptr = &b_scale_val;
+    void *b_scale_ptr = &a_scale_val;
+
     size_t workspaceSize = 1 << 25;
     cublasLtMatmulDescOpaque_t operationDesc = {};
     cublasLtMatrixLayoutOpaque_t Adesc = {}, Bdesc = {}, Cdesc = {};
@@ -128,22 +136,28 @@ void matmul_cuda(torch::Tensor &input_a,
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
         &preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
 
+    // Set math SM count
+    if (math_sms != 0) {
+        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+            &operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &math_sms, sizeof(math_sms)));
+    }
+
+    // FP8 specifics
+    if (fp8) {
+        const int8_t fastAccuMode = (fast_accum) ? 1 : 0;
+        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&operationDesc,
+                                                         CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                         &fastAccuMode,
+                                                         sizeof(fastAccuMode)));
+//        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+//            &operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr)));
+//        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+//            &operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr)));
+    }
+
     // MatMul heuristic
     NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle, &operationDesc, &Adesc, &Bdesc, &Cdesc, &Cdesc, &preference, 1, &heuristicResult, &returnedResults));
-    
-    // Set math SM count
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &math_sms, sizeof(math_sms)));
-
-    // FP8 specifics
-//    if (fp8) {
-//        const int8_t fastAccuMode = (fast_accum) ? 1 : 0;
-//        NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&operationDesc,
-//                                                         CUBLASLT_MATMUL_DESC_FAST_ACCUM,
-//                                                         &fastAccuMode,
-//                                                         sizeof(fastAccuMode)));
-//    }
 
     if (returnedResults == 0) NVTE_CHECK_CUBLAS(CUBLAS_STATUS_NOT_SUPPORTED);
 
@@ -171,3 +185,77 @@ void matmul_cuda(torch::Tensor &input_a,
         stream));
 }
 
+
+void strided_gemm_cuda(torch::Tensor &input_a,
+                       torch::Tensor &input_b,
+                       torch::Tensor &output,
+                       int m,
+                       int n,
+                       int k,
+                       long long int stride_input_b,
+                       long long int stride_output,
+                       int batch,
+                       bool transa,
+                       bool transb,
+                       cudaStream_t stream,
+                       void *lt_workspace,
+                       bool fp8)
+{
+    cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+
+    int lda, ldb, ldd;
+    if (transa && !transb) {  // TN
+        lda = k;
+        ldb = k;
+        ldd = m;
+    } else if (!transa && !transb) {  // NN
+        lda = m;
+        ldb = k;
+        ldd = m;
+    } else if (!transa && transb) {  // NT
+        lda = m;
+        ldb = n;
+        ldd = m;
+    } else {  // TT
+        NVTE_ERROR("TT layout not allowed.");
+    }
+
+    const float alpha = 1.0;
+    const float beta = 0.0;
+
+    cublasOperation_t transa_op = (transa) ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t transb_op = (transb) ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    cudaDataType_t cuda_dtype_a = get_cuda_dtype(input_a, fp8);
+    cudaDataType_t cuda_dtype_b = get_cuda_dtype(input_b, fp8);
+    cudaDataType_t cuda_dtype_c = get_cuda_dtype(output, false);
+
+    void *A = input_a.data_ptr();
+    void *B = input_b.data_ptr();
+    void *C = output.data_ptr();
+
+    NVTE_CHECK_CUBLAS(cublasGemmStridedBatchedEx(
+        handle,
+        transa_op,
+        transb_op,
+        m,
+        n,
+        k,
+        &alpha,
+        A,
+        cuda_dtype_a,
+        lda,
+        (int) 0,
+        B,
+        cuda_dtype_b,
+        ldb,
+        stride_input_b,
+        &beta,
+        C,
+        cuda_dtype_c,
+        ldd,
+        stride_output,
+        batch,
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT));
+}

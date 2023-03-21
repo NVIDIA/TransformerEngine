@@ -10,6 +10,7 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include "../common.h"
+#include <iostream>
 
 namespace {
 
@@ -227,6 +228,7 @@ void cublas_gemm(const Tensor *inputA,
   if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
 
   // D = alpha * (A * B) + beta * C
+
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle,
                                    operationDesc,
                                    static_cast<const void*>(&one),         /* alpha */

@@ -36,6 +36,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set_source_files_properties(comm_gemm_overlap/userbuffers.cu
                             comm_gemm_overlap/userbuffers-host.cpp
                             PROPERTIES
-                            INCLUDE_DIRECTORIES "/usr/local/mpi/include")
+                            INCLUDE_DIRECTORIES "/usr/local/mpi/include;/usr/local/ucx/include;/opt/hpcx/sharp/include/sharp")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")

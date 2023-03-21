@@ -528,6 +528,8 @@ class MultiHeadAttention(torch.nn.Module):
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": sequence_parallel,
             "params_dtype": params_dtype,
+            "ub_bulk_wgrad": ub_bulk_wgrad,
+            "ub_bulk_dgrad": ub_bulk_dgrad,
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -906,6 +908,10 @@ class TransformerLayer(torch.nn.Module):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
+    ub_bulk_wgrad: bool, default = False
+             Overlap UserBuffer ReduceScatter with QKV and FC1 WGRAD layers
+    ub_bulk_dgrad: bool, default = False
+             Overlap UserBuffer AllGather with QKV and FC1 DGRAD layers
 
     Optimization parameters
     -----------------------
@@ -965,6 +971,8 @@ class TransformerLayer(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
+        ub_bulk_wgrad: bool = False,
+        ub_bulk_dgrad: bool = False,
     ) -> None:
         super().__init__()
 
