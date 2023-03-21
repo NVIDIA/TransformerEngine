@@ -1288,7 +1288,7 @@ cudnn_fa_fprop_fp8(int64_t b,
 		void* workspace_ptr,
 		uint64_t* workspace_size)
 {
-    printf("--------------- tensors before fprop_fp8 -----------\n");
+//    printf("--------------- tensors before fprop_fp8 -----------\n");
 //    printf("b %ld, h %ld, s_q %ld, s_kv %ld, d %ld, attnScale %f, dropoutProbability %f, layout %d, tensorType %d\n",
 //		    b, h, s_q, s_kv, d, attnScale, dropoutProbability, (int)layout, (int)tensorType);
 //    uint64_t* hostPtrDropoutSeed = (uint64_t*)calloc(1, sizeof(uint64_t));
@@ -1627,7 +1627,7 @@ cudnn_fa_fprop_fp8(int64_t b,
             //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
             //}
 
-	    printf("--------------- tensors after fprop_fp8 -----------\n");
+	//    printf("--------------- tensors after fprop_fp8 -----------\n");
 
     	//    cudaDeviceSynchronize();
     	//    fp8_dequantize(devPtrQKV, devPtrDescaleQ, devPtrQKV_deq, NN, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
@@ -2579,7 +2579,7 @@ void nvte_cudnn_flash_attn_bwd(
 		cudaStream_t stream
 ) {
 
-  printf("============= NVTE bwd ========== \n");
+//  printf("============= NVTE bwd ========== \n");
   NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
   using namespace transformer_engine;
   Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
