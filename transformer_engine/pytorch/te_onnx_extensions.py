@@ -76,6 +76,17 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
     return out
 
 
+def compute_in_fp32(g, inp, subgraph, cast_outp):
+    inp_dtype = _type_utils.JitScalarType.from_value(inp)
+    is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
+    if not is_fp32:
+        inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
+    sg_out = subgraph(inp)
+    if not is_fp32 and cast_outp:
+        sg_out = g.op("Cast", sg_out, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type())
+    return sg_out
+
+
 @symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for cast_to_fp8"""
@@ -94,7 +105,10 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
-    gelu = torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
+    wrapped_gelu = lambda inputs: torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
+    # TE computes GELU using float32 precision so wrap the GELU subgraph with
+    # conversion to/from float32.
+    gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=False)
     out = quantize(g, gelu, scale_inv, fp8_tensor)
     return out
 
@@ -181,28 +195,21 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        one = g.op("Constant", value_t=torch.tensor([1.], dtype=torch.float, device="cuda"))
+        inputs_dtype= inputs.type().dtype()
+        one = g.op("Constant", value_t=torch.tensor([1.], dtype=inputs_dtype, device="cuda"))
         weight = g.op("Add", weight, one)
 
-    # TE computes LN using float32 precision so wrap the LN subgraph with
-    # conversion to/from float32.
-    input_dtype = _type_utils.JitScalarType.from_value(inputs)
-    is_fp32 = input_dtype == _type_utils.JitScalarType.FLOAT
-    if not is_fp32:
-        inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
-
-    ln = torch.onnx.symbolic_opset9.layer_norm(
-        g,
+    axis = -len(normalized_shape)
+    ln =  g.op(
+        "LayerNormalization",
         inputs,
-        normalized_shape,
         weight,
         bias,
-        eps,
-        False # cudnn_enable (not relevant)
+        epsilon_f=eps,
+        axis_i=axis,
+        # This sets the LN compute precision - use FP32 always as does TE.s
+        stash_type_i=_C_onnx.TensorProtoDataType.FLOAT,
     )
-
-    if not is_fp32:
-        ln = g.op("Cast", ln, to_i=_type_utils.JitScalarType(input_dtype).onnx_type())
     return ln
 
 
