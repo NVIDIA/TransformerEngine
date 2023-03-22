@@ -52,7 +52,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     cudaStream_t* stream_math;
     std::vector<torch::Tensor> _ubufs;
     std::vector<int> _handles;
-    cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm;
+    cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
     std::vector<torch::Tensor> _lt_workspaces;
     torch::Tensor output_tensor;
 
@@ -73,7 +73,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         _ub_comm->push = 1;
         _ub_comm->use_ce = 0;
         _ub_comm->cga_size = comm_cga_size;
-        _ub_comm->use_rr_kernel = 1;
+        _ub_comm->use_rr_kernel = 0;
 
         // Allocate and register extra userbuffers
         _num_buffers = num_buffers;
@@ -109,6 +109,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         // CUDA event creation
         cudaEventCreateWithFlags(&_start_compute, 0);
         cudaEventCreateWithFlags(&_stop_compute, 0);
+        cudaEventCreateWithFlags(&_start_d2dcopy, 0);
         cudaEventCreateWithFlags(&_start_comm, 0);
         cudaEventCreateWithFlags(&_stop_comm, 0);
     }
@@ -650,7 +651,9 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             }
         }
 
-        //at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+        at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
+        CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t) stream_main));
+        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_d2dcopy, 0));
         CHECK_CUDA(cudaMemcpyAsync(
             ubuf_ptr,
             input.data_ptr(),
@@ -665,22 +668,26 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             NVTE_ERROR("Empty output");
         return output_tensor;
     }
-    torch::Tensor get_ubuf_output(int comm_type)
+    torch::Tensor & get_ubuf_output(int comm_type)
     {
         torch::Tensor* ubuf = &_ubufs[_cur_ubuf_id];
         char* ubuf_ptr = reinterpret_cast<char*>(ubuf->data_ptr());
         char* ubuf_wt_ptr = reinterpret_cast<char*>(ubuf->data_ptr());
         COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
+        if (_comm_type != COMM_TYPE::AG && _comm_type != COMM_TYPE::RS)
+            NVTE_ERROR("Invalid comm_type");
+        if (_comm_type == COMM_TYPE::AG)
+            return _ubufs[_cur_ubuf_id];
         if (_comm_type == COMM_TYPE::RS) {
             ubuf_wt_ptr += ubuf->numel() / _tp_size * _rank * ubuf->element_size();
+            int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? ubuf->size(0) : ubuf->size(0) / _tp_size;
+            int output_c_dim1 = ubuf->size(1);
+            output_tensor = torch::from_blob(
+                ubuf_wt_ptr,
+                {output_c_dim0, output_c_dim1},
+                ubuf->options()
+            );
         }
-        int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? ubuf->size(0) : ubuf->size(0) / _tp_size;
-        int output_c_dim1 = ubuf->size(1);
-        output_tensor = torch::from_blob(
-            ubuf_wt_ptr,
-            {output_c_dim0, output_c_dim1},
-            ubuf->options()
-        );
         return output_tensor;
     }
 

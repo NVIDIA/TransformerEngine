@@ -1019,7 +1019,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
                     ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
-                #print ('Max_diff qkv_dgrad_bf16 {}'.format(torch.max(torch.abs(dgrad-dgrad_ub))))
             if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
 
