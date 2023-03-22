@@ -447,21 +447,20 @@ class MultiHeadAttention(nn.Module):
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
 
-            # TODO (Ming Huang): Check performance on GPU withou swap dimensions # pylint: disable=fixme
-            def swap_dims(x):
-                return x[:-3] + tuple(x[i] for i in [-2, -1, -3])
-
-            cached_key = self.variable('cache', 'cached_key', jnp.zeros, swap_dims(key.shape),
-                                       key.dtype)
-            cached_value = self.variable('cache', 'cached_value', jnp.zeros, swap_dims(value.shape),
+            cached_key = self.variable('cache', 'cached_key', jnp.zeros, key.shape, key.dtype)
+            cached_value = self.variable('cache', 'cached_value', jnp.zeros, value.shape,
                                          value.dtype)
             cache_index = self.variable('cache', 'cache_index',
                                         lambda: jnp.array(0, dtype=jnp.int32))
             if is_initialized:
-                batch, num_heads, head_dim, length = cached_key.value.shape
+                if self.transpose_batch_sequence:
+                    length, batch, num_heads, head_dim = cached_key.value.shape
+                    expected_shape = (1, batch, num_heads, head_dim)
+                else:
+                    batch, length, num_heads, head_dim = cached_key.value.shape
+                    expected_shape = (batch, 1, num_heads, head_dim)
 
                 # Sanity shape check of cached key against input query.
-                expected_shape = (batch, 1, num_heads, head_dim)
                 if expected_shape != query.shape:
                     raise ValueError(
                         'Autoregressive cache shape error, '
@@ -469,16 +468,11 @@ class MultiHeadAttention(nn.Module):
 
                 cur_index = cache_index.value
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
-                one_token_key = jnp.moveaxis(key, -3, -1)
-                one_token_value = jnp.moveaxis(value, -3, -1)
-                key = cached_key.value + one_token_key * one_hot_indices
-                value = cached_value.value + one_token_value * one_hot_indices
+                key = cached_key.value + key * one_hot_indices
+                value = cached_value.value + value * one_hot_indices
                 cached_key.value = key
                 cached_value.value = value
                 cache_index.value = cache_index.value + 1
-
-                key = jnp.moveaxis(key, -1, -3)
-                value = jnp.moveaxis(value, -1, -3)
 
                 mask = combine_masks(
                     mask, jnp.broadcast_to(jnp.arange(length) <= cur_index, (batch, 1, 1, length)))
