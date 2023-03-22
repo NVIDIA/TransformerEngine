@@ -177,7 +177,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta = {}
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = get_default_fp8_recipe()
-        self.fp8_checkpoint_loaded = False
+        self.fp8_meta_tensors_initialized = False
         self.tp_group = None
         self.tp_group_initialized = False
         self.tp_size = 1
@@ -189,8 +189,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
-        if self.fp8_checkpoint_loaded:
-            # Handle different amax history size from that of the loaded checkpoint.
+        if self.fp8_meta_tensors_initialized:
+            # Handle changed amax history size.
             curr_len = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[0]
             need_len = self.fp8_meta["recipe"].amax_history_len
             if need_len < curr_len:
@@ -242,6 +242,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Init scales and amaxes."""
         self.set_meta_tensor(True)
         self.set_meta_tensor(False)
+        self.fp8_meta_tensors_initialized = True
 
     def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
@@ -294,7 +295,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
             self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
             self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
-            self.fp8_checkpoint_loaded = True
 
             # Restore global FP8 buffer state.
             set_global_fp8_buffer(state[4])
@@ -324,7 +324,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
-        self.fp8_checkpoint_loaded = True
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
