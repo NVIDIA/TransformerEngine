@@ -4,81 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/cudnn_flash_attn_fp8.h"
+#include "transformer_engine/fused_attn_fp8.h"
 #include <cudnn_frontend.h>
 #include "../common.h"
 
-static bool debug = false;
-
-#include <transformer_engine/cast.h>
-//#include "../common.h"
-#include "../utils.cuh"
-#include "../util/vectorized_pointwise.h"
-
-//namespace detail {
-
-using namespace transformer_engine;
-struct Empty {};
-
-__device__ inline fp32 identity(fp32 value, const Empty&) {
-  return value;
-}
-
-struct DequantizeParam {
-  const fp32 *scale_inv;
-};
-
-__device__ inline fp32 dequantize_func(fp32 value, const DequantizeParam &param) {
-  return value * (*(param.scale_inv));
-}
-
-__global__ void rcp(fp32* in){ //, void* out) {
-if (threadIdx.x==0)
-  in[0] = 1.0f/in[0]; 
-}
-//}  // namespace detail
-
-void fp8_dequantize(void* input,
-		    void* descale_input,
-                    void* output,
-		    size_t N,
-		    transformer_engine::DType itype,
-		    transformer_engine::DType otype,
-                    cudaStream_t stream) {
-//  CheckInputTensor(input, "cast_input");
-//  CheckOutputTensor(*output, "cast_output");
-//  NVTE_CHECK(is_fp8_dtype(input.data.dtype),
-//             "Input must have FP8 type.");
-//
-//  NVTE_CHECK(!is_fp8_dtype(output->data.dtype),
-//             "Output must be in higher precision.");
-//  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
-
-//  void* devPtrQKV = inputQKV->data.dptr;
-//  const size_t N = product(input.data.shape);
-//	using namespace transformer_engine;
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(itype, IType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(otype, OType,
-      constexpr int nvec = 32 / sizeof(OType);
-      //detail::DequantizeParam p;
-      DequantizeParam p;
-      p.scale_inv = reinterpret_cast<const fp32*>(descale_input);
-      //VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
-      VectorizedUnaryKernelLauncher<nvec, DequantizeParam, dequantize_func>(
-          reinterpret_cast<const IType*>(input),
-          reinterpret_cast<OType*>(output),
-          nullptr,
-          nullptr,
-          N,
-          p,
-          stream);
-    );  // NOLINT(*)
-  );  // NOLINT(*)
-}
-
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
-  //printf("cudnn get type %d\n",(int)t);
   switch (t) {
     case DType::kFloat16:
       return CUDNN_DATA_HALF;
@@ -87,10 +18,8 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
     case DType::kBFloat16:
       return CUDNN_DATA_BFLOAT16;
     case DType::kFloat8E4M3:
-    //  printf(" type DType::kFloat8E4M3 \n");
       return CUDNN_DATA_FP8_E4M3;
     case DType::kFloat8E5M2:
-     // printf(" type DType::kFloat8E5M2 \n");
       return CUDNN_DATA_FP8_E5M2;
     default:
       NVTE_ERROR("Invalid type");
@@ -111,7 +40,7 @@ MHA_Layout get_mha_layout(const int layout) {
 }
 
 namespace transformer_engine {
-namespace cudnn_flash_attn {
+namespace fused_attn {
 
 using namespace transformer_engine;
 
@@ -328,7 +257,6 @@ static cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, in
             .setVirtual(is_virtual)
             .setByValue(is_value)
             .build();
-    if (debug) std::cout << tensor_created.describe() << std::endl;
     return tensor_created;
 };
 
@@ -345,7 +273,6 @@ static cudnn_frontend::Tensor tensor_create_with_offset(cudnnDataType_t type, in
             .setByValue(is_value)
             .setRaggedOffset(raggedOffset)
             .build();
-    if (debug) std::cout << tensor_created.describe() << std::endl;
     return tensor_created;
 };
 
@@ -355,7 +282,6 @@ static cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnP
             .setComputeType(type)
             .build();
 
-    if (debug) std::cout << pw_desc_created.describe() << std::endl;
     return pw_desc_created;
 }
 
@@ -366,7 +292,6 @@ static cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -378,7 +303,6 @@ static cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor cons
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -391,7 +315,6 @@ static cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor con
                         .setyDesc(yDesc)
                         .setpwDesc(pwDesc)
                         .build();
-    if (debug) std::cout << pw_op_created.describe() << std::endl;
     return pw_op_created;
 }
 
@@ -411,7 +334,6 @@ createAmax(const std::string& amax_tensor_name,
                                   .setMathPrecision(CUDNN_DATA_FLOAT)
                                   .setReductionOp(CUDNN_REDUCE_TENSOR_AMAX)
                                   .build();
-        if (debug) std::cout << redunctionDesc.describe() << std::endl;
 
         // Create a reduction amax Node.
         auto reduction_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -419,7 +341,6 @@ createAmax(const std::string& amax_tensor_name,
                                 .setyDesc(amaxTensor)
                                 .setreductionDesc(redunctionDesc)
                                 .build();
-        if (debug) std::cout << reduction_op.describe() << std::endl;
         ops.push_back(std::move(reduction_op));
         return amaxTensor;
 }
@@ -578,7 +499,6 @@ createSoftmaxForward(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_MAX)
                                 .build();
-    if (debug) std::cout << reductionMaxDesc.describe() << std::endl;
 
     // Create a reduction max Node.
     auto reductionMax_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -586,7 +506,6 @@ createSoftmaxForward(int64_t b,
                                 .setyDesc(afterMaxReductionTensor)
                                 .setreductionDesc(reductionMaxDesc)
                                 .build();
-    if (debug) std::cout << reductionMax_op.describe() << std::endl;
 
     // Define the subtract descriptor
     auto subtractDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
@@ -605,7 +524,6 @@ createSoftmaxForward(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_ADD)
                                 .build();
-    if (debug) std::cout << reductionAddDesc.describe() << std::endl;
 
     // Create a reduction add Node.
     auto reductionAdd_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -614,7 +532,6 @@ createSoftmaxForward(int64_t b,
                                 .setreductionDesc(reductionAddDesc)
                                 .build();
 
-    if (debug) std::cout << reductionAdd_op.describe() << std::endl;
 
     // Define the reciprocal descriptor
     auto reciprocalDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_RECIPROCAL);
@@ -681,7 +598,6 @@ createDropoutForward(int64_t b,
                                 .setRngDistribution(CUDNN_RNG_DISTRIBUTION_BERNOULLI)
                                 .setBernoulliDistProbability(1.0 - probability)
                                 .build();
-    if (debug) std::cout << rngDesc.describe() << std::endl;
 
     // Create a rng Node.
     auto rng_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
@@ -691,7 +607,6 @@ createDropoutForward(int64_t b,
                                 .setRngDesc(rngDesc)
                                 .build();
 
-    if (debug) std::cout << rng_op.describe() << std::endl;
 
     // Define the multiply mask descriptor
     auto maskMulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
@@ -754,7 +669,6 @@ createDropoutBackward(int64_t b,
                                 .setRngDistribution(CUDNN_RNG_DISTRIBUTION_BERNOULLI)
                                 .setBernoulliDistProbability(1.0 - probability)
                                 .build();
-    if (debug) std::cout << rngDesc.describe() << std::endl;
 
     // Create a rng Node.
     auto rng_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
@@ -764,7 +678,6 @@ createDropoutBackward(int64_t b,
                                 .setRngDesc(rngDesc)
                                 .build();
 
-    if (debug) std::cout << rng_op.describe() << std::endl;
 
     // Define the multiply mask descriptor
     auto maskMulDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
@@ -863,7 +776,6 @@ createQKBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(-2000000)
                                     .build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create reshape node for K -> K.T
     auto reshape_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
@@ -871,7 +783,6 @@ createQKBMM(int64_t b,
                             .setyDesc(kTransposeTensor)
                             .build();
 
-    if (debug) std::cout << reshape_op.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -883,7 +794,6 @@ createQKBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -920,7 +830,6 @@ createSVBMM(int64_t b,
 
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder().setComputeType(CUDNN_DATA_FLOAT).build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -931,8 +840,6 @@ createSVBMM(int64_t b,
                             .setkOverrideDesc(mnkOverride)
                             .setmatmulDesc(matmulDesc)
                             .build();
-
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(matmulOp));
 
@@ -974,7 +881,6 @@ createSdOBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(0)
                                     .build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -986,7 +892,6 @@ createSdOBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -1033,7 +938,6 @@ createdOVBMM(int64_t b,
                                             .setComputeType(CUDNN_DATA_FLOAT)
                                             .setPaddingValue(0)
                                             .build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create reshape node for V -> V.T
     auto reshape_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
@@ -1041,7 +945,6 @@ createdOVBMM(int64_t b,
                             .setyDesc(vTransposeTensor)
                             .build();
 
-    if (debug) std::cout << reshape_op.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1052,8 +955,6 @@ createdOVBMM(int64_t b,
                             .setnOverrideDesc(mnkOverride)
                             .setmatmulDesc(matmulDesc)
                             .build();
-
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -1097,7 +998,6 @@ createdOAndORowReductionChain(int64_t b,
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .setReductionOp(CUDNN_REDUCE_TENSOR_ADD)
                                 .build();
-    if (debug) std::cout << reductionAddDesc.describe() << std::endl;
 
     // Create a reduction add Node.
     auto reductionAdd_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
@@ -1105,8 +1005,6 @@ createdOAndORowReductionChain(int64_t b,
                                 .setyDesc(O_dO_after_rowsum)
                                 .setreductionDesc(reductionAddDesc)
                                 .build();
-
-    if (debug) std::cout << reductionAdd_op.describe() << std::endl;
 
     ops.push_back(std::move(mutliply_op));
     ops.push_back(std::move(dropout_scale_multiply_op));
@@ -1173,7 +1071,6 @@ createdSKBMM(int64_t b,
                                     .setComputeType(CUDNN_DATA_FLOAT)
                                     .setPaddingValue(0)
                                     .build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1184,8 +1081,6 @@ createdSKBMM(int64_t b,
                             .setkOverrideDesc(mnkOverride)
                             .setmatmulDesc(matmulDesc)
                             .build();
-
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(matmulOp));
 
@@ -1228,14 +1123,11 @@ createdSQBMM(int64_t b,
                             .setyDesc(dSTransposeTensor)
                             .build();
 
-    if (debug) std::cout << reshape_op.describe() << std::endl;
-
     // Define the matmul desc
     auto matmulDesc = cudnn_frontend::MatMulDescBuilder()
                                             .setComputeType(CUDNN_DATA_FLOAT)
                                             .setPaddingValue(0)
                                             .build();
-    if (debug) std::cout << matmulDesc.describe() << std::endl;
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1247,7 +1139,6 @@ createdSQBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    if (debug) std::cout << matmulOp.describe() << std::endl;
 
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
@@ -1255,10 +1146,8 @@ createdSQBMM(int64_t b,
     return After_dSTranspose_Q;
 }
 
-		//uint64_t seed,
-		//uint64_t offset,
 void
-cudnn_fa_fprop_fp8(int64_t b,
+fa_cudnn_fp8_fprop(int64_t b,
                 int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
@@ -1288,82 +1177,6 @@ cudnn_fa_fprop_fp8(int64_t b,
 		void* workspace_ptr,
 		uint64_t* workspace_size)
 {
-//    printf("--------------- tensors before fprop_fp8 -----------\n");
-//    printf("b %ld, h %ld, s_q %ld, s_kv %ld, d %ld, attnScale %f, dropoutProbability %f, layout %d, tensorType %d\n",
-//		    b, h, s_q, s_kv, d, attnScale, dropoutProbability, (int)layout, (int)tensorType);
-//    uint64_t* hostPtrDropoutSeed = (uint64_t*)calloc(1, sizeof(uint64_t));
-//    uint64_t* hostPtrDropoutOffset = (uint64_t*)calloc(1, sizeof(uint64_t)); 
-//    float* hostPtrDescaleQ = (float*)calloc(1, sizeof(float));
-//    float* hostPtrDescaleK = (float*)calloc(1, sizeof(float));
-//    float* hostPtrDescaleV = (float*)calloc(1, sizeof(float));
-//    float* hostPtrDescaleS = (float*)calloc(1, sizeof(float));
-//    float* hostPtrScaleS = (float*)calloc(1, sizeof(float));
-//    float* hostPtrScaleO = (float*)calloc(1, sizeof(float));
-//    float* hostPtrAmaxO = (float*)calloc(1, sizeof(float));
-//    float* hostPtrAmaxS = (float*)calloc(1, sizeof(float));
-//
-//    cudaMemcpy(hostPtrDropoutSeed, devPtrDropoutSeed, sizeof(hostPtrDropoutSeed[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrDropoutOffset, devPtrDropoutOffset, sizeof(hostPtrDropoutOffset[0]), cudaMemcpyDeviceToHost);
-//
-//    cudaMemcpy(hostPtrDescaleQ, devPtrDescaleQ, sizeof(hostPtrDescaleQ[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrDescaleK, devPtrDescaleK, sizeof(hostPtrDescaleK[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrDescaleV, devPtrDescaleV, sizeof(hostPtrDescaleV[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrDescaleS, devPtrDescaleS, sizeof(hostPtrDescaleS[0]), cudaMemcpyDeviceToHost);
-//
-//    cudaMemcpy(hostPtrScaleS, devPtrScaleS, sizeof(hostPtrScaleS[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrScaleO, devPtrScaleO, sizeof(hostPtrScaleO[0]), cudaMemcpyDeviceToHost);
-//
-//    cudaMemcpy(hostPtrAmaxS, devPtrAmaxS, sizeof(hostPtrAmaxS[0]), cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrAmaxO, devPtrAmaxO, sizeof(hostPtrAmaxO[0]), cudaMemcpyDeviceToHost);
-//
-//    cudaDeviceSynchronize();
-//    printf("DropoutSeed %ld, DropoutOffset %ld, DescaleQ %f, DescaleK %f, DescaleV %f, DescaleS %f, ScaleS %f, ScaleO %f, AmaxO %f, AmaxS %f \n", hostPtrDropoutSeed[0], hostPtrDropoutOffset[0], hostPtrDescaleQ[0], hostPtrDescaleK[0], hostPtrDescaleV[0], hostPtrDescaleS[0], hostPtrScaleS[0], hostPtrScaleO[0], hostPtrAmaxO[0], hostPtrAmaxS[0]);
-//
-//    float* hostPtrQKV = (float*)calloc(b*s_q*3*h*d, sizeof(float));
-//    float* hostPtrM = (float*)calloc(b*h*s_q, sizeof(float));
-//    float* hostPtrZInv = (float*)calloc(b*h*s_q, sizeof(float));
-//    float* hostPtrO = (float*)calloc(b*s_q*h*d, sizeof(float));
-//
-//    void* devPtrQKV_deq = nullptr;
-//    void* devPtrO_deq = nullptr;
-//    cudaMalloc((void**)&(devPtrQKV_deq), (b*s_q*3*h*d) * sizeof(float));
-//    cudaMalloc((void**)&(devPtrO_deq), (b*s_q*h*d) * sizeof(float));
-//    size_t NN = b*s_q*3*h*d;
-//    size_t NN_o = b*s_q*h*d;
-//    fp8_dequantize(devPtrQKV, devPtrDescaleQ, devPtrQKV_deq, NN, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
-//    fp8_dequantize(devPtrO, devPtrDescaleQ, devPtrO_deq, NN_o, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
-//    cudaDeviceSynchronize();
-//
-//    cudaMemcpy(hostPtrQKV, devPtrQKV_deq, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
-//    //cudaMemcpy(hostPtrQKV, devPtrQKV, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrM, devPtrM, sizeof(hostPtrM[0])*b*h*s_q, cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrZInv, devPtrZInv, sizeof(hostPtrZInv[0])*b*h*s_q, cudaMemcpyDeviceToHost);
-//    //cudaMemcpy(hostPtrO, devPtrO, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
-//    cudaMemcpy(hostPtrO, devPtrO_deq, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
-//    cudaDeviceSynchronize();
-//
-//    printf("---- QKV --- \n");
-//    for (int i=0; i<2; i++)
-//    for (int l=0; l<2; l++)
-//	    for (int j=0; j<2; j++)
-//		    for (int k=0; k<2; k++)
-//			    printf("(%d, %d, %d, %d): %f \n",i,l,j,k,hostPtrQKV[i*3*h*d + l*h*d +j*d +k]);
-//			    //printf("(%d, 0, %d, %d): %d \n",i,j,k,hostPtrQKV[i][0][j][k]);
-//
-//    printf("---- M, ZInv--- \n");
-//    for (int i=0; i<2; i++)
-//	    for (int j=0; j<2; j++)
-//		    for (int k=0; k<2; k++)
-//			    printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i*h*s_q+j*s_q+k], hostPtrZInv[i*h*s_q+j*s_q+k]);
-//			    //printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i][j][k][0], hostPtrZInv[i][j][k][0]);
-//
-//    printf("---- O --- \n");
-//    for (int i=0; i<2; i++)
-//	    for (int j=0; j<2; j++)
-//		    for (int k=0; k<2; k++)
-//		printf("(%d, %d, %d): %f \n",i,j,k,hostPtrO[i*h*d +j*d +k]);
-//		//printf("(%d, %d): %d \n",i,j,hostPtrO[i][j]);
-
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
@@ -1391,11 +1204,9 @@ cudnn_fa_fprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
-	      if (debug) printf("cache hit\n");
               return plan;
             }
 
-	    if (debug) printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -1433,7 +1244,6 @@ cudnn_fa_fprop_fp8(int64_t b,
 
             // Q * K.T
             auto afterQKTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, qTensor, kTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
-
 
             // QK.T * attn scale
             auto AfterAttnScale_before_dequan_Q_tensor = createScale(afterQKTensor, // input tensor
@@ -1507,8 +1317,6 @@ cudnn_fa_fprop_fp8(int64_t b,
             // Amax for O
             createAmax("amaxO", OTensor_before_quan_O_tensor, ops);
 
-            if (debug) std::cout << "Total ops created: " << ops.size() << std::endl;
-
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
             }
@@ -1537,146 +1345,64 @@ cudnn_fa_fprop_fp8(int64_t b,
 	}; // end of get_plan
 
 	auto plan = get_plan(fa_fprop_cache, descriptor);
-        if (debug) std::cout << "Plan tag: " << plan.getTag() << std::endl;
-
 	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
-        //auto wspace_size = plan.getWorkspaceSize();
-        if (debug) std::cout << plan.describe() << " requires workspace " << *workspace_size << std::endl;
-
-	//if (*workspace_size > 0)
-	//{
-	//    if (workspace_ptr == nullptr)
-	//    {
-	//        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
-	//        return;
-        //    }
-	//}
-        //else if (*workspace_size == 0)
-        //{
-        //  return;
-        //}
 	if (workspace_ptr == nullptr)
 	{
 	    if (*workspace_size > 0)
 	    {
-	        if (debug) printf("workspace is nullptr, size required is %ld \n",*workspace_size);
 	        return;
             }
             else if (*workspace_size == 0)
                 return;
         }
-	//if (workspace_ptr == nullptr)
-	//{
-	//    *workspace_size = wspace_size;
-	//    printf("workspace is nullptr, size is %ld \n",*workspace_size);
-	//    return; // not executing
-	//}
-	//else  // begin execution
-	{
 
-	    //printf("workspace is not nullptr, execute fwd \n");
-	    if (debug) printf("workspace is not nullptr or workspace size is 0, execute fwd \n");
-            //void* workspace_ptr = nullptr;
-            //if (workspace_size > 0) {
-            //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-            //}
+	// execute if workspace is not nullptr or the plan require 0 workspace 
+        void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
+        void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
+        void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
 
-            void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
-            void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
-            void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
+        float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
 
-            float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
+        std::set<std::pair<uint64_t, void*>> data_ptrs;
+        // add all the data pointers to be used in the variant pack
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleO"], devPtrScaleO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxO"], devPtrAmaxO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxS"], devPtrAmaxS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
 
-            std::set<std::pair<uint64_t, void*>> data_ptrs;
-            // add all the data pointers to be used in the variant pack
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleO"], devPtrScaleO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxO"], devPtrAmaxO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxS"], devPtrAmaxS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
+        // If training, then we need to write out M and Z_INV
+        if (isTraining) {
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
+            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
+        }
 
-            // If training, then we need to write out M and Z_INV
-            if (isTraining) {
-                data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
-                data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
-            }
-
-            auto variantPack  = cudnn_frontend::VariantPackBuilder()
-                                   .setWorkspacePointer(workspace_ptr)
-                                   .setDataPointers(data_ptrs)
-                                   .build();
-            if (debug) std::cout << "variantPack " << variantPack.describe() << std::endl;
-            cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-            NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-            //if (workspace_size > 0) {
-            //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-            //}
-
-	//    printf("--------------- tensors after fprop_fp8 -----------\n");
-
-    	//    cudaDeviceSynchronize();
-    	//    fp8_dequantize(devPtrQKV, devPtrDescaleQ, devPtrQKV_deq, NN, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
-
-        //    rcp<<<1,1>>>(static_cast<fp32*>(devPtrScaleO)); //, devPtrDescaleO);
-    	//    fp8_dequantize(devPtrO, devPtrScaleO, devPtrO_deq, NN_o, transformer_engine::DType::kFloat8E4M3, transformer_engine::DType::kFloat32, (cudaStream_t)0);
-    	//    cudaDeviceSynchronize();
-
-    	//    cudaMemcpy(hostPtrQKV, devPtrQKV_deq, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
-    	//    //cudaMemcpy(hostPtrQKV, devPtrQKV, sizeof(hostPtrQKV[0])*b*s_q*3*h*d, cudaMemcpyDeviceToHost);
-    	//    cudaMemcpy(hostPtrM, devPtrM, sizeof(hostPtrM[0])*b*h*s_q, cudaMemcpyDeviceToHost);
-    	//    cudaMemcpy(hostPtrZInv, devPtrZInv, sizeof(hostPtrZInv[0])*b*h*s_q, cudaMemcpyDeviceToHost);
-    	//    //cudaMemcpy(hostPtrO, devPtrO, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
-    	//    cudaMemcpy(hostPtrO, devPtrO_deq, sizeof(hostPtrO[0])*b*s_q*h*d, cudaMemcpyDeviceToHost);
+        auto variantPack  = cudnn_frontend::VariantPackBuilder()
+                               .setWorkspacePointer(workspace_ptr)
+                               .setDataPointers(data_ptrs)
+                               .build();
+        cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
+        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
 
-	//    cudaDeviceSynchronize();
+        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
 
-	//    printf("---- QKV --- \n");
-	//    for (int i=0; i<2; i++)
-	//    for (int l=0; l<2; l++)
-	//	    for (int j=0; j<2; j++)
-	//		    for (int k=0; k<2; k++)
-	//			    printf("(%d, %d, %d, %d): %f \n",i,l,j,k,hostPtrQKV[i*3*h*d + l*h*d +j*d +k]);
-	//			    //printf("(%d, 0, %d, %d): %d \n",i,j,k,hostPtrQKV[i][0][j][k]);
-	//
-	//    printf("---- M, ZInv--- \n");
-	//    for (int i=0; i<2; i++)
-	//	    for (int j=0; j<2; j++)
-	//		    for (int k=0; k<2; k++)
-	//			    printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i*h*s_q+j*s_q+k], hostPtrZInv[i*h*s_q+j*s_q+k]);
-	//			    //printf("(%d, %d, %d, 0): %f, %f \n",i,j,k,hostPtrM[i][j][k][0], hostPtrZInv[i][j][k][0]);
-	//
-	//    printf("---- O --- \n");
-	//    for (int i=0; i<2; i++)
-	//	    for (int j=0; j<2; j++)
-	//		    for (int k=0; k<2; k++)
-	//		printf("(%d, %d, %d): %f \n",i,j,k,hostPtrO[i*h*d +j*d +k]);
-	//		//printf("(%d, %d): %d \n",i,j,hostPtrO[i][j]);
-	//
-	//    if (hostPtrQKV) free(hostPtrQKV);
-	//    if (hostPtrM) free(hostPtrM);
-	//    if (hostPtrZInv) free(hostPtrZInv);
-	//    if (hostPtrO) free(hostPtrO);
-
-            NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
-
-            cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
-	} // end of execution
+        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
     } catch (cudnn_frontend::cudnnException& e) {
         struct cudaDeviceProp prop;
@@ -1687,15 +1413,12 @@ cudnn_fa_fprop_fp8(int64_t b,
             std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl;
         }  else {
             std::cout << "[ERROR] Exception " << e.what() << std::endl;
-            //CHECK(false);
         }
     }
 }
 
-		//uint64_t seed,
-		//uint64_t offset,
 void
-cudnn_fa_bprop_fp8(int64_t b,
+fa_cudnn_fp8_bprop(int64_t b,
                 int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
@@ -1734,13 +1457,6 @@ cudnn_fa_bprop_fp8(int64_t b,
 		void* workspace_ptr,
 		uint64_t* workspace_size)
 {
-    float* hostPtrAmaxdQ = (float*)calloc(1, sizeof(float));
-    float* hostPtrScaledQ = (float*)calloc(1, sizeof(float));
-    cudaMemcpy(hostPtrScaledQ, devPtrScaledQ, sizeof(hostPtrScaledQ[0]), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hostPtrAmaxdQ, devPtrAmaxdQ, sizeof(hostPtrAmaxdQ[0]), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    printf("before bprop: ScaledQ %f, AmaxdQ %f \n", hostPtrScaledQ[0], hostPtrAmaxdQ[0]);
-
     cudnnHandle_t handle_;
     try {
         // Create cudnn handle
@@ -1768,11 +1484,9 @@ cudnn_fa_bprop_fp8(int64_t b,
             auto it = cache.find(descriptor);
             if (it != cache.end()) {
               auto plan = it->second;
-	      if (debug) printf("cache hit\n");
               return plan;
             }
 
-	    if (debug) printf("cache not hit\n");
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
             std::vector<cudnn_frontend::Operation> ops;
@@ -2073,8 +1787,6 @@ cudnn_fa_bprop_fp8(int64_t b,
             // Amax for dK
             createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, ops);
 
-            if (debug) std::cout << "Total ops created: " << ops.size() << std::endl;
-
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
             }
@@ -2102,120 +1814,76 @@ cudnn_fa_bprop_fp8(int64_t b,
 	};
 
 	auto plan = get_plan(fa_bprop_cache, descriptor);
-        if (debug) std::cout << "Plan tag: " << plan.getTag() << std::endl;
-
 	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
-        //auto wspace_size = plan.getWorkspaceSize();
-        if (debug) std::cout << plan.describe() << " requires workspace " << *workspace_size << std::endl;
 
-	//if (*workspace_size > 0)
-	//{
-	//    if (workspace_ptr == nullptr)
-	//    {
-	//        printf("workspace is nullptr, size required is %ld \n",*workspace_size);
-	//        return;
-        //    }
-	//}
-        //else if (*workspace_size == 0)
-        //{
-        //  return;
-        //}
 	if (workspace_ptr == nullptr)
 	{
 	    if (*workspace_size > 0)
-	    {
-	        if (debug) printf("workspace is nullptr, size required is %ld \n",*workspace_size);
 	        return;
-            }
             else if (*workspace_size == 0)
                 return;
         }
-	//if (workspace_ptr == nullptr)
-	//{
-	//    *workspace_size = wspace_size;
-	//    printf("workspace is nullptr, size is %ld \n",*workspace_size);
-	//    return; // not executing
-	//}
-	//else  // begin execution
-	{
 
-	    //printf("workspace is not nullptr, execute bwd \n");
-	    if (debug) printf("workspace is not nullptr or workspace size is 0, execute bwd \n");
-            //void* workspace_ptr = nullptr;
-            //if (workspace_size > 0) {
-            //    NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
-            //}
+	// execute if workspace is not nullptr or the plan require 0 workspace 
+        void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
+        void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
+        void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
     
-            void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
-            void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
-            void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
+        void* devPtrdQ = (void *) devPtrdQKV; // dQ points to the top of dQKV
+        void* devPtrdK = (void *)(static_cast<int8_t*>(devPtrdQKV) + h * d); // dK is at an offset of h * d
+        void* devPtrdV = (void *)(static_cast<int8_t*>(devPtrdQKV) + 2 * h * d); // dV is at an offset of 2 * h * d
     
-            void* devPtrdQ = (void *) devPtrdQKV; // dQ points to the top of dQKV
-            void* devPtrdK = (void *)(static_cast<int8_t*>(devPtrdQKV) + h * d); // dK is at an offset of h * d
-            void* devPtrdV = (void *)(static_cast<int8_t*>(devPtrdQKV) + 2 * h * d); // dV is at an offset of 2 * h * d
+        std::set<std::pair<uint64_t, void*>> data_ptrs;
+        float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
+        float dropoutScale_dOVt_OdO = 1.0f - dropoutProbability; // (1 - p)
+        // add all the data pointers to be used in the variant pack
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V_TRANSPOSE"], devPtrV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dQ"], devPtrdQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dK"], devPtrdK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dV"], devPtrdV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dO"], devPtrdO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], &dropoutScale_dOVt_OdO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledS"], devPtrDescaledS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleO"], devPtrDescaleO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledO"], devPtrDescaledO));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledS"], devPtrScaledS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledQ"], devPtrScaledQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledK"], devPtrScaledK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledV"], devPtrScaledV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdS"], devPtrAmaxdS));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdQ"], devPtrAmaxdQ));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdK"], devPtrAmaxdK));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdV"], devPtrAmaxdV));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
+        data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
     
-            std::set<std::pair<uint64_t, void*>> data_ptrs;
-            float dropoutScale = 1.0f/(1.0f - dropoutProbability); // 1 / (1 - p)
-            float dropoutScale_dOVt_OdO = 1.0f - dropoutProbability; // (1 - p)
-            // add all the data pointers to be used in the variant pack
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Q"], devPtrQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K"], devPtrK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["K_TRANSPOSE"], devPtrK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V"], devPtrV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["V_TRANSPOSE"], devPtrV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dQ"], devPtrdQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dK"], devPtrdK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dV"], devPtrdV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["dO"], devPtrdO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["AttnScale"], &attnScale));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE"], &dropoutScale));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SCALE_dOVt_OdO"], &dropoutScale_dOVt_OdO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_SEED"], devPtrDropoutSeed));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["DROPOUT_OFFSET"], devPtrDropoutOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["M"], devPtrM));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["Z_INV"], devPtrZInv));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O"], devPtrO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleQ"], devPtrDescaleQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleK"], devPtrDescaleK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleV"], devPtrDescaleV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleS"], devPtrDescaleS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledS"], devPtrDescaledS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaleO"], devPtrDescaleO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["descaledO"], devPtrDescaledO));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaleS"], devPtrScaleS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledS"], devPtrScaledS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledQ"], devPtrScaledQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledK"], devPtrScaledK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["scaledV"], devPtrScaledV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdS"], devPtrAmaxdS));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdQ"], devPtrAmaxdQ));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdK"], devPtrAmaxdK));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["amaxdV"], devPtrAmaxdV));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["QKV_RAGGED"], devPtrQKVRaggedOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["O_RAGGED"], devPtrORaggeDOffset));
-            data_ptrs.emplace(std::pair<uint64_t, void*>(tensor_name_to_uid["MNK_OVERRIDE"], devPtrMNKOverride));
-    
-            auto variantPack  = cudnn_frontend::VariantPackBuilder()
-                                   .setWorkspacePointer(workspace_ptr)
-                                   .setDataPointers(data_ptrs)
-                                   .build();
-            if (debug) std::cout << "variantPack " << variantPack.describe() << std::endl;
-            cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-            NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-            //if (workspace_size > 0) {
-            //    NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-            //}
+        auto variantPack  = cudnn_frontend::VariantPackBuilder()
+                               .setWorkspacePointer(workspace_ptr)
+                               .setDataPointers(data_ptrs)
+                               .build();
+        cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
+        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-    cudaDeviceSynchronize();
-    cudaMemcpy(hostPtrScaledQ, devPtrScaledQ, sizeof(hostPtrScaledQ[0]), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hostPtrAmaxdQ, devPtrAmaxdQ, sizeof(hostPtrAmaxdQ[0]), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    printf("after bprop: ScaledQ %f, AmaxdQ %f \n", hostPtrScaledQ[0], hostPtrAmaxdQ[0]);
+        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
     
-            NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
-    
-            cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
-	} // end of execution
+        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
     } catch (cudnn_frontend::cudnnException& e) {
         struct cudaDeviceProp prop;
@@ -2226,120 +1894,90 @@ cudnn_fa_bprop_fp8(int64_t b,
             std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and GH100 (cuDNN >= 8800) GPUs" << std::endl;
         }  else {
             std::cout << "[ERROR] Exception " << e.what() << std::endl;
-            //CHECK(false);
         }
     }
 }
 
 #endif
 
-} // namespace cudnn_flash_attn
-		//uint64_t seed, uint64_t offset,
-void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
+} // namespace fused_attn
+
+void fused_attn_fwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
-		Tensor *inputQKV,
-		Tensor *inputM,
-                Tensor *inputZInv,
-                Tensor *inputS,
-                Tensor *inputO,
+                float attn_scale, float p_dropout,
+		int qkv_layout, bool is_training,
+		const Tensor *input_QKV,
+		Tensor *input_M,
+                Tensor *input_ZInv,
+                Tensor *input_S,
+                Tensor *input_O,
 		int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-		int32_t *ActualSeqlens,
-		uint64_t *PhiloxUnpacked,
+		int32_t *Seqlens,
+		uint64_t *RngState,
                 Tensor *workspace,
-                cudaStream_t stream
-) {
-		//uint64_t *PhiloxUnpacked_CPU,
-                //int64_t *ActualSeqlens,
-  //printf("===================== cudnn fa fwd ============== \n");
-  void* devPtrQKV = inputQKV->data.dptr;
-  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+                cudaStream_t stream)
+{
+  void* devPtrQKV = input_QKV->data.dptr;
+  void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
+  void* devPtrDescaleK = input_QKV->scale_inv.dptr;
+  void* devPtrDescaleV = input_QKV->scale_inv.dptr;
 
-  void* devPtrM = inputM->data.dptr;
-  void* devPtrZInv = inputZInv->data.dptr;
+  void* devPtrM = input_M->data.dptr;
+  void* devPtrZInv = input_ZInv->data.dptr;
 
-  void* devPtrAmaxS = inputS->amax.dptr;
-  void* devPtrScaleS = inputS->scale.dptr;
-  void* devPtrDescaleS = inputS->scale_inv.dptr;
+  void* devPtrAmaxS = input_S->amax.dptr;
+  void* devPtrScaleS = input_S->scale.dptr;
+  void* devPtrDescaleS = input_S->scale_inv.dptr;
 
-  void* devPtrO = inputO->data.dptr;
-  void* devPtrAmaxO = inputO->amax.dptr;
-  void* devPtrScaleO = inputO->scale.dptr;
-//  void* devPtrDescaleO = inputO->scale_inv.dptr;
+  void* devPtrO = input_O->data.dptr;
+  void* devPtrAmaxO = input_O->amax.dptr;
+  void* devPtrScaleO = input_O->scale.dptr;
+//  void* devPtrDescaleO = input_O->scale_inv.dptr;
 
   void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
-  void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
-  void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-//  void* devPtrMNKOverride = devPtrQKVRaggedOffset; //nullptr;
-  void* devPtrMNKOverride = (void *)ActualSeqlens;
+  void* devPtrDropoutSeed = (void *)RngState;
+  void* devPtrDropoutOffset = (void *)(RngState + 1);
+  void* devPtrMNKOverride = (void *)Seqlens;
 
-  const DType QKV_type = inputQKV->data.dtype;
+  const DType QKV_type = input_QKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
   uint64_t workspace_size = 0;
 
-//  uint64_t seed = static_cast<uint64_t>(*PhiloxUnpacked_CPU);
-//  uint64_t offset = static_cast<uint64_t>(*(PhiloxUnpacked_CPU+1));
-
-  //printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    if (debug) printf(" select fp8 ------------ \n");
-    bool isTraining = true;
-		//seed, offset,
-    cudnn_flash_attn::cudnn_fa_fprop_fp8(b, h, max_seq_len, max_seq_len, d,
-		scale_q_k, isTraining, p_dropout, layout, 
-                devPtrQKV,
-                devPtrM,
-                devPtrZInv,
-                devPtrO,
-                devPtrDropoutSeed,
-                devPtrDropoutOffset,
-                devPtrDescaleQ,
-                devPtrDescaleK,
-                devPtrDescaleV,
-                devPtrDescaleS,
-                devPtrScaleS,
-                devPtrScaleO,
-                devPtrAmaxO,
-                devPtrAmaxS,
-                devPtrQKVRaggedOffset,
-                devPtrORaggedOffset,
-		devPtrMNKOverride,
-                get_cudnn_dtype(QKV_type),
-		workspace->data.dptr,
-		&workspace_size);
+    fused_attn::fa_cudnn_fp8_fprop(b, h, max_seq_len, max_seq_len, d,
+		    attn_scale, is_training, p_dropout, layout,
+		    devPtrQKV, devPtrM, devPtrZInv, devPtrO,
+		    devPtrDropoutSeed, devPtrDropoutOffset,
+		    devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+		    devPtrDescaleS, 
+		    devPtrScaleS, 
+		    devPtrScaleO,
+		    devPtrAmaxO, devPtrAmaxS,
+		    devPtrQKVRaggedOffset, devPtrORaggedOffset,
+		    devPtrMNKOverride,
+		    get_cudnn_dtype(QKV_type),
+		    workspace->data.dptr,
+		    &workspace_size);
 
     if (workspace_size > 0)
     {
-        if (workspace->data.dptr == nullptr)
-        {
-            if (debug) printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
-	    workspace->data.shape = { workspace_size };
-	    workspace->data.dtype = DType::kByte;
-            return;
-        }
+      if (workspace->data.dptr == nullptr)
+      {
+        workspace->data.shape = { workspace_size };
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
     }
     else if (workspace_size == 0)
     {
-            if (debug) printf("workspace size required is 0 return to allocate \n");
-	    //workspace->data.dptr == nullptr;
-	    workspace->data.shape = { 1 };
-	    workspace->data.dtype = DType::kByte;
-            return;
+      workspace->data.shape = { 1 };
+      workspace->data.dtype = DType::kByte;
+      return;
     }
-    //if (workspace->data.dptr == nullptr)
-    //{
-    //  printf(" workspace size %ld \n",workspace_size);
-    //  workspace->data.dtype = transformer_engine::DType::kByte;
-    //  workspace->data.shape = {workspace_size};
-    //  return;
-    //}
-
 #else
     printf("Error: CUDNN_VERSION must be >= 8900! \n");
 #endif
@@ -2356,140 +1994,104 @@ void cudnn_fa_fwd(int64_t b, int64_t max_seq_len,
   else
   {
     NVTE_ERROR("Invalid combination of data type and sequence length! \n");
-    if (debug) printf(" else branch ------------ \n");
-    if (debug) printf("QKV_type is %d \n",(int)QKV_type);
   }
 
 }
 
-		//uint64_t seed, uint64_t offset,
-void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
+void fused_attn_bwd(int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
-		Tensor *inputQKV,
-		Tensor *input_dQKV,
-		Tensor *inputM,
-                Tensor *inputZInv,
-                Tensor *inputS,
-                Tensor *input_dS,
-                Tensor *inputO,
-                Tensor *input_dO,
+                float attn_scale, float p_dropout, int qkv_layout,
+		const Tensor *input_QKV,
+		Tensor *output_dQKV,
+		const Tensor *input_M,
+                const Tensor *input_ZInv,
+                const Tensor *input_S,
+                Tensor *output_dS,
+                const Tensor *input_O,
+                const Tensor *input_dO,
 		int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-                int32_t *ActualSeqlens,
-		uint64_t *PhiloxUnpacked,
+                int32_t *Seqlens,
+		uint64_t *RngState,
                 Tensor *workspace,
                 cudaStream_t stream
 ) {
-  //printf("===================== cudnn fa bwd ============== \n");
-  void* devPtrQKV = inputQKV->data.dptr;
-  void* devPtrDescaleQ = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleK = inputQKV->scale_inv.dptr;
-  void* devPtrDescaleV = inputQKV->scale_inv.dptr;
+  void* devPtrQKV = input_QKV->data.dptr;
+  void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
+  void* devPtrDescaleK = input_QKV->scale_inv.dptr;
+  void* devPtrDescaleV = input_QKV->scale_inv.dptr;
 
-  void* devPtrdQKV = input_dQKV->data.dptr;
-  void* devPtrAmaxdQ = input_dQKV->amax.dptr;
-  void* devPtrAmaxdK = input_dQKV->amax.dptr;
-  void* devPtrAmaxdV = input_dQKV->amax.dptr;
-  void* devPtrScaledQ = input_dQKV->scale.dptr;
-  void* devPtrScaledK = input_dQKV->scale.dptr;
-  void* devPtrScaledV = input_dQKV->scale.dptr;
-//  void* devPtrDescaledQ = input_dQKV->scale_inv.dptr;
-//  void* devPtrDescaledK = input_dQKV->scale_inv.dptr;
-//  void* devPtrDescaledV = input_dQKV->scale_inv.dptr;
+  void* devPtrdQKV = output_dQKV->data.dptr;
+  void* devPtrAmaxdQ = output_dQKV->amax.dptr;
+  void* devPtrAmaxdK = output_dQKV->amax.dptr;
+  void* devPtrAmaxdV = output_dQKV->amax.dptr;
+  void* devPtrScaledQ = output_dQKV->scale.dptr;
+  void* devPtrScaledK = output_dQKV->scale.dptr;
+  void* devPtrScaledV = output_dQKV->scale.dptr;
+//  void* devPtrDescaledQ = output_dQKV->scale_inv.dptr;
+//  void* devPtrDescaledK = output_dQKV->scale_inv.dptr;
+//  void* devPtrDescaledV = output_dQKV->scale_inv.dptr;
 
-  void* devPtrM = inputM->data.dptr;
-  void* devPtrZInv = inputZInv->data.dptr;
+  void* devPtrM = input_M->data.dptr;
+  void* devPtrZInv = input_ZInv->data.dptr;
 
-  void* devPtrScaleS = inputS->scale.dptr;
-  void* devPtrDescaleS = inputS->scale_inv.dptr;
-  void* devPtrAmaxdS = input_dS->amax.dptr;
-  void* devPtrScaledS = input_dS->scale.dptr;
-  void* devPtrDescaledS = input_dS->scale_inv.dptr;
+  void* devPtrScaleS = input_S->scale.dptr;
+  void* devPtrDescaleS = input_S->scale_inv.dptr;
+  void* devPtrAmaxdS = output_dS->amax.dptr;
+  void* devPtrScaledS = output_dS->scale.dptr;
+  void* devPtrDescaledS = output_dS->scale_inv.dptr;
 
-  void* devPtrO = inputO->data.dptr;
-  void* devPtrDescaleO = inputO->scale_inv.dptr;
+  void* devPtrO = input_O->data.dptr;
+  void* devPtrDescaleO = input_O->scale_inv.dptr;
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
 
   void* devPtrQKVRaggedOffset = (void *)QKVRaggedOffset;
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
-  void* devPtrDropoutSeed = (void *)PhiloxUnpacked;
-  void* devPtrDropoutOffset = (void *)(PhiloxUnpacked + 1);
-  void* devPtrMNKOverride = (void *)ActualSeqlens; //nullptr;
+  void* devPtrDropoutSeed = (void *)RngState;
+  void* devPtrDropoutOffset = (void *)(RngState + 1);
+  void* devPtrMNKOverride = (void *)Seqlens; //nullptr;
 
-  const DType QKV_type = inputQKV->data.dtype;
+  const DType QKV_type = input_QKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
   uint64_t workspace_size = 0;
 
-  //void* devPtrKTranspose = nullptr; 
-
-  //printf(" before conditions ------------ %ld, %ld \n",seed, offset);
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    if (debug) printf(" select fp8 ------------ \n");
-		//seed, offset,
-    cudnn_flash_attn::cudnn_fa_bprop_fp8(b, h, max_seq_len, max_seq_len, d,
-		scale_q_k,
-		p_dropout, 
-		layout, 
-                devPtrQKV,
-                devPtrM,
-                devPtrZInv,
-                devPtrO,
-                devPtrdO,
-                devPtrdQKV,
-                devPtrDropoutSeed,
-                devPtrDropoutOffset,
-                devPtrDescaleQ,
-                devPtrDescaleK,
-                devPtrDescaleV,
-                devPtrDescaleO,
-                devPtrDescaledO,
-                devPtrDescaleS,
-                devPtrDescaledS,
-                devPtrScaleS,
-                devPtrScaledS,
-                devPtrScaledQ,
-                devPtrScaledK,
-                devPtrScaledV,
-                devPtrAmaxdS,
-                devPtrAmaxdQ,
-                devPtrAmaxdK,
-                devPtrAmaxdV,
-                devPtrQKVRaggedOffset,
-                devPtrORaggedOffset,
-		devPtrMNKOverride,
-                get_cudnn_dtype(QKV_type),
-		workspace->data.dptr,
-		&workspace_size);
+    fused_attn::fa_cudnn_fp8_bprop(b, h, max_seq_len, max_seq_len, d,
+		    attn_scale, p_dropout, layout,
+		    devPtrQKV, devPtrM, devPtrZInv,
+		    devPtrO, devPtrdO, devPtrdQKV,
+		    devPtrDropoutSeed, devPtrDropoutOffset,
+		    devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+		    devPtrDescaleO, devPtrDescaledO,
+		    devPtrDescaleS, devPtrDescaledS,
+		    devPtrScaleS, devPtrScaledS,
+		    devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+		    devPtrAmaxdS,
+		    devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV,
+		    devPtrQKVRaggedOffset, devPtrORaggedOffset,
+		    devPtrMNKOverride,
+		    get_cudnn_dtype(QKV_type),
+		    workspace->data.dptr,
+		    &workspace_size);
 
     if (workspace_size > 0)
     {
-        if (workspace->data.dptr == nullptr)
-        {
-            if (debug) printf("workspace is nullptr, size required is %ld return to allocate \n", workspace_size);
-	    workspace->data.shape = { workspace_size };
-	    workspace->data.dtype = DType::kByte;
-            return;
-        }
+      if (workspace->data.dptr == nullptr)
+      {
+        workspace->data.shape = { workspace_size };
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
     }
     else if (workspace_size == 0)
     {
-            if (debug) printf("workspace size required is 0 return to allocate \n");
-	    //workspace->data.dptr == nullptr;
-	    workspace->data.shape = { 1 };
-	    workspace->data.dtype = DType::kByte;
-            return;
+      workspace->data.shape = { 1 };
+      workspace->data.dtype = DType::kByte;
+      return;
     }
-    //if (workspace->data.dptr == nullptr)
-    //{
-    //  workspace->data.dtype = transformer_engine::DType::kByte;
-    //  workspace->data.shape = {workspace_size};
-    //  return;
-    //}
-
 #else
     printf("Error: CUDNN_VERSION must be >= 8900! \n");
 #endif
@@ -2512,94 +2114,72 @@ void cudnn_fa_bwd(int64_t b, int64_t max_seq_len,
 
 } // namespace transformer_engine
 
-		//uint64_t seed, uint64_t offset,
-void nvte_cudnn_flash_attn_fwd(
+void nvte_fused_attn_fwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
-		NVTETensor QKV,
+                float attn_scale, float p_dropout,
+		int qkv_layout, bool is_training,
+		const NVTETensor QKV,
 		NVTETensor M,
                 NVTETensor ZInv,
                 NVTETensor S,
                 NVTETensor O,
 		int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-                int32_t *ActualSeqlens,
-                uint64_t *PhiloxUnpacked,
+                int32_t *Seqlens,
+                uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream
-) {
-                //uint64_t *PhiloxUnpacked_CPU,
-                //int64_t *ActualSeqlens,
-
-  //printf("============= NVTE fwd ========== \n");
+		cudaStream_t stream)
+{
   NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
   using namespace transformer_engine;
-  Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
-  Tensor *inputM = reinterpret_cast<Tensor*>(M);
-  Tensor *inputZInv = reinterpret_cast<Tensor*>(ZInv);
-  Tensor *inputS = reinterpret_cast<Tensor*>(S);
-  Tensor *inputO = reinterpret_cast<Tensor*>(O);
+  const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
+  Tensor *output_M = reinterpret_cast<Tensor*>(M);
+  Tensor *output_ZInv = reinterpret_cast<Tensor*>(ZInv);
+  Tensor *output_S = reinterpret_cast<Tensor*>(S);
+  Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  if (debug) printf(" calling cudnn fwd ------------ \n");
-		  //seed, offset,
-  cudnn_fa_fwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
-		  inputQKV, inputM, inputZInv, inputS, inputO,
-		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
-		  PhiloxUnpacked,
-		  wkspace,
-		  stream);
-                  //PhiloxUnpacked_CPU,
-                  //ActualSeqlens,
-		  //wspace->data.dptr,
-		  //wspace->data.shape[0],
-  if (debug) printf(" end calling cudnn fwd ------------ \n");
-
+  fused_attn_fwd(b, max_seq_len, total_seqs, h, d,
+		  attn_scale, p_dropout, qkv_layout, is_training,
+		  input_QKV, output_M, output_ZInv, output_S, output_O,
+		  QKVRaggedOffset, ORaggedOffset, Seqlens,
+		  RngState, wkspace, stream);
 }
 
-		//uint64_t seed, uint64_t offset,
-void nvte_cudnn_flash_attn_bwd(
+void nvte_fused_attn_bwd(
 		int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
-		NVTETensor QKV,
+                float attn_scale, float p_dropout, int qkv_layout,
+		const NVTETensor QKV,
 		NVTETensor dQKV,
-		NVTETensor M,
-                NVTETensor ZInv,
-                NVTETensor S,
+		const NVTETensor M,
+                const NVTETensor ZInv,
+                const NVTETensor S,
                 NVTETensor dS,
-                NVTETensor O,
-                NVTETensor dO,
+                const NVTETensor O,
+                const NVTETensor dO,
 		int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-                int32_t *ActualSeqlens,
-                uint64_t *PhiloxUnpacked,
+                int32_t *Seqlens,
+                uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream
-) {
-
-//  printf("============= NVTE bwd ========== \n");
+		cudaStream_t stream)
+{
   NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
   using namespace transformer_engine;
-  Tensor *inputQKV = reinterpret_cast<Tensor*>(QKV);
-  Tensor *input_dQKV = reinterpret_cast<Tensor*>(dQKV);
-  Tensor *inputM = reinterpret_cast<Tensor*>(M);
-  Tensor *inputZInv = reinterpret_cast<Tensor*>(ZInv);
-  Tensor *inputS = reinterpret_cast<Tensor*>(S);
-  Tensor *input_dS = reinterpret_cast<Tensor*>(dS);
-  Tensor *inputO = reinterpret_cast<Tensor*>(O);
-  Tensor *input_dO = reinterpret_cast<Tensor*>(dO);
+  const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
+  Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
+  const Tensor *input_M = reinterpret_cast<const Tensor*>(M);
+  const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(ZInv);
+  const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
+  Tensor *output_dS = reinterpret_cast<Tensor*>(dS);
+  const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
+  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-		  //seed, offset,
-  cudnn_fa_bwd(b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout,
-		  inputQKV, input_dQKV, inputM, inputZInv, inputS, input_dS, inputO, input_dO,
-		  QKVRaggedOffset, ORaggedOffset, ActualSeqlens,
-		  PhiloxUnpacked,
-		  wkspace,
-		  stream);
-		  //wspace->data.dptr,
-		  //wspace->data.shape[0],
-
+  fused_attn_bwd(b, max_seq_len, total_seqs, h, d, attn_scale, p_dropout, qkv_layout,
+		  input_QKV, output_dQKV, input_M, input_ZInv, input_S, output_dS, input_O, input_dO,
+		  QKVRaggedOffset, ORaggedOffset, Seqlens,
+		  RngState, wkspace, stream);
 }
