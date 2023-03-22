@@ -69,7 +69,7 @@ def get_mha_layout(qkv_layout: str):
         return 2 
 
 def fp8_fused_attn_fwd(
-    qkv: torch.Tensor,
+    QKV: torch.Tensor,
     qkv_dtype: tex.DType,
     cu_seqlens: torch.Tensor,
     d_scale_qkv: torch.Tensor,
@@ -87,7 +87,7 @@ def fp8_fused_attn_fwd(
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-    check_qkv(qkv)
+    check_qkv(QKV)
     check_cu_seqlens(cu_seqlens)
     check_scalar(d_scale_qkv)
     check_scalar(q_scale_s)
@@ -99,10 +99,10 @@ def fp8_fused_attn_fwd(
     max_seq_len = max(seqlens)
     #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
-    assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
-    total_seqs = qkv.size(0)
-    h = qkv.size(2)
-    d = qkv.size(3)
+    assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
+    total_seqs = QKV.size(0)
+    h = QKV.size(2)
+    d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
     qkv_ragged_offset = cu_seqlens * 3 * h * d
     o_ragged_offset = cu_seqlens * h * d
@@ -119,7 +119,7 @@ def fp8_fused_attn_fwd(
             b, max_seq_len, total_seqs, h, d,
             attn_scale, p_dropout,
             qkv_layout, is_training, set_zero,
-            qkv, qkv_dtype, d_scale_qkv,
+            QKV, qkv_dtype, d_scale_qkv,
             #d_scale_s, d_scale_o,
             q_scale_s, q_scale_o,
             amax_s, amax_o,
@@ -134,7 +134,7 @@ def fp8_fused_attn_fwd(
     return O, M, ZInv, rng_state 
 
 def fp8_fused_attn_bwd(
-    qkv: torch.Tensor,
+    QKV: torch.Tensor,
     O: torch.Tensor,
     dO: torch.Tensor,
     M: torch.Tensor,
@@ -159,7 +159,7 @@ def fp8_fused_attn_bwd(
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     check_o(dO)
-    check_qkv(qkv)
+    check_qkv(QKV)
     check_o(O)
     check_cu_seqlens(cu_seqlens)
 
@@ -167,10 +167,10 @@ def fp8_fused_attn_bwd(
     max_seq_len = max(seqlens)
     #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
-    assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
-    total_seqs = qkv.size(0)
-    h = qkv.size(2)
-    d = qkv.size(3)
+    assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
+    total_seqs = QKV.size(0)
+    h = QKV.size(2)
+    d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
 
     check_stats(M, b, h, max_seq_len)
@@ -211,7 +211,7 @@ def fp8_fused_attn_bwd(
             b, max_seq_len, total_seqs, h, d,
             attn_scale, p_dropout,
             qkv_layout, set_zero,
-            qkv, O, dO, M, ZInv,
+            QKV, O, dO, M, ZInv,
             qkv_dtype,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, 
             #d_scale_ds, d_scale_dqkv,
