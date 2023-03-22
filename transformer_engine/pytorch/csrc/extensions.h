@@ -6,7 +6,7 @@
 
 #include "common.h"
 
-std::vector<at::Tensor> fused_attn_fp8_fwd(
+std::vector<at::Tensor> fused_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float attn_scale, float p_dropout,
@@ -25,7 +25,7 @@ std::vector<at::Tensor> fused_attn_fp8_fwd(
                 at::Tensor &Seqlens,
                 c10::optional<at::Generator> &rng_gen);
 
-at::Tensor fused_attn_fp8_bwd(
+at::Tensor fused_attn_bwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
                 float attn_scale, float p_dropout,

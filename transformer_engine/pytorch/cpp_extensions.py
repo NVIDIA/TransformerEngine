@@ -68,7 +68,7 @@ def get_mha_layout(qkv_layout: str):
     elif qkv_layout == "kv_interleaved":
         return 2 
 
-def fp8_fused_attn_fwd(
+def fused_attn_fwd(
     QKV: torch.Tensor,
     qkv_dtype: tex.DType,
     cu_seqlens: torch.Tensor,
@@ -115,7 +115,7 @@ def fp8_fused_attn_fwd(
     #        d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o)
     #print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
     #print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
-    O, M, ZInv, rng_state = tex.fused_attn_fp8_fwd(
+    O, M, ZInv, rng_state = tex.fused_attn_fwd(
             b, max_seq_len, total_seqs, h, d,
             attn_scale, p_dropout,
             qkv_layout, is_training, set_zero,
@@ -133,7 +133,7 @@ def fp8_fused_attn_fwd(
 
     return O, M, ZInv, rng_state 
 
-def fp8_fused_attn_bwd(
+def fused_attn_bwd(
     QKV: torch.Tensor,
     O: torch.Tensor,
     dO: torch.Tensor,
@@ -207,7 +207,7 @@ def fp8_fused_attn_bwd(
     #print(qkv_ragged_offset, o_ragged_offset, seqlens)
     #print(' ')
 
-    dQKV = tex.fused_attn_fp8_bwd(
+    dQKV = tex.fused_attn_bwd(
             b, max_seq_len, total_seqs, h, d,
             attn_scale, p_dropout,
             qkv_layout, set_zero,
