@@ -68,28 +68,6 @@ void nvte_cast_transpose_dbias(const NVTETensor input,
                                NVTETensor workspace,
                                cudaStream_t stream);
 
-/*! \brief Transpose the FP8 input. Additionally, reduce the input along the first dimension.
- *
- * This function takes FP8 input and produces 2 results:
- *  - `transposed_output` is the transposed result of the input.
- *  - `dbias` is the result of the reduction of the input along the first dimension.
- *
- *  Calling this function with workspace being an empty tensor will not perform the operation,
- *  but instead set the shape and type of the workspace tensor to the required values.
- *
- *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in,out] transposed_output   Result of the transpose. Shape: [H, N].
- *  \param[out]    dbias               Result of the reduction of the input along the
- *                                     first dimension. Shape: [H].
- *  \param[out]    workspace           Workspace tensor.
- *  \param[in]     stream              CUDA stream used for the operation.
- */
-void nvte_fp8_transpose_dbias(const NVTETensor input,
-                               NVTETensor transposed_output,
-                               NVTETensor dbias,
-                               NVTETensor workspace,
-                               cudaStream_t stream);
-
 /*! \brief Compute backward of GELU operation on the input, then cast and transpose. Additionally,
  *         reduce the result of the GELU backward along the first dimension.
  *
