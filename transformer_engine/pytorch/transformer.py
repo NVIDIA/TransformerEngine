@@ -415,10 +415,11 @@ class DotProductAttention(torch.nn.Module):
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
+        self.device_compute_capability = get_device_compute_capability()
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attn_mask_type == "causal"
-            and get_device_compute_capability() >= 8.0
+            and self.device_compute_capability >= 8.0
         )
 
         attn_kwargs = {
@@ -505,6 +506,7 @@ class DotProductAttention(torch.nn.Module):
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
+            or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
         ):
             use_flash_attention = False
 
