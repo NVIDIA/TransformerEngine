@@ -76,7 +76,7 @@ from .cpp_extensions import (
     layernorm_fwd_inf,
     cast_to_fp8,
     cast_from_fp8,
-    fp8_fused_attn_fwd,
+    fused_attn_fwd,
 )
 from .constants import GemmParallelModes, dist_group_type, TE_DType
 
@@ -3079,7 +3079,7 @@ class _cuDNN_FlashAttn(torch.autograd.Function):
             workspace: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-        fp8_fused_attn_fwd(QKV,
+        fused_attn_fwd(QKV,
                     M,
                     ZInv,
                     O,

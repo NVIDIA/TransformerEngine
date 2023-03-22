@@ -86,7 +86,7 @@ at::PhiloxCudaState init_philox_state(
   return philox_args;
 }
 
-std::vector<at::Tensor> fused_attn_fp8_fwd(
+std::vector<at::Tensor> fused_attn_fwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
 		float attn_scale, float p_dropout,
@@ -184,7 +184,7 @@ std::vector<at::Tensor> fused_attn_fp8_fwd(
   return {O, M, ZInv, rng_state};
 }
 
-at::Tensor fused_attn_fp8_bwd(
+at::Tensor fused_attn_bwd(
 		int64_t b, int64_t max_seq_len,
 		int64_t total_seqs, int64_t h, int64_t d,
 		float attn_scale, float p_dropout,
@@ -1198,8 +1198,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
-  m.def("fused_attn_fp8_fwd", &fused_attn_fp8_fwd, "Fused Attention FP8/BF16/FP16 FWD");
-  m.def("fused_attn_fp8_bwd", &fused_attn_fp8_bwd, "Fused Attention FP8/BF16/FP16 BWD");
+  m.def("fused_attn_fwd", &fused_attn_fwd, "Fused Attention FP8/BF16/FP16 FWD");
+  m.def("fused_attn_bwd", &fused_attn_bwd, "Fused Attention FP8/BF16/FP16 BWD");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
 
