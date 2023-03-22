@@ -59,7 +59,7 @@ class Net(nn.Module):
 
     @nn.compact
     def __call__(self, x, disable_dropout=False):
-        x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
+        x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
         te_Encoder = partial(te.TransformerLayer,
                              hidden_size=256,
@@ -128,7 +128,6 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_f
         batch_labels = train_ds['label'][perm, ...]
         state, loss, accuracy, var_collect = train_fn(state, batch_inputs, batch_labels,
                                                       var_collect, rngs, use_fp8)
-
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -226,8 +225,6 @@ def get_params_pspec(sharding_rules, abs_var_collect):
     rules_dict = {}
     for key, value in sharding_rules:
         rules_dict[key] = value
-    rules_dict[NAMED_BROADCAST_AXIS] = None
-    rules_dict[NAMED_TP_AXIS] = DEVICE_TP_AXIS
 
     def to_device_axis(logical_axis):
         partitions = [rules_dict[key] for key in logical_axis]
@@ -278,7 +275,8 @@ def train_and_evaluate(args):
             encoder = Net(num_embed)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs,
                                              jnp.empty(input_shape, dtype=jnp.int32))
-            sharding_rules = te.extend_logical_axis_rules(tuple())
+            customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
+            sharding_rules = te.extend_logical_axis_rules(tuple()) + customized_rules
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
 
             in_shardings = (None, None)

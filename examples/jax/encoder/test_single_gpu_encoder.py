@@ -44,7 +44,7 @@ class Net(nn.Module):
 
     @nn.compact
     def __call__(self, x, disable_dropout=False):
-        x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
+        x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
         te_Encoder = partial(te.TransformerLayer,
                              hidden_size=256,
@@ -68,8 +68,8 @@ class Net(nn.Module):
         return x
 
 
-@jax.jit
-def apply_model(state, inputs, labels, var_collect, rngs=None):
+@partial(jax.jit, static_argnums=5)
+def train_step(state, inputs, labels, var_collect, rngs, use_fp8):
     """Computes gradients, loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
@@ -79,25 +79,16 @@ def apply_model(state, inputs, labels, var_collect, rngs=None):
         return loss, logits
 
     var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
-
-    if rngs is not None:
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, logits), grads = grad_fn(var_collect)
-    else:
-        loss, logits = loss_fn(var_collect, disable_dropout=True)
-        grads = None
-
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, logits), grads = grad_fn(var_collect)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-    return grads, loss, accuracy
 
-
-@partial(jax.jit, static_argnums=2)
-def update_model(state, grads, use_fp8):
-    """Update model params and FP8 meta."""
-    state = state.apply_gradients(grads=grads[PARAMS_KEY])
+    var_collect, grads = grads.pop(PARAMS_KEY)
+    state = state.apply_gradients(grads=grads)
     if use_fp8:
-        grads = te.update_fp8_metas(grads)
-    return state, grads
+        var_collect = te.update_fp8_metas(var_collect)
+
+    return state, loss, accuracy, var_collect
 
 
 def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
@@ -113,14 +104,30 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
     for perm in perms:
         batch_inputs = train_ds['sentence'][perm, ...]
         batch_labels = train_ds['label'][perm, ...]
-        grads, loss, accuracy = apply_model(state, batch_inputs, batch_labels, var_collect, rngs)
-        state, var_collect = update_model(state, grads, use_fp8)
+        state, loss, accuracy, var_collect = train_step(state, batch_inputs, batch_labels,
+                                                        var_collect, rngs, use_fp8)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
     avg_loss = np.mean(epoch_loss)
     avg_accuracy = np.mean(epoch_accuracy)
     return state, avg_loss, avg_accuracy, var_collect
+
+
+@jax.jit
+def eval_step(state, inputs, labels, var_collect):
+    """Computes loss and accuracy for a single batch."""
+
+    def loss_fn(var_collect, disable_dropout=False):
+        logits = state.apply_fn(var_collect, inputs, disable_dropout)
+        one_hot = jax.nn.one_hot(labels, 2)
+        loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
+        return loss, logits
+
+    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    loss, logits = loss_fn(var_collect, disable_dropout=True)
+    accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
+    return loss, accuracy
 
 
 def eval_model(state, test_ds, batch_size, var_collect):
@@ -135,7 +142,7 @@ def eval_model(state, test_ds, batch_size, var_collect):
         batch_end = batch_start + batch_size
         batch_inputs = test_ds['sentence'][batch_start:batch_end]
         batch_labels = test_ds['label'][batch_start:batch_end]
-        _, loss, accuracy = apply_model(state, batch_inputs, batch_labels, var_collect)
+        loss, accuracy = eval_step(state, batch_inputs, batch_labels, var_collect)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -183,9 +190,12 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
+    inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+    labels = jnp.empty(label_shape, dtype=jnp.bfloat16)
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
     assert "Float8" in str(
-        jax.make_jaxpr(apply_model)(state, jnp.zeros(input_shape, dtype=jnp.int32),
-                                    jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
+        jax.make_jaxpr(train_step, static_argnums=5)(state, inputs, labels, var_collect, rngs,
+                                                     True))
 
 
 def train_and_evaluate(args):
@@ -217,11 +227,10 @@ def train_and_evaluate(args):
             check_fp8(state, var_collect, input_shape, label_shape)
 
         if args.dry_run:
-            apply_model(state,
-                        jnp.zeros(input_shape, dtype=jnp.int32),
-                        jnp.zeros(label_shape, dtype=jnp.bfloat16),
-                        var_collect,
-                        rngs={DROPOUT_KEY: dropout_rng})
+            inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+            labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
+            rngs = {DROPOUT_KEY: dropout_rng}
+            train_step(state, inputs, labels, var_collect, rngs, args.use_fp8)
             print("PASSED")
             return None
 
@@ -232,6 +241,7 @@ def train_and_evaluate(args):
 
             state, train_loss, train_accuracy, var_collect = train_epoch(
                 state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8)
+
             test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size, var_collect)
 
             print(f"Epoch: {epoch:>2} "

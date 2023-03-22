@@ -53,7 +53,7 @@ class Net(nn.Module):
 
     @nn.compact
     def __call__(self, x, disable_dropout=False):
-        x = nn.Embed(num_embeddings=self.num_embed, features=768, dtype=jnp.bfloat16)(x)
+        x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
         te_Encoder = partial(te.TransformerLayer,
                              hidden_size=256,
@@ -77,7 +77,7 @@ class Net(nn.Module):
         return x
 
 
-def apply_model(state, inputs, labels, var_collect, rngs=None):
+def train_step(state, inputs, labels, var_collect, rngs, use_fp8):
     """Computes gradients, loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
@@ -87,29 +87,19 @@ def apply_model(state, inputs, labels, var_collect, rngs=None):
         return loss, logits
 
     var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
-
-    if rngs is not None:
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, logits), grads = grad_fn(var_collect)
-    else:
-        loss, logits = loss_fn(var_collect, disable_dropout=True)
-        grads = None
-
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, logits), grads = grad_fn(var_collect)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-    return grads, loss, accuracy
 
-
-def update_model(state, grads, use_fp8):
-    """Update model params and FP8 meta."""
     var_collect, grads = grads.pop(PARAMS_KEY)
     state = state.apply_gradients(grads=grads)
-    del grads
     if use_fp8:
         var_collect = te.update_fp8_metas(var_collect)
-    return state, var_collect
+
+    return state, loss, accuracy, var_collect
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, apply_fn, update_fn):
+def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn):
     """Train for a single epoch."""
     train_ds_size = len(train_ds['sentence'])
     steps_per_epoch = train_ds_size // batch_size
@@ -122,8 +112,8 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, apply_f
     for perm in perms:
         batch_inputs = train_ds['sentence'][perm, ...]
         batch_labels = train_ds['label'][perm, ...]
-        grads, loss, accuracy = apply_fn(state, batch_inputs, batch_labels, var_collect, rngs)
-        state, var_collect = update_fn(state, grads, use_fp8)
+        state, loss, accuracy, var_collect = train_fn(state, batch_inputs, batch_labels,
+                                                      var_collect, rngs, use_fp8)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -132,7 +122,22 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, apply_f
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_model(state, test_ds, batch_size, var_collect, apply_fn):
+def eval_step(state, inputs, labels, var_collect):
+    """Computes loss and accuracy for a single batch."""
+
+    def loss_fn(var_collect, disable_dropout=False):
+        logits = state.apply_fn(var_collect, inputs, disable_dropout)
+        one_hot = jax.nn.one_hot(labels, 2)
+        loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
+        return loss, logits
+
+    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    loss, logits = loss_fn(var_collect, disable_dropout=True)
+    accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
+    return loss, accuracy
+
+
+def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
     """Evaluation loop."""
     test_ds_size = len(test_ds['sentence'])
     num_steps = test_ds_size // batch_size
@@ -144,7 +149,7 @@ def eval_model(state, test_ds, batch_size, var_collect, apply_fn):
         batch_end = batch_start + batch_size
         batch_inputs = test_ds['sentence'][batch_start:batch_end]
         batch_labels = test_ds['label'][batch_start:batch_end]
-        _, loss, accuracy = apply_fn(state, batch_inputs, batch_labels, var_collect, None)
+        loss, accuracy = eval_fn(state, batch_inputs, batch_labels, var_collect)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -193,9 +198,12 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
+    inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+    labels = jnp.empty(label_shape, dtype=jnp.bfloat16)
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
     assert "Float8" in str(
-        jax.make_jaxpr(apply_model)(state, jnp.zeros(input_shape, dtype=jnp.int32),
-                                    jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
+        jax.make_jaxpr(train_step, static_argnums=5)(state, inputs, labels, var_collect, rngs,
+                                                     True))
 
 
 def get_params_pspec(sharding_rules, abs_var_collect):
@@ -210,9 +218,7 @@ def get_params_pspec(sharding_rules, abs_var_collect):
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
     params_axes_pspec = jax.tree_map(to_device_axis, nn.partitioning.get_axis_names(params_axes))
-
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
-
     params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
     return params_pspec
 
@@ -273,20 +279,21 @@ def train_and_evaluate(args):
             labels_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS,)
 
             in_shardings = (state_pspec, inputs_pspec, labels_pspec, None, None)
-            out_shardings = (None, None, None)
-            pjit_apply_model = pjit(apply_model, in_shardings, out_shardings)
+            out_shardings = (state_pspec, None, None, None)
+            pjit_train_step = pjit(train_step, in_shardings, out_shardings, static_argnums=(5,))
 
-            in_shardings = (state_pspec, None)
+            in_shardings = (state_pspec, inputs_pspec, labels_pspec, None)
             out_shardings = (None, None)
-            pjit_update_model = pjit(update_model, in_shardings, out_shardings, static_argnums=2)
+            pjit_eval_step = pjit(eval_step, in_shardings, out_shardings)
 
             if args.use_fp8:
                 check_fp8(state, var_collect, input_shape, label_shape)
 
             if args.dry_run:
+                inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+                labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 rngs = {DROPOUT_KEY: dropout_rng}
-                pjit_apply_model(state, jnp.zeros(input_shape, dtype=jnp.int32),
-                                 jnp.zeros(label_shape, dtype=jnp.bfloat16), var_collect, rngs)
+                pjit_train_step(state, inputs, labels, var_collect, rngs, args.use_fp8)
                 print("PASSED")
                 return None
 
@@ -297,10 +304,10 @@ def train_and_evaluate(args):
 
                 state, train_loss, train_accuracy, var_collect = train_epoch(
                     state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8,
-                    pjit_apply_model, pjit_update_model)
+                    pjit_train_step)
 
                 test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size,
-                                                      var_collect, pjit_apply_model)
+                                                      var_collect, pjit_eval_step)
 
                 print(f"Epoch: {epoch:>2} "
                       f"Train Loss: {train_loss:.6f} "
