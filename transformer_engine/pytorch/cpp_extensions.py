@@ -16,7 +16,6 @@ def check_tensor(x: torch.Tensor):
 
 def check_qkv(qkv: torch.Tensor):
     check_tensor(qkv)
-    #print('qkv type ',qkv.dtype)
     assert (
             qkv.dtype is torch.uint8
             and qkv.dim() == 4
@@ -53,12 +52,12 @@ def check_scalar(scalar: torch.Tensor):
             and scalar.numel() == 1
             ), f"Tensor needs to be a float32 scalar."
 
-def check_seed(philox_unpacked: torch.Tensor):
-    check_tensor(philox_unpacked)
+def check_rng_state(rng_state: torch.Tensor):
+    check_tensor(rng_state)
     assert (
-            philox_unpacked.dtype is torch.int64
-            and philox_unpacked.numel() == 2
-            ), f"Philox tensor should have two int64s."
+            rng_state.dtype is torch.int64
+            and rng_state.numel() == 2
+            ), f"rng_state should be [seed, offset] in int64."
 
 def get_mha_layout(qkv_layout: str):
     qkv_layout = qkv_layout.lower()
@@ -69,7 +68,7 @@ def get_mha_layout(qkv_layout: str):
     elif qkv_layout == "kv_interleaved":
         return 2 
 
-def cudnn_flash_attn_fwd(
+def fp8_fused_attn_fwd(
     qkv: torch.Tensor,
     qkv_dtype: tex.DType,
     cu_seqlens: torch.Tensor,
@@ -78,99 +77,66 @@ def cudnn_flash_attn_fwd(
     q_scale_o: torch.Tensor,
     amax_s: torch.Tensor,
     amax_o: torch.Tensor,
-    d_scale_s: torch.Tensor,
-    d_scale_o: torch.Tensor,
+#    d_scale_s: torch.Tensor,
+#    d_scale_o: torch.Tensor,
     p_dropout: float,
-    max_seq_len: int,
+#    max_seq_len: int,
     is_training: bool,
     set_zero: bool,
     rng_gen: torch.Generator = None,
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-    #print("============== cpp_extension ============ ")
-    #print("qkv_dtype ",qkv_dtype, qkv.shape)
-    #print("entering fwd ")
     check_qkv(qkv)
     check_cu_seqlens(cu_seqlens)
     check_scalar(d_scale_qkv)
+    check_scalar(q_scale_s)
     check_scalar(q_scale_o)
     check_scalar(amax_s)
     check_scalar(amax_o)
 
-    ##qkv_2d = qkv.view([512,3072]).contiguous()
-    #descale_qkv = torch.Tensor([1.0])
-    #qkv_float32 = torch.ops.tex_ts.cast_from_fp8_ts(qkv, descale_qkv, 0, qkv_dtype, tex.DType.kFloat32)
-    #torch.cuda.synchronize()
-    #print('----------- qkv float32 --------')
-    #print(qkv_float32)
-
-    assert max_seq_len <= 512, f"max_seq_len must be <= 512."
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    max_seq_len = max(seqlens)
+    #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
-    #actual_seqlens = (cu_seqlens[1:]-cu_seqlens[:-1]).to(dtype=torch.int32) 
-    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    #print('actual seqlens ',actual_seqlens,cu_seqlens)
-    #print('cu_seqlens ',cu_seqlens)
-
     total_seqs = qkv.size(0)
     h = qkv.size(2)
     d = qkv.size(3)
-    scale_q_k = 1.0 / math.sqrt(d)
-
-#    M = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
-#    ZInv = torch.empty([b, h, max_seq_len, 1], dtype = torch.float32, device = "cuda")
-#    O = torch.empty([total_seqs, h, d], dtype = torch.uint8, device = "cuda")
-    QKVRaggedOffset = cu_seqlens * 3 * h * d
-    ORaggedOffset = cu_seqlens * h * d
-
-#    philox_unpacked = torch.empty([2], dtype = torch.int64, device="cuda")
-#    if set_zero:
-#        O.zero_()
-
-#    qkv_type = TE_DType[qkv.dtype]
-#    scale_amax_type = TE_DType[d_scale_qkv.dtype] 
-#    seqlen_philox_type = TE_DType[cu_seqlens.dtype]
-#             qkv_type,
-#             scale_amax_type,
-#             seqlen_philox_type,
+    attn_scale = 1.0 / math.sqrt(d)
+    qkv_ragged_offset = cu_seqlens * 3 * h * d
+    o_ragged_offset = cu_seqlens * h * d
 
     qkv_layout = get_mha_layout(qkv_layout)
-    #rng_gen_new = torch.Generator(device="cuda") if not rng_gen else rng_gen
-    #print("before calling ext fwd ")
-    print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero: ',
-            b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
-    print('[P] qkv: ', qkv.dtype, qkv_dtype)
-    print('[P] d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o: ',
-            d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o)
-    print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
-    print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
-    print('------- fwd',d_scale_qkv.shape,d_scale_qkv.dtype,d_scale_qkv)
-    O, M, ZInv, philox_unpacked = tex.cudnn_flash_attn_fwd(
-             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
-             qkv, qkv_dtype,
-             d_scale_qkv,
-             d_scale_s,
-             d_scale_o,
-             q_scale_s,
-             q_scale_o,
-             amax_s,
-             amax_o,
-             QKVRaggedOffset,
-             ORaggedOffset,
-             actual_seqlens,
-             rng_gen,
+    #print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero: ',
+    #        b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
+    #print('[P] qkv: ', qkv.dtype, qkv_dtype)
+    #print('[P] d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o: ',
+    #        d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o)
+    #print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
+    #print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
+    O, M, ZInv, rng_state = tex.fused_attn_fp8_fwd(
+            b, max_seq_len, total_seqs, h, d,
+            attn_scale, p_dropout,
+            qkv_layout, is_training, set_zero,
+            qkv, qkv_dtype, d_scale_qkv,
+            #d_scale_s, d_scale_o,
+            q_scale_s, q_scale_o,
+            amax_s, amax_o,
+            qkv_ragged_offset, o_ragged_offset,
+            seqlens,
+            rng_gen,
     )
-    #print('[P] O, M, ZInv, philox_unpacked: ')
-    #print(O[0,:5,:5], M[0,0,:5,0], ZInv[0,0,:5,0], philox_unpacked)
-    #print(O[1,:5,:5], M[1,0,:5,0], ZInv[1,0,:5,0], philox_unpacked)
+    #print('[P] O, M, ZInv, rng_state: ')
+    #print(O[0,:5,:5], M[0,0,:5,0], ZInv[0,0,:5,0], rng_state)
+    #print(O[1,:5,:5], M[1,0,:5,0], ZInv[1,0,:5,0], rng_state)
 
-    return O, M, ZInv, philox_unpacked 
+    return O, M, ZInv, rng_state 
 
-def cudnn_flash_attn_bwd(
-    dO: torch.Tensor,
+def fp8_fused_attn_bwd(
     qkv: torch.Tensor,
     O: torch.Tensor,
+    dO: torch.Tensor,
     M: torch.Tensor,
     ZInv: torch.Tensor,
     qkv_dtype: tex.DType,
@@ -184,87 +150,77 @@ def cudnn_flash_attn_bwd(
     q_scale_dqkv: torch.Tensor,
     amax_ds: torch.Tensor,
     amax_dqkv: torch.Tensor,
-    d_scale_ds: torch.Tensor,
-    d_scale_dqkv: torch.Tensor,
+#    d_scale_ds: torch.Tensor,
+#    d_scale_dqkv: torch.Tensor,
     p_dropout: float,
-    max_seq_len: int,
     set_zero: bool,
-    all_e5m2: bool, # unused
-    philox_unpacked: torch.Tensor,
+    rng_state: torch.Tensor,
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
-    check_o(O)
     check_o(dO)
     check_qkv(qkv)
+    check_o(O)
+    check_cu_seqlens(cu_seqlens)
 
-    x = ['dO', 'qkv', 'O', 'M', 'ZInv']
-    for i in x:
-        print('[P] '+i+': ',eval(i).dtype,eval(i).shape)
-    print('[P] qkv_dtype: ',qkv_dtype)
-    print('[P] cu_seqlens: ',cu_seqlens)
-    print('[P] d_scale_qkv, d_scale_s, d_scale_o, d_scale_do: ',d_scale_qkv, d_scale_s, d_scale_o, d_scale_do) 
-    print('[P] q_scale_s, q_scale_ds, q_scale_dqkv: ',q_scale_s, q_scale_ds, q_scale_dqkv) 
-    print('[P] amax_ds, amax_dqkv: ',amax_ds, amax_dqkv) 
-    print('[P] d_scale_ds, d_scale_dqkv: ',d_scale_ds, d_scale_dqkv) 
-    print('[P] p_dropout, max_seq_len, set_zero, all_e5m2, philox_unpacked, qkv_layout: ',p_dropout, max_seq_len, set_zero, all_e5m2, philox_unpacked, qkv_layout)
-    print(' ')
-    print('------',d_scale_qkv.shape,d_scale_qkv.dtype,d_scale_qkv)
-
-    assert max_seq_len <= 512, f"max_seq_len must be <= 512."
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    max_seq_len = max(seqlens)
+    #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
     assert b <= qkv.size(0), f"b must be <= qkv.size(0)."
-    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    #print('actual seqlens ',actual_seqlens,cu_seqlens)
-
     total_seqs = qkv.size(0)
     h = qkv.size(2)
     d = qkv.size(3)
-    scale_q_k = 1.0 / math.sqrt(d)
+    attn_scale = 1.0 / math.sqrt(d)
 
-    #print('M shape ',M.shape, ZInv.shape)
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
-    check_seed(philox_unpacked)
 
-    #dQtmp = torch.empty([b, h, max_seq_len, d], dtype = torch.float32, device="cuda")
-    #dQKV = torch.empty_like(qkv)
+    check_scalar(d_scale_qkv)
+    check_scalar(d_scale_s)
+    check_scalar(d_scale_o)
+    check_scalar(d_scale_do)
+    check_scalar(q_scale_s)
+    check_scalar(q_scale_ds)
+    check_scalar(q_scale_dqkv)
+    check_scalar(amax_ds)
+    check_scalar(amax_dqkv)
 
-    #if set_zero:
-    #    dQKV.zero_()
-
-    QKVRaggedOffset = cu_seqlens * 3 * h * d
-    ORaggedOffset = cu_seqlens * h * d
+    check_rng_state(rng_state)
     qkv_layout = get_mha_layout(qkv_layout)
-    print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero',
-            b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
-    print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
-    print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
-    dQKV = tex.cudnn_flash_attn_bwd(
-             b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero,
-             qkv,
-             dO,
-             O,
-             M,
-             ZInv,
-             qkv_dtype,
-             d_scale_qkv,
-             d_scale_s,
-             d_scale_o,
-             d_scale_do,
-             d_scale_ds,
-             d_scale_dqkv,
-             q_scale_s,
-             q_scale_ds,
-             q_scale_dqkv,
-             amax_ds,
-             amax_dqkv,
-             QKVRaggedOffset,
-             ORaggedOffset,
-             actual_seqlens,
-             philox_unpacked,
+
+    qkv_ragged_offset = cu_seqlens * 3 * h * d
+    o_ragged_offset = cu_seqlens * h * d
+
+    #x = ['dO', 'qkv', 'O', 'M', 'ZInv']
+    #for i in x:
+    #    print('[P] '+i+': ',eval(i).dtype,eval(i).shape)
+    #print('[P] qkv_dtype: ',qkv_dtype)
+    #print('[P] cu_seqlens: ',cu_seqlens)
+    #print('[P] d_scale_qkv, d_scale_s, d_scale_o, d_scale_do: ',d_scale_qkv, d_scale_s, d_scale_o, d_scale_do) 
+    #print('[P] q_scale_s, q_scale_ds, q_scale_dqkv: ',q_scale_s, q_scale_ds, q_scale_dqkv) 
+    #print('[P] amax_ds, amax_dqkv: ',amax_ds, amax_dqkv) 
+    #print('[P] p_dropout, set_zero, rng_state, qkv_layout: ',p_dropout, set_zero, rng_state, qkv_layout)
+    #print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero',
+    #        b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
+    #print('[P] qkv_ragged_offset, o_ragged_offset, seqlens: ')
+    #print(qkv_ragged_offset, o_ragged_offset, seqlens)
+    #print(' ')
+
+    dQKV = tex.fused_attn_fp8_bwd(
+            b, max_seq_len, total_seqs, h, d,
+            attn_scale, p_dropout,
+            qkv_layout, set_zero,
+            qkv, O, dO, M, ZInv,
+            qkv_dtype,
+            d_scale_qkv, d_scale_s, d_scale_o, d_scale_do, 
+            #d_scale_ds, d_scale_dqkv,
+            q_scale_s, q_scale_ds, q_scale_dqkv,
+            amax_ds, amax_dqkv,
+            qkv_ragged_offset, o_ragged_offset,
+            seqlens,
+            rng_state,
     )
-             #dQtmp,
 
     return dQKV
 

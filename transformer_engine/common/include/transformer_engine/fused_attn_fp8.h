@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_CUDNN_FLASH_ATTN_FP8_H_
-#define TRANSFORMER_ENGINE_CUDNN_FLASH_ATTN_FP8_H_
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 
 #include "transformer_engine.h"
 #include <cstdint>
@@ -32,43 +32,41 @@ enum class MHA_Matrix {
     O_Matrix            = 6, // final output
 };
 
-void nvte_cudnn_flash_attn_fwd(
+void nvte_fused_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
-                NVTETensor QKV,
+                float attn_scale, float p_dropout,
+                int qkv_layout, bool is_training,
+                const NVTETensor QKV,
                 NVTETensor M,
                 NVTETensor ZInv,
                 NVTETensor S,
                 NVTETensor O,
                 int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-		int32_t *ActualSeqlens,
-                uint64_t *PhiloxUnpacked,
+                int32_t *Seqlens,
+                uint64_t *RngState,
                 NVTETensor workspace,
                 cudaStream_t stream);
-		//uint64_t seed, uint64_t offset,
-                //uint64_t *PhiloxUnpacked_CPU,
 
-void nvte_cudnn_flash_attn_bwd(
+void nvte_fused_attn_bwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,
-                float scale_q_k, float p_dropout, int qkv_layout,
+                float attn_scale, float p_dropout, int qkv_layout,
                 const NVTETensor QKV,
-                const NVTETensor dQKV,
+                NVTETensor dQKV,
                 const NVTETensor M,
                 const NVTETensor ZInv,
                 const NVTETensor S,
-                const NVTETensor dS,
+                NVTETensor dS,
                 const NVTETensor O,
                 const NVTETensor dO,
                 int32_t *QKVRaggedOffset,
                 int32_t *ORaggedOffset,
-		int32_t *ActualSeqlens,
-                uint64_t *PhiloxUnpacked,
+                int32_t *Seqlens,
+                uint64_t *RngState,
                 NVTETensor workspace,
                 cudaStream_t stream);
-		//uint64_t seed, uint64_t offset,
 
 #ifdef __cplusplus
 }  // extern "C"
