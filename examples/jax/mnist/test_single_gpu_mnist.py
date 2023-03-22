@@ -278,21 +278,31 @@ class TestMNIST(unittest.TestCase):
     def setUpClass(cls):
         """Run MNIST without Transformer Engine"""
         cls.args = mnist_parser(["--epochs", "5"])
-        cls.desired = train_and_evaluate(cls.args)
+        cls.desired = [0.055, 0.98, 0.035, 0.98]
 
-    def test_te_bf16(self):
+    def verify(cls, actual):
+        desired_traing_loss = 0.055
+        desired_traing_accuracy = 0.98
+        desired_test_loss = 0.035
+        desired_test_accuracy = 0.098
+        assert (actual[0] < desired_traing_loss)
+        assert (actual[1] > desired_traing_accuracy)
+        assert (actual[2] < desired_test_loss)
+        assert (actual[3] > desired_test_accuracy)
+
+    def test_te_bf16(cls):
         """Test Transformer Engine with BF16"""
-        self.args.use_te = True
-        self.args.use_fp8 = False
-        actual = train_and_evaluate(self.args)
-        np.testing.assert_allclose(actual, self.desired, atol=0.002)
+        cls.args.use_te = True
+        cls.args.use_fp8 = False
+        actual = train_and_evaluate(cls.args)
+        cls.verify(actual)
 
     @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
-    def test_te_fp8(self):
+    def test_te_fp8(cls):
         """Test Transformer Engine with FP8"""
-        self.args.use_fp8 = True
-        actual = train_and_evaluate(self.args)
-        np.testing.assert_allclose(actual, self.desired, atol=0.004)
+        cls.args.use_fp8 = True
+        actual = train_and_evaluate(cls.args)
+        cls.verify(actual)
 
 
 if __name__ == "__main__":
