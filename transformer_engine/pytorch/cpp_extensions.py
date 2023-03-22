@@ -80,7 +80,6 @@ def fused_attn_fwd(
 #    d_scale_s: torch.Tensor,
 #    d_scale_o: torch.Tensor,
     p_dropout: float,
-#    max_seq_len: int,
     is_training: bool,
     set_zero: bool,
     rng_gen: torch.Generator = None,
@@ -97,7 +96,6 @@ def fused_attn_fwd(
 
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
     max_seq_len = max(seqlens)
-    #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
@@ -108,13 +106,7 @@ def fused_attn_fwd(
     o_ragged_offset = cu_seqlens * h * d
 
     qkv_layout = get_mha_layout(qkv_layout)
-    #print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero: ',
-    #        b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
-    #print('[P] qkv: ', qkv.dtype, qkv_dtype)
-    #print('[P] d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o: ',
-    #        d_scale_qkv, d_scale_s, d_scale_o, q_scale_s, q_scale_o, amax_s, amax_o)
-    #print('[P] QKVRaggedOffset, ORaggedOffset, actual_seqlens: ')
-    #print(QKVRaggedOffset, ORaggedOffset, actual_seqlens)
+
     O, M, ZInv, rng_state = tex.fused_attn_fwd(
             b, max_seq_len, total_seqs, h, d,
             attn_scale, p_dropout,
@@ -127,9 +119,6 @@ def fused_attn_fwd(
             seqlens,
             rng_gen,
     )
-    #print('[P] O, M, ZInv, rng_state: ')
-    #print(O[0,:5,:5], M[0,0,:5,0], ZInv[0,0,:5,0], rng_state)
-    #print(O[1,:5,:5], M[1,0,:5,0], ZInv[1,0,:5,0], rng_state)
 
     return O, M, ZInv, rng_state 
 
@@ -165,7 +154,6 @@ def fused_attn_bwd(
 
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
     max_seq_len = max(seqlens)
-    #assert max_seq_len <= 512, f"max_seq_len must be <= 512."
     b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
@@ -191,21 +179,6 @@ def fused_attn_bwd(
 
     qkv_ragged_offset = cu_seqlens * 3 * h * d
     o_ragged_offset = cu_seqlens * h * d
-
-    #x = ['dO', 'qkv', 'O', 'M', 'ZInv']
-    #for i in x:
-    #    print('[P] '+i+': ',eval(i).dtype,eval(i).shape)
-    #print('[P] qkv_dtype: ',qkv_dtype)
-    #print('[P] cu_seqlens: ',cu_seqlens)
-    #print('[P] d_scale_qkv, d_scale_s, d_scale_o, d_scale_do: ',d_scale_qkv, d_scale_s, d_scale_o, d_scale_do) 
-    #print('[P] q_scale_s, q_scale_ds, q_scale_dqkv: ',q_scale_s, q_scale_ds, q_scale_dqkv) 
-    #print('[P] amax_ds, amax_dqkv: ',amax_ds, amax_dqkv) 
-    #print('[P] p_dropout, set_zero, rng_state, qkv_layout: ',p_dropout, set_zero, rng_state, qkv_layout)
-    #print('[P] b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero',
-    #        b, max_seq_len, total_seqs, h, d, scale_q_k, p_dropout, qkv_layout, set_zero)
-    #print('[P] qkv_ragged_offset, o_ragged_offset, seqlens: ')
-    #print(qkv_ragged_offset, o_ragged_offset, seqlens)
-    #print(' ')
 
     dQKV = tex.fused_attn_bwd(
             b, max_seq_len, total_seqs, h, d,
