@@ -80,6 +80,7 @@ def fused_attn_fwd(
 #    d_scale_s: torch.Tensor,
 #    d_scale_o: torch.Tensor,
     p_dropout: float,
+    max_seq_len: int,
     is_training: bool,
     set_zero: bool,
     rng_gen: torch.Generator = None,
@@ -95,7 +96,7 @@ def fused_attn_fwd(
     check_scalar(amax_o)
 
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    max_seq_len = max(seqlens)
+    #max_seq_len = max(seqlens)
     b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
@@ -142,6 +143,7 @@ def fused_attn_bwd(
 #    d_scale_ds: torch.Tensor,
 #    d_scale_dqkv: torch.Tensor,
     p_dropout: float,
+    max_seq_len: int,
     set_zero: bool,
     rng_state: torch.Tensor,
     qkv_layout: str = "qkv_interleaved",
@@ -153,7 +155,7 @@ def fused_attn_bwd(
     check_cu_seqlens(cu_seqlens)
 
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    max_seq_len = max(seqlens)
+    #max_seq_len = max(seqlens)
     b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
