@@ -456,9 +456,11 @@ class MultiHeadAttention(nn.Module):
                 if self.transpose_batch_sequence:
                     length, batch, num_heads, head_dim = cached_key.value.shape
                     expected_shape = (1, batch, num_heads, head_dim)
+                    one_hot_indices_shape = (length, 1, 1, 1)
                 else:
                     batch, length, num_heads, head_dim = cached_key.value.shape
                     expected_shape = (batch, 1, num_heads, head_dim)
+                    one_hot_indices_shape = (1, length, 1, 1)
 
                 # Sanity shape check of cached key against input query.
                 if expected_shape != query.shape:
@@ -468,6 +470,7 @@ class MultiHeadAttention(nn.Module):
 
                 cur_index = cache_index.value
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
+                one_hot_indices = jnp.reshape(one_hot_indices, one_hot_indices_shape)
                 key = cached_key.value + key * one_hot_indices
                 value = cached_value.value + value * one_hot_indices
                 cached_key.value = key
@@ -938,6 +941,7 @@ class TransformerLayer(nn.Module):
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.hidden_dropout,
+            intermediate_hidden_dropout_dims=self.hidden_dropout_dims,
             dtype=self.dtype,
             scale_axes=('embed',),
             kernel_init=self.mlp_kernel_init,
