@@ -321,8 +321,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Initialize before loading.
         self.init_fp8_meta_tensors()
         self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
+        self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
+        self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
