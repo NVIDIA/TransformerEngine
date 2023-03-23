@@ -79,7 +79,8 @@ void cublas_gemm(const Tensor *inputA,
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
   if (use_fp8 && gelu) {
-    NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype), "fp8 Aux output for gemm + gelu fusion not supported!");
+    NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype), 
+             "fp8 Aux output for gemm + gelu fusion not supported!");
   }
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate,
