@@ -223,9 +223,6 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
         # This sets the LN compute precision - use FP32 always as does TE.
         stash_type_i=_C_onnx.TensorProtoDataType.FLOAT,
     )
-
-    if not is_fp32:
-        ln = g.op("Cast", ln, to_i=_type_utils.JitScalarType(input_dtype).onnx_type())
     return ln
 
 
