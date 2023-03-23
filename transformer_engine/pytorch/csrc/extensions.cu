@@ -116,10 +116,12 @@ std::vector<at::Tensor> fused_attn_fwd(
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
 
+  // ghost tensor, not returned upstream
+  at::Tensor descaleS = torch::empty_like(scaleS);
   auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
-		  amaxS.data_ptr(), scaleS.data_ptr(), scaleS.data_ptr()); // TODO fix descale
+		  amaxS.data_ptr(), scaleS.data_ptr(), descaleS.data_ptr());
+		  //amaxS.data_ptr(), scaleS.data_ptr(), scaleS.data_ptr()); // TODO fix descale
 		  //amaxS.data_ptr(), scaleS.data_ptr(), nullptr);
-		  //amaxS.data_ptr(), scaleS.data_ptr(), descaleS.data_ptr());
 		  			  
   auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
   if (set_zero)
@@ -129,8 +131,8 @@ std::vector<at::Tensor> fused_attn_fwd(
   }
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
 		  {(size_t)total_seqs, (size_t)h, (size_t)d}, QKV_type,
-		  amaxO.data_ptr(), scaleO.data_ptr(), scaleO.data_ptr()); // TODO fix descale
-		  //amaxO.data_ptr(), scaleO.data_ptr(), nullptr);
+		  amaxO.data_ptr(), scaleO.data_ptr(), nullptr);
+		  //amaxO.data_ptr(), scaleO.data_ptr(), scaleO.data_ptr()); // TODO fix descale
 		  //amaxO.data_ptr(), scaleO.data_ptr(), descaleO.data_ptr());
 
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -224,8 +226,8 @@ at::Tensor fused_attn_bwd(
   }
   auto te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(),
 		  {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
-		  QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), scale_dQKV.data_ptr()); // TODO fix descale
-		  //QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), nullptr);
+		  QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), nullptr);
+		  //QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), scale_dQKV.data_ptr()); // TODO fix descale
 		  //QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), descale_dQKV.data_ptr());
 
   auto te_M = makeTransformerEngineTensor(M);
@@ -240,10 +242,12 @@ at::Tensor fused_attn_bwd(
 
   auto te_S = makeTransformerEngineTensor((void*)nullptr, {0},
 		  QKV_type, nullptr, scaleS.data_ptr(), descaleS.data_ptr());
+  // ghost tensor, not returned upstream
+  at::Tensor descale_dS = torch::empty_like(scale_dS);
   auto te_dS = makeTransformerEngineTensor((void*)nullptr, {0}, 
-		  QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), scale_dS.data_ptr()); // TODO fix descale
+		  QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), descale_dS.data_ptr());
 		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), nullptr);
-		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), descale_dS.data_ptr());
+		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), scale_dS.data_ptr()); // TODO fix descale
 
   TensorWrapper workspace;
 
