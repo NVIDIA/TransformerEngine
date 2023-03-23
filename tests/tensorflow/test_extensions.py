@@ -8,6 +8,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import transformer_engine # pylint: disable=unused-import
 import transformer_engine_tensorflow as tex
 import tensorflow as tf
 
