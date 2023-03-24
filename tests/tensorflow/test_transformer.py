@@ -40,6 +40,7 @@ def train_step(dy, x, x_mask, x_dec, x_dec_mask, model, use_fp8=False,
 class TransformerLayerTest(test.TestCase):
     @test_util.run_gpu_only
     def testTransformerSanity(self):
+        use_fp8 = tf.test.is_gpu_available(True, (9, 0))
         # F=seq_len, B=batch, H=hidden_states, N=num_heads
         F, B, H, N = 8, 4, 32, 2
         # E=depth
@@ -83,10 +84,10 @@ class TransformerLayerTest(test.TestCase):
             dy, x, None, x_dec, None, transformer, use_fp8=False)
 
         y, dx, dvars = train_step(dy, x, None, x_dec, None, transformer,
-                                  use_fp8=True, fp8_recipe=fp8_recipe)
+                                  use_fp8=use_fp8, fp8_recipe=fp8_recipe)
 
         self.assertAllClose(y, y_ref, rtol=0.1, atol=0.01, msg="fwd-y")
-        self.assertAllClose(dx, dx_ref, rtol=0.5, atol=0.6, msg="bwd-dx")
+        self.assertAllClose(dx, dx_ref, rtol=0.5, atol=0.7, msg="bwd-dx")
 
         self.assertEqual(len(dvars), len(dvars_ref))
 

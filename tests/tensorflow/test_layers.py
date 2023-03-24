@@ -92,6 +92,8 @@ class LayersTest(test.TestCase):
         fp8_recipe = get_fp8_recipe()
 
         for use_fp8 in [False, True]:
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             y_ref = dense_ref(x)
             with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
                 y = dense(x)
@@ -128,6 +130,8 @@ class LayersTest(test.TestCase):
         x = tf.random.uniform((B, M, K))
 
         for use_fp8, use_override in product([False, True], repeat=2):
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             recipe = get_fp8_recipe(use_override)
             dx_ref, dw_ref, db_ref = _train_step(x, dense_ref)
             dx, dw, db = _train_step(
@@ -159,6 +163,8 @@ class LayersTest(test.TestCase):
         fp8_recipe = get_fp8_recipe()
 
         for use_fp8 in [False, True]:
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             y_ref = dense_ref(x)
             with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
                 y = dense(x, kernel=dense_ref.kernel, bias=dense_ref.bias)
@@ -168,6 +174,8 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testDenseBookkeeping(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         M, K, N = 16, 16, 32
         init = initializers.RandomNormal(mean=0., stddev=1.)
 
@@ -306,6 +314,8 @@ class LayersTest(test.TestCase):
         fp8_recipe = get_fp8_recipe()
 
         for use_fp8, output_ln in product([False, True], repeat=2):
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             ln_dense = LayerNormDense(
                 **ln_kwargs,
                 **dense_kwargs,
@@ -371,6 +381,8 @@ class LayersTest(test.TestCase):
             return dx, dt, dg, dB, dw, db
 
         for use_fp8, use_override in product([False, True], repeat=2):
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             recipe = get_fp8_recipe(use_override)
 
             dx_ref, ln_dy_ref, dg_ref, dB_ref, dw_ref, db_ref = _train_step_ref(
@@ -422,6 +434,8 @@ class LayersTest(test.TestCase):
         fp8_recipe = get_fp8_recipe()
 
         for use_fp8 in [False, True]:
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             y_ref = dense_ref(ln_ref(x))
             with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
                 y = ln_dense(x, kernel=dense_ref.kernel, bias=dense_ref.bias)
@@ -450,6 +464,8 @@ class LayersTest(test.TestCase):
         fp8_recipe = get_fp8_recipe()
 
         for use_fp8, output_ln in product([False, True], repeat=2):
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             ln_mlp = LayerNormMLP(
                 **ln_kwargs,
                 **dense_common_kwargs,
@@ -530,6 +546,8 @@ class LayersTest(test.TestCase):
             return dx, dt, dg, dB, dw1, db1, dw2, db2
 
         for use_fp8, use_override in product([False, True], repeat=2):
+            if use_fp8 and not tf.test.is_gpu_available(True, (9, 0)):
+                continue
             recipe = get_fp8_recipe(use_override)
 
             dx_ref, ln_dy_ref, dg_ref, dB_ref, dw1_ref, db1_ref, dw2_ref, \

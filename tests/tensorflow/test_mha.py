@@ -128,6 +128,7 @@ class MultiHeadAttentionKeras(tf.keras.Model):
 class MHATest(test.TestCase):
     @test_util.run_gpu_only
     def testMHAForward(self):
+        use_fp8 = tf.test.is_gpu_available(True, (9, 0))
         batches, seq_q, seq_kv, hidden_states = 16, 32, 32, 64
         num_heads, depth = 4, 16
         hidden_size = num_heads * depth
@@ -166,7 +167,7 @@ class MHATest(test.TestCase):
                 fp8_recipe = DelayedScaling(
                     margin=0, interval=1, fp8_format=Format.HYBRID,
                     amax_compute_algo='max', amax_history_len=3)
-                with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+                with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
                     y, y_b = mha(x_q, x_mask, x_kv)
 
                 self.assertAllClose(y, y_ref, rtol=0.01, atol=0.01, msg='y')
@@ -174,6 +175,7 @@ class MHATest(test.TestCase):
 
     @test_util.run_gpu_only
     def testMHABackward(self):
+        use_fp8 = tf.test.is_gpu_available(True, (9, 0))
         batches, seq_q, seq_kv, hidden_states = 4, 8, 8, 32
         num_heads, depth = 4, 8
         hidden_size = num_heads * depth
@@ -213,7 +215,7 @@ class MHATest(test.TestCase):
                     margin=0, interval=1, fp8_format=Format.HYBRID,
                     amax_compute_algo='max', amax_history_len=3)
                 y, dxs, dvars = train_step(
-                    dy, x_q, x_kv, x_mask, mha, attn_type, True, fp8_recipe)
+                    dy, x_q, x_kv, x_mask, mha, attn_type, use_fp8, fp8_recipe)
 
                 for dx, dx_ref in zip(dxs, dxs_ref):
                     self.assertAllClose(

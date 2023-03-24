@@ -22,6 +22,8 @@ from transformer_engine.tensorflow import get_stream_id
 class ExtensionsTest(test.TestCase):
     @test_util.run_gpu_only
     def testCastFp8(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         input_shape = (16, 32)
         x = tf.random.uniform(input_shape)
         scale, amax, scale_inv = tf.ones([]), tf.zeros([]), tf.ones([])
@@ -48,6 +50,8 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testMatmulFp8(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         out_dtype = tex.DType.kFloat32
@@ -87,6 +91,8 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormFwdFp8(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         N, H = (16, 32)
@@ -114,6 +120,8 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluForwardFp8(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         M, N = (16, 32)
@@ -134,6 +142,8 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluForward(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         stream_id = get_stream_id()
         M, N = (16, 32)
 
@@ -146,6 +156,8 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluBackwardFp8(self):
+        if not tf.test.is_gpu_available(True, (9, 0)):
+            self.skipTest('Fp8 requires Hopper+ GPU')
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E5M2
         M, K, N = (16, 32, 32)
