@@ -63,7 +63,7 @@ skip_FP8 = pytest.mark.skipif(
 )
 
 def create_fp8_recipe():
-    return recipe.DelayedScaling(amax_history_len=1)
+    return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
 
 
 def do_export(
@@ -668,8 +668,7 @@ def test_export_linear(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.linear{fp8_str}{bias_str}{high_prec_str}.onnx"
-    fp8_recipe = create_fp8_recipe()
-    with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with te.fp8_autocast(enabled=use_fp8):
         model = Test_Linear(
             in_features,
             out_features,
@@ -725,8 +724,7 @@ def test_export_layernorm_linear(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.layernorm_linear{fp8_str}{bias_str}{high_prec_str}.onnx"
-    fp8_recipe = create_fp8_recipe()
-    with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with te.fp8_autocast(enabled=use_fp8):
         model = te.LayerNormLinear(
             hidden_size,
             3 * hidden_size,
@@ -782,8 +780,7 @@ def test_export_layernorm_mlp(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}.onnx"
-    fp8_recipe = create_fp8_recipe()
-    with te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with te.fp8_autocast(enabled=use_fp8):
         model = te.LayerNormMLP(
             hidden_size,
             ffn_hidden_size,
