@@ -494,6 +494,8 @@ class MultiHeadAttention(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
+        ub_bulk_wgrad: bool = False,
+        ub_bulk_dgrad: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -528,8 +530,6 @@ class MultiHeadAttention(torch.nn.Module):
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": sequence_parallel,
             "params_dtype": params_dtype,
-            "ub_bulk_wgrad": ub_bulk_wgrad,
-            "ub_bulk_dgrad": ub_bulk_dgrad,
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -547,6 +547,8 @@ class MultiHeadAttention(torch.nn.Module):
                     return_layernorm_output=return_layernorm_output,
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     zero_centered_gamma=zero_centered_gamma,
+                    ub_bulk_wgrad=ub_bulk_wgrad,
+                    ub_bulk_dgrad=ub_bulk_dgrad,
                     **common_gemm_kwargs,
                 )
             else:
@@ -572,6 +574,8 @@ class MultiHeadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
+                    ub_bulk_wgrad=ub_bulk_wgrad,
+                    ub_bulk_dgrad=ub_bulk_dgrad,
                     **common_gemm_kwargs,
                 )
             else:
@@ -1039,6 +1043,8 @@ class TransformerLayer(torch.nn.Module):
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
             "qkv_weight_interleaved" : qkv_weight_interleaved,
+            "ub_bulk_wgrad" : ub_bulk_wgrad,
+            "ub_bulk_dgrad" : ub_bulk_dgrad,
         }
 
         self.self_attention = MultiHeadAttention(
@@ -1080,6 +1086,8 @@ class TransformerLayer(torch.nn.Module):
             micro_batch_size=micro_batch_size,
             set_parallel_mode=set_parallel_mode,
             zero_centered_gamma=zero_centered_gamma,
+            ub_bulk_wgrad=ub_bulk_wgrad,
+            ub_bulk_dgrad=ub_bulk_dgrad,
         )
 
         self.hidden_dropout = hidden_dropout

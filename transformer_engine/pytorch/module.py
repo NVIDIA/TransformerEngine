@@ -953,6 +953,14 @@ class _LayerNormLinear(torch.autograd.Function):
             # Overlap input AG with dgrad
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_dgrad = False
+            if ctx.ub_bulk_wgrad:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_wgrad = False
+
+            if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 if tp_world_size != 1:
                     dim_size[0] = dim_size[0] * tp_world_size
@@ -2136,6 +2144,8 @@ class _LayerNormMLP(torch.autograd.Function):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        ub_bulk_wgrad: bool,
+        ub_bulk_dgrad: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -2370,6 +2380,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.ub_bulk_wgrad = ub_bulk_wgrad
+            ctx.ub_bulk_dgrad = ub_bulk_dgrad
 
         # Row Parallel Linear
         if set_parallel_mode and sequence_parallel:
@@ -2415,9 +2427,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx, grad_outputs[0], True
             )
 
+            if ctx.ub_bulk_dgrad:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_dgrad = False
+            if ctx.ub_bulk_wgrad:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.set_parallel_mode and ctx.sequence_parallel:
+            if ctx.ub_bulk_dgrad:
+                dim_size = list(ln_out.size())
+                if tp_world_size != 1:
+                    dim_size[0] = dim_size[0] * tp_world_size
+                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+            elif ctx.set_parallel_mode and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -2518,8 +2544,15 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
                     dgelu_t = None
 
+                fc1_dgrad_size = list(dgelu.size())
+                fc1_dgrad_size[1] = fc1_weight.size(1)
+                if ctx.ub_bulk_wgrad: # allocate dgrad output
+                    ub_obj_dgrad, key_dgrad = get_ub(fc1_dgrad_size, ctx.activation_dtype, fc1_weight.device)
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                else:
+                    fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
                 # FC1 DGRAD: Unconditional
-                fc1_dgrad = fp8_gemm(
+                _ = fp8_gemm(
                     fc1_weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -2530,7 +2563,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_dtype_backward,
                     ctx.activation_dtype,
                     get_workspace(),
+                    out=fc1_dgrad,
                     use_split_accumulator=_2X_ACC_DGRAD,
+                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
+                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
             else:
                 # FC2 DGRAD; Unconditional
@@ -2564,24 +2600,43 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
                     dgelu = fc2_dgrad
 
+                fc1_dgrad_size = list(dgelu.size())
+                fc1_dgrad_size[1] = fc1_weight.size(1)
+                if ctx.ub_bulk_wgrad: # allocate dgrad output
+                    ub_obj_dgrad, key_dgrad = get_ub(fc1_dgrad_size, ctx.activation_dtype, fc1_weight.device)
+                    fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                else:
+                    fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
                 # FC1 DGRAD: Unconditional
-                fc1_dgrad, _, _ = gemm(
+                _, _, _ = gemm(
                     fc1_weight,
                     dgelu,
                     ctx.activation_dtype,
                     get_workspace(),
+                    out=fc1_dgrad,
                     layout="NN",
                     grad=True,
+                    ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
+                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
+                #print ('bf16 fc1_weight {} dgelu {} fc1 dgrad.size {}'.format(fc1_weight.shape, dgelu.shape, fc1_dgrad.shape))
+                #print ('fc1_dgrad {}, fc1_dgrad_ub {} diff {}'.format(fc1_dgrad, fc1_dgrad_ub, torch.max(torch.abs(fc1_dgrad-fc1_dgrad_ub))))
 
+            if ctx.ub_bulk_dgrad:
+                ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             # Overlap dgrad-RS/AR with wgrad
             if ctx.set_parallel_mode and ctx.sequence_parallel:
-                handle.wait()
-                fc1_dgrad, handle = reduce_scatter_along_first_dim(
-                    fc1_dgrad, ctx.tp_group, async_op=True
-                )
+                if not ctx.ub_bulk_dgrad:
+                    handle.wait()
+                if not ctx.ub_bulk_wgrad:
+                    fc1_dgrad, handle = reduce_scatter_along_first_dim(
+                        fc1_dgrad, ctx.tp_group, async_op=True
+                    )
             elif ctx.set_parallel_mode and ctx.tensor_parallel:
                 fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
+            #print ('ln_out_total {}, ln_out_total_ub {} dif {}'.format(ln_out_total, ln_out_total_ub, torch.max(torch.abs(ln_out_total-ln_out_total_ub))))
+            #print ('ln_out_total{} {}'.format('_ub' if ctx.ub_bulk_dgrad else '', ln_out_total))
+            #print ('fc1_dgrad{} {}'.format('_ub' if ctx.ub_bulk_dgrad else '', fc1_dgrad))
 
             if fc1_weight.requires_grad:
                 if ctx.fp8:
@@ -2604,6 +2659,8 @@ class _LayerNormMLP(torch.autograd.Function):
                             if ctx.fuse_wgrad_accumulation
                             else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                         )
                     else:
                         ln_out_total_c = cast_from_fp8(
@@ -2624,6 +2681,8 @@ class _LayerNormMLP(torch.autograd.Function):
                             out=fc1_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                         )
                 else:
                     # FC1 WGRAD
@@ -2637,15 +2696,21 @@ class _LayerNormMLP(torch.autograd.Function):
                         use_bias=not ctx.bias_gelu_nvfusion,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                        ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
 
                     if ctx.bias_gelu_nvfusion:
                         fc1_wgrad, _, _ = fc1_wgrad_outputs
                     else:
                         fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
+            if ctx.ub_bulk_dgrad:
+                free_ub(ub_obj_lnout, key_lnout)
 
             # Column Parallel Linear
-            if ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
+            if ctx.ub_bulk_wgrad:
+                fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
+            elif ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
                 handle.wait()
 
             # LayerNorm gradient
@@ -2659,6 +2724,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 d_ln_out, inputmat, mu, rsigma, ln_weight,
                 ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
+            if ctx.ub_bulk_wgrad:
+                free_ub(ub_obj_dgrad, key_dgrad)
 
             if not ctx.use_bias:
                 fc2_bias_grad = None
@@ -2675,6 +2742,10 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             fc2_bias_grad,
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -2791,6 +2862,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
+        ub_bulk_wgrad: bool = False,
+        ub_bulk_dgrad: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2802,6 +2875,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
+        self.ub_bulk_wgrad = ub_bulk_wgrad
+        self.ub_bulk_dgrad = ub_bulk_dgrad
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -2993,6 +3068,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.ub_bulk_wgrad,
+                self.ub_bulk_dgrad,
             )
             out = fwd_fn(*args)
 
