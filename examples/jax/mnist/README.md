@@ -13,7 +13,7 @@ This example uses MNIST training to demonstrate the Transformer Engine usage. Th
 5. Evaluating process: The evaluating process is the same as the training process. Need to ensure FP8 metadata is inside var_collect and fill it into loss function.
 
 6. Additional options: The `te.fp8_autocast` context manager has additional options
-   * FP8 Recipe: control FP8 training behavior. See the [FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html) for a detailed explanation of FP8 recipes and the supported options. **Noted** that FP8 metadata is now the responsibility of the user to update because of JAX limitation (i.e., manually calling `te.update_fp8_metas`). The JAX version of Transformer Engine cannot update FP8 metadata on its own.
+   * FP8 Recipe: control FP8 training behavior. See the [FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html) for a detailed explanation of FP8 recipes and the supported options. **Noted** that FP8 metadata is now the responsibility of the user to update (i.e., manually calling `te.update_fp8_metas`). The JAX version of Transformer Engine cannot update FP8 metadata on its own.
    * Sharding Resource: tell Transformer Engine how to make data parallelism and tensor parallelism. We will introduce it more in Encoder examples.
 
 ## Run ##
@@ -23,12 +23,12 @@ This example uses MNIST training to demonstrate the Transformer Engine usage. Th
 python test_single_gpu_mnist.py
 ```
 
-2. Use `te.DenseGeneral` provided by Transformer Engine to train MNISt with BF16
+2. Use `te.DenseGeneral` provided by Transformer Engine to train MNIST with BF16
 ```bash
 python test_single_gpu_mnist.py --use-te
 ```
 
-3. Use `te.DenseGeneral` provided by Transformer Engine to train MNISt and enable FP8 training and evaluation.
+3. Use `te.DenseGeneral` provided by Transformer Engine to train MNIST and enable FP8 training and evaluation.
 ```bash
 python test_single_gpu_mnist.py --use-fp8
 ```
