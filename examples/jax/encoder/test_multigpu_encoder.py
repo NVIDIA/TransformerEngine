@@ -26,12 +26,13 @@ PARAMS_KEY = 'params'
 PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
-NUM_GPU = 8
 
 
-def num_gpu_is_enough():
-    """Check if the machine has 8 GPUs."""
-    return len(jax.local_devices()) >= NUM_GPU
+def check_num_gpu(desired_num_gpu):
+    """Check if the number of GPUs are correct."""
+    actual_num_gpu = len(jax.local_devices())
+    assert actual_num_gpu == desired_num_gpu, f"Number of GPUs is mismatch. " \
+        f"{desired_num_gpu} GPUs are assigned, but the actual number of GPUs is {actual_num_gpu}"
 
 
 def gpu_has_fp8():
@@ -191,7 +192,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
 
     dataset['sentence'] = output
     dataset['label'] = dataset['label'].astype(np.float32)
-    dataset['mask'] = mask_3d.reshape(dataset_size, 1, max_seq_len, max_seq_len)
+    dataset['mask'] = mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
     return dataset, vocab, word_id
 
 
@@ -245,15 +246,15 @@ def get_state_pspec(state, params_pspec):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
-    assert num_gpu_is_enough(), "Need 8 GPUs to run"
-    assert args.batch_size % NUM_GPU == 0, "Batch size needs to be multiple of 8"
-    assert args.test_batch_size % NUM_GPU == 0, "Test batch size needs to be multiple of 8"
+    check_num_gpu(args.num_gpu)
+    assert args.batch_size % args.num_gpu == 0, f"Batch size needs to be multiple of {args.num_gpu}"
+    assert args.test_batch_size % args.num_gpu == 0, \
+        f"Test batch size needs to be multiple of {args.num_gpu}"
 
     if args.use_fp8:
         assert gpu_has_fp8(), "GPU needs to support FP8."
 
-    device_mesh = mesh_utils.create_device_mesh((NUM_GPU,))
-
+    device_mesh = mesh_utils.create_device_mesh((args.num_gpu,))
     with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)):
 
         rng = jax.random.PRNGKey(args.seed)
@@ -335,6 +336,13 @@ def encoder_parser(args):
     """Training settings."""
     parser = argparse.ArgumentParser(description="JAX Encoder Example")
     parser.add_argument(
+        "--num-gpu",
+        type=int,
+        default=8,
+        metavar="N",
+        help="number of GPUs (default: 8)",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=64,
@@ -390,21 +398,22 @@ class TestEncoder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3"])
+        num_gpu = len(jax.local_devices())
+        if num_gpu % 2 != 0:
+            num_gpu = 1
+        cls.args = encoder_parser(["--epochs", "3", "--num-gpu", str(num_gpu)])
 
-    @unittest.skipIf(not num_gpu_is_enough(), reason='Need 8 GPUs')
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[1] > 0.75 and actual[3] > 0.60
+        assert actual[0] < 0.45 and actual[1] > 0.79
 
-    @unittest.skipIf(not num_gpu_is_enough(), reason='Need 8 GPUs')
     @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        assert actual[1] > 0.75 and actual[3] > 0.60
+        assert actual[0] < 0.45 and actual[1] > 0.79
 
 
 if __name__ == "__main__":

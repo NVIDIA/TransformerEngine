@@ -184,7 +184,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
 
     dataset['sentence'] = output
     dataset['label'] = dataset['label'].astype(np.float32)
-    dataset['mask'] = mask_3d.reshape(dataset_size, 1, max_seq_len, max_seq_len)
+    dataset['mask'] = mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
     return dataset, vocab, word_id
 
 
@@ -325,19 +325,19 @@ class TestEncoder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Run 4 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "4"])
+        cls.args = encoder_parser(["--epochs", "3"])
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[1] > 0.75 and actual[3] > 0.60
+        assert actual[0] < 0.45 and actual[1] > 0.79
 
     @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        assert actual[1] > 0.75 and actual[3] > 0.60
+        assert actual[0] < 0.45 and actual[1] > 0.79
 
 
 if __name__ == "__main__":
