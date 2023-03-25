@@ -58,7 +58,7 @@ class Net(nn.Module):
     num_embed: int
 
     @nn.compact
-    def __call__(self, x, disable_dropout=False):
+    def __call__(self, x, mask, disable_dropout=False):
         x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
         te_Encoder = partial(te.TransformerLayer,
@@ -71,7 +71,7 @@ class Net(nn.Module):
                              layer_type=te.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
-        x = te_Encoder()(x, deterministic=disable_dropout)
+        x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
 
@@ -91,11 +91,11 @@ class Net(nn.Module):
         return x
 
 
-def train_step(state, inputs, labels, var_collect, rngs, use_fp8):
+def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
     """Computes gradients, loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, disable_dropout, rngs=rngs)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
         one_hot = jax.nn.one_hot(labels, 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -125,9 +125,10 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_f
 
     for perm in perms:
         batch_inputs = train_ds['sentence'][perm, ...]
+        batch_masks = train_ds['mask'][perm, ...]
         batch_labels = train_ds['label'][perm, ...]
-        state, loss, accuracy, var_collect = train_fn(state, batch_inputs, batch_labels,
-                                                      var_collect, rngs, use_fp8)
+        state, loss, accuracy, var_collect = train_fn(state, batch_inputs, batch_masks,
+                                                      batch_labels, var_collect, rngs, use_fp8)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -136,11 +137,11 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_f
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_step(state, inputs, labels, var_collect):
+def eval_step(state, inputs, masks, labels, var_collect):
     """Computes loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, disable_dropout)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
         one_hot = jax.nn.one_hot(labels, 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -162,8 +163,9 @@ def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
     for batch_start in range(0, valid_size, batch_size):
         batch_end = batch_start + batch_size
         batch_inputs = test_ds['sentence'][batch_start:batch_end]
+        batch_masks = test_ds['mask'][batch_start:batch_end]
         batch_labels = test_ds['label'][batch_start:batch_end]
-        loss, accuracy = eval_fn(state, batch_inputs, batch_labels, var_collect)
+        loss, accuracy = eval_fn(state, batch_inputs, batch_masks, batch_labels, var_collect)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -177,10 +179,12 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
     nltk.download('punkt')
     dataset_size = len(dataset['sentence'])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
+    mask_3d = np.empty((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
     for j, sentence in enumerate(dataset['sentence']):
         tokens = nltk.word_tokenize(sentence.decode("utf-8"))
         tensor = output[j]
+        mask_1d = np.zeros((1, max_seq_len), dtype=np.uint8)
 
         for i, word in enumerate(tokens):
             if i >= max_seq_len:
@@ -193,8 +197,15 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
             else:
                 tensor[i] = vocab[word]
 
+            mask_1d[0, i] = 1
+
+        mask_2d = mask_3d[j]
+        np.dot(mask_1d.T, mask_1d, out=mask_2d)
+        np.subtract(1, mask_2d, out=mask_2d)
+
     dataset['sentence'] = output
     dataset['label'] = dataset['label'].astype(np.float32)
+    dataset['mask'] = mask_3d.reshape(dataset_size, 1, max_seq_len, max_seq_len)
     return dataset, vocab, word_id
 
 
@@ -210,14 +221,12 @@ def get_datasets(max_seq_len):
     return train_ds, test_ds, word_id
 
 
-def check_fp8(state, var_collect, input_shape, label_shape):
+def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
-    inputs = jnp.zeros(input_shape, dtype=jnp.int32)
-    labels = jnp.empty(label_shape, dtype=jnp.bfloat16)
     rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
     assert "Float8" in str(
-        jax.make_jaxpr(train_step, static_argnums=5)(state, inputs, labels, var_collect, rngs,
-                                                     True))
+        jax.make_jaxpr(train_step, static_argnums=6)(state, inputs, masks, labels, var_collect,
+                                                     rngs, True))
 
 
 def get_params_pspec(sharding_rules, abs_var_collect):
@@ -261,29 +270,34 @@ def train_and_evaluate(args):
 
     with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)):
 
-        train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
         rng, dropout_rng = jax.random.split(rng)
         init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
 
         input_shape = [args.batch_size, args.max_seq_len]
+        mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
         with te.fp8_autocast(args.use_fp8,
                              sharding_resource=te.ShardingResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS)):
+            train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
             encoder = Net(num_embed)
-            abs_var_collect = jax.eval_shape(encoder.init, init_rngs,
-                                             jnp.empty(input_shape, dtype=jnp.int32))
+            inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+            masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
+            abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
+
             customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
             sharding_rules = te.extend_logical_axis_rules(tuple()) + customized_rules
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
+            inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
+            masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
 
-            in_shardings = (None, None)
+            in_shardings = (None, inputs_pspec, masks_pspec)
             out_shardings = FrozenDict({key: params_pspec if key is PARAMS_KEY else None \
                                         for key in abs_var_collect})
             pjit_encoder_init = pjit(encoder.init, in_shardings, out_shardings)
-            var_collect = pjit_encoder_init(init_rngs, jnp.zeros(input_shape, dtype=jnp.int32))
+            var_collect = pjit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
             var_collect, params = var_collect.pop(PARAMS_KEY)
@@ -291,25 +305,24 @@ def train_and_evaluate(args):
                                                   params=params,
                                                   tx=optimizer)
             state_pspec = get_state_pspec(state, params_pspec)
-            inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             labels_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS,)
 
-            in_shardings = (state_pspec, inputs_pspec, labels_pspec, None, None)
+            in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None, None)
             out_shardings = (state_pspec, None, None, None)
-            pjit_train_step = pjit(train_step, in_shardings, out_shardings, static_argnums=(5,))
+            pjit_train_step = pjit(train_step, in_shardings, out_shardings, static_argnums=(6,))
 
-            in_shardings = (state_pspec, inputs_pspec, labels_pspec, None)
+            in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None)
             out_shardings = (None, None)
             pjit_eval_step = pjit(eval_step, in_shardings, out_shardings)
 
             if args.use_fp8:
-                check_fp8(state, var_collect, input_shape, label_shape)
+                labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
+                check_fp8(state, var_collect, inputs, masks, labels)
 
             if args.dry_run:
-                inputs = jnp.zeros(input_shape, dtype=jnp.int32)
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 rngs = {DROPOUT_KEY: dropout_rng}
-                pjit_train_step(state, inputs, labels, var_collect, rngs, args.use_fp8)
+                pjit_train_step(state, inputs, masks, labels, var_collect, rngs, args.use_fp8)
                 print("PASSED")
                 return None
 
