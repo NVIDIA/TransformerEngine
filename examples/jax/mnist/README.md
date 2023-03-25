@@ -18,7 +18,7 @@ This example uses MNIST training to demonstrate the Transformer Engine usage. Th
 
 ## Run ##
 
-1. Use Flax to train MNIST as usual
+1. Use Flax to train MNIST with BF16 as usual
 ```bash
 python test_single_gpu_mnist.py
 ```
