@@ -745,13 +745,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
     multiple_results = True
 
     @staticmethod
-    def abstract(
-            x,
-            gamma,
-            beta,
-            *,
-            epsilon    # pylint: disable=unused-argument
-    ):
+    def abstract(x, gamma, beta, **kwargs):    # pylint: disable=unused-argument
         """
         LayerNorm fwd abstract
         """
@@ -774,7 +768,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def lowering(ctx, x, gamma, beta, *, epsilon):
+    def lowering(ctx, x, gamma, beta, *, zero_centered_gamma, epsilon):
         """
         LayerNorm fwd lowering rules
         """
@@ -815,6 +809,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            zero_centered_gamma,
             epsilon,
         )
 
@@ -826,11 +821,16 @@ class LayerNormFwdPrimitive(BasePrimitive):
 _layernorm_fwd_p = register_primitive(LayerNormFwdPrimitive)
 
 
-def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, epsilon: float):
+def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
+                  epsilon: float):
     """
     Wrapper for TE layernorm fwd
     """
-    return _layernorm_fwd_p.bind(x, gamma, beta, epsilon=epsilon)
+    return _layernorm_fwd_p.bind(x,
+                                 gamma,
+                                 beta,
+                                 zero_centered_gamma=zero_centered_gamma,
+                                 epsilon=epsilon)
 
 
 class LayerNormFwdFp8Primitive(BasePrimitive):
@@ -848,8 +848,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             amax,
             scale,
             scale_inv,
-            *,
-            epsilon    # pylint: disable=unused-argument
+            **kwargs    # pylint: disable=unused-argument
     ):
         """
         LayerNorm fwd (fp8 out) abstract
@@ -879,7 +878,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         )
 
     @staticmethod
-    def lowering(ctx, x, gamma, beta, amax, scale, scale_inv, *, epsilon):
+    def lowering(ctx, x, gamma, beta, amax, scale, scale_inv, *, zero_centered_gamma, epsilon):
         """
         LayerNorm fwd (fp8 out) lowering rules
         """
@@ -928,6 +927,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            zero_centered_gamma,
             epsilon,
         )
 
@@ -944,11 +944,19 @@ _layernorm_fwd_fp8_p = register_primitive(LayerNormFwdFp8Primitive)
 
 
 def layernorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, amax: jnp.ndarray,
-                      scale: jnp.ndarray, scale_inv: jnp.ndarray, epsilon: float):
+                      scale: jnp.ndarray, scale_inv: jnp.ndarray, zero_centered_gamma: bool,
+                      epsilon: float):
     """
     Wrapper for TE layernorm fwd (fp8 out)
     """
-    return _layernorm_fwd_fp8_p.bind(x, gamma, beta, amax, scale, scale_inv, epsilon=epsilon)
+    return _layernorm_fwd_fp8_p.bind(x,
+                                     gamma,
+                                     beta,
+                                     amax,
+                                     scale,
+                                     scale_inv,
+                                     zero_centered_gamma=zero_centered_gamma,
+                                     epsilon=epsilon)
 
 
 class LayerNormBwdPrimitive(BasePrimitive):
@@ -959,15 +967,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
     multiple_results = True
 
     @staticmethod
-    def abstract(
-            grad_output,
-            mu,
-            rsigma,
-            x,
-            gamma,
-            *,
-            epsilon    # pylint: disable=unused-argument
-    ):
+    def abstract(grad_output, mu, rsigma, x, gamma, **kwargs):    # pylint: disable=unused-argument
         """
         Layernorm bwd abstract
         """
@@ -993,7 +993,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def lowering(ctx, grad_output, mu, rsigma, x, gamma, *, epsilon):
+    def lowering(ctx, grad_output, mu, rsigma, x, gamma, *, zero_centered_gamma, epsilon):
         """
         Layernorm bwd lowering rules
         """
@@ -1029,6 +1029,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            zero_centered_gamma,
             epsilon,
         )
 
@@ -1041,11 +1042,17 @@ _layernorm_bwd_p = register_primitive(LayerNormBwdPrimitive)
 
 
 def layernorm_bwd(g: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.ndarray, x: jnp.ndarray,
-                  gamma: jnp.ndarray, epsilon: float):
+                  gamma: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
     """
     Wrapper for TE layernorm bwd
     """
-    return _layernorm_bwd_p.bind(g, mu, rsigma, x, gamma, epsilon=epsilon)
+    return _layernorm_bwd_p.bind(g,
+                                 mu,
+                                 rsigma,
+                                 x,
+                                 gamma,
+                                 zero_centered_gamma=zero_centered_gamma,
+                                 epsilon=epsilon)
 
 
 class RmsNormFwdPrimitive(BasePrimitive):
@@ -1056,12 +1063,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
     multiple_results = True
 
     @staticmethod
-    def abstract(
-            x,
-            gamma,
-            *,
-            epsilon    # pylint: disable=unused-argument
-    ):
+    def abstract(x, gamma, **kwargs):    # pylint: disable=unused-argument
         """
         RMSNorm fwd abstract
         """
@@ -1106,6 +1108,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            0,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 
@@ -1138,8 +1141,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             amax,
             scale,
             scale_inv,
-            *,
-            epsilon    # pylint: disable=unused-argument
+            **kwargs    # pylint: disable=unused-argument
     ):
         """
         RMSNorm fwd (fp8 out) abstract
@@ -1207,6 +1209,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            0,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 
@@ -1243,8 +1246,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
             rsigma,
             x,
             gamma,
-            *,
-            epsilon    # pylint: disable=unused-argument
+            **kwargs    # pylint: disable=unused-argument
     ):
         """
         RMSNorm bwd abstract
@@ -1298,6 +1300,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
+            0,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 

@@ -66,8 +66,9 @@ pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, DType
 }
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             float eps) {
-    return PackOpaque(CustomCallNormDescriptor{n, hidden, x_dtype, w_dtype, eps});
+                                             bool zero_centered_gamma, float eps) {
+    return PackOpaque(
+        CustomCallNormDescriptor{n, hidden, x_dtype, w_dtype, zero_centered_gamma, eps});
 }
 
 pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, size_t heads,
@@ -269,10 +270,10 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
                      desc.use_split_accumulator, stream);
 }
 
-void LayerNormForwardImpl(size_t n, size_t hidden, void *input, DType in_dtype, void *weight,
-                          DType w_dtype, void *bias, float eps, void *output, DType out_dtype,
-                          void *mu, void *rsigma, float *amax, float *scale, float *scale_inv,
-                          cudaStream_t stream) {
+void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps, void *input,
+                          DType in_dtype, void *weight, DType w_dtype, void *bias, void *output,
+                          DType out_dtype, void *mu, void *rsigma, float *amax, float *scale,
+                          float *scale_inv, cudaStream_t stream) {
     auto input_shape = std::vector<size_t>{n, hidden};
     auto weight_shape = std::vector<size_t>{hidden};
     auto intermediates_shape = std::vector<size_t>{n};
@@ -291,12 +292,17 @@ void LayerNormForwardImpl(size_t n, size_t hidden, void *input, DType in_dtype, 
     TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
     auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
+    auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    if (!is_layer_norm) {
+        assert(!zero_centered_gamma && "rmsnorm doesn't support zero_centered_gamma.");
+    }
+
     // The first call is to query the required workspace
     if (is_layer_norm) {
         auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
         auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
 
-        nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
+        layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
                            output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), stream,
                            num_sm, dummy_workspace_tensor.data(), dummy_barrier_tensor.data());
     } else {
@@ -322,7 +328,7 @@ void LayerNormForwardImpl(size_t n, size_t hidden, void *input, DType in_dtype, 
         auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
         auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
 
-        nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
+        layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
                            output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), stream,
                            num_sm, workspace_tensor.data(), barrier_tensor.data());
     } else {
@@ -332,9 +338,10 @@ void LayerNormForwardImpl(size_t n, size_t hidden, void *input, DType in_dtype, 
     }
 }
 
-void LayerNormBackwardImpl(size_t n, size_t hidden, void *input, DType in_dtype, void *weight,
-                           DType w_dtype, void *ograd, void *mu, void *rsigma, float eps,
-                           void *xgrad, void *wgrad, void *dbeta, cudaStream_t stream) {
+void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps,
+                           void *input, DType in_dtype, void *weight, DType w_dtype, void *ograd,
+                           void *mu, void *rsigma, void *xgrad, void *wgrad, void *dbeta,
+                           cudaStream_t stream) {
     auto input_shape = std::vector<size_t>{n, hidden};
     auto weight_shape = std::vector<size_t>{hidden};
     auto intermediates_shape = std::vector<size_t>{n};
@@ -360,12 +367,17 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, void *input, DType in_dtype,
     auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
     size_t dbeta_part_size{};
 
+    auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+    if (!is_layer_norm) {
+        assert(!zero_centered_gamma && "rmsnorm doesn't support zero_centered_gamma.");
+    }
+
     // The first call is to query the workspace
     if (is_layer_norm) {
         auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
         auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
 
-        nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(),
+        layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(),
                            rsigma_tensor.data(), gamma_tensor.data(), xgrad_tensor.data(),
                            wgrad_tensor.data(), dbeta_tensor.data(),
                            dummy_dgamma_part_tensor.data(), dummy_dbeta_part_tensor.data(), stream,
@@ -411,7 +423,7 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, void *input, DType in_dtype,
         auto dbeta_part_tensor = TensorWrapper(dbeta_part, dummy_dbeta_part_tensor.shape(),
                                                dummy_dbeta_part_tensor.dtype());
 
-        nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(),
+        layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(),
                            rsigma_tensor.data(), gamma_tensor.data(), xgrad_tensor.data(),
                            wgrad_tensor.data(), dbeta_tensor.data(), dgamma_part_tensor.data(),
                            dbeta_part_tensor.data(), stream, num_sm, workspace_tensor.data(),
@@ -444,11 +456,12 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
 
     auto out_dtype = DType::kFloat8E4M3;
 
-    LayerNormForwardImpl(n, hidden, input, in_dtype, weight, w_dtype, bias, eps, output, out_dtype,
-                         mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
 }
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -470,9 +483,10 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto out_dtype = in_dtype;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
 
-    LayerNormForwardImpl(n, hidden, input, in_dtype, weight, w_dtype, bias, eps, output, out_dtype,
-                         mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
 }
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -483,6 +497,7 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
 
     auto *ograd = buffers[0];
     auto *mu = buffers[1];
@@ -493,8 +508,8 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *wgrad = buffers[6];
     auto *dbeta = buffers[7];
 
-    LayerNormBackwardImpl(n, hidden, input, in_dtype, weight, w_dtype, ograd, mu, rsigma, eps,
-                          xgrad, wgrad, dbeta, stream);
+    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                          ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
 }
 
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -517,10 +532,11 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
     auto out_dtype = DType::kFloat8E4M3;
 
-    LayerNormForwardImpl(n, hidden, input, in_dtype, weight, w_dtype, bias, eps, output, out_dtype,
-                         mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
 }
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -541,10 +557,11 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
     auto out_dtype = in_dtype;
 
-    LayerNormForwardImpl(n, hidden, input, in_dtype, weight, w_dtype, bias, eps, output, out_dtype,
-                         mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
 }
 
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -561,12 +578,13 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
     auto in_dtype = desc.x_dtype;
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
+    auto zero_centered_gamma = desc.zero_centered_gamma;
 
     void *mu = nullptr;
     void *dbeta = nullptr;
 
-    LayerNormBackwardImpl(n, hidden, input, in_dtype, weight, w_dtype, ograd, mu, rsigma, eps,
-                          xgrad, wgrad, dbeta, stream);
+    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
+                          ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
 }
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
