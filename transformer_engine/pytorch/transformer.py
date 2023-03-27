@@ -4,7 +4,6 @@
 
 """Transformer."""
 import os
-import re
 import math
 import warnings
 from importlib.metadata import version
