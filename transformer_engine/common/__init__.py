@@ -7,12 +7,10 @@
 
 def get_te_path():
     """Find TE path using pip"""
-
-    import os
-
-    te_info = (
-        os.popen("pip show transformer_engine").read().replace("\n", ":").split(":")
-    )
+    import subprocess
+    command = "pip show transformer_engine"
+    result = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    te_info = result.stdout.replace("\n", ":").split(":")
     return te_info[te_info.index("Location") + 1].strip()
 
 
