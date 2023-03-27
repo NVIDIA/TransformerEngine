@@ -478,7 +478,7 @@ class MultiHeadAttention(nn.Module):
                 cache_index.value = cache_index.value + 1
 
                 mask = combine_masks(
-                    mask, jnp.broadcast_to(jnp.arange(length) <= cur_index, (batch, 1, 1, length)))
+                    mask, jnp.broadcast_to(jnp.arange(length) > cur_index, (batch, 1, 1, length)))
 
                 if bias is not None:
                     bias = dynamic_vector_slice_in_dim(jnp.squeeze(bias, axis=0),
@@ -889,7 +889,8 @@ class TransformerLayer(nn.Module):
                 assert -x_shape_len < dims < x_shape_len
 
             return nn.Dropout(rate=self.hidden_dropout,
-                              broadcast_dims=self.hidden_dropout_dims)(x, deterministic)
+                              broadcast_dims=self.hidden_dropout_dims)(x,
+                                                                       deterministic=deterministic)
 
         x = hidden_dropout(x, deterministic)
         if self.drop_path > 0.0:
