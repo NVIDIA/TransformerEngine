@@ -1,3 +1,4 @@
+flax
 nltk
 optax
 tensorflow-datasets
