@@ -917,7 +917,7 @@ class LayerNormMLP(TransformerEngineBase):
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
                            broadcast_dims=self.intermediate_hidden_dropout_dims)(
-                               z, deterministic=deterministic)    # Broadcast along length.
+                               z, deterministic=deterministic)
 
             # DenseGeneral 2
             hidden_size = inputs.shape[-1]

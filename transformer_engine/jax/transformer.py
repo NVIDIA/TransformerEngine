@@ -886,7 +886,7 @@ class TransformerLayer(nn.Module):
             assert isinstance(self.hidden_dropout_dims, Sequence)
             x_shape_len = len(x.shape)
             for dims in self.hidden_dropout_dims:
-                assert -x_shape_len < dims < x_shape_len
+                assert -x_shape_len <= dims < x_shape_len
 
             return nn.Dropout(rate=self.hidden_dropout,
                               broadcast_dims=self.hidden_dropout_dims)(x,
