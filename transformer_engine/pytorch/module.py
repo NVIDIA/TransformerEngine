@@ -1122,7 +1122,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
-        self.return_bias = bias and return_bias
+        self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
@@ -1246,7 +1247,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias and not self.return_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
@@ -1330,7 +1331,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 bias_tensor,
-                self.use_bias and not self.return_bias and not self.gemm_bias_unfused_add,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1774,7 +1775,8 @@ class Linear(TransformerEngineBaseModule):
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
-        self.return_bias = bias and return_bias
+        self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
 
         if tp_group is None:
@@ -1877,7 +1879,7 @@ class Linear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias and not self.return_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
@@ -1944,7 +1946,7 @@ class Linear(TransformerEngineBaseModule):
                 self.weight1_t_fp8 if self.fp8 else None,
                 inp,
                 bias_tensor,
-                self.use_bias and not self.return_bias and not self.gemm_bias_unfused_add,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
@@ -2664,7 +2666,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
-        self.return_bias = bias and return_bias
+        self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
@@ -2768,7 +2771,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.set_parallel_mode and self.use_bias and not self.return_bias:
+        if self.set_parallel_mode and self.apply_bias:
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
@@ -2842,7 +2845,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.weight2_fp8 if self.fp8 else None,
                 self.weight2_t_fp8 if self.fp8 else None,
                 self.fc2_bias,
-                self.use_bias and not self.return_bias and not self.gemm_bias_unfused_add,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
