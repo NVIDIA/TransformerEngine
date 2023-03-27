@@ -26,7 +26,8 @@ void te_gemm(at::Tensor A,
              at::Tensor workspace,
              size_t workspaceSize,
              bool accumulate,
-             bool use_split_accumulator
+             bool use_split_accumulator,
+             int math_sm_count
 );
 
 

@@ -290,7 +290,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             workspace,
             workspaceSize,
             accumulate,
-            use_split_accumulator);
+            use_split_accumulator,
+            _math_sms);
 
         CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_comm, 0));
