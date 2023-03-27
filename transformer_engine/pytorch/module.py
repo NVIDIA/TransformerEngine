@@ -143,14 +143,14 @@ def get_ub(shape: list,
         pp_size: int = 1,
         tp_size: int = 8,
         num_comm_sm: int = 16,
-        comm_cga_size: int = 1,
+        comm_cga_size: int = 2,
         num_splits: int = 1,
-        num_buffers: int = 1,
-        set_sm_margin: int = 1):
+        use_rr_kernel: int = 0,
+        set_sm_margin: int = 0):
     global ub_mgr
     if ub_mgr is None:
         ub_mgr = UserBufferManager(torch.distributed.get_rank())
-    key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#buf{num_buffers}_margin{set_sm_margin}'
+    key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
     print (f'get_ub {key}')
     if key not in ub_mgr.free_list:
         ub_mgr.free_list[key] = []
@@ -164,7 +164,7 @@ def get_ub(shape: list,
             num_comm_sm,        # num_comm_sm
             comm_cga_size,      # comm_cga_size
             num_splits,         # num_splits
-            num_buffers,        # number of buffers
+            use_rr_kernel,      # number of buffers
             set_sm_margin,      # set sm margin
         )
     else:

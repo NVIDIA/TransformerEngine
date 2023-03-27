@@ -884,7 +884,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool>())
     .def("rs", &ubuf::UbufCommOverlap::rs)
-//    .def("rs_", &ubuf::UbufCommOverlap::rs_)
     .def("ag", &ubuf::UbufCommOverlap::ag)
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
