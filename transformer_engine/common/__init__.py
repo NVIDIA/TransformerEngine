@@ -13,9 +13,7 @@ def get_te_path():
     """Find Transformer Engine install path using pip"""
 
     command = ["pip", "show", "transformer_engine"]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError("Could not find transformer_engine install path")
+    result = subprocess.run(command, capture_output=True, check=True, text=True)
     result = result.stdout.replace("\n", ":").split(":")
     return result[result.index("Location")+1].strip()
 
