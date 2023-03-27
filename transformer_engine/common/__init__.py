@@ -3,25 +3,25 @@
 # See LICENSE for license information.
 
 """FW agnostic user-end APIs"""
+import ctypes
+import os
+import platform
+import subprocess
 
 
 def get_te_path():
-    """Find TE path using pip"""
+    """Find Transformer Engine install path using pip"""
 
-    import os
-
-    te_info = (
-        os.popen("pip show transformer_engine").read().replace("\n", ":").split(":")
-    )
-    return te_info[te_info.index("Location") + 1].strip()
+    command = ["pip", "show", "transformer_engine"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("Could not find transformer_engine install path")
+    result = result.stdout.replace("\n", ":").split(":")
+    return result[result.index("Location")+1].strip()
 
 
 def _load_library():
-    """Load TE .so"""
-
-    import os
-    import ctypes
-    import platform
+    """Load shared library with Transformer Engine C extensions"""
 
     system = platform.system()
     if system == "Linux":
@@ -31,7 +31,7 @@ def _load_library():
     elif system == "Windows":
         extension = "dll"
     else:
-        raise "Unsupported operating system " + system + "."
+        raise RuntimeError(f"Unsupported operating system ({system})")
     lib_name = "libtransformer_engine." + extension
     dll_path = get_te_path()
     dll_path = os.path.join(dll_path, lib_name)
