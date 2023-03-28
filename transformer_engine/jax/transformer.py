@@ -45,8 +45,10 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     logical axis rules.
 
     .. note::
-        We currently only support single, data parallelism and standard tensor parallelism
-        logical axis rules for performance reasons.
+        We currently only support logical axis rules for single GPU training, data parallel
+        training and 1D-sharding tensor parallel training.
+        Refer to `Figure 3 in` `Megatron-LM tensor parallel <https://arxiv.org/pdf/1909.08053.pdf>`_
+        for 1D-sharding tensor parallelism.
 
     .. warning::
         Please make sure ShardingResource is set via fp8_autocast before calling this function.
@@ -718,7 +720,7 @@ class TransformerLayer(nn.Module):
         If set to True, `TransformerLayer` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence : bool, default = True
+    transpose_batch_sequence : bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -753,7 +755,7 @@ class TransformerLayer(nn.Module):
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
 

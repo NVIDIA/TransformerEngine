@@ -15,3 +15,8 @@ try:
     from . import jax
 except ImportError as e:
     pass
+
+try:
+    from . import tensorflow
+except ImportError as e:
+    pass

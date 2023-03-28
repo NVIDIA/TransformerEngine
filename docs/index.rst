@@ -6,6 +6,15 @@
 Transformer Engine documentation
 ==============================================
 
+.. ifconfig:: "dev" in release
+
+   .. warning::
+      You are currently viewing unstable developer preview of the documentation.
+      To see the documentation for the latest stable release, refer to:
+
+      * `Release Notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
+      * `Developer Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ (stable version of this page)
+
 .. include:: ../README.rst
    :start-after: overview-begin-marker-do-not-remove
    :end-before: overview-end-marker-do-not-remove
