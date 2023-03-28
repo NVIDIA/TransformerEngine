@@ -17,7 +17,9 @@
                 "VERSION",
                 "Doxyfile",
                 "pylintrc",
-                ".json"
+                ".json",
+                ".md",
+                ".txt"
                ],
     "exclude_copyright": [],
     "copyright_only": false
