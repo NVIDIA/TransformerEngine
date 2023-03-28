@@ -4,9 +4,9 @@
 
 """Transformer."""
 import os
-import re
 import math
 import warnings
+from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -42,7 +42,7 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
-_flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
+_flash_attn_version = version("flash-attn")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
@@ -607,7 +607,7 @@ class MultiHeadAttention(torch.nn.Module):
             hidden_size,
             hidden_size,
             init_method=output_layer_init_method,
-            bias=False,
+            bias=True,
             return_bias=True,
             parallel_mode="row" if set_parallel_mode else None,
             **common_gemm_kwargs,
@@ -1059,7 +1059,7 @@ class TransformerLayer(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
-            bias=False,
+            bias=True,
             return_bias=True,
             sequence_parallel=self.sequence_parallel,
             params_dtype=params_dtype,
