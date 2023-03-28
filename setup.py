@@ -116,6 +116,7 @@ supported_frameworks = {
     "all": all_sources,
     "pytorch": pytorch_sources,
     "jax": None, # JAX use transformer_engine/CMakeLists.txt
+    "tensorflow": None, # tensorflow use transformer_engine/CMakeLists.txt
 }
 
 framework = os.environ.get("NVTE_FRAMEWORK", "pytorch")
@@ -190,6 +191,17 @@ class JaxBuilder(FrameworkBuilderBase):
     def run(self, extensions):
         print("Building jax extensions!")
 
+class TensorFlowBuilder(FrameworkBuilderBase):
+    def cmake_flags(self):
+        return ["-DENABLE_TENSORFLOW=ON"]
+
+    def run(self, extensions):
+        print("Building TensorFlow extensions!")
+
+    @staticmethod
+    def install_requires():
+        return ["pydantic",]
+
 ext_modules = []
 dlfw_builder_funcs = []
 
@@ -223,6 +235,9 @@ if framework in ("all", "pytorch"):
 
 if framework in ("all", "jax"):
     dlfw_builder_funcs.append(JaxBuilder)
+
+if framework in ("all", "tensorflow"):
+    dlfw_builder_funcs.append(TensorFlowBuilder)
 
 dlfw_install_requires = []
 for builder in dlfw_builder_funcs:

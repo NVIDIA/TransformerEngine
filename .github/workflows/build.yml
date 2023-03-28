@@ -31,3 +31,27 @@ jobs:
         run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
       - name: 'Sanity check'
         run: python tests/pytorch/test_sanity_import.py
+  TensorFlow:
+    name: 'TensorFlow build'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/tensorflow:23.02-tf2-py3
+      options: --user root
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Build'
+        run: |
+          apt-get update && apt-get install -y ninja-build pybind11-dev
+          mkdir -p wheelhouse && \
+          NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
+      - name: 'Upload wheel'
+        uses: actions/upload-artifact@v3
+        with:
+          name: te_wheel_tf
+          path: wheelhouse/transformer_engine*.whl
+          retention-days: 7
+      - name: 'Install'
+        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+      - name: 'Sanity check'
+        run: python tests/tensorflow/test_sanity_import.py
