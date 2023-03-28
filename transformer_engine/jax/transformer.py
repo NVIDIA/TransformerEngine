@@ -54,8 +54,8 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         Please make sure ShardingResource is set via fp8_autocast before calling this function.
 
     .. note::
-        This function is only needed when using TransformerLayer. For  other modules, such as DenseGeneral,
-        please properly set axes of kernels and bias.
+        This function is only needed when using TransformerLayer. For  other modules, such as
+        DenseGeneral, please properly set axes of kernels and bias.
 
     Parameters
     ----------
