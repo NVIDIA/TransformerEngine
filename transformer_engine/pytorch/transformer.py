@@ -4,9 +4,9 @@
 
 """Transformer."""
 import os
-import re
 import math
 import warnings
+from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -48,7 +48,7 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
-_flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
+_flash_attn_version = version("flash-attn")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
