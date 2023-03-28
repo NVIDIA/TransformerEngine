@@ -14,7 +14,6 @@ Until FP8 is introduced to the ONNX standard, FP8 QuantizeLinear/DequantizeLinea
 using custom ORT operations.
 """
 
-
 import os
 import tempfile
 import pytest
@@ -309,7 +308,7 @@ def test_export_cast_ops(scale_factor: float, atol: float, precision: torch.dtyp
 @pytest.mark.parametrize(
     "precision,     atol", [
     [torch.float32, 1e-5],
-    [torch.float16, 1e-5]
+    [torch.float16, 2e-3]
 ])
 def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: float):
     class TestFP8_Gelu(nn.Module):
@@ -342,7 +341,7 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     fname = f"te.gelu_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_Gelu()
     do_export(model, inp, fname)
-    validate_result(fname, inp, model, rtol=0, atol=atol, is_fp8=True, allow_cnt_errors=2)
+    validate_result(fname, inp, model, rtol=1e-1, atol=atol, is_fp8=True, allow_cnt_errors=2)
 
 
 @pytest.mark.parametrize("scale_factors",

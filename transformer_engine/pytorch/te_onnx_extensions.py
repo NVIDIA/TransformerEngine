@@ -23,12 +23,10 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
     TypeError: 'torch._C.Value' object is not subscriptable
 """
 
-
 import torch
-from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
+from torch.onnx import symbolic_helper, register_custom_op_symbolic
 import torch._C._onnx as _C_onnx
 import transformer_engine_extensions as tex
-
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
@@ -76,22 +74,6 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
     return out
 
 
-def compute_in_fp32(g, inp, subgraph, cast_outp):
-    """Wrap subgraph with casts to/from FP32 so that its precision is FP32.
-
-    If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`.
-    Then, if `cast_output` is true, cast subgraphs's output back to `inp` data type.
-    """
-    inp_dtype = _type_utils.JitScalarType.from_value(inp)
-    is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
-    if not is_fp32:
-        inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
-    sg_out = subgraph(inp)
-    if not is_fp32 and cast_outp:
-        sg_out = g.op("Cast", sg_out, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type())
-    return sg_out
-
-
 @symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
 def onnx_cast_to_fp8(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for cast_to_fp8"""
@@ -110,10 +92,7 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
-    wrapped_gelu = lambda inputs: torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
-    # TE computes GELU using float32 precision so wrap the GELU subgraph with
-    # conversion to/from float32.
-    gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=False)
+    gelu = torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
     out = quantize(g, gelu, scale_inv, fp8_tensor)
     return out
 
@@ -200,20 +179,16 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        inputs_dtype= inputs.type().dtype()
-        one = g.op("Constant", value_t=torch.tensor([1.], dtype=inputs_dtype, device="cuda"))
+        one = g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64, device="cuda"))
         weight = g.op("Add", weight, one)
-
-    axis = -len(normalized_shape)
-    ln =  g.op(
-        "LayerNormalization",
+    ln = torch.onnx.symbolic_opset9.layer_norm(
+        g,
         inputs,
+        normalized_shape,
         weight,
         bias,
-        epsilon_f=eps,
-        axis_i=axis,
-        # This sets the LN compute precision - use FP32 always as does TE.
-        stash_type_i=_C_onnx.TensorProtoDataType.FLOAT,
+        eps,
+        False # cudnn_enable (not relevant)
     )
     return ln
 
