@@ -4,9 +4,9 @@
 
 """Transformer."""
 import os
-import re
 import math
 import warnings
+from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -42,7 +42,7 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 
-_flash_attn_version = re.search("Version: (.*)", os.popen("pip show flash_attn").read()).group(1)
+_flash_attn_version = version("flash-attn")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
@@ -353,10 +353,11 @@ class DotProductAttention(torch.nn.Module):
 
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
+        self.device_compute_capability = get_device_compute_capability()
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and attn_mask_type == "causal"
-            and get_device_compute_capability() >= 8.0
+            and self.device_compute_capability >= 8.0
         )
 
         attn_kwargs = {
@@ -437,6 +438,7 @@ class DotProductAttention(torch.nn.Module):
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
+            or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
         ):
             use_flash_attention = False
 
@@ -605,7 +607,7 @@ class MultiHeadAttention(torch.nn.Module):
             hidden_size,
             hidden_size,
             init_method=output_layer_init_method,
-            bias=False,
+            bias=True,
             return_bias=True,
             parallel_mode="row" if set_parallel_mode else None,
             **common_gemm_kwargs,
@@ -1057,7 +1059,7 @@ class TransformerLayer(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
-            bias=False,
+            bias=True,
             return_bias=True,
             sequence_parallel=self.sequence_parallel,
             params_dtype=params_dtype,

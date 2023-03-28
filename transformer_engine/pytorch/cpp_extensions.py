@@ -20,6 +20,7 @@ def fp8_gemm(
     B_dtype: tex.DType,
     out_dtype: torch.dtype,
     workspace: torch.Tensor,
+    gelu: bool = False,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
     out_index = None,
@@ -44,10 +45,15 @@ def fp8_gemm(
             device="cuda",
         )
         return_output = True
+    # Use bfloat16 as default bias_dtype
+    bias_dtype = torch.bfloat16 if bias is None else bias.dtype
+    if gelu:
+        gelu_input = torch.empty_like(out, dtype=bias_dtype)
+    else:
+        gelu_input = empty_tensor
+    bias_dtype = TE_DType[bias_dtype]
 
     out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
-    # Use bfloat16 as default bias_dtype
-    bias_dtype = tex.DType.kBFloat16 if bias is None else TE_DType[bias.dtype]
 
     _ = torch.ops.tex_ts.te_gemm_ts(
         A,
@@ -66,7 +72,7 @@ def fp8_gemm(
         empty_tensor if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
         bias if use_bias else empty_tensor,
         bias_dtype,
-        empty_tensor,  # this is pre_gelu_out
+        gelu_input,  # this is pre_gelu_out
         False,  # grad
         workspace,
         workspace.shape[0],
@@ -75,7 +81,11 @@ def fp8_gemm(
     )
 
     if return_output:
+        if gelu:
+            return out, gelu_input
         return out
+    if gelu:
+        return gelu_input
     return None
 
 
@@ -208,6 +218,24 @@ def fp8_cast_transpose_bgrad_fused(
         fp8_meta_tensor.amax_history[0][fp8_tensor],
         fp8_meta_tensor.scale_inv[fp8_tensor],
         otype,
+    )
+
+
+def fp8_transpose_bgrad_fused(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    grad_bias_type: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Transpose + BGRAD with FP8 output"""
+    return tex.fused_fp8_transpose_bgrad(
+        inp,
+        fp8_meta_tensor.scale[fp8_tensor],
+        fp8_meta_tensor.amax_history[0][fp8_tensor],
+        fp8_meta_tensor.scale_inv[fp8_tensor],
+        otype,
+        TE_DType[grad_bias_type],
     )
 
 
