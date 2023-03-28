@@ -53,6 +53,10 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     .. warning::
         Please make sure ShardingResource is set via fp8_autocast before calling this function.
 
+    .. note::
+        This function is only needed when using TransformerLayer. For  other modules, such as DenseGeneral,
+        please properly set axes of kernels and bias.
+
     Parameters
     ----------
     rules : Sequence[Tuple[str, Union[str, None]]]
@@ -73,10 +77,12 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
             f"Thie axis_name should be str, but got {type(key)}."
         assert isinstance(val, str) or (val is None), \
             f"Thie mesh_axis_name should be str or None, but got {type(val)}."
-        rules_map[key] = val
+        if key in rules_map:
+            rules_map[key].append(val)
+        else:
+            rules_map[key] = [val]
 
     gsr = global_shard_resource()
-
     te_logical_axis_rules = (('batch', gsr.dp_resource), ('embed', None), ('mlp', gsr.tp_resource),
                              ('heads', gsr.tp_resource), ('kv', None), ('qkv_dim', None),
                              ('kv_dim', None), ('joined_kv', gsr.tp_resource), ('act', None),
@@ -87,7 +93,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         key = item[0]
         val = item[1]
         if key in rules_map:
-            assert rules_map[key] == val, \
+            assert len(rules_map[key]) == 1 and rules_map[key][0] == val, \
                 f"The rule diverged between TE and given rule." \
                 f"Axis:{key} map to {rules_map[key]} in the given" \
                 f" rules, but {val} in TE's rules."
