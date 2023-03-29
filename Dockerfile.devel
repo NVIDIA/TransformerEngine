@@ -26,6 +26,6 @@ RUN set -x \
  && git remote set-url origin "https://${NO_USER}"
 
 # Install dependencies for JAX build
-RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+RUN [[ "${FRAMEWORK}" =~ jax|tensorflow|all ]] \
  && pip install pytest tensorflow_datasets \
- || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+ || [[ ! "${FRAMEWORK}" =~ jax|tensorflow|all ]]

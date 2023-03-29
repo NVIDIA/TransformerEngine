@@ -7,10 +7,12 @@ variables:
     DATADIR: /mnt/nvdl/datasets
     PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
     JAX_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/jax:main-py3-base
+    TENSORFLOW_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/tensorflow:master-py3-base
 
     # variables that may be overridden by the pipeline vars
     BUILD_PYTORCH: 1
     BUILD_JAX: 1
+    BUILD_TENSORFLOW: 1
     API_LOGGING: 0
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -217,6 +219,17 @@ jax-py3-base:
       variables:
         - $BUILD_JAX == "0"
 
+tensorflow-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $TENSORFLOW_IMAGE
+      FRAMEWORK: tensorflow
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
+
 .devel_template:
     variables:
       GIT_STRATEGY: fetch
@@ -247,6 +260,14 @@ jax-py3-devel:
     variables:
       FRAMEWORK: jax
     needs: [ jax-py3-base ]
+    extends:
+    - .devel_template
+
+tensorflow-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-base ]
     extends:
     - .devel_template
 
@@ -616,6 +637,15 @@ L0_jax_lint:
     tags:
     - 1GPU
 
+L0_tensorflow_lint:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
 L0_unittest--V100_1GPU:
     variables:
       FRAMEWORK: pytorch
@@ -668,6 +698,30 @@ L0_jax_unittest--H100_1GPU:
     variables:
       FRAMEWORK: jax
     needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_tensorflow_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
+
+L0_tensorflow_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_tensorflow_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
     extends:
     - .L0_test
     - .H100_1GPU

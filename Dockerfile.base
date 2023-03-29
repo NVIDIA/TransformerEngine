@@ -21,11 +21,11 @@ WORKDIR /opt/transformerengine/
 COPY --from=transformerengine . .
 
 # Install dependencies for JAX build
-RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+RUN [[ "${FRAMEWORK}" =~ jax|tensorflow|all ]] \
  && DEBIAN_FRONTEND=noninteractive apt-get -y update \
  && DEBIAN_FRONTEND=noninteractive apt -y install pybind11-dev ninja-build \
  && pip install pydantic \
- || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+ || [[ ! "${FRAMEWORK}" =~ jax|tensorflow|all ]]
 
 
 # Install Transformer Engine
