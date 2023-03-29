@@ -353,6 +353,11 @@ def cast_to_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input to FP8"""
+
+    assert len(fp8_meta_tensor.scale) > int(fp8_tensor)
+    assert len(fp8_meta_tensor.scale_inv) > int(fp8_tensor)
+    assert len(fp8_meta_tensor.amax_history[0]) > int(fp8_tensor)
+
     return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
         fp8_meta_tensor.scale,
@@ -371,6 +376,9 @@ def cast_from_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input from FP8"""
+
+    assert len(fp8_meta_tensor.scale_inv) > int(fp8_tensor)
+
     return torch.ops.tex_ts.cast_from_fp8_ts(
         inp,
         fp8_meta_tensor.scale_inv,

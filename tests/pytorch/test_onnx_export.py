@@ -104,12 +104,15 @@ def to_numpy(tensor):
     return tensor.cpu().numpy()
 
 
-def set_layer_scale(module: torch.nn.Module, scale: float):
-    module.fp8_init()
+def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
+    """Initialize the FP8 quantization scales in module"""
+    NB_SCALES_PER_GEMM = 3  # One scale per: input, weights, and output GEMM tensors.
+    nb_total_scales = num_gemms * NB_SCALES_PER_GEMM
+    module.fp8_init(num_gemms)
     module.fp8_meta["scaling_fwd"].scale = torch.ones(
-        2, dtype=torch.float32, device="cuda") / scale
+        nb_total_scales, dtype=torch.float32, device="cuda") / scale
     module.fp8_meta["scaling_fwd"].scale_inv = torch.ones(
-        2, dtype=torch.float32, device="cuda") * scale
+        nb_total_scales, dtype=torch.float32, device="cuda") * scale
 
 
 def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool):
@@ -677,7 +680,7 @@ def test_export_linear(
             precision
         ).to(device='cuda')
         if use_fp8:
-            set_layer_scale(model.linear, scale_factor)
+            set_layer_scale(model.linear, scale_factor, num_gemms=1)
         do_export(model, inp, fname, use_fp8)
 
         if precision in (torch.bfloat16, ):
@@ -735,7 +738,7 @@ def test_export_layernorm_linear(
             zero_centered_gamma=zero_centered_gamma,
         ).to(device='cuda')
         if use_fp8:
-            set_layer_scale(model, scale_factor)
+            set_layer_scale(model, scale_factor, num_gemms=1)
         do_export(model, inp, fname, use_fp8)
         if not use_fp8:
             validate_result(fname, inp, model, atol=1e-3)
@@ -791,7 +794,7 @@ def test_export_layernorm_mlp(
             zero_centered_gamma=zero_centered_gamma,
         ).to(device='cuda')
         if use_fp8:
-            set_layer_scale(model, scale_factor)
+            set_layer_scale(model, scale_factor, num_gemms=2)
         do_export(model, inp, fname, use_fp8)
         if not use_fp8:
             validate_result(fname, inp, model, atol=1e-3)
