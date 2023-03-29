@@ -190,7 +190,7 @@ class FP8Helper:
         Update the amax history
         """
         updated_amax_buffers = jnp.roll(amax_buffers, -1, 1)
-        updated_amax_buffers.at[:, 0].set(0)
+        updated_amax_buffers = updated_amax_buffers.at[:, 0].set(0)
         return updated_amax_buffers
 
     @staticmethod
