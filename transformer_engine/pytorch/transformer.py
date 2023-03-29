@@ -47,6 +47,7 @@ from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
 )
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 _flash_attn_version = version("flash-attn")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
@@ -516,6 +517,9 @@ class DotProductAttention(torch.nn.Module):
                                                             query_layer,
                                                             key_layer,
                                                             value_layer)
+        if is_in_onnx_export_mode():
+            use_flash_attention = False
+
         if use_flash_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.flash_attention,
