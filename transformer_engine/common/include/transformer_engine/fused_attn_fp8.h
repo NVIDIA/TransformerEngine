@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 
 #include "transformer_engine.h"
+#include <cudnn_frontend.h>
 #include <cstdint>
 
 #ifdef __cplusplus
@@ -47,7 +48,8 @@ void nvte_fused_attn_fwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
                 NVTETensor workspace,
-                cudaStream_t stream);
+                cudaStream_t stream,
+		cudnnHandle_t handle);
 
 void nvte_fused_attn_bwd(
                 int64_t b, int64_t max_seq_len,
@@ -66,7 +68,8 @@ void nvte_fused_attn_bwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
                 NVTETensor workspace,
-                cudaStream_t stream);
+                cudaStream_t stream,
+		cudnnHandle_t handle);
 
 #ifdef __cplusplus
 }  // extern "C"
