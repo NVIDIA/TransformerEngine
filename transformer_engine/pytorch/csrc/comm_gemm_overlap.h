@@ -38,7 +38,7 @@ enum UBOverlapAlgo{
 
 
 struct UbufCommOverlap : torch::CustomClassHolder {
-    int _rank;
+    int _local_rank;
     int _tp_size;
     int _num_splits;
     int _math_sms;
@@ -52,9 +52,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
     std::vector<torch::Tensor> _lt_workspaces;
     torch::Tensor output_tensor;
+    void* _ubuf_ptr;
 
     // Initialize userbuf.
-    UbufCommOverlap(torch::Tensor& sample,
+    UbufCommOverlap(torch::Tensor sample,
                     int rank,
                     int pp_size,
                     int tp_size,
@@ -73,10 +74,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         _ub_comm->use_rr_kernel = use_rr_kernel;
 
         // Allocate and register extra userbuffers
-        _ubuf = sample;
-        void* ubuf_ptr = static_cast<void*>(_ubuf.data_ptr());
-        _handle = register_user_buffer_collective(
-            (void**)&ubuf_ptr, _ubuf.numel() * _ubuf.element_size(), _ub_comm);
+        int ubuf_bytes = sample.numel() * sample.element_size();
+        cudaMalloc((void**)&_ubuf_ptr, ubuf_bytes);
+        _handle = register_user_buffer_collective((void**)&_ubuf_ptr, ubuf_bytes, _ub_comm);
+        _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
         for (int i = 0; i < num_splits; i++) {
             _stream_compute.push_back(at::cuda::getStreamFromPool());
@@ -85,7 +86,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
         _num_splits = num_splits;
         _tp_size = tp_size;
-        _rank = rank;
+        _local_rank = (rank % tp_size);
 
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, 0);
@@ -101,6 +102,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         cudaEventCreateWithFlags(&_stop_comm, 0);
     }
 
+    ~UbufCommOverlap()
+    {
+        cudaFree(_ubuf_ptr);
+    }
 
     /*
     ** Reduce Scatter
@@ -198,7 +203,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         char* ubuf_wt_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
         COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
         if (_comm_type == COMM_TYPE::RS) {
-            ubuf_wt_ptr += _ubuf.numel() / _tp_size * _rank * _ubuf.element_size();
+            ubuf_wt_ptr += _ubuf.numel() / _tp_size * _local_rank * _ubuf.element_size();
         }
 
         // Catch up the default torch stream
@@ -606,7 +611,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             if ((input.numel() * _tp_size) != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
                 NVTE_ERROR("input and ubuf size do not match!");
             }
-            ubuf_ptr += _ubuf.numel() / _tp_size * _rank * _ubuf.element_size();
+            ubuf_ptr += _ubuf.numel() / _tp_size * _local_rank * _ubuf.element_size();
         } else {
             if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
                 NVTE_ERROR("input and ubuf size do not match!");
@@ -637,7 +642,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         if (_comm_type != COMM_TYPE::AG && _comm_type != COMM_TYPE::RS)
             NVTE_ERROR("Invalid comm_type");
         if (_comm_type == COMM_TYPE::RS) 
-            ubuf_wt_ptr += _ubuf.numel() / _tp_size * _rank * _ubuf.element_size();
+            ubuf_wt_ptr += _ubuf.numel() / _tp_size * _local_rank * _ubuf.element_size();
         int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
         int output_c_dim1 = _ubuf.size(1);
         output_tensor = torch::from_blob(
