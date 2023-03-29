@@ -32,7 +32,7 @@ from transformer_engine.pytorch.module import get_workspace
 import transformer_engine.pytorch.cpp_extensions as texcpp
 import transformer_engine.pytorch.softmax as softmax_defs
 from transformer_engine.pytorch.utils import get_default_init_method
-
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 # Global test configuration knobs.
 
@@ -89,15 +89,16 @@ def do_export(
         os.makedirs(TEST_ARTIFACTS_DIR, exist_ok=True)
         fname = os.path.join(TEST_ARTIFACTS_DIR, fname)
         inps = inp if isinstance(inp, list) or isinstance(inp, tuple) else (inp,)
-        torch.onnx.export(model,
-                          inps,
-                          fname,
-                          verbose=False,
-                          opset_version=opset,
-                          input_names=input_names,
-                          output_names=output_names,
-                          do_constant_folding=False,
-                          operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
+        with te.onnx_export(True):
+            torch.onnx.export(model,
+                            inps,
+                            fname,
+                            verbose=False,
+                            opset_version=opset,
+                            input_names=input_names,
+                            output_names=output_names,
+                            do_constant_folding=False,
+                            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
 def to_numpy(tensor):
@@ -1006,3 +1007,10 @@ def test_export_transformer_layer(
         validate_result(fname, inp, model, atol=1e-3)
     elif precision != torch.float16:
         validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8)
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_export_ctx_manager(enabled):
+    assert is_in_onnx_export_mode() == False
+    with te.onnx_export(enabled):
+        assert is_in_onnx_export_mode() == enabled
+    assert is_in_onnx_export_mode() == False
