@@ -683,6 +683,8 @@ class LayerNormMLP(TransformerEngineBase):
         Each activation has its own transformation layer.
     intermediate_dropout_rate: float, default = 0.1
         Dropout probability for the dropout op after the :attr:`activations`.
+    intermediate_hidden_dropout_dims: Sequence[int], default = ()
+        Dimensions that will share the same dropout mask for hidden
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
 
@@ -716,6 +718,7 @@ class LayerNormMLP(TransformerEngineBase):
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ('relu',)
     intermediate_dropout_rate: float = 0.1
+    intermediate_hidden_dropout_dims: Sequence[int] = ()
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -912,8 +915,9 @@ class LayerNormMLP(TransformerEngineBase):
                 z = functools.reduce(operator.mul, activations)
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
-            z = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
-                z, deterministic=deterministic)    # Broadcast along length.
+            z = nn.Dropout(rate=self.intermediate_dropout_rate,
+                           broadcast_dims=self.intermediate_hidden_dropout_dims)(
+                               z, deterministic=deterministic)
 
             # DenseGeneral 2
             hidden_size = inputs.shape[-1]

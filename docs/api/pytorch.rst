@@ -26,3 +26,5 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.fp8_autocast
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
+
+.. autoapifunction:: transformer_engine.pytorch.onnx_export
