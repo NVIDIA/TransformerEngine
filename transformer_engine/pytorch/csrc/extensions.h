@@ -6,6 +6,25 @@
 
 #include "common.h"
 
+class cudnnExecutionPlanManager {
+ public:
+    static cudnnExecutionPlanManager &Instance() {
+        static thread_local cudnnExecutionPlanManager instance;
+	printf("----------- instance ----------- \n");
+        return instance;
+    }
+
+    cudnnHandle_t GetCudnnHandle() {
+        std::once_flag flag;
+        std::call_once(flag, [&] { cudnnCreate(&handle_); printf("----------- create handle ----\n");});
+        return handle_;
+    }
+
+ private:
+    cudnnHandle_t handle_;
+};
+
+
 std::vector<at::Tensor> fused_attn_fwd(
                 int64_t b, int64_t max_seq_len,
                 int64_t total_seqs, int64_t h, int64_t d,

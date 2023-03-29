@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include "transformer_engine/fused_attn_fp8.h"
-#include <cudnn_frontend.h>
+//#include <cudnn_frontend.h>
 #include "../common.h"
 
 bool check_device_arch_newer_than(std::string const arch) {
@@ -187,21 +187,17 @@ struct FADescriptor {
   std::int64_t s_kv;
   std::int64_t d;
   float attnScale;
+  bool isTraining;
   float dropoutProbability;
   MHA_Layout layout;
-  void* seed;
-  void* offset;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FADescriptor &rhs) const {
     return std::tie(b, h, s_q, s_kv, d,
-		    attnScale, dropoutProbability,
-		    layout,
-		    seed, offset,
+		    attnScale, isTraining, dropoutProbability, layout,
                     tensor_type) < std::tie(rhs.b, rhs.h, rhs.s_q, rhs.s_kv,
-			    rhs.d, rhs.attnScale, rhs.dropoutProbability,
-			    rhs.layout, rhs.seed, rhs.offset,
-                            rhs.tensor_type);
+			    rhs.d, rhs.attnScale, rhs.isTraining, rhs.dropoutProbability,
+			    rhs.layout, rhs.tensor_type);
   }
 };
 
@@ -1168,7 +1164,7 @@ createdSQBMM(int64_t b,
 }
 
 void
-fa_cudnn_fp8_fprop(int64_t b,
+fa_fp8_fprop(int64_t b,
                 int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
@@ -1196,12 +1192,15 @@ fa_cudnn_fp8_fprop(int64_t b,
                 void* devPtrMNKOverride,
                 cudnnDataType_t tensorType,
 		void* workspace_ptr,
-		uint64_t* workspace_size)
+		uint64_t* workspace_size,
+		cudaStream_t stream,
+		cudnnHandle_t handle_)
 {
-    cudnnHandle_t handle_;
+    //cudnnHandle_t handle_;
     try {
         // Create cudnn handle
-        NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
+        //NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
+	NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
 	// FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
         if (check_device_arch_newer_than("hopper") == false) {
@@ -1217,10 +1216,9 @@ fa_cudnn_fp8_fprop(int64_t b,
                               s_kv,
                               d,
 			      attnScale,
+			      isTraining,
                               dropoutProbability,
                               layout,
-                              devPtrDropoutSeed,
-                              devPtrDropoutOffset,
                               tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
@@ -1426,10 +1424,12 @@ fa_cudnn_fp8_fprop(int64_t b,
                                .setDataPointers(data_ptrs)
                                .build();
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+        //NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-
-        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+        //NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+	//if (*workspace_size > 0) {
+        //  NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+        //}
 
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
@@ -1447,7 +1447,7 @@ fa_cudnn_fp8_fprop(int64_t b,
 }
 
 void
-fa_cudnn_fp8_bprop(int64_t b,
+fa_fp8_bprop(int64_t b,
                 int64_t h,
                 int64_t s_q,
                 int64_t s_kv,
@@ -1484,12 +1484,17 @@ fa_cudnn_fp8_bprop(int64_t b,
                 void* devPtrMNKOverride,
                 cudnnDataType_t tensorType,
 		void* workspace_ptr,
-		uint64_t* workspace_size)
+		uint64_t* workspace_size,
+		cudaStream_t stream,
+		cudnnHandle_t handle_)
 {
-    cudnnHandle_t handle_;
+    //cudnnHandle_t handle_;
     try {
+	printf("--------- enter bprop -------\n");
         // Create cudnn handle
-        NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
+        //NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
+	NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
+	printf("--------- set stream -------\n");
 
 	// FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
         if (check_device_arch_newer_than("hopper") == false) {
@@ -1505,10 +1510,9 @@ fa_cudnn_fp8_bprop(int64_t b,
                               s_kv,
                               d,
 			      attnScale,
+			      false,
                               dropoutProbability,
                               layout,
-                              devPtrDropoutSeed,
-                              devPtrDropoutOffset,
                               tensorType};
 
 	using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
@@ -1523,6 +1527,7 @@ fa_cudnn_fp8_bprop(int64_t b,
               auto plan = it->second;
               return plan;
             }
+	    printf("--------- create cache -------\n");
 
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
@@ -1860,6 +1865,7 @@ fa_cudnn_fp8_bprop(int64_t b,
             else if (*workspace_size == 0)
                 return;
         }
+	printf("--------- execute -------\n");
 
 	// execute if workspace is not nullptr or the plan require 0 workspace 
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
@@ -1915,10 +1921,17 @@ fa_cudnn_fp8_bprop(int64_t b,
                                .setWorkspacePointer(workspace_ptr)
                                .setDataPointers(data_ptrs)
                                .build();
+	printf("--------- before backend -------\n");
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-        NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+	printf("--------- after backend -------\n");
+        //NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-        NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+        //NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
+	//if (*workspace_size > 0) {
+	//  printf("--------- free -------\n");
+        //  NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
+        //}
+	//printf("--------- after free -------\n");
     
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
@@ -1953,7 +1966,8 @@ void fused_attn_fwd(int64_t b, int64_t max_seq_len,
 		int32_t *Seqlens,
 		uint64_t *RngState,
                 Tensor *workspace,
-                cudaStream_t stream)
+                cudaStream_t stream,
+		cudnnHandle_t handle)
 {
   void* devPtrQKV = input_QKV->data.dptr;
   void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
@@ -1985,7 +1999,7 @@ void fused_attn_fwd(int64_t b, int64_t max_seq_len,
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn::fa_cudnn_fp8_fprop(b, h, max_seq_len, max_seq_len, d,
+    fused_attn::fa_fp8_fprop(b, h, max_seq_len, max_seq_len, d,
 		    attn_scale, is_training, p_dropout, layout,
 		    devPtrQKV, devPtrM, devPtrZInv, devPtrO,
 		    devPtrDropoutSeed, devPtrDropoutOffset,
@@ -1998,7 +2012,9 @@ void fused_attn_fwd(int64_t b, int64_t max_seq_len,
 		    devPtrMNKOverride,
 		    get_cudnn_dtype(QKV_type),
 		    workspace->data.dptr,
-		    &workspace_size);
+		    &workspace_size,
+		    stream,
+		    handle);
 
     if (workspace_size > 0)
     {
@@ -2051,8 +2067,9 @@ void fused_attn_bwd(int64_t b, int64_t max_seq_len,
                 int32_t *Seqlens,
 		uint64_t *RngState,
                 Tensor *workspace,
-                cudaStream_t stream
-) {
+                cudaStream_t stream,
+		cudnnHandle_t handle)
+{
   void* devPtrQKV = input_QKV->data.dptr;
   void* devPtrDescaleQ = input_QKV->scale_inv.dptr;
   void* devPtrDescaleK = input_QKV->scale_inv.dptr;
@@ -2096,7 +2113,7 @@ void fused_attn_bwd(int64_t b, int64_t max_seq_len,
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2)) && (max_seq_len <= 512))
   {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn::fa_cudnn_fp8_bprop(b, h, max_seq_len, max_seq_len, d,
+    fused_attn::fa_fp8_bprop(b, h, max_seq_len, max_seq_len, d,
 		    attn_scale, p_dropout, layout,
 		    devPtrQKV, devPtrM, devPtrZInv,
 		    devPtrO, devPtrdO, devPtrdQKV,
@@ -2112,7 +2129,9 @@ void fused_attn_bwd(int64_t b, int64_t max_seq_len,
 		    devPtrMNKOverride,
 		    get_cudnn_dtype(QKV_type),
 		    workspace->data.dptr,
-		    &workspace_size);
+		    &workspace_size,
+		    stream,
+		    handle);
 
     if (workspace_size > 0)
     {
@@ -2166,9 +2185,10 @@ void nvte_fused_attn_fwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream)
+		cudaStream_t stream,
+		cudnnHandle_t handle)
 {
-  NVTE_API_CALL(nvte_cudnn_flash_attn_fwd);
+  NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   Tensor *output_M = reinterpret_cast<Tensor*>(M);
@@ -2181,7 +2201,7 @@ void nvte_fused_attn_fwd(
 		  attn_scale, p_dropout, qkv_layout, is_training,
 		  input_QKV, output_M, output_ZInv, output_S, output_O,
 		  QKVRaggedOffset, ORaggedOffset, Seqlens,
-		  RngState, wkspace, stream);
+		  RngState, wkspace, stream, handle);
 }
 
 void nvte_fused_attn_bwd(
@@ -2201,9 +2221,10 @@ void nvte_fused_attn_bwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream)
+		cudaStream_t stream,
+		cudnnHandle_t handle)
 {
-  NVTE_API_CALL(nvte_cudnn_flash_attn_bwd);
+  NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
   Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
@@ -2218,5 +2239,5 @@ void nvte_fused_attn_bwd(
   fused_attn_bwd(b, max_seq_len, total_seqs, h, d, attn_scale, p_dropout, qkv_layout,
 		  input_QKV, output_dQKV, input_M, input_ZInv, input_S, output_dS, input_O, input_dO,
 		  QKVRaggedOffset, ORaggedOffset, Seqlens,
-		  RngState, wkspace, stream);
+		  RngState, wkspace, stream, handle);
 }
