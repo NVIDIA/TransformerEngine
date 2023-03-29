@@ -38,9 +38,13 @@ MESH_CONFIG = [((4,), ("dp",), ShardingType.DP), ((4,), ("tp",), ShardingType.TP
                ((4,), ("tp",), ShardingType.TP_ROW), ((2, 2), ("dp", "tp"), ShardingType.DP_TP_COL),
                ((2, 2), ("dp", "tp"), ShardingType.DP_TP_ROW)]
 
-LOGICAL_RULES = [[(('a1', None), ('a2', 'ma2')), False],
-                 [(('a1', None), ('a2', 'ma2'), ('a3', ('ma31', 'ma32'))), True],
-                 [(('a1', None), ('a2', 'ma2'), ('batch', 'batch_1200234')), True]]
+LOGICAL_RULES = [
+    [(('a1', None), ('a2', 'ma2')), False],
+    [(('a1', None), ('a2', 'ma2'), ('a3', ('ma31', 'ma32'))), True],
+    [(('a1', None), ('a2', 'ma2'), ('a3', 'ma31'), ('a3', 'ma32')), False],
+    [(('a1', None), ('a2', 'ma2'), ('batch', 'batch_1200234')), True],
+    [(('a1', None), ('a2', 'ma2'), ('a2', 'ma1'), ('batch', 'model'), ('batch', 'data')), True],
+]
 SRS = [
     ShardingResource(),
     ShardingResource('data', None),
