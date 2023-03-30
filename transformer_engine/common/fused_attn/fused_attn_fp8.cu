@@ -1375,12 +1375,13 @@ fa_fp8_fprop(int64_t b,
 	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
 	if (workspace_ptr == nullptr)
 	{
-	    if (*workspace_size > 0)
-	    {
-	        return;
-            }
-            else if (*workspace_size == 0)
-                return;
+	    return;
+	    //if (*workspace_size > 0)
+	    //{
+	    //    return;
+            //}
+            //else if (*workspace_size == 0)
+            //    return;
         }
 
 	// execute if workspace is not nullptr or the plan require 0 workspace 
@@ -1490,11 +1491,11 @@ fa_fp8_bprop(int64_t b,
 {
     //cudnnHandle_t handle_;
     try {
-	printf("--------- enter bprop -------\n");
+	//printf("--------- enter bprop -------\n");
         // Create cudnn handle
         //NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 	NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
-	printf("--------- set stream -------\n");
+	//printf("--------- set stream -------\n");
 
 	// FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
         if (check_device_arch_newer_than("hopper") == false) {
@@ -1527,7 +1528,7 @@ fa_fp8_bprop(int64_t b,
               auto plan = it->second;
               return plan;
             }
-	    printf("--------- create cache -------\n");
+	    //printf("--------- create cache -------\n");
 
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
@@ -1860,12 +1861,13 @@ fa_fp8_bprop(int64_t b,
 
 	if (workspace_ptr == nullptr)
 	{
-	    if (*workspace_size > 0)
-	        return;
-            else if (*workspace_size == 0)
-                return;
+	    return;
+	    //if (*workspace_size > 0)
+	    //    return;
+            //else if (*workspace_size == 0)
+            //    return;
         }
-	printf("--------- execute -------\n");
+	//printf("--------- execute -------\n");
 
 	// execute if workspace is not nullptr or the plan require 0 workspace 
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
@@ -1921,9 +1923,9 @@ fa_fp8_bprop(int64_t b,
                                .setWorkspacePointer(workspace_ptr)
                                .setDataPointers(data_ptrs)
                                .build();
-	printf("--------- before backend -------\n");
+	//printf("--------- before backend -------\n");
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-	printf("--------- after backend -------\n");
+	//printf("--------- after backend -------\n");
         //NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
         //NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
