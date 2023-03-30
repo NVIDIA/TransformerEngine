@@ -57,22 +57,33 @@ at::Tensor & mha_fill(at::Tensor &self, const at::Tensor &start_index)
   return self;
 }
 
-void unpack(at::PhiloxCudaState arg, at::Tensor &rng_state)
+__global__ void unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) 
 {
-  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
   if (arg.captured_) {
-    at::Tensor t_seed = torch::from_blob(arg.seed_.ptr, {1}, options);  
-    at::Tensor t_offset = torch::from_blob(arg.offset_.ptr, {1}, options);  
-    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_intragraph_)); 
-    rng_state = at::concat({t_seed, t_offset});
+    rng_state_ptr[0] = static_cast<int64_t>(*arg.seed_.ptr);
+    rng_state_ptr[1] = static_cast<int64_t>(*(arg.offset_.ptr) + static_cast<int64_t>(arg.offset_intragraph_));
   } else {
-    at::Tensor t_seed = torch::zeros({1}, options);
-    at::Tensor t_offset = torch::zeros({1}, options);
-    t_seed = at::add(t_seed, static_cast<int64_t>(arg.seed_.val)); 
-    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_.val)); 
-    rng_state = at::concat({t_seed, t_offset});
+    rng_state_ptr[0] = static_cast<int64_t>(arg.seed_.val);
+    rng_state_ptr[1] = static_cast<int64_t>(arg.offset_.val);
   }
 }
+
+//void unpack(at::PhiloxCudaState arg, at::Tensor &rng_state)
+//{
+//  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+//  if (arg.captured_) {
+//    at::Tensor t_seed = torch::from_blob(arg.seed_.ptr, {1}, options);  
+//    at::Tensor t_offset = torch::from_blob(arg.offset_.ptr, {1}, options);  
+//    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_intragraph_)); 
+//    rng_state = at::concat({t_seed, t_offset});
+//  } else {
+//    at::Tensor t_seed = torch::zeros({1}, options);
+//    at::Tensor t_offset = torch::zeros({1}, options);
+//    t_seed = at::add(t_seed, static_cast<int64_t>(arg.seed_.val)); 
+//    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_.val)); 
+//    rng_state = at::concat({t_seed, t_offset});
+//  }
+//}
 
 at::PhiloxCudaState init_philox_state(
 		at::CUDAGeneratorImpl* gen,
@@ -140,7 +151,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   int64_t threads_per_cta = 128;
   at::PhiloxCudaState philox_args = init_philox_state(gen, max_seq_len, threads_per_cta);
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
-  unpack(philox_args, rng_state);
+  unpack<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
 
   TensorWrapper workspace;
   //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
