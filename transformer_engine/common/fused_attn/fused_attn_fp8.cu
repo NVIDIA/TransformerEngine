@@ -2187,8 +2187,8 @@ void nvte_fused_attn_fwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream,
-		cudnnHandle_t handle)
+		cudaStream_t stream)//,
+		//cudnnHandle_t handle)
 {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
@@ -2199,6 +2199,7 @@ void nvte_fused_attn_fwd(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   fused_attn_fwd(b, max_seq_len, total_seqs, h, d,
 		  attn_scale, p_dropout, qkv_layout, is_training,
 		  input_QKV, output_M, output_ZInv, output_S, output_O,
@@ -2223,8 +2224,8 @@ void nvte_fused_attn_bwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream,
-		cudnnHandle_t handle)
+		cudaStream_t stream)//,
+		//cudnnHandle_t handle)
 {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
@@ -2238,6 +2239,7 @@ void nvte_fused_attn_bwd(
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   fused_attn_bwd(b, max_seq_len, total_seqs, h, d, attn_scale, p_dropout, qkv_layout,
 		  input_QKV, output_dQKV, input_M, input_ZInv, input_S, output_dS, input_O, input_dO,
 		  QKVRaggedOffset, ORaggedOffset, Seqlens,
