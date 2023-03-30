@@ -45,11 +45,17 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     logical axis rules.
 
     .. note::
-        We currently only support single, data parallelism and standard tensor parallelism
-        logical axis rules for performance reasons.
+        We currently only support logical axis rules for single GPU training, data parallel
+        training and 1D-sharding tensor parallel training.
+        Refer to `Figure 3 in` `Megatron-LM tensor parallel <https://arxiv.org/pdf/1909.08053.pdf>`_
+        for 1D-sharding tensor parallelism.
 
     .. warning::
         Please make sure ShardingResource is set via fp8_autocast before calling this function.
+
+    .. note::
+        This function is only needed when using TransformerLayer. For  other modules, such as
+        DenseGeneral, please properly set axes of kernels and bias.
 
     Parameters
     ----------
@@ -71,10 +77,12 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
             f"Thie axis_name should be str, but got {type(key)}."
         assert isinstance(val, str) or (val is None), \
             f"Thie mesh_axis_name should be str or None, but got {type(val)}."
-        rules_map[key] = val
+        if key in rules_map:
+            rules_map[key].append(val)
+        else:
+            rules_map[key] = [val]
 
     gsr = global_shard_resource()
-
     te_logical_axis_rules = (('batch', gsr.dp_resource), ('embed', None), ('mlp', gsr.tp_resource),
                              ('heads', gsr.tp_resource), ('kv', None), ('qkv_dim', None),
                              ('kv_dim', None), ('joined_kv', gsr.tp_resource), ('act', None),
@@ -85,7 +93,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         key = item[0]
         val = item[1]
         if key in rules_map:
-            assert rules_map[key] == val, \
+            assert len(rules_map[key]) == 1 and rules_map[key][0] == val, \
                 f"The rule diverged between TE and given rule." \
                 f"Axis:{key} map to {rules_map[key]} in the given" \
                 f" rules, but {val} in TE's rules."
@@ -445,21 +453,22 @@ class MultiHeadAttention(nn.Module):
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
 
-            # TODO (Ming Huang): Check performance on GPU withou swap dimensions # pylint: disable=fixme
-            def swap_dims(x):
-                return x[:-3] + tuple(x[i] for i in [-2, -1, -3])
-
-            cached_key = self.variable('cache', 'cached_key', jnp.zeros, swap_dims(key.shape),
-                                       key.dtype)
-            cached_value = self.variable('cache', 'cached_value', jnp.zeros, swap_dims(value.shape),
+            cached_key = self.variable('cache', 'cached_key', jnp.zeros, key.shape, key.dtype)
+            cached_value = self.variable('cache', 'cached_value', jnp.zeros, value.shape,
                                          value.dtype)
             cache_index = self.variable('cache', 'cache_index',
                                         lambda: jnp.array(0, dtype=jnp.int32))
             if is_initialized:
-                batch, num_heads, head_dim, length = cached_key.value.shape
+                if self.transpose_batch_sequence:
+                    length, batch, num_heads, head_dim = cached_key.value.shape
+                    expected_shape = (1, batch, num_heads, head_dim)
+                    one_hot_indices_shape = (length, 1, 1, 1)
+                else:
+                    batch, length, num_heads, head_dim = cached_key.value.shape
+                    expected_shape = (batch, 1, num_heads, head_dim)
+                    one_hot_indices_shape = (1, length, 1, 1)
 
                 # Sanity shape check of cached key against input query.
-                expected_shape = (batch, 1, num_heads, head_dim)
                 if expected_shape != query.shape:
                     raise ValueError(
                         'Autoregressive cache shape error, '
@@ -467,19 +476,15 @@ class MultiHeadAttention(nn.Module):
 
                 cur_index = cache_index.value
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
-                one_token_key = jnp.moveaxis(key, -3, -1)
-                one_token_value = jnp.moveaxis(value, -3, -1)
-                key = cached_key.value + one_token_key * one_hot_indices
-                value = cached_value.value + one_token_value * one_hot_indices
+                one_hot_indices = jnp.reshape(one_hot_indices, one_hot_indices_shape)
+                key = cached_key.value + key * one_hot_indices
+                value = cached_value.value + value * one_hot_indices
                 cached_key.value = key
                 cached_value.value = value
                 cache_index.value = cache_index.value + 1
 
-                key = jnp.moveaxis(key, -1, -3)
-                value = jnp.moveaxis(value, -1, -3)
-
                 mask = combine_masks(
-                    mask, jnp.broadcast_to(jnp.arange(length) <= cur_index, (batch, 1, 1, length)))
+                    mask, jnp.broadcast_to(jnp.arange(length) > cur_index, (batch, 1, 1, length)))
 
                 if bias is not None:
                     bias = dynamic_vector_slice_in_dim(jnp.squeeze(bias, axis=0),
@@ -718,7 +723,7 @@ class TransformerLayer(nn.Module):
         If set to True, `TransformerLayer` module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
         cross-attention.
-    transpose_batch_sequence : bool, default = True
+    transpose_batch_sequence : bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
@@ -753,7 +758,7 @@ class TransformerLayer(nn.Module):
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
-    transpose_batch_sequence: bool = True
+    transpose_batch_sequence: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
 
@@ -887,10 +892,11 @@ class TransformerLayer(nn.Module):
             assert isinstance(self.hidden_dropout_dims, Sequence)
             x_shape_len = len(x.shape)
             for dims in self.hidden_dropout_dims:
-                assert -x_shape_len < dims < x_shape_len
+                assert -x_shape_len <= dims < x_shape_len
 
             return nn.Dropout(rate=self.hidden_dropout,
-                              broadcast_dims=self.hidden_dropout_dims)(x, deterministic)
+                              broadcast_dims=self.hidden_dropout_dims)(x,
+                                                                       deterministic=deterministic)
 
         x = hidden_dropout(x, deterministic)
         if self.drop_path > 0.0:
@@ -942,6 +948,7 @@ class TransformerLayer(nn.Module):
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
             intermediate_dropout_rate=self.hidden_dropout,
+            intermediate_hidden_dropout_dims=self.hidden_dropout_dims,
             dtype=self.dtype,
             scale_axes=('embed',),
             kernel_init=self.mlp_kernel_init,

@@ -1,0 +1,38 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to deploy the nightly version of TE documentation to GitHub Pages
+name: Deploy nightly docs
+on:
+  push:
+    branches: [ "main" ]
+jobs:
+  build:
+    uses: ./.github/workflows/build_docs.yml
+
+  prepare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+            name: "te_docs"
+            path: "html"
+      - name: Prepare for pages
+        uses: actions/upload-pages-artifact@v1.0.7
+        with:
+          path: "html"
+  deploy:
+    needs: prepare
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy
+      uses: actions/deploy-pages@v2.0.0

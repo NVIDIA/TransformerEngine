@@ -51,7 +51,7 @@ from .utils import (
     divide,
     get_default_init_method,
     cast_if_needed,
-    check_modulo_16,
+    check_dim_for_fp8_forward_exec,
 )
 from .distributed import (
     set_tensor_model_parallel_attributes,
@@ -666,8 +666,8 @@ class _LayerNormLinear(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1123,6 +1123,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
@@ -1187,7 +1188,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 stride=1,
             )
 
-            if self.use_bias or self.return_bias:
+            if self.use_bias:
                 self.register_buffer("bias_tensor",
                                      torch.empty(
                                          self.out_features,
@@ -1229,7 +1230,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     stride=1,
                 )
 
-                if self.use_bias or self.return_bias:
+                if self.use_bias:
                     self.register_parameter(
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
@@ -1246,9 +1247,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -1331,7 +1331,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 bias_tensor,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1396,8 +1396,8 @@ class _Linear(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1776,6 +1776,7 @@ class Linear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
 
         if tp_group is None:
@@ -1819,7 +1820,7 @@ class Linear(TransformerEngineBaseModule):
                 stride=1,
             )
 
-            if self.use_bias or self.return_bias:
+            if self.use_bias:
                 self.register_buffer("bias_tensor",
                                      torch.empty(
                                          self.out_features,
@@ -1861,7 +1862,7 @@ class Linear(TransformerEngineBaseModule):
                     stride=1,
                 )
 
-                if self.use_bias or self.return_bias:
+                if self.use_bias:
                     self.register_parameter(
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
@@ -1878,9 +1879,8 @@ class Linear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -1946,7 +1946,7 @@ class Linear(TransformerEngineBaseModule):
                 self.weight1_t_fp8 if self.fp8 else None,
                 inp,
                 bias_tensor,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
@@ -2012,8 +2012,8 @@ class _LayerNormMLP(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
-            not fp8 or check_modulo_16(inputmat, fc1_weight, fc2_weight)
-        ), "Inputs and weights must be divisible by 16 for FP8 execution."
+            not fp8 or check_dim_for_fp8_forward_exec(inputmat, fc1_weight, fc2_weight)
+        ), "Input and weight dimensions are not compatible for FP8 execution."
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -2667,6 +2667,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
@@ -2759,7 +2760,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             stride=1,
         )
 
-        if self.use_bias or self.return_bias:
+        if self.use_bias:
             self.fc2_bias = Parameter(
                 torch.empty(
                     hidden_size, device=torch.cuda.current_device(), dtype=params_dtype
@@ -2770,9 +2771,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.set_parallel_mode and self.use_bias:
+        if self.set_parallel_mode and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -2845,7 +2845,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.weight2_fp8 if self.fp8 else None,
                 self.weight2_t_fp8 if self.fp8 else None,
                 self.fc2_bias,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
