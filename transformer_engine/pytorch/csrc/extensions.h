@@ -15,9 +15,14 @@ class cudnnExecutionPlanManager {
     }
 
     cudnnHandle_t GetCudnnHandle() {
-        std::once_flag flag;
+        static thread_local std::once_flag flag;
         std::call_once(flag, [&] { cudnnCreate(&handle_); printf("----------- create handle ----\n");});
         return handle_;
+    }
+
+    ~cudnnExecutionPlanManager() {
+        static thread_local std::once_flag flag;
+        std::call_once(flag, [&] { cudnnDestroy(handle_); printf("----------- destroy handle ----\n");});
     }
 
  private:
