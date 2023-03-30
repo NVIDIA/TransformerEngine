@@ -143,7 +143,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   unpack(philox_args, rng_state);
 
   TensorWrapper workspace;
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_fwd(
@@ -160,8 +160,8 @@ std::vector<at::Tensor> fused_attn_fwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream(),
-		  handle);
+		  at::cuda::getCurrentCUDAStream());//,
+		  //handle);
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype()); 
@@ -183,8 +183,8 @@ std::vector<at::Tensor> fused_attn_fwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream(),
-		  handle);
+		  at::cuda::getCurrentCUDAStream());//,
+		  //handle);
 
   return {O, M, ZInv, rng_state};
 }
@@ -253,7 +253,7 @@ at::Tensor fused_attn_bwd(
 		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), scale_dS.data_ptr()); // TODO fix descale
 
   TensorWrapper workspace;
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_bwd(
@@ -272,8 +272,8 @@ at::Tensor fused_attn_bwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream(),
-		  handle);
+		  at::cuda::getCurrentCUDAStream());//,
+		  //handle);
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
@@ -297,8 +297,8 @@ at::Tensor fused_attn_bwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream(),
-		  handle);
+		  at::cuda::getCurrentCUDAStream());//,
+		  //handle);
 
   return dQKV;
 }
