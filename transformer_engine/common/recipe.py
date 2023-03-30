@@ -66,10 +66,10 @@ class DelayedScaling:
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
-    amax_history_len : int, default = 1
+    amax_history_len : int, default = 1024
                       The length of the amax history window used for
                       scaling factor computation.
-    amax_compute_algo : {'max', 'most_recent', Callable}, default = 'most_recent'
+    amax_compute_algo : {'max', 'most_recent', Callable}, default = 'max'
                        Algorithm used for choosing the `amax` value for the
                        scaling factor computation. There are 2 predefined
                        choices: `max` chooses the largest `amax` in the history
@@ -125,8 +125,8 @@ class DelayedScaling:
     margin: int = 0
     interval: int = 1
     fp8_format: Format = Format.HYBRID
-    amax_history_len: int = 1
-    amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "most_recent"
+    amax_history_len: int = 1024
+    amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
     override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
