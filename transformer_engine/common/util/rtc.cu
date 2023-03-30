@@ -73,6 +73,12 @@ inline int max_supported_sm_arch() {
 
 }  // namespace
 
+bool is_enabled() {
+  /// TODO Check env for NVTE_DISABLE_NVRTC
+  static bool is_enabled_ = true;
+  return is_enabled_;
+}
+
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)
   : mangled_name_{std::move(mangled_name)}
   , compiled_code_{std::move(compiled_code)}
@@ -136,6 +142,7 @@ void Kernel::launch(int device_id,
 }
 
 CUfunction Kernel::get_function(int device_id) {
+  std::lock_guard<std::mutex> lock_guard_(lock_);
   if (functions_[device_id] == null_function) {
     // Set driver context to proper device
     CUdevice device;
@@ -160,6 +167,7 @@ CUfunction Kernel::get_function(int device_id) {
 }
 
 KernelManager& KernelManager::instance() {
+  NVTE_CHECK(is_enabled(), "NVRTC support is not enabled");
   static KernelManager instance_;
   return instance_;
 }

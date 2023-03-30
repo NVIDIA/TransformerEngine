@@ -1,6 +1,18 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+
+# Convert files to string headers
+function(convert_file_to_string_header file_ string_header string_name)
+    file(READ "${file_}" STRING)
+    set(STRING_NAME "${string_name}")
+    configure_file(util/string_header.h.in "${string_header}" @ONLY)
+endfunction()
+convert_file_to_string_header(transpose/rtc/transpose.cu
+                              rtc_code_transpose.h
+                              rtc_code_transpose)
+
+# Configure C++ library
 add_library(transformer_engine SHARED
                                transformer_engine.cpp
                                transpose/cast_transpose.cu
@@ -20,14 +32,17 @@ add_library(transformer_engine SHARED
                                util/rtc.cu
                                fused_softmax/scaled_masked_softmax.cu
                                fused_softmax/scaled_upper_triang_masked_softmax.cu)
+target_include_directories(transformer_engine
+                           PUBLIC
+                           "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                           "${CMAKE_CURRENT_BINARY_DIR}")
 
-target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-
+# Configure dependencies
 list(APPEND transformer_engine_LINKER_LIBS CUDA::cuda_driver CUDA::cublas CUDA::cudart CUDA::nvrtc CUDA::nvToolsExt)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
-
 target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 
+# Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             PROPERTIES

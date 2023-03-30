@@ -20,6 +20,9 @@ namespace transformer_engine {
 
 namespace rtc {
 
+/* \brief Whether NVRTC support is enabled */
+bool is_enabled();
+
 /* \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
 public:
@@ -58,6 +61,9 @@ private:
   std::vector<CUmodule> modules_;
   // CUDA function for each CUDA device
   std::vector<CUfunction> functions_;
+
+  /* /brief Mutex for thread-safe kernel initialization */
+  std::mutex lock_;
 
   // Uninitialized CUDA module
   static constexpr CUmodule null_module = static_cast<CUmodule>(nullptr);
