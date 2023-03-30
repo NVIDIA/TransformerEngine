@@ -82,17 +82,21 @@ def compute_in_fp32(g, inp, subgraph, cast_outp):
     If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`.
     Then, if `cast_output` is true, cast subgraphs's output back to `inp` data type.
     """
-    inp_dtype = {
-        "Float": _C_onnx.TensorProtoDataType.FLOAT,
-        "Half": _C_onnx.TensorProtoDataType.FLOAT16,
-        "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
-    }[inp.type().scalarType()]
+    try:
+        inp_dtype = {
+            "Float": _C_onnx.TensorProtoDataType.FLOAT,
+            "Half": _C_onnx.TensorProtoDataType.FLOAT16,
+            "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
+        }[inp.type().scalarType()]
+    except KeyError as e:
+        raise TypeError(f"Onnx export for dtype {inp.type().scalarType()} not supported.") from e
+
     is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
     if not is_fp32:
         inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
     sg_out = subgraph(inp)
     if not is_fp32 and cast_outp:
-        sg_out = g.op("Cast", sg_out, to_i=_type_utils.JitScalarType(inp_dtype).onnx_type())
+        sg_out = g.op("Cast", sg_out, to_i=inp_dtype)
     return sg_out
 
 
