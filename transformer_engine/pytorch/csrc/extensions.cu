@@ -68,23 +68,6 @@ __global__ void unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr)
   }
 }
 
-//void unpack(at::PhiloxCudaState arg, at::Tensor &rng_state)
-//{
-//  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-//  if (arg.captured_) {
-//    at::Tensor t_seed = torch::from_blob(arg.seed_.ptr, {1}, options);  
-//    at::Tensor t_offset = torch::from_blob(arg.offset_.ptr, {1}, options);  
-//    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_intragraph_)); 
-//    rng_state = at::concat({t_seed, t_offset});
-//  } else {
-//    at::Tensor t_seed = torch::zeros({1}, options);
-//    at::Tensor t_offset = torch::zeros({1}, options);
-//    t_seed = at::add(t_seed, static_cast<int64_t>(arg.seed_.val)); 
-//    t_offset = at::add(t_offset, static_cast<int64_t>(arg.offset_.val)); 
-//    rng_state = at::concat({t_seed, t_offset});
-//  }
-//}
-
 at::PhiloxCudaState init_philox_state(
 		at::CUDAGeneratorImpl* gen,
 		int64_t max_seq_len,
@@ -131,8 +114,6 @@ std::vector<at::Tensor> fused_attn_fwd(
   at::Tensor descaleS = torch::empty_like(scaleS);
   auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
 		  amaxS.data_ptr(), scaleS.data_ptr(), descaleS.data_ptr());
-		  //amaxS.data_ptr(), scaleS.data_ptr(), scaleS.data_ptr()); // TODO fix descale
-		  //amaxS.data_ptr(), scaleS.data_ptr(), nullptr);
 		  			  
   auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
   if (set_zero)
@@ -143,8 +124,6 @@ std::vector<at::Tensor> fused_attn_fwd(
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
 		  {(size_t)total_seqs, (size_t)h, (size_t)d}, QKV_type,
 		  amaxO.data_ptr(), scaleO.data_ptr(), nullptr);
-		  //amaxO.data_ptr(), scaleO.data_ptr(), scaleO.data_ptr()); // TODO fix descale
-		  //amaxO.data_ptr(), scaleO.data_ptr(), descaleO.data_ptr());
 
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
 		  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
@@ -154,7 +133,6 @@ std::vector<at::Tensor> fused_attn_fwd(
   unpack<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
 
   TensorWrapper workspace;
-  //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_fwd(
@@ -171,8 +149,7 @@ std::vector<at::Tensor> fused_attn_fwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());//,
-		  //handle);
+		  at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype()); 
@@ -194,8 +171,7 @@ std::vector<at::Tensor> fused_attn_fwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());//,
-		  //handle);
+		  at::cuda::getCurrentCUDAStream());
 
   return {O, M, ZInv, rng_state};
 }
@@ -241,8 +217,6 @@ at::Tensor fused_attn_bwd(
   auto te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(),
 		  {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
 		  QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), nullptr);
-		  //QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), scale_dQKV.data_ptr()); // TODO fix descale
-		  //QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), descale_dQKV.data_ptr());
 
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
@@ -260,11 +234,8 @@ at::Tensor fused_attn_bwd(
   at::Tensor descale_dS = torch::empty_like(scale_dS);
   auto te_dS = makeTransformerEngineTensor((void*)nullptr, {0}, 
 		  QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), descale_dS.data_ptr());
-		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), nullptr);
-		  //QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), scale_dS.data_ptr()); // TODO fix descale
 
   TensorWrapper workspace;
-  //auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_bwd(
@@ -283,8 +254,7 @@ at::Tensor fused_attn_bwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());//,
-		  //handle);
+		  at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
@@ -308,8 +278,7 @@ at::Tensor fused_attn_bwd(
 	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
 		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());//,
-		  //handle);
+		  at::cuda::getCurrentCUDAStream());
 
   return dQKV;
 }

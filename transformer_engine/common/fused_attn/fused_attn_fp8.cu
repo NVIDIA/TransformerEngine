@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "transformer_engine/fused_attn_fp8.h"
-//#include <cudnn_frontend.h>
 #include "../common.h"
 
 bool check_device_arch_newer_than(std::string const arch) {
@@ -909,7 +908,6 @@ createSdOBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
 
@@ -961,7 +959,6 @@ createdOVBMM(int64_t b,
                             .setxDesc(vTensor)
                             .setyDesc(vTransposeTensor)
                             .build();
-
 
     // Create a matmul Node
     auto matmulOp = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1156,7 +1153,6 @@ createdSQBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-
     ops.push_back(std::move(reshape_op));
     ops.push_back(std::move(matmulOp));
 
@@ -1196,10 +1192,7 @@ fa_fp8_fprop(int64_t b,
 		cudaStream_t stream,
 		cudnnHandle_t handle_)
 {
-    //cudnnHandle_t handle_;
     try {
-        // Create cudnn handle
-        //NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 	NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
 	// FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
@@ -1296,7 +1289,6 @@ fa_fp8_fprop(int64_t b,
                                                     false, // scale is by value
                                                     ops);
 
-
             auto BeforeDropoutTensor = createSoftmaxForward(b, h, s_q, s_kv, ops, AfterAttnScale_tensor, isTraining);
 
             auto AfterDropout_before_quan_S = createDropoutForward(b, h, s_q, s_kv, dropoutProbability, ops, BeforeDropoutTensor);
@@ -1354,7 +1346,6 @@ fa_fp8_fprop(int64_t b,
                                .setOperationGraph(all_ops.size(), all_ops.data())
                                .build();
 
-
             cudnn_frontend::EngineConfigList filtered_configs;
             auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
 
@@ -1373,18 +1364,14 @@ fa_fp8_fprop(int64_t b,
 
 	auto plan = get_plan(fa_fprop_cache, descriptor);
 	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
+
+	// exit to request upper level API to allocate memory if needed 
 	if (workspace_ptr == nullptr)
 	{
 	    return;
-	    //if (*workspace_size > 0)
-	    //{
-	    //    return;
-            //}
-            //else if (*workspace_size == 0)
-            //    return;
         }
 
-	// execute if workspace is not nullptr or the plan require 0 workspace 
+	// execute if workspace is not nullptr
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
         void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
         void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
@@ -1425,12 +1412,6 @@ fa_fp8_fprop(int64_t b,
                                .setDataPointers(data_ptrs)
                                .build();
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-        //NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-        //NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
-	//if (*workspace_size > 0) {
-        //  NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        //}
 
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
@@ -1489,13 +1470,8 @@ fa_fp8_bprop(int64_t b,
 		cudaStream_t stream,
 		cudnnHandle_t handle_)
 {
-    //cudnnHandle_t handle_;
     try {
-	//printf("--------- enter bprop -------\n");
-        // Create cudnn handle
-        //NVTE_CHECK_CUDNN(cudnnCreate(&handle_));
 	NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
-	//printf("--------- set stream -------\n");
 
 	// FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
         if (check_device_arch_newer_than("hopper") == false) {
@@ -1528,7 +1504,6 @@ fa_fp8_bprop(int64_t b,
               auto plan = it->second;
               return plan;
             }
-	    //printf("--------- create cache -------\n");
 
 	    // otherwise, build the op_graph and the plan. Then update cache
             std::vector<cudnn_frontend::Operation const*> all_ops;
@@ -1667,7 +1642,6 @@ fa_fp8_bprop(int64_t b,
 
             auto dS_before_dequan_dO_Tensor = createdOVBMM(b, h, s_q, s_kv, d, layout, tensorType, ops, dOTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
-
             // dS * dequant_dO
             auto dS_before_dequan_V = createScale(dS_before_dequan_dO_Tensor, // input tensor
                                                             descaledOTensor, // scale tensor
@@ -1723,14 +1697,11 @@ fa_fp8_bprop(int64_t b,
                                             ops,
                                             2004 /*UID offset*/);
 
-
             // row reduction sum[(dO * dequant_dO) * (O * dequant_O) * (1 - p)]
             auto O_dO_after_rowsum = createdOAndORowReductionChain(b, h, s_q, s_kv, d, layout, ops, O_after_dequan_Tensor, dO_after_dequan_Tensor, dropoutScale_dOVt_OdO_Tensor);
 
             // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S
             auto S_mul_dS_minus_O_dO = createBiasSubtractionSoftmaxMulChain(b, h, s_q, s_kv, d, layout, ops, dS_after_dropout, AfterDropout_before_quan_S, O_dO_after_rowsum);
-
-
 
             // S_mul_dS_minus_O_dO * scaledS
             auto S_mul_dS_minus_O_dO_after_quan_dS = createScale(S_mul_dS_minus_O_dO, // input tensor
@@ -1745,7 +1716,6 @@ fa_fp8_bprop(int64_t b,
 
             // dS @ K
             auto After_dS_K = createdSKBMM(b, h, s_q, s_kv, d, ops, S_mul_dS_minus_O_dO_after_quan_dS, kTensor, seqlenMNKTensor);
-
 
             // (dS * K) * attn scale ds_K
             auto AfterAttnScale_dS_K_before_dequan_dS = createScale(After_dS_K, // input tensor
@@ -1840,7 +1810,6 @@ fa_fp8_bprop(int64_t b,
                                .setOperationGraph(all_ops.size(), all_ops.data())
                                .build();
 
-
             cudnn_frontend::EngineConfigList filtered_configs;
             auto statuses = cudnn_frontend::get_heuristics_list<1>({"heuristics_instant"}, opGraph, allowAllConfig, filtered_configs, true);
 
@@ -1859,17 +1828,13 @@ fa_fp8_bprop(int64_t b,
 	auto plan = get_plan(fa_bprop_cache, descriptor);
 	*workspace_size = static_cast<uint64_t>(plan.getWorkspaceSize());
 
+	// exit to request upper level API to allocate memory if needed 
 	if (workspace_ptr == nullptr)
 	{
 	    return;
-	    //if (*workspace_size > 0)
-	    //    return;
-            //else if (*workspace_size == 0)
-            //    return;
         }
-	//printf("--------- execute -------\n");
 
-	// execute if workspace is not nullptr or the plan require 0 workspace 
+	// execute if workspace is not nullptr
         void* devPtrQ = (void *) devPtrQKV; // q points to the top of qkv
         void* devPtrK = (void *)(static_cast<int8_t*>(devPtrQKV) + h * d); // k is at an offset of h * d
         void* devPtrV = (void *)(static_cast<int8_t*>(devPtrQKV) + 2 * h * d); // v is at an offset of 2 * h * d
@@ -1923,17 +1888,7 @@ fa_fp8_bprop(int64_t b,
                                .setWorkspacePointer(workspace_ptr)
                                .setDataPointers(data_ptrs)
                                .build();
-	//printf("--------- before backend -------\n");
         cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(), variantPack.get_raw_desc());
-	//printf("--------- after backend -------\n");
-        //NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-        //NVTE_CHECK_CUDNN(cudnnDestroy(handle_));
-	//if (*workspace_size > 0) {
-	//  printf("--------- free -------\n");
-        //  NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-        //}
-	//printf("--------- after free -------\n");
     
         cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); }, "Plan execute error", status);
 
@@ -2044,7 +1999,7 @@ void fused_attn_fwd(int64_t b, int64_t max_seq_len,
   }
   else if (max_seq_len > 512)
   {
-    printf("TO DO: call Julien version of cudnn flash attn fwd \n");
+    printf("TO DO: call JD version of cudnn flash attn fwd \n");
   }
   else
   {
@@ -2106,7 +2061,7 @@ void fused_attn_bwd(int64_t b, int64_t max_seq_len,
   void* devPtrORaggedOffset = (void *)ORaggedOffset;
   void* devPtrDropoutSeed = (void *)RngState;
   void* devPtrDropoutOffset = (void *)(RngState + 1);
-  void* devPtrMNKOverride = (void *)Seqlens; //nullptr;
+  void* devPtrMNKOverride = (void *)Seqlens;
 
   const DType QKV_type = input_QKV->data.dtype;
   MHA_Layout layout = get_mha_layout(qkv_layout);
@@ -2161,7 +2116,7 @@ void fused_attn_bwd(int64_t b, int64_t max_seq_len,
   }
   else if (max_seq_len > 512)
   {
-    printf("TO DO: call Julien version of cudnn flash attn bwd \n");
+    printf("TO DO: call JD version of cudnn flash attn bwd \n");
   }
   else
   {
@@ -2187,8 +2142,7 @@ void nvte_fused_attn_fwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream)//,
-		//cudnnHandle_t handle)
+		cudaStream_t stream)
 {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
@@ -2224,8 +2178,7 @@ void nvte_fused_attn_bwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
 		NVTETensor workspace,
-		cudaStream_t stream)//,
-		//cudnnHandle_t handle)
+		cudaStream_t stream)
 {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;

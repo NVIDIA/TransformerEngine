@@ -37,19 +37,18 @@ class cudnnExecutionPlanManager {
  public:
     static cudnnExecutionPlanManager &Instance() {
         static thread_local cudnnExecutionPlanManager instance;
-	printf("----------- instance ----------- \n");
         return instance;
     }
 
     cudnnHandle_t GetCudnnHandle() {
         static thread_local std::once_flag flag;
-        std::call_once(flag, [&] { cudnnCreate(&handle_); printf("----------- create handle ----\n");});
+        std::call_once(flag, [&] { cudnnCreate(&handle_); });
         return handle_;
     }
 
     ~cudnnExecutionPlanManager() {
         static thread_local std::once_flag flag;
-        std::call_once(flag, [&] { cudnnDestroy(handle_); printf("----------- destroy handle ----\n");});
+        std::call_once(flag, [&] { cudnnDestroy(handle_); });
     }
 
  private:
@@ -71,8 +70,7 @@ void nvte_fused_attn_fwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
                 NVTETensor workspace,
-                cudaStream_t stream);//,
-		//cudnnHandle_t handle);
+                cudaStream_t stream);
 
 void nvte_fused_attn_bwd(
                 int64_t b, int64_t max_seq_len,
@@ -91,8 +89,7 @@ void nvte_fused_attn_bwd(
                 int32_t *Seqlens,
                 uint64_t *RngState,
                 NVTETensor workspace,
-                cudaStream_t stream);//,
-		//cudnnHandle_t handle);
+                cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
