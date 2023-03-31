@@ -260,7 +260,7 @@ class FlashAttention_cuDNN(torch.nn.Module):
         print("output shape: ",output.shape)
         #return output
 
-        ## [(b, sq), np, hn] 
+        ## [(b, sq), np, hn]
         # [b, sq, np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
 

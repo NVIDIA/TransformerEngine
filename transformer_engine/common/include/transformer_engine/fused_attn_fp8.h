@@ -24,13 +24,13 @@ enum class MHA_Layout {
 };
 
 enum class MHA_Matrix {
-    Q_Matrix            = 0, // queries
-    K_Matrix            = 1, // keys
-    K_Matrix_Transpose  = 2, // keys transposed
-    V_Matrix            = 3, // values
-    V_Matrix_Transpose  = 4, // value matrix transposed
-    S_Matrix            = 5, // output of GEMM1
-    O_Matrix            = 6, // final output
+    Q_Matrix            = 0,  // queries
+    K_Matrix            = 1,  // keys
+    K_Matrix_Transpose  = 2,  // keys transposed
+    V_Matrix            = 3,  // values
+    V_Matrix_Transpose  = 4,  // value matrix transposed
+    S_Matrix            = 5,  // output of GEMM1
+    O_Matrix            = 6,  // final output
 };
 
 class cudnnExecutionPlanManager {
