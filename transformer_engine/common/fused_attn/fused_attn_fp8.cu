@@ -285,7 +285,7 @@ static cudnn_frontend::Tensor tensor_create_with_offset(
                 cudnnDataType_t type, int64_t id,
                 int64_t const * dim, int64_t const * stride,
                 bool is_virtual, bool is_value,
-                std::shared_ptr<cudnn_frontend::Tensor>& raggedOffset) {
+                std::shared_ptr<cudnn_frontend::Tensor> raggedOffset) {
     int nbDims = 4;
     auto tensor_created = cudnn_frontend::TensorBuilder()
             .setDim(nbDims, dim)
@@ -357,8 +357,8 @@ static cudnn_frontend::Operation ternary_pw_op_create(
 
 static cudnn_frontend::Tensor
 createAmax(const std::string& amax_tensor_name,
-            cudnn_frontend::Tensor& prevBlockOutputTensor,
-            std::vector<cudnn_frontend::Operation>& ops) {
+            const cudnn_frontend::Tensor& prevBlockOutputTensor,
+            std::vector<cudnn_frontend::Operation>* ops) {
         // Amax is just a scalar
         int64_t amax_dim[4] = {1, 1, 1, 1};
         int64_t amax_stride[4] = {1, 1, 1, 1};
@@ -380,16 +380,16 @@ createAmax(const std::string& amax_tensor_name,
                                 .setyDesc(amaxTensor)
                                 .setreductionDesc(redunctionDesc)
                                 .build();
-        ops.push_back(std::move(reduction_op));
+        ops->push_back(std::move(reduction_op));
         return amaxTensor;
 }
 
 static cudnn_frontend::Tensor createScale(
-                cudnn_frontend::Tensor& prevBlockOutputTensor,
+                const cudnn_frontend::Tensor& prevBlockOutputTensor,
                 const std::string& scale_tensor_name,
                 cudnnDataType_t tensorType,
                 bool isOutputVirtual, bool isScaleByValue,
-                std::vector<cudnn_frontend::Operation>& ops,
+                std::vector<cudnn_frontend::Operation>* ops,
                 const std::string& output_tensor_name ="") {
     // scale
     int64_t scale_dim[4] = {1, 1, 1, 1};
@@ -423,16 +423,16 @@ static cudnn_frontend::Tensor createScale(
     auto scale_op = binary_pw_op_create(
                     prevBlockOutputTensor, scaleTensor, afterScaleKTensor, scaleDesc);
 
-    ops.push_back(std::move(scale_op));
+    ops->push_back(std::move(scale_op));
     return afterScaleKTensor;
 }
 
 static cudnn_frontend::Tensor createScale(
-                cudnn_frontend::Tensor& prevBlockOutputTensor,
+                const cudnn_frontend::Tensor& prevBlockOutputTensor,
                 const cudnn_frontend::Tensor& scaleTensor,
                 cudnnDataType_t tensorType,
                 bool isOutputVirtual, bool isScaleByValue,
-                std::vector<cudnn_frontend::Operation>& ops,
+                std::vector<cudnn_frontend::Operation>* ops,
                 int UID_offset, const std::string& output_tensor_name ="") {
     CUDNN_FRONTEND_UNUSED(isScaleByValue);
     int64_t output_dim[4];
@@ -458,18 +458,18 @@ static cudnn_frontend::Tensor createScale(
     auto scale_op = binary_pw_op_create(
                     prevBlockOutputTensor, scaleTensor, afterScaleTensor, scaleDesc);
 
-    ops.push_back(std::move(scale_op));
+    ops->push_back(std::move(scale_op));
     return afterScaleTensor;
 }
 
 static cudnn_frontend::Tensor
-createScaleWithOffset(cudnn_frontend::Tensor& prevBlockOutputTensor,
+createScaleWithOffset(const cudnn_frontend::Tensor& prevBlockOutputTensor,
             const std::string& scale_tensor_name,
             cudnnDataType_t tensorType,
             bool isOutputVirtual,
             bool isScaleByValue,
-            std::vector<cudnn_frontend::Operation>& ops,
-            std::shared_ptr<cudnn_frontend::Tensor>& offsetTensor,
+            std::vector<cudnn_frontend::Operation>* ops,
+            std::shared_ptr<cudnn_frontend::Tensor> offsetTensor,
             const std::string& output_tensor_name ="") {
     // scale
     int64_t scale_dim[4] = {1, 1, 1, 1};
@@ -517,7 +517,7 @@ createScaleWithOffset(cudnn_frontend::Tensor& prevBlockOutputTensor,
     auto scale_op = binary_pw_op_create(
                     prevBlockOutputTensor, scaleTensor, afterScaleTensor, scaleDesc);
 
-    ops.push_back(std::move(scale_op));
+    ops->push_back(std::move(scale_op));
     return afterScaleTensor;
 }
 
@@ -526,8 +526,8 @@ createSoftmaxForward(int64_t b,
                      int64_t h,
                      int64_t s_q,
                      int64_t s_kv,
-                     std::vector<cudnn_frontend::Operation>& ops,
-                     cudnn_frontend::Tensor& prevBlockOutputTensor,
+                     std::vector<cudnn_frontend::Operation>* ops,
+                     const cudnn_frontend::Tensor& prevBlockOutputTensor,
                      bool isTraining) {
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -621,12 +621,12 @@ createSoftmaxForward(int64_t b,
     auto mutliply_op = binary_pw_op_create(
                     afterExponentTensor, zInvTensor, beforeDropoutTensor, multiplyDesc);
 
-    ops.push_back(std::move(reductionMax_op));
-    ops.push_back(std::move(subtract_op));
-    ops.push_back(std::move(exponent_op));
-    ops.push_back(std::move(reductionAdd_op));
-    ops.push_back(std::move(reciprocal_op));
-    ops.push_back(std::move(mutliply_op));
+    ops->push_back(std::move(reductionMax_op));
+    ops->push_back(std::move(subtract_op));
+    ops->push_back(std::move(exponent_op));
+    ops->push_back(std::move(reductionAdd_op));
+    ops->push_back(std::move(reciprocal_op));
+    ops->push_back(std::move(mutliply_op));
 
     return beforeDropoutTensor;
 }
@@ -637,9 +637,9 @@ createDropoutForward(int64_t b,
               int64_t s_q,
               int64_t s_kv,
               double probability,
-              std::vector<cudnn_frontend::Operation>& ops,
-              cudnn_frontend::Tensor& beforeDropoutTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0,
+              std::vector<cudnn_frontend::Operation>* ops,
+              const cudnn_frontend::Tensor& beforeDropoutTensor) {
+    cudnn_frontend::throw_if(ops->size() == 0,
                     "Dropout DAG constructed incorrectly as the first one",
                     CUDNN_STATUS_BAD_PARAM);
 
@@ -712,9 +712,9 @@ createDropoutForward(int64_t b,
                     beforeDropoutScaleTensor, scaleDropoutTensor,
                     afterDropout_before_quan_S, scaleMulDesc);
 
-    ops.push_back(std::move(rng_op));
-    ops.push_back(std::move(maskMul_op));
-    ops.push_back(std::move(scaleMul_op));
+    ops->push_back(std::move(rng_op));
+    ops->push_back(std::move(maskMul_op));
+    ops->push_back(std::move(scaleMul_op));
 
     return afterDropout_before_quan_S;
 }
@@ -725,10 +725,10 @@ createDropoutBackward(int64_t b,
               int64_t s_q,
               int64_t s_kv,
               double probability,
-              std::vector<cudnn_frontend::Operation>& ops,
-              cudnn_frontend::Tensor& beforeDropoutTensor,
-              cudnn_frontend::Tensor& dropoutMaskTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0,
+              std::vector<cudnn_frontend::Operation>* ops,
+              const cudnn_frontend::Tensor& beforeDropoutTensor,
+              const cudnn_frontend::Tensor& dropoutMaskTensor) {
+    cudnn_frontend::throw_if(ops->size() == 0,
                     "Dropout DAG constructed incorrectly as the first one",
                     CUDNN_STATUS_BAD_PARAM);
 
@@ -797,9 +797,9 @@ createDropoutBackward(int64_t b,
                     beforeDropoutScaleTensor, scaleDropoutTensor,
                     afterDropout_before_quan_S, scaleMulDesc);
 
-    ops.push_back(std::move(rng_op));
-    ops.push_back(std::move(maskMul_op));
-    ops.push_back(std::move(scaleMul_op));
+    ops->push_back(std::move(rng_op));
+    ops->push_back(std::move(maskMul_op));
+    ops->push_back(std::move(scaleMul_op));
 
     return afterDropout_before_quan_S;
 }
@@ -809,9 +809,9 @@ createSoftmaxBackward(int64_t b,
                      int64_t h,
                      int64_t s_q,
                      int64_t s_kv,
-                     std::vector<cudnn_frontend::Operation>& ops,
-                     cudnn_frontend::Tensor& dyTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0,
+                     std::vector<cudnn_frontend::Operation>* ops,
+                     const cudnn_frontend::Tensor& dyTensor) {
+    cudnn_frontend::throw_if(ops->size() == 0,
                     "Softmax backward constructed incorrectly as the first one",
                     CUDNN_STATUS_BAD_PARAM);
 
@@ -858,9 +858,9 @@ createSoftmaxBackward(int64_t b,
     auto mutliplyOp = binary_pw_op_create(
                     dxAfterExponentiation, ZInvTensor, dxBeforeDropout_QKt_Tensor, multiplyDesc);
 
-    ops.push_back(std::move(subtractionOp));
-    ops.push_back(std::move(exponentOp));
-    ops.push_back(std::move(mutliplyOp));
+    ops->push_back(std::move(subtractionOp));
+    ops->push_back(std::move(exponentOp));
+    ops->push_back(std::move(mutliplyOp));
 
     return dxBeforeDropout_QKt_Tensor;
 }
@@ -873,11 +873,11 @@ createQKBMM(int64_t b,
            int64_t d,
            MHA_Layout layout,
            cudnnDataType_t tensorType,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &qTensor,
            const cudnn_frontend::Tensor &kTensor,
            const cudnn_frontend::Tensor &mnkOverride,
-           std::shared_ptr<cudnn_frontend::Tensor>& QKVRaggedOffsetTensor) {
+           std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensor) {
     // Creates the necessary tensor descriptors
     int64_t k_transpose_dim[4] = {b, h, d, s_kv};
     int64_t k_transpose_stride[4];
@@ -923,8 +923,8 @@ createQKBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(reshape_op));
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(reshape_op));
+    ops->push_back(std::move(matmulOp));
 
     return afterQKTensor;
 }
@@ -937,11 +937,11 @@ createSVBMM(int64_t b,
            int64_t d,
            MHA_Layout layout,
            cudnnDataType_t tensorType,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &softmaxTensor,
            const cudnn_frontend::Tensor &mnkOverride,
-           std::shared_ptr<cudnn_frontend::Tensor>& QKVRaggedOffsetTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0,
+           std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensor) {
+    cudnn_frontend::throw_if(ops->size() == 0,
                     "BMM2 op constructed incorrectly as the first one",
                     CUDNN_STATUS_BAD_PARAM);
 
@@ -977,7 +977,7 @@ createSVBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(matmulOp));
 
     return oTensor;
 }
@@ -989,11 +989,11 @@ createSdOBMM(int64_t b,
            int64_t s_kv,
            int64_t d,
            cudnnDataType_t tensorType,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &softmaxTensor,
            const cudnn_frontend::Tensor &dOTensor,
            const cudnn_frontend::Tensor &mnkOverride) {
-    cudnn_frontend::throw_if(ops.size() == 0,
+    cudnn_frontend::throw_if(ops->size() == 0,
                     "BMM2 op constructed incorrectly as the first one",
                     CUDNN_STATUS_BAD_PARAM);
 
@@ -1037,8 +1037,8 @@ createSdOBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(reshape_op));
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(reshape_op));
+    ops->push_back(std::move(matmulOp));
 
     return dVTensor_before_dequan_S;
 }
@@ -1051,10 +1051,10 @@ createdOVBMM(int64_t b,
            int64_t d,
            MHA_Layout layout,
            cudnnDataType_t tensorType,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &dOTensor,
            const cudnn_frontend::Tensor &mnkOverride,
-           std::shared_ptr<cudnn_frontend::Tensor>& QKVRaggedOffsetTensor) {
+           std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensor) {
     // Creates the necessary tensor descriptors
     int64_t v_dim[4] =  {b, h, s_kv, d};
     int64_t v_stride[4];
@@ -1109,8 +1109,8 @@ createdOVBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(reshape_op));
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(reshape_op));
+    ops->push_back(std::move(matmulOp));
 
     return afterdOVTensor;
 }
@@ -1122,7 +1122,7 @@ createdOAndORowReductionChain(int64_t b,
            int64_t s_kv,
            int64_t d,
            MHA_Layout layout,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &O_after_dequan,
            const cudnn_frontend::Tensor &dO_after_dequan,
            const cudnn_frontend::Tensor &dropoutScale_dOVt_OdO_Tensor) {
@@ -1169,9 +1169,9 @@ createdOAndORowReductionChain(int64_t b,
                                 .setreductionDesc(reductionAddDesc)
                                 .build();
 
-    ops.push_back(std::move(mutliply_op));
-    ops.push_back(std::move(dropout_scale_multiply_op));
-    ops.push_back(std::move(reductionAdd_op));
+    ops->push_back(std::move(mutliply_op));
+    ops->push_back(std::move(dropout_scale_multiply_op));
+    ops->push_back(std::move(reductionAdd_op));
 
     return O_dO_after_rowsum;
 }
@@ -1183,7 +1183,7 @@ createBiasSubtractionSoftmaxMulChain(int64_t b,
            int64_t s_kv,
            int64_t d,
            MHA_Layout layout,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &dS_after_dropout,
            const cudnn_frontend::Tensor &AfterDropout_before_quan_S,
            const cudnn_frontend::Tensor &O_dO_after_rowsum) {
@@ -1213,8 +1213,8 @@ createBiasSubtractionSoftmaxMulChain(int64_t b,
                     AfterDropout_before_quan_S, dS_minus_O_dO,
                     S_mul_dS_minus_O_dO, multiplyDesc);
 
-    ops.push_back(std::move(sub_op));
-    ops.push_back(std::move(mutliply_op));
+    ops->push_back(std::move(sub_op));
+    ops->push_back(std::move(mutliply_op));
 
     return S_mul_dS_minus_O_dO;
 }
@@ -1225,7 +1225,7 @@ createdSKBMM(int64_t b,
            int64_t s_q,
            int64_t s_kv,
            int64_t d,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &dSTensor,
            const cudnn_frontend::Tensor &kTensor,
            const cudnn_frontend::Tensor &mnkOverride) {
@@ -1255,7 +1255,7 @@ createdSKBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(matmulOp));
 
     return After_dS_K;
 }
@@ -1267,7 +1267,7 @@ createdSQBMM(int64_t b,
            int64_t s_kv,
            int64_t d,
            MHA_Layout layout,
-           std::vector<cudnn_frontend::Operation>& ops,
+           std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor &dSTensor,
            const cudnn_frontend::Tensor &qTensor,
            const cudnn_frontend::Tensor &mnkOverride) {
@@ -1319,8 +1319,8 @@ createdSQBMM(int64_t b,
                             .setmatmulDesc(matmulDesc)
                             .build();
 
-    ops.push_back(std::move(reshape_op));
-    ops.push_back(std::move(matmulOp));
+    ops->push_back(std::move(reshape_op));
+    ops->push_back(std::move(matmulOp));
 
     return After_dSTranspose_Q;
 }
@@ -1441,7 +1441,7 @@ fa_fp8_fprop(int64_t b,
             // Q * K.T
             auto afterQKTensor = createQKBMM(
                             b, h, s_q, s_kv, d, layout, tensorType,
-                            ops, qTensor, kTensor,
+                            &ops, qTensor, kTensor,
                             seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
             // QK.T * attn scale
@@ -1451,7 +1451,7 @@ fa_fp8_fprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             true,  // scale is by value
-                                                                    ops);
+                            &ops);
 
             // QK.T * attn scale * dequant_Q
             auto AfterAttnScale_before_dequan_K_tensor = createScale(
@@ -1460,7 +1460,7 @@ fa_fp8_fprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // QK.T * attn scale * dequant_Q * dequant_K
             auto AfterAttnScale_tensor = createScale(
@@ -1469,18 +1469,18 @@ fa_fp8_fprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             auto BeforeDropoutTensor = createSoftmaxForward(
-                            b, h, s_q, s_kv, ops,
+                            b, h, s_q, s_kv, &ops,
                             AfterAttnScale_tensor, isTraining);
 
             auto AfterDropout_before_quan_S = createDropoutForward(
                             b, h, s_q, s_kv, dropoutProbability,
-                            ops, BeforeDropoutTensor);
+                            &ops, BeforeDropoutTensor);
 
             // Amax for S
-            createAmax("amaxS", BeforeDropoutTensor, ops);
+            createAmax("amaxS", BeforeDropoutTensor, &ops);
 
             // After softmax * dropout * scale S -> fp8 input to next bmm with V
             auto AfterMultiplyDropout = createScale(
@@ -1489,12 +1489,12 @@ fa_fp8_fprop(int64_t b,
                             tensorType,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // After softmax * Dropout * V
             auto OTensor_before_dequan_S_tensor = createSVBMM(
                             b, h, s_q, s_kv, d, layout, tensorType,
-                            ops, AfterMultiplyDropout,
+                            &ops, AfterMultiplyDropout,
                             seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
             // O * dequant_S
@@ -1504,7 +1504,7 @@ fa_fp8_fprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // O * dequant_S * dequant_V
             auto OTensor_before_quan_O_tensor = createScale(
@@ -1513,7 +1513,7 @@ fa_fp8_fprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // O * dequant_S * dequant_V * scale O
             auto OTensor = createScaleWithOffset(
@@ -1522,12 +1522,12 @@ fa_fp8_fprop(int64_t b,
                             tensorType,  // output tensor type
                             false,  // output not virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             ORaggedOffsetTensorPtr,  // ragged offset
                             "O");
 
             // Amax for O
-            createAmax("amaxO", OTensor_before_quan_O_tensor, ops);
+            createAmax("amaxO", OTensor_before_quan_O_tensor, &ops);
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
@@ -1801,7 +1801,7 @@ fa_fp8_bprop(int64_t b,
             // Q * K.T
             auto afterQKTensor = createQKBMM(
                             b, h, s_q, s_kv, d, layout, tensorType,
-                            ops, qTensor, kTensor,
+                            &ops, qTensor, kTensor,
                             seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
             // QK.T * attn scale
@@ -1811,7 +1811,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             true,  // scale is by value
-                            ops,
+                            &ops,
                             1999  /*UID offset*/);
 
             // QK.T * attn scale * dequant_Q
@@ -1821,7 +1821,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2000  /*UID offset*/);
 
             // QK.T * attn scale * dequant_Q * dequant_K
@@ -1831,11 +1831,11 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2001  /*UID offset*/);
 
             auto beforeDropout_QKt_Tensor = createSoftmaxBackward(
-                            b, h, s_q, s_kv, ops, AfterAttnScale_tensor);
+                            b, h, s_q, s_kv, &ops, AfterAttnScale_tensor);
 
             int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
             int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -1847,7 +1847,7 @@ fa_fp8_bprop(int64_t b,
 
             auto AfterDropout_before_quan_S = createDropoutBackward(
                             b, h, s_q, s_kv, dropoutProbability,
-                            ops, beforeDropout_QKt_Tensor, dropoutMaskTensor);
+                            &ops, beforeDropout_QKt_Tensor, dropoutMaskTensor);
 
             // After softmax * scale S -> fp8 input to next bmm with V
             auto AfterMultiply = createScale(
@@ -1856,12 +1856,12 @@ fa_fp8_bprop(int64_t b,
                             tensorType,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // After softmax * dO
             auto dVTensor_before_dequan_S = createSdOBMM(
                             b, h, s_q, s_kv, d, tensorType,
-                            ops, AfterMultiply, dOTensor, seqlenMNKTensor);
+                            &ops, AfterMultiply, dOTensor, seqlenMNKTensor);
 
             // O * dequant_S
             auto dVTensor_before_dequan_dO = createScale(
@@ -1870,7 +1870,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // O * dequant_S * dequant_dO
             auto dVTensor_before_quan_dV = createScale(
@@ -1879,7 +1879,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2002  /*UID offset*/);
 
             // O * dequant_S * dequant_dO * scale dV
@@ -1889,16 +1889,16 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FP8_E5M2,  // output tensor type
                             false,  // output not virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             QKVRaggedOffsetTensorPtr,  // ragged offset
                             "dV"  /*Output tensor name*/);
 
             // Amax for dV
-            createAmax("amaxdV", dVTensor_before_quan_dV, ops);
+            createAmax("amaxdV", dVTensor_before_quan_dV, &ops);
 
             auto dS_before_dequan_dO_Tensor = createdOVBMM(
                             b, h, s_q, s_kv, d, layout, tensorType,
-                            ops, dOTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
+                            &ops, dOTensor, seqlenMNKTensor, QKVRaggedOffsetTensorPtr);
 
             // dS * dequant_dO
             auto dS_before_dequan_V = createScale(
@@ -1907,7 +1907,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2003  /*UID offset*/);
 
             // O * dequant_S * dequant_dV
@@ -1917,7 +1917,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // RNG Multiply
             auto beforeDropoutScale_dOVt_Tensor = tensor_create(
@@ -1957,7 +1957,7 @@ fa_fp8_bprop(int64_t b,
                                             CUDNN_DATA_FLOAT,  // output tensor type
                                             true,  // output is virtual
                                             false,  // scale is by value
-                                            ops);
+                                            &ops);
 
             // dO * dequant_dO
             auto dO_after_dequan_Tensor = createScale(dOTensor,  // input tensor
@@ -1965,19 +1965,19 @@ fa_fp8_bprop(int64_t b,
                                             CUDNN_DATA_FLOAT,  // output tensor type
                                             true,  // output is virtual
                                             false,  // scale is by value
-                                            ops,
+                                            &ops,
                                             2004  /*UID offset*/);
 
             // row reduction sum[(dO * dequant_dO) * (O * dequant_O) * (1 - p)]
             auto O_dO_after_rowsum = createdOAndORowReductionChain(
                             b, h, s_q, s_kv, d, layout,
-                            ops, O_after_dequan_Tensor,
+                            &ops, O_after_dequan_Tensor,
                             dO_after_dequan_Tensor, dropoutScale_dOVt_OdO_Tensor);
 
             // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S
             auto S_mul_dS_minus_O_dO = createBiasSubtractionSoftmaxMulChain(
                             b, h, s_q, s_kv, d, layout,
-                            ops, dS_after_dropout,
+                            &ops, dS_after_dropout,
                             AfterDropout_before_quan_S, O_dO_after_rowsum);
 
             // S_mul_dS_minus_O_dO * scaledS
@@ -1987,14 +1987,14 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FP8_E5M2,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops);
+                            &ops);
 
             // Amax for dS
-            createAmax("amaxdS", S_mul_dS_minus_O_dO, ops);
+            createAmax("amaxdS", S_mul_dS_minus_O_dO, &ops);
 
             // dS @ K
             auto After_dS_K = createdSKBMM(
-                            b, h, s_q, s_kv, d, ops,
+                            b, h, s_q, s_kv, d, &ops,
                             S_mul_dS_minus_O_dO_after_quan_dS,
                             kTensor, seqlenMNKTensor);
 
@@ -2005,7 +2005,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             true,  // scale is by value
-                            ops,
+                            &ops,
                             2005  /*UID offset*/);
 
             // (dS * K) * attn scale ds_K * descale dS
@@ -2015,7 +2015,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2006  /*UID offset*/);
 
             // (dS * K) * attn scale ds_K * descale dS * descale K
@@ -2025,7 +2025,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2007  /*UID offset*/);
 
             // (dS * K) * attn scale ds_K * descale dS * descale K * scale dQ
@@ -2035,16 +2035,16 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FP8_E5M2,  // output tensor type
                             false,  // output not virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             QKVRaggedOffsetTensorPtr,  // ragged offset
                             "dQ");
 
             // Amax for dQ
-            createAmax("amaxdQ", AfterAttnScale_dS_K_before_quan_dQ, ops);
+            createAmax("amaxdQ", AfterAttnScale_dS_K_before_quan_dQ, &ops);
 
             // dS.T @ Q
             auto After_dSTranspose_Q = createdSQBMM(
-                            b, h, s_q, s_kv, d, layout, ops,
+                            b, h, s_q, s_kv, d, layout, &ops,
                             S_mul_dS_minus_O_dO_after_quan_dS,
                             qTensor, seqlenMNKTensor);
 
@@ -2055,7 +2055,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             true,  // scale is by value
-                            ops,
+                            &ops,
                             2008  /*UID offset*/);
 
             // (dS.T * Q) * attn scale dS.T_Q * descale dS
@@ -2065,7 +2065,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2009  /*UID offset*/);
 
             // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q
@@ -2075,7 +2075,7 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FLOAT,  // output tensor type
                             true,  // output is virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             2010  /*UID offset*/);
 
             // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q * scale dK
@@ -2085,12 +2085,12 @@ fa_fp8_bprop(int64_t b,
                             CUDNN_DATA_FP8_E5M2,  // output tensor type
                             false,  // output not virtual
                             false,  // scale is by value
-                            ops,
+                            &ops,
                             QKVRaggedOffsetTensorPtr,  // ragged offset
                             "dK");
 
             // Amax for dK
-            createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, ops);
+            createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, &ops);
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
