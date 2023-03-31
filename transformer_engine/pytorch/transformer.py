@@ -14,13 +14,7 @@ import torch
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
-from transformer_engine.pytorch.module import (
-    LayerNormLinear,
-    Linear,
-    LayerNormMLP,
-    LayerNorm,
-    cuDNN_FlashAttn,
-)
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
