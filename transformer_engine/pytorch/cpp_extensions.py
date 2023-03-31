@@ -71,7 +71,8 @@ def get_mha_layout(qkv_layout: str):
 def fused_attn_fwd(
     QKV: torch.Tensor,
     qkv_dtype: tex.DType,
-    cu_seqlens: torch.Tensor,
+#    cu_seqlens: torch.Tensor,
+    qkv_ragged_offset: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     q_scale_s: torch.Tensor,
     q_scale_o: torch.Tensor,
@@ -88,23 +89,37 @@ def fused_attn_fwd(
 ) -> Tuple[Union[torch.Tensor, None], ...]:
 
     check_qkv(QKV)
-    check_cu_seqlens(cu_seqlens)
+    #check_cu_seqlens(cu_seqlens)
+    check_cu_seqlens(qkv_ragged_offset)
     check_scalar(d_scale_qkv)
     check_scalar(q_scale_s)
     check_scalar(q_scale_o)
     check_scalar(amax_s)
     check_scalar(amax_o)
 
-    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+
+    #seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    ##max_seq_len = max(seqlens)
+    #b = cu_seqlens.numel() - 1
+    #assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
+    #total_seqs = QKV.size(0)
+    #h = QKV.size(2)
+    #d = QKV.size(3)
+    #attn_scale = 1.0 / math.sqrt(d)
+    #qkv_ragged_offset = cu_seqlens * 3 * h * d
+    #o_ragged_offset = cu_seqlens * h * d
+
+    phantom_tensor = torch.empty(1,dtype=qkv_ragged_offset.dtype,device=qkv_ragged_offset.device)
+    seqlens = phantom_tensor # this will be removed when cudnn kernel drops requirement for it
     #max_seq_len = max(seqlens)
-    b = cu_seqlens.numel() - 1
+    b = qkv_ragged_offset.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
     h = QKV.size(2)
     d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
-    qkv_ragged_offset = cu_seqlens * 3 * h * d
-    o_ragged_offset = cu_seqlens * h * d
+    o_ragged_offset = phantom_tensor # this will be removed when cudnn kernel drops requirement for it
+
 
     qkv_layout = get_mha_layout(qkv_layout)
 
@@ -130,7 +145,8 @@ def fused_attn_bwd(
     M: torch.Tensor,
     ZInv: torch.Tensor,
     qkv_dtype: tex.DType,
-    cu_seqlens: torch.Tensor,
+#    cu_seqlens: torch.Tensor,
+    qkv_ragged_offset: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     d_scale_s: torch.Tensor,
     d_scale_o: torch.Tensor,
@@ -152,16 +168,32 @@ def fused_attn_bwd(
     check_o(dO)
     check_qkv(QKV)
     check_o(O)
-    check_cu_seqlens(cu_seqlens)
+    #check_cu_seqlens(cu_seqlens)
+    check_cu_seqlens(qkv_ragged_offset)
 
-    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+
+    #seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    ##max_seq_len = max(seqlens)
+    #b = cu_seqlens.numel() - 1
+    #assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
+    #total_seqs = QKV.size(0)
+    #h = QKV.size(2)
+    #d = QKV.size(3)
+    #attn_scale = 1.0 / math.sqrt(d)
+    #qkv_ragged_offset = cu_seqlens * 3 * h * d
+    #o_ragged_offset = cu_seqlens * h * d
+
+    phantom_tensor = torch.empty(1,dtype=qkv_ragged_offset.dtype,device=qkv_ragged_offset.device)
+    seqlens = phantom_tensor # this will be removed when cudnn kernel drops requirement for it
     #max_seq_len = max(seqlens)
-    b = cu_seqlens.numel() - 1
+    b = qkv_ragged_offset.numel() - 1
     assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
     h = QKV.size(2)
     d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
+    o_ragged_offset = phantom_tensor # this will be removed when cudnn kernel drops requirement for it
+
 
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
@@ -178,9 +210,6 @@ def fused_attn_bwd(
 
     check_rng_state(rng_state)
     qkv_layout = get_mha_layout(qkv_layout)
-
-    qkv_ragged_offset = cu_seqlens * 3 * h * d
-    o_ragged_offset = cu_seqlens * h * d
 
     dQKV = tex.fused_attn_bwd(
             b, max_seq_len, total_seqs, h, d,
