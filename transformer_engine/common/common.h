@@ -231,7 +231,6 @@ struct TypeInfo{
             } \
         break; \
         default: \
-	    printf(" ------------------ dtype is %d \n",(int)dtype); \
             NVTE_ERROR("Invalid type. "); \
     }
 

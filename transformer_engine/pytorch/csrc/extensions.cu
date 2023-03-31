@@ -16,52 +16,47 @@ constexpr int ctas_per_sm = 4;
 
 template <typename scalar_t>
 __global__ void __launch_bounds__(block_size) mha_fill_kernel(scalar_t* out_tensor,
-		const int32_t* const start_row,
-		const size_t num_rows)
-{
+                const int32_t* const start_row,
+                const size_t num_rows) {
   size_t row_stride = gridDim.y * blockDim.x;
-  size_t row_index = blockIdx.x + (size_t)start_row[0];
+  size_t row_index = blockIdx.x + static_cast<size_t>(start_row[0]);
   size_t col_index = blockIdx.y * blockDim.x + threadIdx.x;
-  while (row_index < num_rows)
-  {
+  while (row_index < num_rows) {
     out_tensor[row_index*row_stride + col_index] = 0;
     row_index += gridDim.x;
   }
 }
 
-at::Tensor & mha_fill(at::Tensor &self, const at::Tensor &start_index)
-{
+void mha_fill(const at::Tensor &self, const at::Tensor &start_index) {
   auto max_tokens = self.size(0);
   auto self_2d = self.view({max_tokens, -1});
   auto fcd_size = self_2d.size(1);
-  TORCH_CHECK (self.is_contiguous(), "input not contiguous");
-  TORCH_CHECK (fcd_size % block_size == 0, "input size not aligned to block size");
+  TORCH_CHECK(self.is_contiguous(), "input not contiguous");
+  TORCH_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
   const int num_mp = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
   uint64_t num_blk_y = (uint64_t)(fcd_size / block_size);
   uint64_t num_blk_x = (uint64_t)std::ceil(num_mp * ctas_per_sm / num_blk_y);
   dim3 dim_grid(num_blk_x, num_blk_y);
   dim3 dim_block(block_size);
   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND2(
-		  at::ScalarType::Half,
-		  at::ScalarType::BFloat16,
-		  self_2d.scalar_type(),
-		  "mha_fill", [&]()
-		  {
-		  mha_fill_kernel<<<dim_grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(
-				  self_2d.data_ptr<scalar_t>(),
-				  static_cast<int32_t*>(start_index.data_ptr()),
-				  max_tokens);
-		  C10_CUDA_KERNEL_LAUNCH_CHECK();
-		  }
-		  );
-  return self;
+                  at::ScalarType::Half,
+                  at::ScalarType::BFloat16,
+                  self_2d.scalar_type(),
+                  "mha_fill", [&]()
+                  { mha_fill_kernel<<<dim_grid, dim_block, 0,
+                                  at::cuda::getCurrentCUDAStream()>>>(
+                                  self_2d.data_ptr<scalar_t>(),
+                                  static_cast<int32_t*>(start_index.data_ptr()),
+                                  max_tokens);
+                  C10_CUDA_KERNEL_LAUNCH_CHECK();
+                  });
 }
 
-__global__ void unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) 
-{
+__global__ void unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   if (arg.captured_) {
     rng_state_ptr[0] = static_cast<int64_t>(*arg.seed_.ptr);
-    rng_state_ptr[1] = static_cast<int64_t>(*(arg.offset_.ptr) + static_cast<int64_t>(arg.offset_intragraph_));
+    rng_state_ptr[1] = static_cast<int64_t>(
+                    *(arg.offset_.ptr) + static_cast<int64_t>(arg.offset_intragraph_));
   } else {
     rng_state_ptr[0] = static_cast<int64_t>(arg.seed_.val);
     rng_state_ptr[1] = static_cast<int64_t>(arg.offset_.val);
@@ -69,10 +64,9 @@ __global__ void unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr)
 }
 
 at::PhiloxCudaState init_philox_state(
-		at::CUDAGeneratorImpl* gen,
-		int64_t max_seq_len,
-		int64_t threads_per_cta)
-{
+                at::CUDAGeneratorImpl* gen,
+                int64_t max_seq_len,
+                int64_t threads_per_cta) {
   at::PhiloxCudaState philox_args;
   size_t elts_per_thread = (max_seq_len * max_seq_len + threads_per_cta - 1)/threads_per_cta;
   std::lock_guard<std::mutex> lock(gen->mutex_);
@@ -81,28 +75,28 @@ at::PhiloxCudaState init_philox_state(
 }
 
 std::vector<at::Tensor> fused_attn_fwd(
-		int64_t b, int64_t max_seq_len,
-		int64_t total_seqs, int64_t h, int64_t d,
-		float attn_scale, float p_dropout,
-		int qkv_layout, bool is_training, bool set_zero,
-		at::Tensor &QKV,
+                int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float attn_scale, float p_dropout,
+                int qkv_layout, bool is_training, bool set_zero,
+                const at::Tensor &QKV,
                 transformer_engine::DType QKV_type,
-	        at::Tensor &descaleQKV,
-	        //at::Tensor descaleS,
-	        //at::Tensor descaleO,
-	        at::Tensor &scaleS,
-	        at::Tensor &scaleO,
-	        at::Tensor amaxS,
-	        at::Tensor amaxO,
-	        at::Tensor &QKVRaggedOffset,
-	        at::Tensor &ORaggedOffset,
-	        at::Tensor &Seqlens,
-		c10::optional<at::Generator> &rng_gen)
-{
+                const at::Tensor &descaleQKV,
+                // at::Tensor descaleS,
+                // at::Tensor descaleO,
+                const at::Tensor &scaleS,
+                const at::Tensor &scaleO,
+                at::Tensor amaxS,
+                at::Tensor amaxO,
+                const at::Tensor &QKVRaggedOffset,
+                const at::Tensor &ORaggedOffset,
+                const at::Tensor &Seqlens,
+                const c10::optional<at::Generator> rng_gen) {
   using namespace transformer_engine;
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
-		  {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
-		  QKV_type, nullptr, nullptr, descaleQKV.data_ptr());
+                  {static_cast<size_t>(total_seqs),
+                  3, static_cast<size_t>(h), static_cast<size_t>(d)},
+                  QKV_type, nullptr, nullptr, descaleQKV.data_ptr());
 
   auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   auto M = torch::zeros({b, h, max_seq_len, 1}, options);
@@ -112,173 +106,178 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // ghost tensor, not returned upstream
   at::Tensor descaleS = torch::empty_like(scaleS);
-  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0}, QKV_type,
-		  amaxS.data_ptr(), scaleS.data_ptr(), descaleS.data_ptr());
-		  			  
+  auto te_S = makeTransformerEngineTensor(nullptr, {0}, QKV_type,
+                  amaxS.data_ptr(), scaleS.data_ptr(), descaleS.data_ptr());
+
   auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
-  if (set_zero)
-  {
-    //O.zero_();
-    mha_fill(O, at::cumsum(Seqlens, 0).index({torch::indexing::Slice(-1,torch::indexing::None)}));
+  if (set_zero) {
+    // O.zero_();
+    mha_fill(O, at::cumsum(Seqlens, 0)
+                    .index({torch::indexing::Slice(-1, torch::indexing::None)}));
   }
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
-		  {(size_t)total_seqs, (size_t)h, (size_t)d}, QKV_type,
-		  amaxO.data_ptr(), scaleO.data_ptr(), nullptr);
+                  {static_cast<size_t>(total_seqs),
+                  static_cast<size_t>(h), static_cast<size_t>(d)}, QKV_type,
+                  amaxO.data_ptr(), scaleO.data_ptr(), nullptr);
 
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-		  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+                  rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   int64_t threads_per_cta = 128;
   at::PhiloxCudaState philox_args = init_philox_state(gen, max_seq_len, threads_per_cta);
   auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
-  unpack<<<1,1,0,at::cuda::getCurrentCUDAStream()>>>(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
+  unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
+                  philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
 
   TensorWrapper workspace;
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_fwd(
-		  b, max_seq_len, total_seqs, h, d,
-		  attn_scale, p_dropout,
-		  qkv_layout, is_training,
-		  te_QKV.data(),
-		  te_M.data(),
-		  te_ZInv.data(),
-	          te_S.data(),
-		  te_O.data(),
-	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
-		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
+                  b, max_seq_len, total_seqs, h, d,
+                  attn_scale, p_dropout,
+                  qkv_layout, is_training,
+                  te_QKV.data(),
+                  te_M.data(),
+                  te_ZInv.data(),
+                  te_S.data(),
+                  te_O.data(),
+                  reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
+                  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());
+                  at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype()); 
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
-		  workspace.shape(), workspace.dtype());
+                  workspace.shape(), workspace.dtype());
 
   // Actual call to kernel
   nvte_fused_attn_fwd(
-		  b, max_seq_len, total_seqs, h, d,
-		  attn_scale, p_dropout,
-		  qkv_layout, is_training,
-		  te_QKV.data(),
-		  te_M.data(),
-		  te_ZInv.data(),
-	          te_S.data(),
-		  te_O.data(),
-	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
-		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
+                  b, max_seq_len, total_seqs, h, d,
+                  attn_scale, p_dropout,
+                  qkv_layout, is_training,
+                  te_QKV.data(),
+                  te_M.data(),
+                  te_ZInv.data(),
+                  te_S.data(),
+                  te_O.data(),
+                  reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
+                  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());
+                  at::cuda::getCurrentCUDAStream());
 
   return {O, M, ZInv, rng_state};
 }
 
 at::Tensor fused_attn_bwd(
-		int64_t b, int64_t max_seq_len,
-		int64_t total_seqs, int64_t h, int64_t d,
-		float attn_scale, float p_dropout,
-		int qkv_layout, bool set_zero,
-		at::Tensor &QKV,
-		at::Tensor &O,
-		at::Tensor &dO,
-		at::Tensor &M,
-		at::Tensor &ZInv,
+                int64_t b, int64_t max_seq_len,
+                int64_t total_seqs, int64_t h, int64_t d,
+                float attn_scale, float p_dropout,
+                int qkv_layout, bool set_zero,
+                const at::Tensor &QKV,
+                const at::Tensor &O,
+                const at::Tensor &dO,
+                const at::Tensor &M,
+                const at::Tensor &ZInv,
                 transformer_engine::DType QKV_type,
-	        at::Tensor &descaleQKV,
-	        at::Tensor &descaleS,
-	        at::Tensor &descaleO,
-	        at::Tensor &descale_dO,
-	        //at::Tensor descale_dS,
-	        //at::Tensor descale_dQKV,
-	        at::Tensor &scaleS,
-	        at::Tensor &scale_dS,
-	        at::Tensor &scale_dQKV,
-	        at::Tensor amax_dS,
-	        at::Tensor amax_dQKV,
-	        at::Tensor &QKVRaggedOffset,
-	        at::Tensor &ORaggedOffset,
-	        at::Tensor &Seqlens,
-		at::Tensor &rng_state)
-{
+                const at::Tensor &descaleQKV,
+                const at::Tensor &descaleS,
+                const at::Tensor &descaleO,
+                const at::Tensor &descale_dO,
+                // at::Tensor descale_dS,
+                // at::Tensor descale_dQKV,
+                const at::Tensor &scaleS,
+                const at::Tensor &scale_dS,
+                const at::Tensor &scale_dQKV,
+                at::Tensor amax_dS,
+                at::Tensor amax_dQKV,
+                const at::Tensor &QKVRaggedOffset,
+                const at::Tensor &ORaggedOffset,
+                const at::Tensor &Seqlens,
+                const at::Tensor &rng_state) {
   using namespace transformer_engine;
   auto te_QKV = makeTransformerEngineTensor(QKV.data_ptr(),
-		  {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
-		  QKV_type, nullptr, nullptr, descaleQKV.data_ptr());
+                  {static_cast<size_t>(total_seqs), 3,
+                  static_cast<size_t>(h), static_cast<size_t>(d)},
+                  QKV_type, nullptr, nullptr, descaleQKV.data_ptr());
 
   at::Tensor dQKV = torch::empty_like(QKV);
-  if (set_zero)
-  {
-    //dQKV.zero_();
-    mha_fill(dQKV, at::cumsum(Seqlens, 0).index({torch::indexing::Slice(-1,torch::indexing::None)}));
+  if (set_zero) {
+    // dQKV.zero_();
+    mha_fill(dQKV, at::cumsum(Seqlens, 0)
+                    .index({torch::indexing::Slice(-1, torch::indexing::None)}));
   }
   auto te_dQKV = makeTransformerEngineTensor(dQKV.data_ptr(),
-		  {(size_t)total_seqs, 3, (size_t)h, (size_t)d},
-		  QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), nullptr);
+                  {static_cast<size_t>(total_seqs), 3,
+                  static_cast<size_t>(h), static_cast<size_t>(d)},
+                  QKV_type, amax_dQKV.data_ptr(), scale_dQKV.data_ptr(), nullptr);
 
   auto te_M = makeTransformerEngineTensor(M);
   auto te_ZInv = makeTransformerEngineTensor(ZInv);
 
   auto te_O = makeTransformerEngineTensor(O.data_ptr(),
-		  {(size_t)total_seqs, (size_t)h, (size_t)d},
-		  QKV_type, nullptr, nullptr, descaleO.data_ptr());
+                  {static_cast<size_t>(total_seqs),
+                  static_cast<size_t>(h), static_cast<size_t>(d)},
+                  QKV_type, nullptr, nullptr, descaleO.data_ptr());
   auto te_dO = makeTransformerEngineTensor(dO.data_ptr(),
-		  {(size_t)total_seqs, (size_t)h, (size_t)d},
-		  QKV_type, nullptr, nullptr, descale_dO.data_ptr());
+                  {static_cast<size_t>(total_seqs),
+                  static_cast<size_t>(h), static_cast<size_t>(d)},
+                  QKV_type, nullptr, nullptr, descale_dO.data_ptr());
 
-  auto te_S = makeTransformerEngineTensor((void*)nullptr, {0},
-		  QKV_type, nullptr, scaleS.data_ptr(), descaleS.data_ptr());
+  auto te_S = makeTransformerEngineTensor(nullptr, {0},
+                  QKV_type, nullptr, scaleS.data_ptr(), descaleS.data_ptr());
   // ghost tensor, not returned upstream
   at::Tensor descale_dS = torch::empty_like(scale_dS);
-  auto te_dS = makeTransformerEngineTensor((void*)nullptr, {0}, 
-		  QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), descale_dS.data_ptr());
+  auto te_dS = makeTransformerEngineTensor(nullptr, {0},
+                  QKV_type, amax_dS.data_ptr(), scale_dS.data_ptr(), descale_dS.data_ptr());
 
   TensorWrapper workspace;
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_bwd(
-		  b, max_seq_len, total_seqs, h, d,
-		  attn_scale, p_dropout, qkv_layout,
-		  te_QKV.data(),
-		  te_dQKV.data(),
-		  te_M.data(),
-		  te_ZInv.data(),
-	          te_S.data(),
-	          te_dS.data(),
-		  te_O.data(),
-		  te_dO.data(),
-	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
-		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
+                  b, max_seq_len, total_seqs, h, d,
+                  attn_scale, p_dropout, qkv_layout,
+                  te_QKV.data(),
+                  te_dQKV.data(),
+                  te_M.data(),
+                  te_ZInv.data(),
+                  te_S.data(),
+                  te_dS.data(),
+                  te_O.data(),
+                  te_dO.data(),
+                  reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
+                  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());
+                  at::cuda::getCurrentCUDAStream());
 
   // Fill workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
-		  workspace.shape(), workspace.dtype());
+                  workspace.shape(), workspace.dtype());
 
   // Actual call to kernel
   nvte_fused_attn_bwd(
-		  b, max_seq_len, total_seqs, h, d,
-		  attn_scale, p_dropout, qkv_layout,
-		  te_QKV.data(),
-		  te_dQKV.data(),
-		  te_M.data(),
-		  te_ZInv.data(),
-	          te_S.data(),
-	          te_dS.data(),
-		  te_O.data(),
-		  te_dO.data(),
-	          reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
-	          reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
-		  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
+                  b, max_seq_len, total_seqs, h, d,
+                  attn_scale, p_dropout, qkv_layout,
+                  te_QKV.data(),
+                  te_dQKV.data(),
+                  te_M.data(),
+                  te_ZInv.data(),
+                  te_S.data(),
+                  te_dS.data(),
+                  te_O.data(),
+                  te_dO.data(),
+                  reinterpret_cast<int32_t*>(QKVRaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(ORaggedOffset.data_ptr()),
+                  reinterpret_cast<int32_t*>(Seqlens.data_ptr()),
+                  reinterpret_cast<uint64_t*>(rng_state.data_ptr()),
                   workspace.data(),
-		  at::cuda::getCurrentCUDAStream());
+                  at::cuda::getCurrentCUDAStream());
 
   return dQKV;
 }
@@ -359,7 +358,6 @@ void fused_cast_transpose(at::Tensor input,
                           transformer_engine::DType otype
 ) {
   using namespace transformer_engine;
-//  printf(" ============= fused_cast_transpose otype \n",(int)otype); 
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
@@ -716,7 +714,6 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dbeta_cu   = makeTransformerEngineTensor(dbeta);
 
     // This call populates tensors with the required config.
-    //const 
     auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
     bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
             dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
@@ -907,15 +904,15 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
                        transformer_engine::DType otype
 ) {
     using namespace transformer_engine;
-    //size_t N = static_cast<size_t>(input.size(0));
-    //size_t H = static_cast<size_t>(input.size(1));
+    // size_t N = static_cast<size_t>(input.size(0));
+    // size_t H = static_cast<size_t>(input.size(1));
     auto input_shape = input.sizes().vec();
     std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
     auto input_cu     = makeTransformerEngineTensor(input);
-    //auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+    // auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
     auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), shape, otype,
                                                     amax.data_ptr(), scale.data_ptr(),
                                                     scale_inv.data_ptr());
@@ -933,14 +930,14 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 ) {
     using namespace transformer_engine;
-    //size_t N = static_cast<size_t>(input.size(0));
-    //size_t H = static_cast<size_t>(input.size(1));
+    // size_t N = static_cast<size_t>(input.size(0));
+    // size_t H = static_cast<size_t>(input.size(1));
     auto input_shape = input.sizes().vec();
     std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
-    //auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype,
+    // auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype,
     auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), shape, itype,
                                                     nullptr, nullptr, scale_inv.data_ptr());
     auto output_cu    = makeTransformerEngineTensor(output);
