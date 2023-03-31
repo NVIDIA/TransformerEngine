@@ -33,6 +33,7 @@ Additional Prerequisites
 2. [Optional] `Ninja <https://ninja-build.org/>`__: `pip install ninja`.
 3. [For pyTorch support] `pyTorch <https://pytorch.org/>`__ with GPU support.
 3. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
+3. [For JAX support] `pybind11`: `pip install pybind11`.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

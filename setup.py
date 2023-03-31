@@ -209,7 +209,10 @@ if framework in ("all", "pytorch"):
 if framework in ("all", "jax"):
     dlfw_builder_funcs.append(JaxBuilder)
     # Trigger a better error when pybind11 isn't present.
-    import pybind11
+    # Sadly, if pybind11 was installed with `apt -y install pybind11-dev`
+    # This doesn't install a python packages. So the line bellow is too strict.
+    # When it fail, we need to detect if cmake will find pybind11.
+    # import pybind11
 
 if framework in ("all", "tensorflow"):
     dlfw_builder_funcs.append(TensorFlowBuilder)
