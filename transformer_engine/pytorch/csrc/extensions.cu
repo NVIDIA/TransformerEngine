@@ -714,7 +714,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dbeta_cu   = makeTransformerEngineTensor(dbeta);
 
     // This call populates tensors with the required config.
-    auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+    const auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
     bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
             dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(),
             dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
@@ -904,15 +904,12 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
                        transformer_engine::DType otype
 ) {
     using namespace transformer_engine;
-    // size_t N = static_cast<size_t>(input.size(0));
-    // size_t H = static_cast<size_t>(input.size(1));
     auto input_shape = input.sizes().vec();
     std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
     auto input_cu     = makeTransformerEngineTensor(input);
-    // auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
     auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), shape, otype,
                                                     amax.data_ptr(), scale.data_ptr(),
                                                     scale_inv.data_ptr());
@@ -930,14 +927,11 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 ) {
     using namespace transformer_engine;
-    // size_t N = static_cast<size_t>(input.size(0));
-    // size_t H = static_cast<size_t>(input.size(1));
     auto input_shape = input.sizes().vec();
     std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
 
     auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
-    // auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), {N, H}, itype,
     auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), shape, itype,
                                                     nullptr, nullptr, scale_inv.data_ptr());
     auto output_cu    = makeTransformerEngineTensor(output);
