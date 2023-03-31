@@ -435,7 +435,6 @@ def fp8_cast_transpose_bgrad_fused(
     otype: tex.DType,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cast + Transpose + BGRAD with FP8 output"""
-    print('fp8_cast_transpose_bgrad_fused otype',otype)
     return tex.fused_cast_transpose_bgrad(
         inp,
         fp8_meta_tensor.scale[fp8_tensor],
