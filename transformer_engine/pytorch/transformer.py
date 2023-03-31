@@ -207,62 +207,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         return context_layer
 
-class FlashAttention_cuDNN(torch.nn.Module):
-    """Dot product attention implementation by using the cuDNN flash-attn implementation.
-    """
-
-    def __init__(
-        self,
-        norm_factor: float,
-        attention_dropout: float = 0.0,
-        attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
-    ) -> None:
-        super().__init__()
-
-        self.attn_causal_mask = attn_mask_type == "causal"
-        self.norm_factor = norm_factor
-        self.attention_dropout_ctx = attention_dropout_ctx
-        self.attention_dropout = attention_dropout
-        self.cudnn_flashattn = cuDNN_FlashAttn()
-
-    def forward(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """flash-attn fprop"""
-
-        print("=========== FA - cuDNN self attn ===========")
-
-        qkv = torch.cat([query_layer.unsqueeze(2),
-            key_layer.unsqueeze(2),
-            value_layer.unsqueeze(2)], dim=2).contiguous()
-        print("q,k,v shape: ",query_layer.shape,"qkv shape: ",qkv.shape)
-        batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
-        actualSeqlenQ = torch.ones(
-            seqlen,
-            dtype=torch.int32,
-            device=query_layer.device)
-        actualSeqlenK = torch.ones(
-            seqlen,
-            dtype=torch.int32,
-            device=query_layer.device)
-
-        with self.attention_dropout_ctx():
-            output = self.cudnn_flashattn(
-                qkv, actualSeqlenQ, actualSeqlenK, is_first_microbatch=None,
-            )
-                #self.attention_dropout if self.training else 0.0,
-                #softmax_scale=1.0/self.norm_factor
-        print("output shape: ",output.shape)
-        #return output
-
-        ## [(b, sq), np, hn]
-        # [b, sq, np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention implementation by using the flash-attn package.
