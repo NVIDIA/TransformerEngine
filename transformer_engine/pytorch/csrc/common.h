@@ -106,7 +106,7 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
         case torch::kByte:
             return transformer_engine::DType::kByte;
         default:
-            NVTE_ERROR("Invalid type"+str(t));
+            NVTE_ERROR("Invalid type");
     }
 }
 
@@ -144,8 +144,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
 
 
 size_t product(const std::vector<size_t> &shape);
-
-size_t product(const NVTEShape &shape);
 
 
 at::Tensor allocateSpace(const NVTEShape &shape,
