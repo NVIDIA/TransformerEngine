@@ -544,12 +544,16 @@ def global_amax_reduction(
 
     # Key already deleted.
     if amax_buffer_key not in _global_fp8_buffer:
-        return
+        return None
 
     chunk_sizes = [x.numel() for x in _global_fp8_buffer[amax_buffer_key]]
     contiguous_amax = torch.cat(_global_fp8_buffer[amax_buffer_key])
 
-    wait_handle = reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"], fp8_meta["async_amax_reduction"])
+    wait_handle = reduce_tensor_across_group_op_max(
+        contiguous_amax,
+        fp8_meta["fp8_group"],
+        fp8_meta["async_amax_reduction"],
+    )
 
     _global_fp8_buffer[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
     return wait_handle
