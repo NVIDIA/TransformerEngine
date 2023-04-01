@@ -374,12 +374,6 @@ class DotProductAttention(torch.nn.Module):
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
-        # temporarily set to True for testing
-        self.use_flash_attention_cudnn = True
-        if self.use_flash_attention_cudnn:
-            self.flash_attention_cudnn = FlashAttention_cuDNN(norm_factor, **attn_kwargs)
-
-
     def _checkpointed_attention_forward(
         self,
         attention_func: Callable,
@@ -449,6 +443,7 @@ class DotProductAttention(torch.nn.Module):
         ):
             use_flash_attention = False
 
+<<<<<<< HEAD
         if self.use_flash_attention_cudnn:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.flash_attention_cudnn,
@@ -456,6 +451,8 @@ class DotProductAttention(torch.nn.Module):
                                                             key_layer,
                                                             value_layer)
 
+=======
+>>>>>>> 2020e4995b925c7579f051c9bc3243f9a707a9bb
         if is_in_onnx_export_mode():
             use_flash_attention = False
 
