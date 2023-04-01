@@ -658,7 +658,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
 
 struct UbufP2PCommOverlap : torch::CustomClassHolder {
-    int _rank;
+    int _local_rank;
     int _tp_size;
     int _reg;
     int _next_rank, _prev_rank;
@@ -711,10 +711,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         }
 
         _tp_size = tp_size;
-        _rank = rank;
+        _local_rank = (rank % tp_size);
 
-        _next_rank = (tp_size + rank + 1) % tp_size;
-        _prev_rank = (tp_size + rank + -1) % tp_size;
+        int base_tp_rank = (rank / tp_size) * tp_size;
+        _next_rank = (tp_size + rank + 1) % tp_size + base_tp_rank;
+        _prev_rank = (tp_size + rank + -1) % tp_size + base_tp_rank;
 
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, 0);
@@ -764,7 +765,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         // Create GEMM output buffer and a pointer to its current chunk
         torch::Tensor output = torch::empty({n_chunk * _tp_size, m}, at::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
         char* output_ptr = reinterpret_cast<char*>(output.data_ptr());
-        int cur_ouput_chunk_id = _rank;
+        int cur_ouput_chunk_id = _local_rank;
 
         // Catch up the default torch stream
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -777,8 +778,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
             // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks to 
             // be contiguous after the ring exchanges
-            int send_chunk_id = (_tp_size + _rank - i) % _tp_size;
-            int recv_chunk_id = (_tp_size + _rank - i - 1) % _tp_size;
+            int send_chunk_id = (_tp_size + _local_rank - i) % _tp_size;
+            int recv_chunk_id = (_tp_size + _local_rank - i - 1) % _tp_size;
             int send_offset = comm_bytes * send_chunk_id;
             int recv_offset = comm_bytes * recv_chunk_id;
 
@@ -846,8 +847,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         char* input_b_ptr = reinterpret_cast<char*>(input_b.data_ptr());
 
         // Init send/recv chunk id
-        int send_buf_id = (_tp_size + _rank - 1) % _tp_size;
-        int recv_buf_id = (_tp_size + _rank - 2) % _tp_size;
+        int send_buf_id = (_tp_size + _local_rank - 1) % _tp_size;
+        int recv_buf_id = (_tp_size + _local_rank - 2) % _tp_size;
         int input_b_chunk_id = send_buf_id;
 
         // Triple buffer GEMM chunk outputs to overlap GEMMs with multi streams
@@ -923,7 +924,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         CHECK_CUDA(cudaEventRecord(_stop_accum, (cudaStream_t) _stream_accum));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_compute, 0));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_accum, 0));
-        return _ubufs[_rank];
+        return _ubufs[_local_rank];
     }
 
 
@@ -942,8 +943,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
         for (int i = 0; i < _tp_size; i++) {
-            int send_chunk_id = (_tp_size + _rank - i) % _tp_size;
-            int recv_chunk_id = (_tp_size + _rank - i - 1) % _tp_size;
+            int send_chunk_id = (_tp_size + _local_rank - i) % _tp_size;
+            int recv_chunk_id = (_tp_size + _local_rank - i - 1) % _tp_size;
             int send_offset = comm_bytes * send_chunk_id;
             int recv_offset = comm_bytes * recv_chunk_id;
 
@@ -962,10 +963,10 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         int recv_offset = comm_bytes * recv_chunk_id;
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
 
-        if (_rank == send_rank) {
+        if (_local_rank == send_rank) {
             userbuffers_send(_reg, send_offset, _reg, recv_offset, comm_bytes, _ub_comm, recv_rank, (cudaStream_t) stream_main);
         }
-        else if (_rank == recv_rank) {
+        else if (_local_rank == recv_rank) {
             userbuffers_recv(_reg, send_offset, _reg, recv_offset, comm_bytes, _ub_comm, send_rank, (cudaStream_t) stream_main);
         }
     }
@@ -982,7 +983,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                 NVTE_ERROR("input and ubuf size do not match!");
             }
             CHECK_CUDA(cudaMemcpyAsync(
-                _ubufs[_rank].data_ptr(),
+                _ubufs[_local_rank].data_ptr(),
                 input.data_ptr(),
                 input.numel() * input.element_size(),
                 cudaMemcpyDeviceToDevice,
