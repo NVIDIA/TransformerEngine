@@ -375,8 +375,8 @@ def test_export_gemm(
     scale_factors
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     class TestFP8_GEMM(nn.Module):
         def __init__(self, precision, use_bias, gelu, scale_factors):
@@ -496,8 +496,8 @@ def test_export_layernorm(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
     inp_shape = [64, 32]
@@ -637,8 +637,8 @@ def test_export_linear(
     precision: torch.dtype
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -714,8 +714,8 @@ def test_export_layernorm_linear(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -769,8 +769,8 @@ def test_export_layernorm_mlp(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -889,8 +889,8 @@ def test_export_multihead_attention(
     fuse_qkv_params: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     hidden_size = 256
     sequence_length = 128
@@ -966,8 +966,8 @@ def test_export_transformer_layer(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
+    if use_fp8 and fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Layer configuration
     hidden_size = 64
