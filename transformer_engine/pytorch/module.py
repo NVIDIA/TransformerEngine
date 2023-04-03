@@ -77,7 +77,6 @@ from .cpp_extensions import (
     layernorm_fwd_inf,
     cast_to_fp8,
     cast_from_fp8,
-    fused_attn_fwd,
 )
 from .constants import GemmParallelModes, dist_group_type, TE_DType
 
@@ -3049,4 +3048,3 @@ class LayerNorm(torch.nn.Module):
             self.bwd_ln_sm_margin,
             self.zero_centered_gamma
         )
-

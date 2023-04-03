@@ -10,11 +10,13 @@ import transformer_engine_extensions as tex
 from .constants import TE_DType
 
 def check_tensor(x: torch.Tensor):
+    """Check tensor properties."""
     assert (
             x.is_cuda and x.is_contiguous()
             ), "Tensor needs to be on CUDA and contiguous."
 
 def check_qkv(qkv: torch.Tensor):
+    """Check tensor properties."""
     check_tensor(qkv)
     assert (
             qkv.dtype is torch.uint8
@@ -23,6 +25,7 @@ def check_qkv(qkv: torch.Tensor):
             ), "QKV needs to be in [total_seqs x 3 x num_heads x head_dim] and FP8."
 
 def check_o(o: torch.Tensor):
+    """Check tensor properties."""
     check_tensor(o)
     assert (
             o.dtype is torch.uint8
@@ -30,6 +33,7 @@ def check_o(o: torch.Tensor):
             ), "O needs to be a 3D FP8 tensor."
 
 def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
+    """Check tensor properties."""
     check_tensor(stats)
     assert (
             stats.dtype is torch.float32
@@ -38,6 +42,7 @@ def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
             ), "Tensor needs to be in [b, h, s, 1] and float32."
 
 def check_cu_seqlens(cu_seqlens: torch.Tensor):
+    """Check tensor properties."""
     check_tensor(cu_seqlens)
     assert (
             cu_seqlens.dtype is torch.int32
@@ -45,6 +50,7 @@ def check_cu_seqlens(cu_seqlens: torch.Tensor):
             ), "cu_seqlens needs to be an int32 scalar."
 
 def check_scalar(scalar: torch.Tensor):
+    """Check tensor properties."""
     check_tensor(scalar)
     assert (
             scalar.dtype is torch.float32
@@ -53,6 +59,7 @@ def check_scalar(scalar: torch.Tensor):
             ), "Tensor needs to be a float32 scalar."
 
 def check_rng_state(rng_state: torch.Tensor):
+    """Check tensor properties."""
     check_tensor(rng_state)
     assert (
             rng_state.dtype is torch.int64
@@ -60,26 +67,24 @@ def check_rng_state(rng_state: torch.Tensor):
             ), "rng_state should be [seed, offset] in int64."
 
 def get_mha_layout(qkv_layout: str):
+    """Get MHA Layout in integers."""
     qkv_layout = qkv_layout.lower()
-    if qkv_layout == "not_interleaved":
-        return 0
-    elif qkv_layout == "qkv_interleaved":
-        return 1
-    elif qkv_layout == "kv_interleaved":
-        return 2
+    qkv_layout_dict = {
+        "not_interleaved": 0,
+        "qkv_interleaved": 1,
+        "kv_interleaved": 2,
+    }
+    return qkv_layout_dict[qkv_layout]
 
 def fused_attn_fwd(
     QKV: torch.Tensor,
     qkv_dtype: tex.DType,
-#    cu_seqlens: torch.Tensor,
     qkv_ragged_offset: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     q_scale_s: torch.Tensor,
     q_scale_o: torch.Tensor,
     amax_s: torch.Tensor,
     amax_o: torch.Tensor,
-#    d_scale_s: torch.Tensor,
-#    d_scale_o: torch.Tensor,
     p_dropout: float,
     max_seq_len: int,
     is_training: bool,
@@ -87,9 +92,9 @@ def fused_attn_fwd(
     rng_gen: torch.Generator = None,
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Fused Attention FWD."""
 
     check_qkv(QKV)
-    #check_cu_seqlens(cu_seqlens)
     check_cu_seqlens(qkv_ragged_offset)
     check_scalar(d_scale_qkv)
     check_scalar(q_scale_s)
@@ -97,23 +102,10 @@ def fused_attn_fwd(
     check_scalar(amax_s)
     check_scalar(amax_o)
 
-
-    #seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    ##max_seq_len = max(seqlens)
-    #b = cu_seqlens.numel() - 1
-    #assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
-    #total_seqs = QKV.size(0)
-    #h = QKV.size(2)
-    #d = QKV.size(3)
-    #attn_scale = 1.0 / math.sqrt(d)
-    #qkv_ragged_offset = cu_seqlens * 3 * h * d
-    #o_ragged_offset = cu_seqlens * h * d
-
     phantom_tensor = torch.empty(1,
                         dtype=qkv_ragged_offset.dtype,
                         device=qkv_ragged_offset.device)
     seqlens = phantom_tensor
-    #max_seq_len = max(seqlens)
     b = qkv_ragged_offset.numel() - 1
     assert b <= QKV.size(0), "b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
@@ -122,7 +114,6 @@ def fused_attn_fwd(
     attn_scale = 1.0 / math.sqrt(d)
     o_ragged_offset = phantom_tensor
 
-
     qkv_layout = get_mha_layout(qkv_layout)
 
     O, M, ZInv, rng_state = tex.fused_attn_fwd(
@@ -130,7 +121,6 @@ def fused_attn_fwd(
             attn_scale, p_dropout,
             qkv_layout, is_training, set_zero,
             QKV, qkv_dtype, d_scale_qkv,
-            #d_scale_s, d_scale_o,
             q_scale_s, q_scale_o,
             amax_s, amax_o,
             qkv_ragged_offset, o_ragged_offset,
@@ -139,7 +129,7 @@ def fused_attn_fwd(
     )
 
     return O, M, ZInv, rng_state
- 
+
 def fused_attn_bwd(
     QKV: torch.Tensor,
     O: torch.Tensor,
@@ -147,7 +137,6 @@ def fused_attn_bwd(
     M: torch.Tensor,
     ZInv: torch.Tensor,
     qkv_dtype: tex.DType,
-#    cu_seqlens: torch.Tensor,
     qkv_ragged_offset: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     d_scale_s: torch.Tensor,
@@ -158,38 +147,23 @@ def fused_attn_bwd(
     q_scale_dqkv: torch.Tensor,
     amax_ds: torch.Tensor,
     amax_dqkv: torch.Tensor,
-#    d_scale_ds: torch.Tensor,
-#    d_scale_dqkv: torch.Tensor,
     p_dropout: float,
     max_seq_len: int,
     set_zero: bool,
     rng_state: torch.Tensor,
     qkv_layout: str = "qkv_interleaved",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Fused Attention BWD."""
 
     check_o(dO)
     check_qkv(QKV)
     check_o(O)
-    #check_cu_seqlens(cu_seqlens)
     check_cu_seqlens(qkv_ragged_offset)
-
-
-    #seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    ##max_seq_len = max(seqlens)
-    #b = cu_seqlens.numel() - 1
-    #assert b <= QKV.size(0), f"b must be <= QKV.size(0)."
-    #total_seqs = QKV.size(0)
-    #h = QKV.size(2)
-    #d = QKV.size(3)
-    #attn_scale = 1.0 / math.sqrt(d)
-    #qkv_ragged_offset = cu_seqlens * 3 * h * d
-    #o_ragged_offset = cu_seqlens * h * d
 
     phantom_tensor = torch.empty(1,
                         dtype=qkv_ragged_offset.dtype,
                         device=qkv_ragged_offset.device)
     seqlens = phantom_tensor
-    #max_seq_len = max(seqlens)
     b = qkv_ragged_offset.numel() - 1
     assert b <= QKV.size(0), "b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
@@ -197,7 +171,6 @@ def fused_attn_bwd(
     d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
     o_ragged_offset = phantom_tensor
-
 
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
@@ -222,7 +195,6 @@ def fused_attn_bwd(
             QKV, O, dO, M, ZInv,
             qkv_dtype,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
-            #d_scale_ds, d_scale_dqkv,
             q_scale_s, q_scale_ds, q_scale_dqkv,
             amax_ds, amax_dqkv,
             qkv_ragged_offset, o_ragged_offset,
