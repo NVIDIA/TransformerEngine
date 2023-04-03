@@ -34,12 +34,11 @@ def _check_fp8_support() -> bool:
     """Return if fp8 support is available"""
     if get_device_compute_capability() >= 9.0: # hopper and above
         return True
-
     if get_device_compute_capability() < 8.9: # pre-ada
         return False
-    elif tex.get_cublasLt_version() < 120103: # cublasLt v12.1.3.x required for FP8 on Ada
+    if tex.get_cublasLt_version() < 120103: # cublasLt v12.1.3.x required for FP8 on Ada
         return False
-    elif float(torch.version.cuda) < 12.1: # cuda v12.1 required for FP8 on Ada
+    if float(torch.version.cuda) < 12.1: # cuda v12.1 required for FP8 on Ada
         return False
     return True
 
