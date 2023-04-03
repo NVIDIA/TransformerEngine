@@ -5,7 +5,7 @@
 import torch
 import pytest
 
-from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.fp8 import fp8_autocast, is_fp8_available
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
