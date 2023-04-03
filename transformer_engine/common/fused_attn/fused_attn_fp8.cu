@@ -7,26 +7,6 @@
 #include "transformer_engine/fused_attn_fp8.h"
 #include "../common.h"
 
-bool check_device_arch_newer_than(std::string const arch) {
-    int arch_major = 6;
-    int arch_minor = 0;
-    if (arch == "hopper") {arch_major = 9;}
-    if (arch == "ampere") {arch_major = 8;}
-    if (arch == "turing")  {arch_major = 7; arch_minor = 5;}
-    if (arch == "volta")  {arch_major = 7;}
-    if (arch == "pascal") {arch_major = 6;}
-
-    struct cudaDeviceProp prop;
-    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-
-    auto device_version = prop.major * 10 + prop.minor;
-    auto queried_version = arch_major * 10 + arch_minor;
-     if (device_version >= queried_version) {
-        return true;
-     }
-     return false;
-}
-
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
@@ -1360,14 +1340,6 @@ fa_fp8_fprop(int64_t b,
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-        // FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
-        if (check_device_arch_newer_than("hopper") == false) {
-            cudnn_frontend::set_error_and_throw_exception(
-                    nullptr,
-                    CUDNN_STATUS_ARCH_MISMATCH,
-                    "Run FP8 BERT Flash Attention: Sample requires Hopper or above GPU");
-        }
-
         FADescriptor descriptor{
                 b, h, s_q, s_kv, d,
                 attnScale, isTraining, dropoutProbability, layout, tensorType};
@@ -1691,14 +1663,6 @@ fa_fp8_bprop(int64_t b,
                 cudnnHandle_t handle_) {
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
-
-        // FP8 BERT Flash Attention only runs on cudnn v8.9 and above and only on Hopper
-        if (check_device_arch_newer_than("hopper") == false) {
-            cudnn_frontend::set_error_and_throw_exception(
-                    nullptr,
-                    CUDNN_STATUS_ARCH_MISMATCH,
-                    "Run FP8 BERT Flash Attention: Sample requires Hopper or above GPU");
-        }
 
         FADescriptor descriptor{
                 b, h, s_q, s_kv, d,
