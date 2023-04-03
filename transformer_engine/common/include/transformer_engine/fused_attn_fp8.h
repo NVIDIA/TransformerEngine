@@ -57,7 +57,7 @@ class cudnnExecutionPlanManager {
 
 void nvte_fused_attn_fwd(
                 int64_t b, int64_t max_seq_len,
-                int64_t total_seqs, int64_t h, int64_t d,
+                int64_t h, int64_t d,
                 float attn_scale, float p_dropout,
                 int qkv_layout, bool is_training,
                 const NVTETensor QKV,
@@ -74,7 +74,7 @@ void nvte_fused_attn_fwd(
 
 void nvte_fused_attn_bwd(
                 int64_t b, int64_t max_seq_len,
-                int64_t total_seqs, int64_t h, int64_t d,
+                int64_t h, int64_t d,
                 float attn_scale, float p_dropout, int qkv_layout,
                 const NVTETensor QKV,
                 NVTETensor dQKV,

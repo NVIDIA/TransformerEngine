@@ -82,8 +82,6 @@ std::vector<at::Tensor> fused_attn_fwd(
                 const at::Tensor &QKV,
                 transformer_engine::DType QKV_type,
                 const at::Tensor &descaleQKV,
-                // at::Tensor descaleS,
-                // at::Tensor descaleO,
                 const at::Tensor &scaleS,
                 const at::Tensor &scaleO,
                 at::Tensor amaxS,
@@ -111,7 +109,6 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   auto O = torch::empty({total_seqs, h, d}, options.dtype(torch::kByte));
   if (set_zero) {
-    // O.zero_();
     mha_fill(O, at::cumsum(Seqlens, 0)
                     .index({torch::indexing::Slice(-1, torch::indexing::None)}));
   }
@@ -132,7 +129,7 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_fwd(
-                  b, max_seq_len, total_seqs, h, d,
+                  b, max_seq_len, h, d,
                   attn_scale, p_dropout,
                   qkv_layout, is_training,
                   te_QKV.data(),
@@ -154,7 +151,7 @@ std::vector<at::Tensor> fused_attn_fwd(
 
   // Actual call to kernel
   nvte_fused_attn_fwd(
-                  b, max_seq_len, total_seqs, h, d,
+                  b, max_seq_len, h, d,
                   attn_scale, p_dropout,
                   qkv_layout, is_training,
                   te_QKV.data(),
@@ -187,8 +184,6 @@ at::Tensor fused_attn_bwd(
                 const at::Tensor &descaleS,
                 const at::Tensor &descaleO,
                 const at::Tensor &descale_dO,
-                // at::Tensor descale_dS,
-                // at::Tensor descale_dQKV,
                 const at::Tensor &scaleS,
                 const at::Tensor &scale_dS,
                 const at::Tensor &scale_dQKV,
@@ -206,7 +201,6 @@ at::Tensor fused_attn_bwd(
 
   at::Tensor dQKV = torch::empty_like(QKV);
   if (set_zero) {
-    // dQKV.zero_();
     mha_fill(dQKV, at::cumsum(Seqlens, 0)
                     .index({torch::indexing::Slice(-1, torch::indexing::None)}));
   }
@@ -238,7 +232,7 @@ at::Tensor fused_attn_bwd(
 
   // This call populates workspace tensors with the required config
   nvte_fused_attn_bwd(
-                  b, max_seq_len, total_seqs, h, d,
+                  b, max_seq_len, h, d,
                   attn_scale, p_dropout, qkv_layout,
                   te_QKV.data(),
                   te_dQKV.data(),
@@ -262,7 +256,7 @@ at::Tensor fused_attn_bwd(
 
   // Actual call to kernel
   nvte_fused_attn_bwd(
-                  b, max_seq_len, total_seqs, h, d,
+                  b, max_seq_len, h, d,
                   attn_scale, p_dropout, qkv_layout,
                   te_QKV.data(),
                   te_dQKV.data(),
