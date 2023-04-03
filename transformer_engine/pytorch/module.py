@@ -250,8 +250,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8 or self.fp8_calibration:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
             state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
             state["global_fp8_buffer"] = get_global_fp8_buffer()
 
@@ -321,11 +323,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Initialize before loading.
         self.init_fp8_meta_tensors()
         self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
-        self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
-        self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
+
+        # Backwards compatibility: compute scale inv if it wasn't saved in the extra state explicitly
+        if "scale_inv_fwd" not in state or "scale_inv_bwd" not in state:
+            assert "scale_inv_fwd" not in state and "scale_inv_bwd" not in state, "Invalid state, began saving scale_inv_fwd and scale_inv_bwd at the same time"
+            self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
+            self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
+        else:
+            self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
+            self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
+
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""

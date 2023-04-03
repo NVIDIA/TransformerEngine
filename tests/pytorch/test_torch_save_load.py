@@ -42,7 +42,6 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     tmp_filename = tempfile.NamedTemporaryFile().name
 
     precision = torch.float32
-    out_features = 128
 
     class Test_TE_Export(TransformerEngineBaseModule):
         def __init__(self, precision, use_bias):
@@ -52,7 +51,7 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
 
             self.fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
             self.fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
-            nb_inp_scales, nb_weight_scales = 1, out_features
+            nb_inp_scales = nb_weight_scales = 1
             self.meta_inp = init_meta(nb_inp_scales)
             self.meta_weight = init_meta(nb_weight_scales)
 
@@ -95,9 +94,11 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     model_in = Test_TE_Export(precision, True)
     with te.fp8_autocast(enabled=True):
         model_in.fp8_init()
+        # scaling fwd
         model_in.fp8_meta["scaling_fwd"].scale = torch.ones(3, dtype=torch.float32, device="cuda") * scale_fwd
         model_in.fp8_meta["scaling_fwd"].scale_inv = torch.ones(3, dtype=torch.float32, device="cuda") / scale_fwd
         model_in.fp8_meta["scaling_fwd"].amax_history = torch.ones(3, dtype=torch.float32, device="cuda") * history_fwd
+        # scaling bwd
         model_in.fp8_meta["scaling_bwd"].scale = torch.ones(2, dtype=torch.float32, device="cuda") * scale_bwd
         model_in.fp8_meta["scaling_bwd"].scale_inv = torch.ones(2, dtype=torch.float32, device="cuda") / scale_bwd
         model_in.fp8_meta["scaling_bwd"].amax_history = torch.ones(2, dtype=torch.float32, device="cuda") * history_bwd
@@ -108,9 +109,11 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     model_out.load_state_dict(torch.load(tmp_filename))
     model_out.eval()
 
+    # scaling fwd
     assert torch.allclose(model_in.fp8_meta["scaling_fwd"].scale, model_out.fp8_meta["scaling_fwd"].scale)
     assert torch.allclose(model_in.fp8_meta["scaling_fwd"].scale_inv, model_out.fp8_meta["scaling_fwd"].scale_inv)
     assert torch.allclose(model_in.fp8_meta["scaling_fwd"].amax_history, model_out.fp8_meta["scaling_fwd"].amax_history)
+    # scaling bwd
     assert torch.allclose(model_in.fp8_meta["scaling_bwd"].scale, model_out.fp8_meta["scaling_bwd"].scale)
     assert torch.allclose(model_in.fp8_meta["scaling_bwd"].scale_inv, model_out.fp8_meta["scaling_bwd"].scale_inv)
     assert torch.allclose(model_in.fp8_meta["scaling_bwd"].amax_history, model_out.fp8_meta["scaling_bwd"].amax_history)
