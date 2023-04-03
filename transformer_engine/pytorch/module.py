@@ -327,9 +327,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
 
-        # Backwards compatibility: compute scale inv if it wasn't saved in the extra state explicitly
+        # Backwards compatibility: compute scale inv if it wasn't saved in the extra state.
         if "scale_inv_fwd" not in state or "scale_inv_bwd" not in state:
-            assert "scale_inv_fwd" not in state and "scale_inv_bwd" not in state, "Invalid state, began saving scale_inv_fwd and scale_inv_bwd at the same time"
+            assert (
+                "scale_inv_fwd" not in state and "scale_inv_bwd" not in state
+            ), "Invalid state, began saving scale_inv_fwd and scale_inv_bwd at the same time"
             self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
             self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
         else:
