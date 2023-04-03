@@ -81,7 +81,6 @@ def fp8_gemm(
         accumulate,
         use_split_accumulator)
     fn = torch.ops.tex_ts.te_gemm_ts
-    _ = fn(*args)
     if ub_algo is not None:
         assert ub is not None, 'ub object is None!'
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
