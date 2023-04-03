@@ -154,7 +154,7 @@ void transpose(const Tensor &input,
                                                     ",load_size=",8,
                                                     ",store_size=",8);
       if (!rtc_manager.is_compiled("transpose", device_id, parameters)) {
-        rtc_manager.compile("transpose",
+        rtc_manager.compile("transpose_optimized_kernel",
                             rtc_code_transpose,
                             "rtc/transpose.cu",
                             device_id,
@@ -165,7 +165,7 @@ void transpose(const Tensor &input,
                                  const_cast<void*>(reinterpret_cast<const void*>(&output.data.dptr)),
                                  const_cast<void*>(reinterpret_cast<const void*>(&row_length)),
                                  const_cast<void*>(reinterpret_cast<const void*>(&num_rows))};
-      rtc_manager.launch("transpose", device_id, parameters,
+      rtc_manager.launch("transpose_optimized_kernel", device_id, parameters,
                          num_blocks, block_size, 0, stream,
                          args);
     } else {

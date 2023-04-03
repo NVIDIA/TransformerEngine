@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <iostream>
 #include <utility>
 
 #include "../common.h"
@@ -209,9 +210,22 @@ void KernelManager::compile(const std::string &kernel_name,
                                       nullptr,      // headers
                                       nullptr));    // include names
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
-  NVTE_CHECK_NVRTC(nvrtcCompileProgram(program,
-                                       opts_ptrs.size(),
-                                       opts_ptrs.data()));
+  const nvrtcResult compile_result = nvrtcCompileProgram(program,
+                                                         opts_ptrs.size(),
+                                                         opts_ptrs.data());
+  if (compile_result != NVRTC_SUCCESS) {
+    // Display log if compilation failed
+    std::string log = concat_strings("NVRTC compilation log for ",
+                                     filename, ":\n");
+    const size_t log_offset = log.size();
+    size_t log_size;
+    NVTE_CHECK_NVRTC(nvrtcGetProgramLogSize(program, &log_size));
+    log.resize(log_offset + log_size);
+    NVTE_CHECK_NVRTC(nvrtcGetProgramLog(program, &log[log_offset]));
+    log.back() = '\n';
+    std::cerr << log;
+    NVTE_CHECK_NVRTC(compile_result);
+  }
 
   // Get mangled function name
   const char *mangled_name;

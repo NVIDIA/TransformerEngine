@@ -4,7 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-using namespace transformer_engine;
+/// TODO Get from cstdint header
+using uint32_t = size_t;
+using uint64_t = size_t;
 
 // Parameters
 /// TODO Make configurable
@@ -12,6 +14,7 @@ using Type = float;
 constexpr int load_size = 8;
 constexpr int store_size = 8;
 constexpr int warps_per_tile = 4;
+constexpr int THREADS_PER_WARP = 32;
 
 namespace {
 
@@ -23,7 +26,7 @@ struct BytesToType {};
 template<>
 struct BytesToType<8> {
     using Type = uint64_t;
-    static_assert(sizeof(Type) == 8);
+    static_assert(sizeof(Type) == 8, "Unexpected type size");
 };
 template<typename Elt_type, uint32_t NUM_ELT>
 struct Vec {
@@ -105,7 +108,7 @@ transpose_optimized_kernel(const Type * const input,
       local_input.load_from(&input[row * row_length + col]);
       #pragma unroll
       for (int j2 = 0; j2 < nvec_in; ++j2) {
-        local_output[j2][iter].data.elt[i2] = local_input.data.elt[j2]
+        local_output[j2][iter].data.elt[i2] = local_input.data.elt[j2];
       }
     }
   }
