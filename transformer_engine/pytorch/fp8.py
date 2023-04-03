@@ -277,7 +277,7 @@ def fp8_autocast(
         _FP8_AUTOCAST_DEPTH += 1
 
         if enabled:
-            assert is_fp8_available(), "FP8 execution not supported."
+            assert is_fp8_available(), "FP8 execution is not supported."
         yield
     finally:
         _FP8_ENABLED,_FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP = fp8_state

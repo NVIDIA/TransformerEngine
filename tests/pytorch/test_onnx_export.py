@@ -60,7 +60,7 @@ ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 
 skip_FP8 = pytest.mark.skipif(
     not is_fp8_available(),
-    reason="FP8 execution not supported.",
+    reason="FP8 execution is not supported.",
 )
 
 def create_fp8_recipe():
