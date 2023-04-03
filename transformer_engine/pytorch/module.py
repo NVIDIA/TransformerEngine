@@ -26,8 +26,6 @@ from .fp8 import (
     get_default_fp8_recipe,
     get_fp8_te_dtype,
     is_first_fp8_module,
-    is_last_fp8_module,
-    reset_is_last_fp8_module,
     new_fp8_context_id,
     get_fp8_context_id,
     set_fp8_context_id,
@@ -111,8 +109,9 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
     """Checks and prep for BWD."""
     if fp8:
         global _amax_reduce_handle_bwd
-        if is_last_fp8_module() and _amax_reduce_handle_bwd is not None:
+        if _amax_reduce_handle_bwd is not None:
             _amax_reduce_handle_bwd.wait()
+            _amax_reduce_handle_bwd = None
 
         # Update amax and scale; Skip all setup for global amax reduction
         if not fp8_meta["recipe"].reduce_amax:
@@ -134,7 +133,6 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
     if fp8 and fp8_meta["recipe"].reduce_amax:
         if fp8_meta["first_module"]:
             _amax_reduce_handle_bwd = global_amax_reduction(fp8_meta, forward=False)
-            reset_is_last_fp8_module()
             delete_key_from_amax_buffer(forward=False)
 
 

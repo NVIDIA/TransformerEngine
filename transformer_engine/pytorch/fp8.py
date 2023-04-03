@@ -18,7 +18,6 @@ _FP8_CALIBRATION = False
 _FP8_RECIPE = None
 _FP8_DISTRIBUTED_GROUP = None
 _IS_FIRST_FP8_MODULE = False
-_IS_LAST_FP8_MODULE = True
 _FP8_AUTOCAST_COUNTER = 0
 _FP8_CURRENT_CONTEXT_ID = 0
 _FP8_AUTOCAST_DEPTH = 0
@@ -311,21 +310,6 @@ def is_first_fp8_module():
     tmp = _IS_FIRST_FP8_MODULE
     _IS_FIRST_FP8_MODULE = False
     return tmp
-
-
-def is_last_fp8_module():
-    """Returns `True` only the first time in backprop when called
-    multiple times from within the same `fp8_autocast` context.
-    """
-    global _IS_LAST_FP8_MODULE
-    tmp = _IS_LAST_FP8_MODULE
-    _IS_LAST_FP8_MODULE = False
-    return tmp
-
-def reset_is_last_fp8_module():
-    """Reset the global flag of `_IS_LAST_FP8_MODULE` to `True` """
-    global _IS_LAST_FP8_MODULE
-    _IS_LAST_FP8_MODULE = True
 
 
 def get_fp8_recipe() -> DelayedScaling:
