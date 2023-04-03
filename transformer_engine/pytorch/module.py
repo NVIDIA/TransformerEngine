@@ -135,6 +135,56 @@ class UserBufferManager:
         # Dictionary of lists where key={shape}_{dtype}_{num_comm_sm}
         self.free_list = {}
         self.rank = rank
+        self.pre_initialized = False
+
+def pre_init_ub_communicators(shape: list,
+        dtype: torch.dtype,
+        #device: torch.device,
+        pp_size: int = 1,
+        tp_size: int = 8,
+        num_comm_sm: int = 16,
+        comm_cga_size: int = 2,
+        num_splits: int = 1,
+        use_rr_kernel: int = 0,
+        set_sm_margin: int = 0):
+    global ub_mgr
+    if ub_mgr is not None:
+        pass
+    else:
+        ub_mgr = UserBufferManager(torch.distributed.get_rank())
+        # TODO: Register all userbuffers needed during training
+        # TODO: Set env vars for individual ub configs
+        ubufs = {}
+        # qkv,fc1 / dgrad / rs
+        _shape = shape
+        _dtype = torch.bfloat16
+        key = f'{_shape}_{_dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
+        ubufs[key] = torch.empty(_shape, dtype=_dtype, device='cuda')
+        ub_mgr.free_list[key] = []
+        #print (f'get_ub {key}')
+
+        # qkv,fc1 / wgrad / ag
+        _shape = shape
+        _dtype = dtype
+        key = f'{_shape}_{_dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
+        ubufs[key] = torch.empty(_shape, dtype=_dtype, device='cuda')
+        ub_mgr.free_list[key] = []
+        #print (f'get_ub {key}')
+
+        for key in ubufs:
+            ub_obj = tex.UbufCommOverlap(
+                ubufs[key],
+                ub_mgr.rank,          # rank id
+                pp_size,            # pp size
+                tp_size,            # tp size
+                num_comm_sm,        # num_comm_sm
+                comm_cga_size,      # comm_cga_size
+                num_splits,         # num_splits
+                use_rr_kernel,      # number of buffers
+                set_sm_margin,      # set sm margin
+            )
+            ub_mgr.free_list[key].append(ub_obj)
+        ub_mgr.pre_initialized = True
 
 #TODO: thread safety ???
 def get_ub(shape: list,
@@ -148,27 +198,32 @@ def get_ub(shape: list,
         use_rr_kernel: int = 0,
         set_sm_margin: int = 0):
     global ub_mgr
-    if ub_mgr is None:
-        ub_mgr = UserBufferManager(torch.distributed.get_rank())
     key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-    print (f'get_ub {key}')
-    if key not in ub_mgr.free_list:
-        ub_mgr.free_list[key] = []
-    if not ub_mgr.free_list[key]:
-        ubuf = torch.empty(shape, dtype=dtype, device=device)
-        ub_obj = tex.UbufCommOverlap(
-            ubuf,
-            ub_mgr.rank,          # rank id
-            pp_size,            # pp size
-            tp_size,            # tp size
-            num_comm_sm,        # num_comm_sm
-            comm_cga_size,      # comm_cga_size
-            num_splits,         # num_splits
-            use_rr_kernel,      # number of buffers
-            set_sm_margin,      # set sm margin
-        )
-    else:
+    #print (f'get_ub {key}')
+    if ub_mgr.pre_initialized:
+        assert ub_mgr is not None
+        assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
         ub_obj = ub_mgr.free_list[key].pop()
+    else:
+        if ub_mgr is None:
+            ub_mgr = UserBufferManager(torch.distributed.get_rank())
+        if key not in ub_mgr.free_list:
+            ub_mgr.free_list[key] = []
+        if not ub_mgr.free_list[key]:
+            ubuf = torch.empty(shape, dtype=dtype, device=device)
+            ub_obj = tex.UbufCommOverlap(
+                ubuf,
+                ub_mgr.rank,          # rank id
+                pp_size,            # pp size
+                tp_size,            # tp size
+                num_comm_sm,        # num_comm_sm
+                comm_cga_size,      # comm_cga_size
+                num_splits,         # num_splits
+                use_rr_kernel,      # number of buffers
+                set_sm_margin,      # set sm margin
+            )
+        else:
+            ub_obj = ub_mgr.free_list[key].pop()
     return ub_obj, key
 
 #TODO: thread safety ???
