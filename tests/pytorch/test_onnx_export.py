@@ -58,10 +58,8 @@ assert OPSET >= TRILU_OPSET
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
 ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 
-skip_FP8 = pytest.mark.skipif(
-    not is_fp8_available(),
-    reason="FP8 execution is not supported.",
-)
+fp8_available, reason_for_no_fp8 = is_fp8_available()
+skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 def create_fp8_recipe():
     return recipe.DelayedScaling(margin=0, interval=1, fp8_format=recipe.Format.E4M3)
