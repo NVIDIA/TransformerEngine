@@ -33,6 +33,7 @@ import transformer_engine.pytorch.cpp_extensions as texcpp
 import transformer_engine.pytorch.softmax as softmax_defs
 from transformer_engine.pytorch.utils import get_default_init_method
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.fp8 import is_fp8_available
 
 # Global test configuration knobs.
 
@@ -58,8 +59,8 @@ assert OPSET >= TRILU_OPSET
 ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 
 skip_FP8 = pytest.mark.skipif(
-    torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9,
-    reason="Device compute capability 9.x required for FP8 execution.",
+    not is_fp8_available(),
+    reason="FP8 execution not supported.",
 )
 
 def create_fp8_recipe():
