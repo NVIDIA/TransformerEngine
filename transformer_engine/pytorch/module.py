@@ -13,6 +13,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
@@ -199,6 +200,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
+
+        if self.fp8_meta_tensors_initialized:
+            # Handle changed amax history size.
+            curr_len = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[0]
+            need_len = self.fp8_meta["recipe"].amax_history_len
+            if need_len < curr_len:
+                self.fp8_meta[fp8_meta_tensor_key].amax_history = (
+                    self.fp8_meta[fp8_meta_tensor_key]
+                    .amax_history[: self.fp8_meta["recipe"].amax_history_len].clone()
+                )
+            elif need_len > curr_len:
+                extra_rows = need_len - curr_len
+                self.fp8_meta[fp8_meta_tensor_key].amax_history = F.pad(
+                    self.fp8_meta[fp8_meta_tensor_key].amax_history, pad=(0, 0, 0, extra_rows)
+                )
+            return
+
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = (
@@ -234,12 +252,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def init_fp8_meta_tensors(self) -> None:
         """Init scales and amaxes."""
-        # Checkpoint loaded
-        if self.fp8_meta_tensors_initialized:
-            return
-
         self.set_meta_tensor(True)
         self.set_meta_tensor(False)
+        self.fp8_meta_tensors_initialized = True
 
     def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
@@ -292,7 +307,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
             self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
             self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
-            self.fp8_meta_tensors_initialized = True
 
             # Restore global FP8 buffer state.
             set_global_fp8_buffer(state[4])
@@ -322,7 +336,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
-        self.fp8_meta_tensors_initialized = True
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -1139,6 +1152,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
@@ -1203,7 +1217,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 stride=1,
             )
 
-            if self.use_bias or self.return_bias:
+            if self.use_bias:
                 self.register_buffer("bias_tensor",
                                      torch.empty(
                                          self.out_features,
@@ -1245,7 +1259,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     stride=1,
                 )
 
-                if self.use_bias or self.return_bias:
+                if self.use_bias:
                     self.register_parameter(
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
@@ -1262,9 +1276,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -1347,7 +1360,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 bias_tensor,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1792,6 +1805,7 @@ class Linear(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
 
         if tp_group is None:
@@ -1835,7 +1849,7 @@ class Linear(TransformerEngineBaseModule):
                 stride=1,
             )
 
-            if self.use_bias or self.return_bias:
+            if self.use_bias:
                 self.register_buffer("bias_tensor",
                                      torch.empty(
                                          self.out_features,
@@ -1877,7 +1891,7 @@ class Linear(TransformerEngineBaseModule):
                     stride=1,
                 )
 
-                if self.use_bias or self.return_bias:
+                if self.use_bias:
                     self.register_parameter(
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
@@ -1894,9 +1908,8 @@ class Linear(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.use_bias:
+        if self.parallel_mode == "row" and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -1962,7 +1975,7 @@ class Linear(TransformerEngineBaseModule):
                 self.weight1_t_fp8 if self.fp8 else None,
                 inp,
                 bias_tensor,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
@@ -2683,6 +2696,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.return_bias = return_bias
+        self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
@@ -2775,7 +2789,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             stride=1,
         )
 
-        if self.use_bias or self.return_bias:
+        if self.use_bias:
             self.fc2_bias = Parameter(
                 torch.empty(
                     hidden_size, device=torch.cuda.current_device(), dtype=params_dtype
@@ -2786,9 +2800,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
-        if self.set_parallel_mode and self.use_bias:
+        if self.set_parallel_mode and self.apply_bias:
             self.gemm_bias_unfused_add = True
-            self.use_bias = False
         else:
             self.gemm_bias_unfused_add = False
 
@@ -2861,7 +2874,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.weight2_fp8 if self.fp8 else None,
                 self.weight2_t_fp8 if self.fp8 else None,
                 self.fc2_bias,
-                self.use_bias,
+                self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,

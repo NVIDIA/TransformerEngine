@@ -69,6 +69,7 @@ def get_file_type(path):
            "txt": ["txt"],
            "cfg": ["cfg"],
            "sh":  ["sh"],
+           "md":  ["md"],
           }
     tmp = path.split(".")
     for filetype, ext_list in ext.items():
