@@ -2144,6 +2144,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        ub_split_rs: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
@@ -2161,6 +2162,11 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
+
+        if ub_split_rs:
+            tp_world_size = get_distributed_world_size(tp_group)
+            if tp_world_size == 1:
+                ub_split_rs = False
 
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
@@ -2285,6 +2291,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_forward,
             )
 
+            if ub_split_rs:
+                dim_size = list(gelu_out.size())
+                dim_size[1] = fc2_weight.size(0)
+                ub_obj_fc2out, key_fc2out = get_ub(dim_size, activation_dtype, fc2_weight.device, num_splits=4, use_rr_kernel=1)
             fc2_out = fp8_gemm(
                 fc2_weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -2341,9 +2351,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT] = \
                     torch.amax(fc2_weight).float()
 
+            if ub_split_rs:
+                dim_size = list(gelu_out.size())
+                dim_size[1] = fc2_weight.size(0)
+                ub_obj_fc2out, key_fc2out = get_ub(dim_size, activation_dtype, fc2_weight.device, num_splits=4, use_rr_kernel=1)
+            # fc2_out row: 4096 x 12288
             fc2_out, _, _ = gemm(
-                fc2_weight,
-                gelu_out,
+                fc2_weight, #row: 12288 x 6144 --> T --> 6144 x 12288 -> col: 12288 x 6144
+                gelu_out,   #row: 4096 x 6144  --> N --> 4096 x 6144  -> col: 6144 x 4096
                 activation_dtype,
                 get_workspace(),
                 bias=fc2_bias,
@@ -2384,7 +2399,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
 
         # Row Parallel Linear
-        if set_parallel_mode and sequence_parallel:
+        if not ub_split_rs and set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
         elif set_parallel_mode and tensor_parallel:
             fc2_out, _ = allreduce(fc2_out, tp_group)
@@ -2764,6 +2779,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2862,6 +2878,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
+        ub_split_rs: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
     ) -> None:
@@ -2875,6 +2892,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
+        self.ub_split_rs = ub_split_rs
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
 
@@ -3068,6 +3086,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.ub_split_rs,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
             )
