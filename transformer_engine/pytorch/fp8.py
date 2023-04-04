@@ -12,6 +12,7 @@ import transformer_engine_extensions as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
+from .utils import get_device_compute_capability
 
 _FP8_ENABLED = False
 _FP8_CALIBRATION = False
@@ -26,6 +27,29 @@ _fp8_tensors_recompute_buffer = []
 _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
+_is_fp8_available = None
+_reason_for_no_fp8 = ""
+
+
+def _check_fp8_support() -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    if get_device_compute_capability() >= 9.0: # hopper and above
+        return True, ""
+    if get_device_compute_capability() < 8.9: # pre-ada
+        return False, "Device compute capability 8.9 or higher required for FP8 execution."
+    if tex.get_cublasLt_version() < 120103:
+        return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
+    if float(torch.version.cuda) < 12.1:
+        return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
+    return True, ""
+
+
+def is_fp8_available() -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    global _is_fp8_available, _reason_for_no_fp8
+    if _is_fp8_available is None:
+        _is_fp8_available, _reason_for_no_fp8 = _check_fp8_support()
+    return _is_fp8_available, _reason_for_no_fp8
 
 
 def get_meta_tensor_key(forward: bool = True) -> str:
@@ -253,9 +277,8 @@ def fp8_autocast(
         _FP8_AUTOCAST_DEPTH += 1
 
         if enabled:
-            assert (
-                torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9
-            ), "Device compute capability 9.x required for FP8 execution."
+            fp8_available, reason_for_no_fp8 = is_fp8_available()
+            assert fp8_available, reason_for_no_fp8
         yield
     finally:
         _FP8_ENABLED,_FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP = fp8_state
@@ -290,9 +313,11 @@ def is_fp8_enabled() -> bool:
     """Is FP8 enabled"""
     return _FP8_ENABLED
 
+
 def is_fp8_calibration() -> bool:
     """Is FP8 calibration"""
     return _FP8_CALIBRATION
+
 
 def is_first_fp8_module():
     """Returns `True` only the first time when called multiple
