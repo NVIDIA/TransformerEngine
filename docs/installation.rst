@@ -29,11 +29,12 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. [Not needed for JAX] `CMake <https://cmake.org/>`__ version 3.18 or later.
+1. `CMake <https://cmake.org/>`__ version 3.18 or later.
 2. [For pyTorch support] `pyTorch <https://pytorch.org/>`__ with GPU support.
 3. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
 4. [For JAX support] `pybind11`: `pip install pybind11`.
-5. [Optional] `Ninja <https://ninja-build.org/>`__: `pip install ninja`.
+5. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
+6. [Optional] `Ninja <https://ninja-build.org/>`__: `pip install ninja`.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
