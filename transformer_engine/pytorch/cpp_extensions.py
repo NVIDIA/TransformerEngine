@@ -79,7 +79,7 @@ def get_mha_layout(qkv_layout: str):
 def fused_attn_fwd(
     QKV: torch.Tensor,
     qkv_dtype: tex.DType,
-    qkv_ragged_offset: torch.Tensor,
+    cu_seqlens: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     q_scale_s: torch.Tensor,
     q_scale_o: torch.Tensor,
@@ -95,24 +95,22 @@ def fused_attn_fwd(
     """Fused Attention FWD."""
 
     check_qkv(QKV)
-    check_cu_seqlens(qkv_ragged_offset)
+    check_cu_seqlens(cu_seqlens)
     check_scalar(d_scale_qkv)
     check_scalar(q_scale_s)
     check_scalar(q_scale_o)
     check_scalar(amax_s)
     check_scalar(amax_o)
 
-    phantom_tensor = torch.empty(1,
-                        dtype=qkv_ragged_offset.dtype,
-                        device=qkv_ragged_offset.device)
-    seqlens = phantom_tensor
-    b = qkv_ragged_offset.numel() - 1
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), "b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
     h = QKV.size(2)
     d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
-    o_ragged_offset = phantom_tensor
+    qkv_ragged_offset = cu_seqlens * 3 * h * d
+    o_ragged_offset = cu_seqlens * h * d
 
     qkv_layout = get_mha_layout(qkv_layout)
 
@@ -137,7 +135,7 @@ def fused_attn_bwd(
     M: torch.Tensor,
     ZInv: torch.Tensor,
     qkv_dtype: tex.DType,
-    qkv_ragged_offset: torch.Tensor,
+    cu_seqlens: torch.Tensor,
     d_scale_qkv: torch.Tensor,
     d_scale_s: torch.Tensor,
     d_scale_o: torch.Tensor,
@@ -158,19 +156,17 @@ def fused_attn_bwd(
     check_o(dO)
     check_qkv(QKV)
     check_o(O)
-    check_cu_seqlens(qkv_ragged_offset)
+    check_cu_seqlens(cu_seqlens)
 
-    phantom_tensor = torch.empty(1,
-                        dtype=qkv_ragged_offset.dtype,
-                        device=qkv_ragged_offset.device)
-    seqlens = phantom_tensor
-    b = qkv_ragged_offset.numel() - 1
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    b = cu_seqlens.numel() - 1
     assert b <= QKV.size(0), "b must be <= QKV.size(0)."
     total_seqs = QKV.size(0)
     h = QKV.size(2)
     d = QKV.size(3)
     attn_scale = 1.0 / math.sqrt(d)
-    o_ragged_offset = phantom_tensor
+    qkv_ragged_offset = cu_seqlens * 3 * h * d
+    o_ragged_offset = cu_seqlens * h * d
 
     check_stats(M, b, h, max_seq_len)
     check_stats(ZInv, b, h, max_seq_len)
