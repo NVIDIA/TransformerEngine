@@ -23,6 +23,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+#include <cublasLt.h>
 #include <stdexcept>
 #include <memory>
 #include <iomanip>
