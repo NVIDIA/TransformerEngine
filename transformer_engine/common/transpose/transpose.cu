@@ -150,24 +150,22 @@ void transpose(const Tensor &input,
       // Tuned runtime-compiled kernel
       auto& rtc_manager = rtc::KernelManager::instance();
       int device_id = 0;  /// TODO Detect current GPU
-      const std::string parameters = concat_strings("type=",int(input.data.dtype),
-                                                    ",load_size=",8,
-                                                    ",store_size=",8);
-      if (!rtc_manager.is_compiled("transpose", device_id, parameters)) {
-        rtc_manager.compile("transpose_optimized_kernel",
-                            rtc_code_transpose,
-                            "rtc/transpose.cu",
+      const std::string kernel_label = concat_strings("transpose"
+                                                      ",type=",int(input.data.dtype),
+                                                      ",load_size=",8,
+                                                      ",store_size",8);
+      if (!rtc_manager.is_compiled(kernel_label, device_id)) {
+        rtc_manager.compile(kernel_label,
                             device_id,
-                            parameters);
+                            "transpose_optimized_kernel",
+                            rtc_code_transpose,
+                            "rtc/transpose.cu");
       }
       const int num_blocks = (row_length / tile_size) * (num_rows / tile_size);
-      std::vector<void*> args = {const_cast<void*>(reinterpret_cast<const void*>(&input.data.dptr)),
-                                 const_cast<void*>(reinterpret_cast<const void*>(&output.data.dptr)),
-                                 const_cast<void*>(reinterpret_cast<const void*>(&row_length)),
-                                 const_cast<void*>(reinterpret_cast<const void*>(&num_rows))};
-      rtc_manager.launch("transpose_optimized_kernel", device_id, parameters,
+      rtc_manager.launch(kernel_label, device_id,
                          num_blocks, block_size, 0, stream,
-                         args);
+                         input.data.dptr, output.data.dptr,
+                         row_length, num_rows);
     } else {
       // General kernel
       const int num_blocks = DIVUP(row_length, tile_size) * DIVUP(num_rows, tile_size);

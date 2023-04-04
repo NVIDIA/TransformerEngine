@@ -123,25 +123,6 @@ void swap(Kernel& first, Kernel& second) noexcept {
   swap(first.functions_, second.functions_);
 }
 
-void Kernel::launch(int device_id,
-                    const dim3 grid_dim,
-                    const dim3 block_dim,
-                    unsigned int shared_mem_bytes,
-                    cudaStream_t stream,
-                    std::vector<void*> &args) {
-  NVTE_CHECK_CUDA_DRIVER(cuLaunchKernel(get_function(device_id),
-                                        grid_dim.x,
-                                        grid_dim.y,
-                                        grid_dim.z,
-                                        block_dim.x,
-                                        block_dim.y,
-                                        block_dim.z,
-                                        shared_mem_bytes,
-                                        static_cast<CUstream>(stream),
-                                        args.data(),
-                                        nullptr)); // extra
-}
-
 CUfunction Kernel::get_function(int device_id) {
   std::lock_guard<std::mutex> lock_guard_(lock_);
   if (functions_[device_id] == null_function) {
@@ -173,11 +154,11 @@ KernelManager& KernelManager::instance() {
   return instance_;
 }
 
-void KernelManager::compile(const std::string &kernel_name,
-                            const std::string &code,
-                            const std::string &filename,
+void KernelManager::compile(const std::string &kernel_label,
                             int device_id,
-                            const std::string &parameters) {
+                            const std::string &kernel_name,
+                            const std::string &code,
+                            const std::string &filename) {
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   // Choose whether to compile to PTX or cubin
@@ -248,7 +229,7 @@ void KernelManager::compile(const std::string &kernel_name,
   }
 
   // Cache compiled code
-  const std::string key = get_kernel_cache_key(kernel_name, device_id, parameters);
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
   kernel_cache_.insert({key, Kernel(mangled_name, std::move(compiled_code))});
   kernel_cache_.at(key).get_function(device_id);  // Make sure kernel is available on device
 
@@ -256,38 +237,15 @@ void KernelManager::compile(const std::string &kernel_name,
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
 }
 
-bool KernelManager::is_compiled(const std::string &kernel_name,
-                                int device_id,
-                                const std::string &parameters) const {
-  const std::string key = get_kernel_cache_key(kernel_name, device_id, parameters);
+bool KernelManager::is_compiled(const std::string &kernel_label,
+                                int device_id) const {
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
   return kernel_cache_.count(key) > 0;
 }
 
-void KernelManager::launch(const std::string &kernel_name,
-                           int device_id,
-                           const std::string &parameters,
-                           const dim3 grid_dim,
-                           const dim3 block_dim,
-                           unsigned int shared_mem_bytes,
-                           cudaStream_t stream,
-                           std::vector<void*> &args) {
-  const std::string key = get_kernel_cache_key(kernel_name, device_id, parameters);
-  NVTE_CHECK(kernel_cache_.count(key) > 0,
-             "Attempted to launch RTC kernel before compilation");
-  kernel_cache_.at(key).launch(device_id,
-                               grid_dim,
-                               block_dim,
-                               shared_mem_bytes,
-                               stream,
-                               args);
-}
-
-std::string KernelManager::get_kernel_cache_key(const std::string &kernel_name,
-                                                int device_id,
-                                                const std::string &parameters) const {
-  return concat_strings(kernel_name,
-                        ",sm_arch=",sm_arch(device_id),",",
-                        parameters);
+std::string KernelManager::get_kernel_cache_key(const std::string &kernel_label,
+                                                int device_id) const {
+  return concat_strings("sm=",sm_arch(device_id),",",kernel_label);
 }
 
 }  // namespace rtc
