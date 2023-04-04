@@ -28,6 +28,7 @@ _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
 _is_fp8_available = None
+_reason_for_no_fp8 = ""
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
@@ -45,11 +46,10 @@ def _check_fp8_support() -> Tuple[bool, str]:
 
 def is_fp8_available() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    global _is_fp8_available
-    reason_for_no_fp8 = ""
+    global _is_fp8_available, _reason_for_no_fp8
     if _is_fp8_available is None:
-        _is_fp8_available, reason_for_no_fp8 = _check_fp8_support()
-    return _is_fp8_available, reason_for_no_fp8
+        _is_fp8_available, _reason_for_no_fp8 = _check_fp8_support()
+    return _is_fp8_available, _reason_for_no_fp8
 
 
 def get_meta_tensor_key(forward: bool = True) -> str:

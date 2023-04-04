@@ -375,7 +375,7 @@ def test_export_gemm(
     scale_factors
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     class TestFP8_GEMM(nn.Module):
@@ -496,7 +496,7 @@ def test_export_layernorm(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
@@ -637,7 +637,7 @@ def test_export_linear(
     precision: torch.dtype
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
@@ -714,7 +714,7 @@ def test_export_layernorm_linear(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
@@ -769,7 +769,7 @@ def test_export_layernorm_mlp(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     # Set dimensions (these are arbitrary).
@@ -889,7 +889,7 @@ def test_export_multihead_attention(
     fuse_qkv_params: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     hidden_size = 256
@@ -966,7 +966,7 @@ def test_export_transformer_layer(
     zero_centered_gamma: bool
 ):
     # Skip FP8 tests on non-hopper devices
-    if use_fp8 and fp8_available:
+    if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     # Layer configuration
