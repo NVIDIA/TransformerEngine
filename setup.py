@@ -176,7 +176,7 @@ class JaxBuilder(FrameworkBuilderBase):
         print("Building jax extensions!")
 
     def install_requires():
-        # TODO: need to find a way to instal directly pybind11 and ninja
+        # TODO: find a way to install pybind11 and ninja directly.
         return ['cmake']
 
 ext_modules = []

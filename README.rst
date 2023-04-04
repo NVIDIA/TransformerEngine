@@ -178,12 +178,12 @@ Clone the repository and inside it type one of those commands:
 
 .. code-block:: bash
 
-  NVTE_FRAMEWORK=all pip install .        # Building with all frameworks.
-  NVTE_FRAMEWORK=pytorch pip install .    # Building with pyTorch only.
-  NVTE_FRAMEWORK=jax pip install .        # Building with JAX only.
-  NVTE_FRAMEWORK=tensorflow pip install . # Building with Tensorflow only.
+  NVTE_FRAMEWORK=all pip install .        # Build TE for all supported frameworks.
+  NVTE_FRAMEWORK=pytorch pip install .    # Build TE for PyTorch only.
+  NVTE_FRAMEWORK=jax pip install .        # Build TE for JAX only.
+  NVTE_FRAMEWORK=tensorflow pip install . # Build TE for TensorFlow only.
 
-The default is pyTorch only.
+If the framework is not explicitly specified, TE will be built for PyTorch only.
 
 User Guide
 ----------
