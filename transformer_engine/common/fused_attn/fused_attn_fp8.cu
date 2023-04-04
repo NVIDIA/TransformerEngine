@@ -1115,15 +1115,19 @@ static cudnn_frontend::Tensor createBiasSubtractionSoftmaxMulChain(
             std::vector<cudnn_frontend::Operation>* ops,
             const cudnn_frontend::Tensor &dS_after_dropout,
             const cudnn_frontend::Tensor &AfterDropout_before_quan_S,
-            const cudnn_frontend::Tensor &O_dO_after_rowsum) {
+            const cudnn_frontend::Tensor &O_dO_after_rowsum,
+            const cudnn_frontend::Tensor &attnScale) {
   int64_t o_dim[4] = {b, h, s_q, s_kv};
   int64_t o_stride[4];
   generateMHAStrides(b, h, s_q, s_kv, d, o_stride, layout, MHA_Matrix::S_Matrix);
   auto dS_minus_O_dO = tensor_create(
                   CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 800,
                   o_dim, o_stride, true, false);  // is virtual
-  auto S_mul_dS_minus_O_dO = tensor_create(
+  auto AfterAttnScale_before_dS = tensor_create(
                   CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 801,
+                  o_dim, o_stride, true, false);  // is virtual
+  auto S_mul_dS_minus_O_dO = tensor_create(
+                  CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 802,
                   o_dim, o_stride, true, false);  // is virtual
 
   // Define the pw subtraction descriptor
@@ -1136,12 +1140,19 @@ static cudnn_frontend::Tensor createBiasSubtractionSoftmaxMulChain(
   // Define the pw multiplication descriptor
   auto multiplyDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_MUL);
 
-  // Create a multiply Node
+  // dS_minus_O_dO * attnScale
+  auto mutliply_attn_scale_op = binary_pw_op_create(
+          AfterDropout_before_quan_S, attnScale,
+          AfterAttnScale_before_dS, multiplyDesc);
+
+  // AfterDropout_before_quan_S * AfterAttnScale_before_dS
   auto mutliply_op = binary_pw_op_create(
-                  AfterDropout_before_quan_S, dS_minus_O_dO,
-                  S_mul_dS_minus_O_dO, multiplyDesc);
+          AfterDropout_before_quan_S, AfterAttnScale_before_dS,
+          S_mul_dS_minus_O_dO, multiplyDesc);
+
 
   ops->push_back(std::move(sub_op));
+  ops->push_back(std::move(mutliply_attn_scale_op));
   ops->push_back(std::move(mutliply_op));
 
   return S_mul_dS_minus_O_dO;
@@ -1838,11 +1849,13 @@ void fa_fp8_bprop(
                           &ops, O_after_dequan_Tensor,
                           dO_after_dequan_Tensor, dropoutScale_dOVt_OdO_Tensor);
 
-          // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S
+          // (dS_after_dropout - O_dO_after_rowsum) * AfterDropout_before_quan_S * attnScale
           auto S_mul_dS_minus_O_dO = createBiasSubtractionSoftmaxMulChain(
-                          b, h, s_q, s_kv, d, layout,
-                          &ops, dS_after_dropout,
-                          AfterDropout_before_quan_S, O_dO_after_rowsum);
+              b, h, s_q, s_kv, d, layout,
+              &ops, dS_after_dropout,
+              AfterDropout_before_quan_S, O_dO_after_rowsum,
+              attnScaleTensor);
+
 
           // S_mul_dS_minus_O_dO * scaledS
           auto S_mul_dS_minus_O_dO_after_quan_dS = createScale(
@@ -1862,19 +1875,9 @@ void fa_fp8_bprop(
                           S_mul_dS_minus_O_dO_after_quan_dS,
                           kTensor, seqlenMNKTensor);
 
-          // (dS * K) * attn scale ds_K
-          auto AfterAttnScale_dS_K_before_dequan_dS = createScale(
-                          After_dS_K,  // input tensor
-                          attnScaleTensor,  // scale tensor
-                          CUDNN_DATA_FLOAT,  // output tensor type
-                          true,  // output is virtual
-                          true,  // scale is by value
-                          &ops,
-                          2005  /*UID offset*/);
-
-          // (dS * K) * attn scale ds_K * descale dS
-          auto AfterAttnScale_dS_K_before_dequan_K = createScale(
-                          AfterAttnScale_dS_K_before_dequan_dS,  // input tensor
+          // (dS * K) * descale dS
+          auto After_dS_K_before_dequan_K = createScale(
+              After_dS_K,  // input tensor
                           descaledSTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1882,9 +1885,9 @@ void fa_fp8_bprop(
                           &ops,
                           2006  /*UID offset*/);
 
-          // (dS * K) * attn scale ds_K * descale dS * descale K
-          auto AfterAttnScale_dS_K_before_quan_dQ = createScale(
-                          AfterAttnScale_dS_K_before_dequan_K,  // input tensor
+          // (dS * K) * descale dS * descale K
+          auto After_dS_K_before_quan_dQ = createScale(
+              After_dS_K_before_dequan_K,  // input tensor
                           descaleKTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1892,9 +1895,9 @@ void fa_fp8_bprop(
                           &ops,
                           2007  /*UID offset*/);
 
-          // (dS * K) * attn scale ds_K * descale dS * descale K * scale dQ
+          // (dS * K) * descale dS * descale K * scale dQ
           auto dQ = createScaleWithOffset(
-                          AfterAttnScale_dS_K_before_quan_dQ,  // input tensor
+              After_dS_K_before_quan_dQ,  // input tensor
                           "scaledQ",  // scale tensor
                           CUDNN_DATA_FP8_E5M2,  // output tensor type
                           false,  // output not virtual
@@ -1904,7 +1907,7 @@ void fa_fp8_bprop(
                           "dQ");
 
           // Amax for dQ
-          createAmax("amaxdQ", AfterAttnScale_dS_K_before_quan_dQ, &ops);
+          createAmax("amaxdQ", After_dS_K_before_quan_dQ, &ops);
 
           // dS.T @ Q
           auto After_dSTranspose_Q = createdSQBMM(
@@ -1912,19 +1915,9 @@ void fa_fp8_bprop(
                           S_mul_dS_minus_O_dO_after_quan_dS,
                           qTensor, seqlenMNKTensor);
 
-          // (dS.T @ Q) * attn scale ds.T_Q
-          auto AfterAttnScale_dSTranspose_Q_before_dequan_dS = createScale(
-                          After_dSTranspose_Q,  // input tensor
-                          attnScaleTensor,  // scale tensor
-                          CUDNN_DATA_FLOAT,  // output tensor type
-                          true,  // output is virtual
-                          true,  // scale is by value
-                          &ops,
-                          2008  /*UID offset*/);
-
-          // (dS.T * Q) * attn scale dS.T_Q * descale dS
-          auto AfterAttnScale_dSTranspose_Q_before_dequan_Q = createScale(
-                          AfterAttnScale_dSTranspose_Q_before_dequan_dS,  // input tensor
+          // (dS.T * Q) * descale dS
+          auto After_dSTranspose_Q_before_dequan_Q = createScale(
+              After_dSTranspose_Q,  // input tensor
                           descaledSTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1932,9 +1925,9 @@ void fa_fp8_bprop(
                           &ops,
                           2009  /*UID offset*/);
 
-          // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q
-          auto AfterAttnScale_dSTranspose_Q_before_quan_dK = createScale(
-                          AfterAttnScale_dSTranspose_Q_before_dequan_Q,  // input tensor
+          // (dS.T * Q) * descale dS * descale Q
+          auto After_dSTranspose_Q_before_quan_dK = createScale(
+              After_dSTranspose_Q_before_dequan_Q,  // input tensor
                           descaleQTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1942,9 +1935,9 @@ void fa_fp8_bprop(
                           &ops,
                           2010  /*UID offset*/);
 
-          // (dS.T * Q) * attn scale dS.T_Q * descale dS * descale Q * scale dK
+          // (dS.T * Q) * descale dS * descale Q * scale dK
           auto dK = createScaleWithOffset(
-                          AfterAttnScale_dSTranspose_Q_before_quan_dK,  // input tensor
+              After_dSTranspose_Q_before_quan_dK,  // input tensor
                           "scaledK",  // scale tensor
                           CUDNN_DATA_FP8_E5M2,  // output tensor type
                           false,  // output not virtual
@@ -1954,7 +1947,7 @@ void fa_fp8_bprop(
                           "dK");
 
           // Amax for dK
-          createAmax("amaxdK", AfterAttnScale_dSTranspose_Q_before_quan_dK, &ops);
+          createAmax("amaxdK", After_dSTranspose_Q_before_quan_dK, &ops);
 
           for (unsigned int i = 0; i < ops.size(); i++) {
               all_ops.push_back(&ops[i]);
