@@ -5,8 +5,7 @@
 cmake_minimum_required(VERSION 3.18)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  #set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
-  set(CMAKE_CUDA_ARCHITECTURES 90)
+  set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
 endif()
 
 
@@ -21,7 +20,10 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
 find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
+find_package(CUDNN REQUIRED cudnn_all)
+find_package(CUDNN_FRONTEND REQUIRED)
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR})

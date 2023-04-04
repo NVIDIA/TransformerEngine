@@ -23,13 +23,22 @@ add_library(transformer_engine SHARED
 
 target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-include_directories(${CMAKE_CUDNN_FRONTEND_HOME}/include ${CMAKE_CUDNN_HOME}/include)
-#link_directories(${CMAKE_CUDNN_HOME}/lib64)
-list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart CUDA::nvToolsExt)
+#include(FetchContent)
+#FetchContent_Declare(
+#    cudnn-frontend
+#    GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
+#    GIT_TAG        8f488bd41229aa0a3d5f7c0168f59e4d69c618ee # release v0.8
+#)
+#FetchContent_Populate(cudnn-frontend)
+#set_source_files_properties(fused_attn/fused_attn_fp8.cu
+#                            PROPERTIES
+#                            INCLUDE_DIRECTORIES ${CUDNN_FRONTEND_INCLUDE_DIR})
+
+list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart CUDA::nvToolsExt CUDNN::cudnn)
 target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
-target_link_libraries(transformer_engine PUBLIC ${CMAKE_CUDNN_HOME}/lib64/libcudnn.so)
 
 target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE ${CUDNN_FRONTEND_INCLUDE_DIR})
 
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu

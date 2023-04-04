@@ -19,18 +19,9 @@ from distutils.file_util import copy_file
 path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
-
-os.environ["CUDA_HOME"] = "/jliu/cuda_builds/cuda12.1"
-os.environ["CUDNN_HOME"] = "/code/fmha/debug_cudnn"
-os.environ["PATH"] = "/jliu/cuda_builds/cuda12.1/bin:"+os.environ["PATH"]
-os.environ["LD_LIBRARY_PATH"] = "/jliu/cuda_builds/cuda12.1/lib64:/code/fmha/debug_cudnn/lib64:"+os.environ["LD_LIBRARY_PATH"]
-os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
-#print("CUDA_HOME: ",os.environ["CUDA_HOME"])
-#print("CUDNN_HOME: ",os.environ["CUDNN_HOME"])
-#print("PATH: ",os.environ["PATH"])
-#print("LD_LIBRARY_PATH: ",os.environ["LD_LIBRARY_PATH"])
-
 CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+CUDNN_PATH = os.environ.get("CUDNN_PATH", "/usr/local/cudnn")
+CUDNN_FRONTEND_PATH = os.environ.get("CUDNN_FRONTEND_PATH", "/usr/local/cudnn_frontend")
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
@@ -53,22 +44,22 @@ def append_nvcc_threads(nvcc_extra_args):
 
 def extra_gencodes(cc_flag):
     _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    #cc_flag.append("-gencode")
-    #cc_flag.append("arch=compute_70,code=sm_70")
-    #if int(bare_metal_major) >= 11:
-    #    cc_flag.append("-gencode")
-    #    cc_flag.append("arch=compute_80,code=sm_80")
-    #    if int(bare_metal_minor) >= 8:
-    #        cc_flag.append("-gencode")
-    #        cc_flag.append("arch=compute_90,code=sm_90")
-    if int(bare_metal_major) >= 12:
+    if int(bare_metal_major) >= 11:
         cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_90,code=sm_90")
+        cc_flag.append("arch=compute_80,code=sm_80")
+        if int(bare_metal_minor) >= 8:
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90,code=sm_90")
+        if int(bare_metal_major) >= 12:
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90,code=sm_90")
 
 
 def extra_compiler_flags():
     return [
         "-O3",
+        "-gencode",
+        "arch=compute_70,code=sm_70",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -93,9 +84,7 @@ def make_abs_path(l):
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
-    "/jliu/cuda_builds/cuda12.1/include",
-    "/code/fmha/debug_cudnn/include",
-    "/code/fmha/gitlab/cudnn_frontend/include",
+    CUDNN_FRONTEND_PATH+"/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
@@ -218,9 +207,6 @@ if framework in ("all", "pytorch"):
                 "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
             },
             include_dirs=include_dirs,
-            library_dirs=["jliu/cuda_builds/cuda12.1/lib64", 
-                "/code/fmha/debug_cudnn/lib64/"],
-            libraries = ['cudnn'],
         )
     )
     dlfw_builder_funcs.append(PyTorchBuilder)
@@ -294,9 +280,6 @@ class CMakeBuildExtension(build_ext, object):
         cmake_args = [
             "-GNinja",
             "-DCMAKE_BUILD_TYPE=" + config,
-            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
-            "-DCMAKE_CUDNN_HOME=/code/fmha/debug_cudnn",
-            "-DCMAKE_CUDNN_FRONTEND_HOME=/code/fmha/gitlab/cudnn_frontend",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
         cmake_args = cmake_args + self.dlfw_flags
