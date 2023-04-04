@@ -18,6 +18,7 @@
 #include <nvrtc.h>
 
 #include "../util/cuda_driver.h"
+#include "../util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -41,13 +42,13 @@ public:
    * Loads the kernel into the device the first time the device is
    * accessed.
    */
-  template <typename... Args>
+  template <typename... ArgTs>
   void launch(int device_id,
               const dim3 grid_dim,
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              Args&... args);
+              ArgTs&... args);
 
   /*! \brief CUDA function for given CUDA device
    *
@@ -81,28 +82,29 @@ public:
   /*! \brief Access singleton */
   static KernelManager& instance();
 
-  /*! \brief Compile CUDA kernel */
+  /*! \brief Compile CUDA kernel for current CUDA device
+   */
   void compile(const std::string &kernel_label,
-               int device_id,
                const std::string &kernel_name,
                const std::string &code,
                const std::string &filename);
 
-  /*! \brief Whether a CUDA kernel has already been compiled */
-  bool is_compiled(const std::string &kernel_label, int device_id) const;
+  /*! \brief Whether CUDA kernel has been compiled for current CUDA
+   * device.
+   */
+  bool is_compiled(const std::string &kernel_label) const;
 
-  /*! \brief Launch a CUDA kernel
+  /*! \brief Launch CUDA kernel on current CUDA device
    *
    * Assumes the kernel has already been compiled.
    */
-  template <typename... Args>
+  template <typename... ArgTs>
   void launch(const std::string &kernel_label,
-              int device_id,
               const dim3 grid_dim,
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              Args&... args);
+              ArgTs&... args);
 
 private:
   /*! \brief Compiled kernels */
@@ -132,13 +134,13 @@ namespace transformer_engine {
 
 namespace rtc {
 
-template <typename... Args>
+template <typename... ArgTs>
 void Kernel::launch(int device_id,
                     const dim3 grid_dim,
                     const dim3 block_dim,
                     unsigned int shared_mem_bytes,
                     cudaStream_t stream,
-                    Args&... args) {
+                    ArgTs&... args) {
   void* arg_ptrs[] = { const_cast<void*>(static_cast<const void*>(&args))... };
   NVTE_CHECK_CUDA_DRIVER(cuLaunchKernel(get_function(device_id),
                                         grid_dim.x,
@@ -153,14 +155,14 @@ void Kernel::launch(int device_id,
                                         nullptr));
 }
 
-template <typename... Args>
+template <typename... ArgTs>
 void KernelManager::launch(const std::string &cache_key,
-                           int device_id,
                            const dim3 grid_dim,
                            const dim3 block_dim,
                            unsigned int shared_mem_bytes,
                            cudaStream_t stream,
-                           Args&... args) {
+                           ArgTs&... args) {
+  const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(cache_key, device_id);
   NVTE_CHECK(kernel_cache_.count(key) > 0,
              "Attempted to launch RTC kernel before compilation");

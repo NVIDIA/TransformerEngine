@@ -149,21 +149,18 @@ void transpose(const Tensor &input,
     if (full_tile && rtc::is_enabled() && input.data.dtype == DType::kFloat32) { /// TODO Support arbitrary types
       // Tuned runtime-compiled kernel
       auto& rtc_manager = rtc::KernelManager::instance();
-      int device_id = 0;  /// TODO Detect current GPU
       const std::string kernel_label = concat_strings("transpose"
                                                       ",type=",int(input.data.dtype),
                                                       ",load_size=",8,
                                                       ",store_size",8);
-      if (!rtc_manager.is_compiled(kernel_label, device_id)) {
+      if (!rtc_manager.is_compiled(kernel_label)) {
         rtc_manager.compile(kernel_label,
-                            device_id,
                             "transpose_optimized_kernel",
                             rtc_code_transpose,
                             "rtc/transpose.cu");
       }
       const int num_blocks = (row_length / tile_size) * (num_rows / tile_size);
-      rtc_manager.launch(kernel_label, device_id,
-                         num_blocks, block_size, 0, stream,
+      rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
                          input.data.dptr, output.data.dptr,
                          row_length, num_rows);
     } else {

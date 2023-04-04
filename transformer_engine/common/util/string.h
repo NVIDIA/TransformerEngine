@@ -7,31 +7,37 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 
-#include <iostream>
-#include <sstream>
+#include <string>
+#include <type_traits>
 
 namespace transformer_engine {
 
 namespace detail {
 
-inline void concat_strings_helper(std::ostringstream& oss) {}
+// Helper function that converts to a type compatible with
+// std::string::operator+=
 
-template <typename HeadT, typename... TailTs>
-inline void concat_strings_helper(std::ostringstream& oss,
-                                  const HeadT& head,
-                                  const TailTs&... tail) {
-  oss << head;
-  concat_strings_helper(oss, tail...);
+template <typename T,
+          typename = typename std::enable_if<!std::is_arithmetic<T>::value>::type>
+inline const T& to_string_like(const T& val) {
+  return val;
+}
+
+template <typename T,
+          typename = typename std::enable_if<std::is_arithmetic<T>::value>::type>
+inline std::string to_string_like(const T &val) {
+  return std::to_string(val);
 }
 
 }  // namespace detail
 
-/// TODO Consider fast impl with reserved buffer size
+/*! \brief Convert arguments to string and concatenate */
 template <typename... Ts>
-inline std::string concat_strings(const Ts&... args) {
-  std::ostringstream oss;
-  detail::concat_strings_helper(oss, args...);
-  return oss.str();
+inline std::string concat_strings(const Ts &... args) {
+  std::string str;
+  str.reserve(1024);
+  (..., (str += detail::to_string_like(args)));
+  return str;
 }
 
 }  // namespace transformer_engine

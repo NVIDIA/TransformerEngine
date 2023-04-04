@@ -19,31 +19,7 @@ namespace rtc {
 
 namespace {
 
-/* \brief Number of accessible CUDA devices */
-inline int num_devices() {
-  static int num_devices_ = -1;
-  if (num_devices_ < 0) {
-    NVTE_CHECK_CUDA(cudaGetDeviceCount(&num_devices_));
-  }
-  return num_devices_;
-}
-
-/* \brief Compute capability of CUDA device
- *
- * \return Compute capability as int. Last digit is minor revision,
- *         remaining digits are major revision.
- */
-inline int sm_arch(int device_id) {
-  static std::vector<int> cache(num_devices(), -1);
-  if (cache[device_id] < 0) {
-    cudaDeviceProp prop;
-    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
-    cache[device_id] = 10*prop.major + prop.minor;
-  }
-  return cache[device_id];
-}
-
-/* \brief Latest compute capability that NVRTC supports
+/*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
  *         remaining digits are major revision.
@@ -83,8 +59,8 @@ bool is_enabled() {
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)
   : mangled_name_{std::move(mangled_name)}
   , compiled_code_{std::move(compiled_code)}
-  , modules_(num_devices(), null_module)
-  , functions_(num_devices(), null_function) {
+  , modules_(cuda::num_devices(), null_module)
+  , functions_(cuda::num_devices(), null_function) {
 }
 
 Kernel::~Kernel() {
@@ -155,14 +131,14 @@ KernelManager& KernelManager::instance() {
 }
 
 void KernelManager::compile(const std::string &kernel_label,
-                            int device_id,
                             const std::string &kernel_name,
                             const std::string &code,
                             const std::string &filename) {
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   // Choose whether to compile to PTX or cubin
-  const int sm_arch_ = sm_arch(device_id);
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
   const bool compile_ptx = (CUDA_VERSION <= 11000) || (sm_arch_ != compile_sm_arch);
 
@@ -237,15 +213,15 @@ void KernelManager::compile(const std::string &kernel_label,
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
 }
 
-bool KernelManager::is_compiled(const std::string &kernel_label,
-                                int device_id) const {
+bool KernelManager::is_compiled(const std::string &kernel_label) const {
+  const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   return kernel_cache_.count(key) > 0;
 }
 
 std::string KernelManager::get_kernel_cache_key(const std::string &kernel_label,
                                                 int device_id) const {
-  return concat_strings("sm=",sm_arch(device_id),",",kernel_label);
+  return concat_strings("sm=",cuda::sm_arch(device_id),",",kernel_label);
 }
 
 }  // namespace rtc

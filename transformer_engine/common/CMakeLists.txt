@@ -29,6 +29,7 @@ add_library(transformer_engine SHARED
                                rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
                                rmsnorm/rmsnorm_fwd_cuda_kernel.cu
                                util/cast.cu
+                               util/cuda_runtime.cu
                                util/rtc.cu
                                fused_softmax/scaled_masked_softmax.cu
                                fused_softmax/scaled_upper_triang_masked_softmax.cu)
