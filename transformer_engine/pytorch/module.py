@@ -2097,7 +2097,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 if activation_dtype == torch.float32
                 else activation_dtype
             )
-            fc1_bias = cast_if_needed(fc1_bias, bias_dtype)
+            fc1_bias = cast_if_needed(fc1_bias, bias_dtype) if use_bias else fc1_bias
             fc2_bias = cast_if_needed(fc2_bias, bias_dtype) if use_bias else fc2_bias
 
             if update_fp8_weights:
@@ -2147,7 +2147,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc1_bias,
-                use_bias=True,
+                use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
             )
 
@@ -2177,7 +2177,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # Cast for native AMP
             fc1_weight = cast_if_needed(fc1_weight, activation_dtype)
             fc2_weight = cast_if_needed(fc2_weight, activation_dtype)
-            fc1_bias = cast_if_needed(fc1_bias, activation_dtype)
+            fc1_bias = (
+                cast_if_needed(fc1_bias, activation_dtype) if use_bias else fc1_bias
+            )
             fc2_bias = (
                 cast_if_needed(fc2_bias, activation_dtype) if use_bias else fc2_bias
             )
@@ -2196,12 +2198,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc1_bias,
-                use_bias=not bias_gelu_nvfusion,
+                use_bias=(not bias_gelu_nvfusion) and use_bias,
                 gelu=not bias_gelu_nvfusion,
             )
 
             if bias_gelu_nvfusion:
                 fc1_out, _, _ = fc1_outputs
+
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
             else:
                 gelu_out, _, fc1_out = fc1_outputs
@@ -2742,14 +2745,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
             stride=1,
         )
 
-        self.fc1_bias = Parameter(
-            torch.empty(
-                self.size_per_partition,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
+        if self.use_bias:
+            self.fc1_bias = Parameter(
+                torch.empty(
+                    self.size_per_partition,
+                    device=torch.cuda.current_device(),
+                    dtype=params_dtype,
+                )
             )
-        )
-        set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+            set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+        else:
+            self.register_buffer("fc1_bias", torch.Tensor().type(params_dtype), persistent=False)
 
         with torch.no_grad():
             self.fc1_bias.zero_()
