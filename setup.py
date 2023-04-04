@@ -413,6 +413,8 @@ setup(
     install_requires=dlfw_install_requires,
     extras_require={
         'test': ['pytest',
-                 'tensorflow_datasets'],},
+                 'tensorflow_datasets'],
+        'test_pytest': ['onnxruntime',],
+    },
     license_files=("LICENSE",),
 )
