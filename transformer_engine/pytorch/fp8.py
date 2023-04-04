@@ -536,7 +536,7 @@ def global_amax_reduction(
     wait_handle = reduce_tensor_across_group_op_max(
         contiguous_amax,
         fp8_meta["fp8_group"],
-        fp8_meta["async_op"],
+        fp8_meta["async_amax_reduction"],
     )
 
     _global_fp8_buffer[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
