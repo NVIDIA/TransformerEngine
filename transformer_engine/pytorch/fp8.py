@@ -504,7 +504,7 @@ def get_fp8_te_dtype(
 
 
 def reduce_tensor_across_group_op_max(
-    tensor: torch.Tensor, group: dist_group_type, async_amax_reduction: bool
+    tensor: torch.Tensor, group: dist_group_type, async_op: bool
 ) -> None:
     """Reduce tensor across given group."""
     if torch.distributed.is_initialized():
@@ -512,7 +512,7 @@ def reduce_tensor_across_group_op_max(
             tensor,
             op=torch.distributed.ReduceOp.MAX,
             group=group,
-            async_op=async_amax_reduction,
+            async_op=async_op,
         )
         return wait_handle
     return None
@@ -536,7 +536,7 @@ def global_amax_reduction(
     wait_handle = reduce_tensor_across_group_op_max(
         contiguous_amax,
         fp8_meta["fp8_group"],
-        fp8_meta["async_amax_reduction"],
+        fp8_meta["async_op"],
     )
 
     _global_fp8_buffer[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))

@@ -191,7 +191,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.fp8_weight_shapes = []
         self.fp8_meta["autocast_id_fwd_stack"] = []
-        self.fp8_meta["async_amax_reduction"] = bool(
+        self.fp8_meta["async_op"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "1"))
         )
 
