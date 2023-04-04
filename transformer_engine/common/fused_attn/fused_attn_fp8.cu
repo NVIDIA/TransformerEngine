@@ -1142,14 +1142,13 @@ static cudnn_frontend::Tensor createBiasSubtractionSoftmaxMulChain(
 
   // dS_minus_O_dO * attnScale
   auto mutliply_attn_scale_op = binary_pw_op_create(
-          AfterDropout_before_quan_S, attnScale,
+          dS_minus_O_dO, attnScale,
           AfterAttnScale_before_dS, multiplyDesc);
 
   // AfterDropout_before_quan_S * AfterAttnScale_before_dS
   auto mutliply_op = binary_pw_op_create(
           AfterDropout_before_quan_S, AfterAttnScale_before_dS,
           S_mul_dS_minus_O_dO, multiplyDesc);
-
 
   ops->push_back(std::move(sub_op));
   ops->push_back(std::move(mutliply_attn_scale_op));

@@ -22,7 +22,7 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
 find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
-find_package(CUDNN REQUIRED cudnn_all)
+find_package(CUDNN REQUIRED cudnn)
 find_package(CUDNN_FRONTEND REQUIRED)
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
