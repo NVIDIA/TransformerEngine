@@ -189,11 +189,14 @@ Install TE (optionally specifying the framework):
 
 If the framework is not explicitly specified, TE will be built for PyTorch only.
 
-User Guide
-----------
+User Guide and Examples
+-----------------------
 
-For examples, tutorials and API reference please refer to the
-`User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_.
+For examples, tutorials and API reference please refer to:
+
+* `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ for the last release.
+* `Development User Guide <https://nvidia.github.io/TransformerEngine/>`_ for the development version.
+* `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
 
 Transformer Architectures
 -------------------------
