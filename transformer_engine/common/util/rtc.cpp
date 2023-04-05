@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdlib>
 #include <iostream>
 #include <utility>
 
@@ -51,8 +52,13 @@ inline int max_supported_sm_arch() {
 }  // namespace
 
 bool is_enabled() {
-  /// TODO Check env for NVTE_DISABLE_NVRTC
   static bool is_enabled_ = true;
+  static bool need_to_check_env = true;
+  if (need_to_check_env) {
+    const char *env = std::getenv("NVTE_DISABLE_NVRTC");
+    is_enabled_ = env == nullptr || std::string(env) == "0";
+    need_to_check_env = false;
+  }
   return is_enabled_;
 }
 
