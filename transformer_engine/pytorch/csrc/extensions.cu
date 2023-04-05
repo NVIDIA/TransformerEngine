@@ -538,6 +538,67 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
 }
 
 
+std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
+                                                  const at::Tensor &weight,
+                                                  const at::Tensor &bias,
+                                                  float eps,
+                                                  at::Tensor scale,
+                                                  at::Tensor ln_out,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  const int sm_margin,
+                                                  const bool zero_centered_gamma
+) {
+    using namespace transformer_engine;
+
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    DType itype = GetTransformerEngineDType(input.scalar_type());
+
+    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto gamma_cu     = makeTransformerEngineTensor(weight);
+    auto beta_cu      = makeTransformerEngineTensor(bias);
+    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
+    auto mu_cu        = makeTransformerEngineTensor(mu);
+    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
+    transformer_engine::TensorWrapper workspace, barrier;
+
+    // This call populates workspace and barrier tensors with the required config
+    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    // Fill workspace and barrier
+    auto workspace_data = allocateSpace(workspace.shape(),
+                                        workspace.dtype());
+    auto barrier_data = allocateSpace(barrier.shape(),
+                                      barrier.dtype(),
+                                      true);
+    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
+                                            workspace.shape(),
+                                            workspace.dtype());
+    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
+                                            barrier.shape(),
+                                            barrier.dtype());
+
+    // Actual call to fwd kernel
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    return {ln_out, mu, rsigma};
+}
+
+
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  const at::Tensor &weight,
                                  const at::Tensor &bias,
@@ -571,6 +632,61 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
     DType itype = GetTransformerEngineDType(input.scalar_type());
 
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
+    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto gamma_cu     = makeTransformerEngineTensor(weight);
+    auto beta_cu      = makeTransformerEngineTensor(bias);
+    auto z_cu         = makeTransformerEngineTensor(ln_out);
+    auto mu_cu        = makeTransformerEngineTensor(mu);
+    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
+    transformer_engine::TensorWrapper workspace, barrier;
+
+    // This call populates workspace and barrier tensors with the required config
+    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    // Fill workspace and barrier
+    auto workspace_data = allocateSpace(workspace.shape(),
+                                        workspace.dtype());
+    auto barrier_data = allocateSpace(barrier.shape(),
+                                      barrier.dtype(),
+                                      true);
+    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
+                                            workspace.shape(),
+                                            workspace.dtype());
+    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
+                                            barrier.shape(),
+                                            barrier.dtype());
+
+    // Actual call to fwd kernel
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    return {ln_out, mu, rsigma};
+}
+
+
+std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input,
+                                              const at::Tensor &weight,
+                                              const at::Tensor &bias,
+                                              at::Tensor ln_out,
+                                              float eps,
+                                              const int sm_margin,
+                                              const bool zero_centered_gamma
+) {
+    using namespace transformer_engine;
+
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    DType itype = GetTransformerEngineDType(input.scalar_type());
+
     auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
@@ -897,8 +1013,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
+  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
+  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
   m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
                                               "Fused Cast + Transpose + BGRAD");

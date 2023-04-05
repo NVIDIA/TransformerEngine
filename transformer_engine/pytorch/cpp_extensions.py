@@ -306,9 +306,25 @@ def layernorm_fwd_fp8(
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
     sm_margin: int,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    ln_out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm with FP8 output"""
+    if ln_out is not None:
+        return tex.layernorm_fwd_fp8_noalloc(
+            inp,
+            weight,
+            bias,
+            eps,
+            fp8_meta_tensor.scale[fp8_tensor],
+            ln_out,
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+            sm_margin,
+            zero_centered_gamma
+        )
+
     return tex.layernorm_fwd_fp8(
         inp,
         weight,
@@ -376,6 +392,7 @@ def cast_to_fp8(
     otype: tex.DType,
 ) -> torch.Tensor:
     """Cast input to FP8"""
+
     return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
         fp8_meta_tensor.scale,

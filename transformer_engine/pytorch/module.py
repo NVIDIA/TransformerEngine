@@ -198,15 +198,15 @@ def get_ub(shape: list,
         use_rr_kernel: int = 0,
         set_sm_margin: int = 0):
     global ub_mgr
-    key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
     #print (f'get_ub {key}')
-    if ub_mgr.pre_initialized:
-        assert ub_mgr is not None
+    if ub_mgr is not None and ub_mgr.pre_initialized:
+        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
         assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
         ub_obj = ub_mgr.free_list[key].pop()
     else:
         if ub_mgr is None:
             ub_mgr = UserBufferManager(torch.distributed.get_rank())
+        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
         if key not in ub_mgr.free_list:
             ub_mgr.free_list[key] = []
         if not ub_mgr.free_list[key]:
@@ -843,14 +843,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # of an extra fp8 cast.
         if ub_split_ag:
             tp_world_size = get_distributed_world_size(tp_group)
-            if tp_world_size == 1:
+            if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
                 ub_split_ag = False
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
             if not return_layernorm_output:
                 if is_grad_enabled:
-                    ln_out, mu, rsigma = layernorm_fwd_fp8(
+                    ln_out = torch.empty_like(inputmat, dtype=torch.uint8)
+                    _, mu, rsigma = layernorm_fwd_fp8(
                         inputmat,
                         ln_weight,
                         ln_bias,
@@ -860,6 +861,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         fp8_dtype_forward,
                         fwd_ln_sm_margin,
                         zero_centered_gamma,
+                        ln_out = ln_out
                     )
                 else:
                     mu = rsigma = None
@@ -891,9 +893,15 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
         else:
             if is_grad_enabled:
-                ln_out, mu, rsigma = tex.layernorm_fwd(
-                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
-                )
+                if ub_split_ag:
+                    ln_out = torch.empty_like(inputmat)
+                    _, mu, rsigma = tex.layernorm_fwd_noalloc(
+                        inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
+                    )
+                else:
+                    ln_out, mu, rsigma = tex.layernorm_fwd(
+                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
+                    )
             else:
                 ln_out, mu, rsigma = layernorm_fwd_inf(
                         inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
