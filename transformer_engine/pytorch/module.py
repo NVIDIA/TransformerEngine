@@ -1562,6 +1562,7 @@ class _Linear(torch.autograd.Function):
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
+            ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -1600,11 +1601,11 @@ class _Linear(torch.autograd.Function):
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     inputmat_t_total, handle = gather_along_last_dim(
-                        inputmat_t, ctx.tp_group, async_op=True
+                        inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
                     )
                 else:
                     inputmat_total, handle = gather_along_first_dim(
-                        inputmat, ctx.tp_group, async_op=True
+                        inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
                     )
             else:
                 inputmat_t_total = inputmat_t
@@ -1625,39 +1626,39 @@ class _Linear(torch.autograd.Function):
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
 
-                # DGRAD
-                dgrad = fp8_gemm(
-                    weight_t_fp8,
-                    fwd_scale_inverses,
-                    tex.FP8FwdTensors.GEMM1_WEIGHT,
-                    fp8_dtype_forward,
-                    grad_output_c,
-                    ctx.fp8_meta["scaling_bwd"].scale_inv,
-                    tex.FP8BwdTensors.GRAD_OUTPUT1,
-                    fp8_dtype_backward,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    use_split_accumulator=_2X_ACC_DGRAD,
-                )
-            else:
-                # DGRAD
-                dgrad, _, _ = gemm(
-                    weight,
-                    grad_output,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NN",
-                    grad=True,
-                )
+            if ctx.requires_dgrad:
+                if ctx.fp8:
+                    dgrad = fp8_gemm(
+                        weight_t_fp8,
+                        fwd_scale_inverses,
+                        tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        fp8_dtype_forward,
+                        grad_output_c,
+                        ctx.fp8_meta["scaling_bwd"].scale_inv,
+                        tex.FP8BwdTensors.GRAD_OUTPUT1,
+                        fp8_dtype_backward,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        use_split_accumulator=_2X_ACC_DGRAD,
+                    )
+                else:
+                    dgrad, _, _ = gemm(
+                        weight,
+                        grad_output,
+                        ctx.activation_dtype,
+                        get_workspace(),
+                        layout="NN",
+                        grad=True,
+                    )
 
-            # Overlap dgrad-RS/AR with wgrad
-            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                handle.wait()
-                dgrad, handle = reduce_scatter_along_first_dim(
-                    dgrad, ctx.tp_group, async_op=True
-                )
-            elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
-                dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
+                # Overlap dgrad-RS/AR with wgrad
+                if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                    handle.wait()
+                    dgrad, handle = reduce_scatter_along_first_dim(
+                        dgrad, ctx.tp_group, async_op=True
+                    )
+                elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
+                    dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
             if weight.requires_grad:
                 if ctx.fp8:
@@ -1714,7 +1715,7 @@ class _Linear(torch.autograd.Function):
             wgrad if weight.requires_grad else None,
             None,
             None,
-            dgrad.view(ctx.inp_shape),
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
             None,
