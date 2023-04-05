@@ -193,6 +193,7 @@ User Guide and Examples
 -----------------------
 
 For examples, tutorials and API reference please refer to:
+
 * `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ for the last release.
 * `Development User Guide <https://nvidia.github.io/TransformerEngine/>`_ for the development version.
 * `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
