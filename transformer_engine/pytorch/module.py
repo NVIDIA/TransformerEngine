@@ -226,6 +226,34 @@ def get_ub(shape: list,
             ub_obj = ub_mgr.free_list[key].pop()
     return ub_obj, key
 
+def get_ub_p2p(shape: list,
+        dtype: torch.dtype,
+        device: torch.device,
+        pp_size: int = 1,
+        tp_size: int = 8,
+        num_comm_sm: int = 16,
+        set_sm_margin: int = 0):
+    global ub_mgr
+    if ub_mgr is None:
+        ub_mgr = UserBufferManager(torch.distributed.get_rank())
+    key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
+    print (f'get_ub {key}')
+    if key not in ub_mgr.free_list:
+        ub_mgr.free_list[key] = []
+    if not ub_mgr.free_list[key]:
+        ubuf = torch.empty(shape, dtype=dtype, device=device)
+        ub_obj = tex.UbufP2PCommOverlap(
+            ubuf,
+            ub_mgr.rank,          # rank id
+            pp_size,            # pp size
+            tp_size,            # tp size
+            num_comm_sm,        # num_comm_sm
+            set_sm_margin,      # set sm margin
+        )
+    else:
+        ub_obj = ub_mgr.free_list[key].pop()
+    return ub_obj, key
+
 #TODO: thread safety ???
 def free_ub(ub_obj: tex.UbufCommOverlap, key: str):
     global ub_mgr
@@ -794,6 +822,7 @@ class _LayerNormLinear(torch.autograd.Function):
         zero_centered_gamma: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
+        ub_split_ag: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -812,6 +841,10 @@ class _LayerNormLinear(torch.autograd.Function):
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
+        if ub_split_ag:
+            tp_world_size = get_distributed_world_size(tp_group)
+            if tp_world_size == 1:
+                ub_split_ag = False
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -1207,6 +1240,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1300,9 +1334,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
         zero_centered_gamma: bool = False,
-        ub_pipelined_fwd: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
+        ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -1314,9 +1348,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
-        self.ub_pipelined_fwd = ub_pipelined_fwd
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
+        self.ub_split_ag = ub_split_ag
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1541,6 +1575,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.zero_centered_gamma,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
+                self.ub_split_ag,
             )
             out = fwd_fn(*args)
 
@@ -2199,9 +2234,10 @@ class _LayerNormMLP(torch.autograd.Function):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
-        ub_split_rs: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
+        ub_split_rs: bool,
+        ub_split_ag: bool,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -2452,6 +2488,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
+            ctx.ub_split_ag = ub_split_ag
 
         # Row Parallel Linear
         if not ub_split_rs and set_parallel_mode and sequence_parallel:
@@ -2834,7 +2871,6 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
-            None,
         )
 
 
@@ -2933,9 +2969,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
-        ub_split_rs: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
+        ub_split_rs: bool = False,
+        ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2947,9 +2984,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bias_gelu_nvfusion = bool(int(os.getenv("NVTE_BIAS_GELU_NVFUSION", "1")))
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
-        self.ub_split_rs = ub_split_rs
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
+        self.ub_split_rs = ub_split_rs
+        self.ub_split_ag = ub_split_ag
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -3141,9 +3179,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
-                self.ub_split_rs,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
+                self.ub_split_rs,
+                self.ub_split_ag,
             )
             out = fwd_fn(*args)
 

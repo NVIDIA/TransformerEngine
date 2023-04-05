@@ -496,6 +496,7 @@ class MultiHeadAttention(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
+        ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -549,6 +550,7 @@ class MultiHeadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_split_ag=ub_split_ag,
                     **common_gemm_kwargs,
                 )
             else:
@@ -576,6 +578,7 @@ class MultiHeadAttention(torch.nn.Module):
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_split_ag=ub_split_ag,
                     **common_gemm_kwargs,
                 )
             else:
@@ -913,9 +916,11 @@ class TransformerLayer(torch.nn.Module):
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
     ub_bulk_wgrad: bool, default = False
-             Overlap UserBuffer ReduceScatter with QKV and FC1 WGRAD layers
+             Bulk overlap UserBuffer ReduceScatter | WGRAD GEMM
     ub_bulk_dgrad: bool, default = False
-             Overlap UserBuffer AllGather with QKV and FC1 DGRAD layers
+             Bulk overlap UserBuffer AllGather | DGRAD GEMM
+    ub_split_ag: bool, default = False
+             Split pipelined overlap UserBuffer AllGather -> GEMM
 
     Optimization parameters
     -----------------------
@@ -977,6 +982,7 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
+        ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1045,6 +1051,7 @@ class TransformerLayer(torch.nn.Module):
             "qkv_weight_interleaved" : qkv_weight_interleaved,
             "ub_bulk_wgrad" : ub_bulk_wgrad,
             "ub_bulk_dgrad" : ub_bulk_dgrad,
+            "ub_split_ag" : ub_split_ag,
         }
 
         self.self_attention = MultiHeadAttention(
@@ -1088,6 +1095,7 @@ class TransformerLayer(torch.nn.Module):
             zero_centered_gamma=zero_centered_gamma,
             ub_bulk_wgrad=ub_bulk_wgrad,
             ub_bulk_dgrad=ub_bulk_dgrad,
+            ub_split_ag=ub_split_ag,
         )
 
         self.hidden_dropout = hidden_dropout
