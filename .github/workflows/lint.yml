@@ -23,7 +23,7 @@ jobs:
     name: 'PyTorch Python'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/pytorch:22.09-py3
+      image: nvcr.io/nvidia/pytorch:23.03-py3
       options: --user root
     steps:
       - name: 'Checkout'
@@ -45,17 +45,19 @@ jobs:
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
   jax_pylint:
-    if: false  # JAX container is not yet publicly available on NGC catalog
     name: 'JAX Python'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/jax:XX.XX-py3
+      #image: nvcr.io/nvidia/jax:XX.XX-py3  # Not yet available
+      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
       options: --user root
     steps:
       - name: 'Checkout'
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
+          pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+          pip install flax
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
