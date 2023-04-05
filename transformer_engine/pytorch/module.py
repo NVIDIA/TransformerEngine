@@ -198,7 +198,6 @@ def get_ub(shape: list,
         use_rr_kernel: int = 0,
         set_sm_margin: int = 0):
     global ub_mgr
-    #print (f'get_ub {key}')
     if ub_mgr is not None and ub_mgr.pre_initialized:
         key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
         assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
@@ -207,6 +206,7 @@ def get_ub(shape: list,
         if ub_mgr is None:
             ub_mgr = UserBufferManager(torch.distributed.get_rank())
         key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
+        print (f'get_ub {key}')
         if key not in ub_mgr.free_list:
             ub_mgr.free_list[key] = []
         if not ub_mgr.free_list[key]:
@@ -231,13 +231,13 @@ def get_ub_p2p(shape: list,
         device: torch.device,
         pp_size: int = 1,
         tp_size: int = 8,
-        num_comm_sm: int = 16,
+        num_comm_sm: int = 2,
         set_sm_margin: int = 0):
     global ub_mgr
     if ub_mgr is None:
         ub_mgr = UserBufferManager(torch.distributed.get_rank())
     key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
-    print (f'get_ub {key}')
+    print (f'get_ub_p2p {key}')
     if key not in ub_mgr.free_list:
         ub_mgr.free_list[key] = []
     if not ub_mgr.free_list[key]:
@@ -845,12 +845,18 @@ class _LayerNormLinear(torch.autograd.Function):
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
                 ub_split_ag = False
+        if ub_split_ag:
+            dim_size = list(inputmat.size())
+            dim_size[0] = dim_size[0] * tp_world_size
+            ub_obj_lnout, key_lnout = get_ub_p2p(dim_size, torch.uint8 if fp8 else inputmat.dtype, inputmat.device)
+            ln_out = ub_obj_lnout.get_ubuf_output(0)
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
             if not return_layernorm_output:
                 if is_grad_enabled:
-                    ln_out = torch.empty_like(inputmat, dtype=torch.uint8)
+                    if not ub_split_ag:
+                        ln_out = torch.empty_like(inputmat, dtype=torch.uint8)
                     _, mu, rsigma = layernorm_fwd_fp8(
                         inputmat,
                         ln_weight,
@@ -894,7 +900,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             if is_grad_enabled:
                 if ub_split_ag:
-                    ln_out = torch.empty_like(inputmat)
+                    #print ('layernorm_fwd_noalloc')
+                    #ln_out = torch.empty_like(inputmat)
                     _, mu, rsigma = tex.layernorm_fwd_noalloc(
                         inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
                     )
@@ -909,7 +916,9 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_return = ln_out
 
         # Column Parallel Linear
-        if parallel_mode == "column" and sequence_parallel:
+        if ub_split_ag:
+            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+        elif parallel_mode == "column" and sequence_parallel:
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
             ln_out_total = ln_out
@@ -954,6 +963,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                ub=ub_obj_lnout if ctx.ub_split_ag else None
             )
         else:
             # Cast for native AMP
@@ -975,8 +986,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                ub=ub_obj_lnout if ub_split_ag else None
             )
 
+        if ub_split_ag:
+            free_ub(ub_obj_lnout, key_lnout)
         if is_grad_enabled:
             ctx.save_for_backward(
                 inputmat,
@@ -1036,6 +1051,15 @@ class _LayerNormLinear(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            if ctx.ub_bulk_dgrad:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_dgrad = False
+            if ctx.ub_bulk_dgrad:
+                dim_size = list(ln_out.size())
+                dim_size[0] = dim_size[0] * tp_world_size
+                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
             (
                 grad_output,
                 grad_output_c,
@@ -1045,24 +1069,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx, grad_outputs[0], ctx.parallel_mode == "row"
             )
             
-            # Column Parallel Linear
-            # Overlap input AG with dgrad
-            if ctx.ub_bulk_dgrad:
-                tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
-                    ctx.ub_bulk_dgrad = False
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
                     ctx.ub_bulk_wgrad = False
 
-            if ctx.ub_bulk_dgrad:
-                dim_size = list(ln_out.size())
-                if tp_world_size != 1:
-                    dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
-            elif ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            # Column Parallel Linear
+            # Overlap input AG with dgrad
+            if (not ctx.ub_bulk_dgrad) and ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -2533,6 +2547,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            if ctx.ub_bulk_dgrad:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_bulk_dgrad = False
+            if ctx.ub_bulk_dgrad:
+                dim_size = list(ln_out.size())
+                dim_size[0] = dim_size[0] * tp_world_size
+                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
             (
                 grad_output,
                 grad_output_c,
@@ -2542,23 +2565,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx, grad_outputs[0], True
             )
 
-            if ctx.ub_bulk_dgrad:
-                tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
-                    ctx.ub_bulk_dgrad = False
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.ub_bulk_dgrad:
-                dim_size = list(ln_out.size())
-                if tp_world_size != 1:
-                    dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
-            elif ctx.set_parallel_mode and ctx.sequence_parallel:
+            if (not ctx.ub_bulk_dgrad) and ctx.set_parallel_mode and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )

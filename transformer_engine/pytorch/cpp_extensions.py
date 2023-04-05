@@ -89,6 +89,8 @@ def fp8_gemm(
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             args = tuple(args + (0,))
+        if ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
+            fn = ub.split_overlap_ag
     _ = fn(*args)
 
     if return_output:

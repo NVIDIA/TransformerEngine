@@ -33,7 +33,8 @@ enum COMM_TYPE{
 
 enum UBOverlapAlgo{
   BULK_OVERLAP_AG = 0,
-  BULK_OVERLAP_RS = 1
+  BULK_OVERLAP_RS = 1,
+  SPLIT_PIPELINED_AG = 2
 };
 
 
@@ -232,44 +233,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             NVTE_ERROR("Not supported communication type.");
         }
 
-        // GEMM
-        #if 0
-        bool transa, transb;
-        if (fp8) {
-            transa = true;
-            transb = false;
-        } else {
-            std::tie(transa, transb) = get_gemm_input_layout(
-                static_cast<GEMM_INPUT_LAYOUT>(gemm_input_layout));
-        }
-
-        const int m = transa ? input_a.size(0) : input_a.size(1);
-        const int k = transa ? input_a.size(1) : input_a.size(0);
-        const int n = transb ? input_b.size(1) : input_b.size(0);
-        auto output_dtype = (gemm_input_layout == 2) ? torch::kFloat32 : torch::kBFloat16;
-        torch::Tensor output = torch::empty(
-            {n, m}, at::TensorOptions().dtype(output_dtype).device(torch::kCUDA));
-        torch::Tensor psum = (gemm_input_layout == 2) ?
-            torch::empty({n, m}, at::TensorOptions().dtype(output_dtype).device(torch::kCUDA)) : torch::empty({});
-
-        matmul_cuda(
-            input_a,
-            input_b,
-            output,
-            psum,
-            m,
-            n,
-            k,
-            transa,
-            transb,
-            (cudaStream_t) stream_main,
-            (void*) _lt_workspaces[0].data_ptr(),
-            _math_sms,
-            (gemm_input_layout == 0) ? true : false,
-            fp8,
-            (gemm_input_layout == 2) ? true : false
-        );
-        #endif
         if (A_scale_inverse.numel())
             A_scale_inverse = A_scale_inverse[A_fp8_tensor];
 
@@ -641,7 +604,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
         if (_comm_type != COMM_TYPE::AG && _comm_type != COMM_TYPE::RS)
             NVTE_ERROR("Invalid comm_type");
-        if (_comm_type == COMM_TYPE::RS) 
+        if (_comm_type == COMM_TYPE::RS)
             ubuf_wt_ptr += _ubuf.numel() / _tp_size * _local_rank * _ubuf.element_size();
         int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
         int output_c_dim1 = _ubuf.size(1);
@@ -741,30 +704,38 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     ** in each rank to be in the contiguous memory space after all ring exchange phases.
     */
     torch::Tensor split_overlap_ag(
-        torch::Tensor input_a,
-        int gemm_input_layout,
-        bool get_ag_output,
-        bool fp8)
+        at::Tensor A,
+        at::Tensor A_scale_inverse,
+        int64_t A_fp8_tensor,
+        transformer_engine::DType A_type,
+        bool transa,
+        at::Tensor B,
+        at::Tensor B_scale_inverse,
+        int64_t B_fp8_tensor,
+        transformer_engine::DType B_type,
+        bool transb,
+        at::Tensor D,
+        at::Tensor D_scale,
+        transformer_engine::DType D_type,
+        at::Tensor D_amax,
+        at::Tensor bias,
+        transformer_engine::DType bias_type,
+        at::Tensor pre_gelu_out,
+        bool grad,
+        at::Tensor workspace,
+        size_t workspaceSize,
+        bool accumulate,
+        bool use_split_accumulator)
     {
-        bool transa, transb;
-        if (fp8) {
-            transa = true;
-            transb = false;
-        } else {
-            std::tie(transa, transb) = get_gemm_input_layout(
-                static_cast<GEMM_INPUT_LAYOUT>(gemm_input_layout));
-        }
-
         // Get GEMM dimensions between TN and NN input layouts
-        const int m = (transa) ? input_a.size(0) : input_a.size(1);
-        const int k = (transa) ? input_a.size(1) : input_a.size(0);
+        const int m = (transa) ? A.size(0) : A.size(1);
+        const int k = (transa) ? A.size(1) : A.size(0);
         const int n_chunk = _ubufs[0].size(0);
         // Get communication and GEMM output chunk sizes
         const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
         int output_chunk_bytes = (n_chunk * m) * BFLOAT16_BYTES;
         // Create GEMM output buffer and a pointer to its current chunk
-        torch::Tensor output = torch::empty({n_chunk * _tp_size, m}, at::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
-        char* output_ptr = reinterpret_cast<char*>(output.data_ptr());
+        char* output_ptr = reinterpret_cast<char*>(D.data_ptr());
         int cur_ouput_chunk_id = _local_rank;
 
         // Catch up the default torch stream
@@ -773,6 +744,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[0], _start_compute, 0));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_compute, 0));
 
+        assert (pre_gelu_out.numel() == 0);
         torch::Tensor dummy = torch::empty({});
         for (int i = 0; i < _tp_size; i++) {
             // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
@@ -787,25 +759,36 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             torch::Tensor output_chunk = torch::from_blob(
                 output_ptr + (cur_ouput_chunk_id * output_chunk_bytes),
                 {n_chunk, m},
-                output.options()
+                D.options()
             );
-            matmul_cuda(
-                input_a,
-                _ubufs[send_chunk_id],
-                output_chunk,
-                dummy,
-                m,
-                n_chunk,
-                k,
+            if (A_scale_inverse.numel())
+                A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+            if (B_scale_inverse.numel())
+                B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
+            at::cuda::setCurrentCUDAStream(_stream_compute[i]);
+            te_gemm(A,
+                A_scale_inverse,
+                A_type,
                 transa,
+                _ubufs[send_chunk_id],
+                B_scale_inverse,
+                B_type,
                 transb,
-                _stream_compute[i],
-                (void*) _lt_workspaces[i].data_ptr(),
-                _math_sms,
-                (gemm_input_layout == 0) ? true : false,
-                fp8,
-                false // no grad accum
-            );
+                output_chunk,
+                D_scale,
+                D_type,
+                D_amax,
+                bias,
+                bias_type,
+                pre_gelu_out,
+                grad,
+                _lt_workspaces[i],
+                _lt_workspaces[i].numel(),
+                accumulate,
+                use_split_accumulator,
+                _math_sms);
 
             if (i < _tp_size - 1) {
                 // P2P communication
@@ -816,11 +799,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             }
             cur_ouput_chunk_id = (_tp_size + cur_ouput_chunk_id - 1) % _tp_size;
         }
+        at::cuda::setCurrentCUDAStream(stream_main);
 
         CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[_tp_size-1]));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_compute, 0));
 
-        return output;
+        return D;
     } // split_overlap_ag
 
 
@@ -1001,6 +985,22 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                 (cudaStream_t) stream_main)
             );
         }
+    }
+    torch::Tensor get_ubuf_output(int comm_type)
+    {
+        char* ubuf_wt_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
+        COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
+        if (_comm_type != COMM_TYPE::AG && _comm_type != COMM_TYPE::RS)
+            NVTE_ERROR("Invalid comm_type");
+        if (_comm_type == COMM_TYPE::RS)
+            ubuf_wt_ptr += _ubuf.numel() / _tp_size * _local_rank * _ubuf.element_size();
+        int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
+        int output_c_dim1 = _ubuf.size(1);
+        return torch::from_blob(
+            ubuf_wt_ptr,
+            {output_c_dim0, output_c_dim1},
+            _ubuf.options()
+        );
     }
 
 }; // UbufP2PCommOverlap
