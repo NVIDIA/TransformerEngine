@@ -162,32 +162,32 @@ Transformer Engine comes preinstalled in the pyTorch container on
 From source
 ^^^^^^^^^^^
 
-First, install the prequisites.
+For JAX and Tensorflow, pybind11 must be installed:
 
 .. code-block:: bash
 
-  apt-get install ninja-build pybind11-dev
+  pip install pybind11
 
-Clone the repository and inside it type:
-
-.. code-block:: bash
-
-  NVTE_FRAMEWORK=all pip install .     # Building with all frameworks.
-  NVTE_FRAMEWORK=pytorch pip install . # Building with pyTorch only.
-  NVTE_FRAMEWORK=jax pip install .     # Building with JAX only.
-
-You can also specify which framework bindings to build. The default is pytorch only.
+Then, you can install this optional dependency:
 
 .. code-block:: bash
 
-  # Build with TensorFlow bindings
-  NVTE_FRAMEWORK=tensorflow pip install .
+  pip install ninja
 
-  # Build with Jax bindings
-  NVTE_FRAMEWORK=jax pip install .
+Install TE (optionally specifying the framework):
 
-  # Build with all bindings (Pytorch, TF, Jax)
-  NVTE_FRAMEWORK=all pip install .
+.. code-block:: bash
+
+  git clone https://github.com/NVIDIA/TransformerEngine.git
+  cd TransformerEngine
+
+  # Execute one of the following command
+  NVTE_FRAMEWORK=all pip install .        # Build TE for all supported frameworks.
+  NVTE_FRAMEWORK=pytorch pip install .    # Build TE for PyTorch only.
+  NVTE_FRAMEWORK=jax pip install .        # Build TE for JAX only.
+  NVTE_FRAMEWORK=tensorflow pip install . # Build TE for TensorFlow only.
+
+If the framework is not explicitly specified, TE will be built for PyTorch only.
 
 User Guide
 ----------
