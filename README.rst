@@ -174,7 +174,7 @@ Then, you can install this optional dependency:
 
   pip install ninja
 
-Clone the repository and inside it type one of those commands:
+Install TE (optionally specifying the framework):
 
 .. code-block:: bash
 
