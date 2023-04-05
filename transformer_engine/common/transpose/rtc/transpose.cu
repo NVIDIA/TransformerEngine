@@ -8,13 +8,14 @@
 using uint32_t = size_t;
 using uint64_t = size_t;
 
-// Parameters
-/// TODO Make configurable
-using Type = float;
-constexpr int load_size = 8;
-constexpr int store_size = 8;
-constexpr int warps_per_tile = 4;
+/// TODO Get from utils.cuh
 constexpr int THREADS_PER_WARP = 32;
+
+// Parameters
+using Type = __TYPE__;
+constexpr int load_size = __LOAD_SIZE__;
+constexpr int store_size = __STORE_SIZE__;
+constexpr int warps_per_tile = 4;
 
 namespace {
 
@@ -92,7 +93,7 @@ transpose_optimized_kernel(const Type * const input,
   // load/store
   constexpr int num_iterations = THREADS_PER_WARP / warps_per_tile;
 
-  // Load input and store to registers
+  // Load input to registers and transpose
   // Note: Each thread loads num_iterations subtiles and transposes in
   // registers.
   OVec local_output[nvec_in][num_iterations];
@@ -113,7 +114,7 @@ transpose_optimized_kernel(const Type * const input,
     }
   }
 
-  // Copy transposed output from registers to global memory
+  // Copy from registers to shared memory to global memory
   __shared__ OVec shared_output[THREADS_PER_WARP][THREADS_PER_WARP+1];
   #pragma unroll
   for (int j2 = 0; j2 < nvec_in; ++j2) {

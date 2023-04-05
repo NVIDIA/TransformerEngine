@@ -7,37 +7,47 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 
+#include <regex>
 #include <string>
 #include <type_traits>
 
 namespace transformer_engine {
 
-namespace detail {
-
-// Helper function that converts to a type compatible with
-// std::string::operator+=
-
-template <typename T,
-          typename = typename std::enable_if<!std::is_arithmetic<T>::value>::type>
-inline const T& to_string_like(const T& val) {
-  return val;
-}
-
+/*! \brief Convert to C-style or C++-style string */
 template <typename T,
           typename = typename std::enable_if<std::is_arithmetic<T>::value>::type>
 inline std::string to_string_like(const T &val) {
   return std::to_string(val);
 }
 
-}  // namespace detail
+inline const std::string& to_string_like(const std::string& val) noexcept {
+  return val;
+}
+
+constexpr const char *to_string_like(const char *val) noexcept{
+  return val;
+}
 
 /*! \brief Convert arguments to string and concatenate */
 template <typename... Ts>
 inline std::string concat_strings(const Ts &... args) {
   std::string str;
   str.reserve(1024);
-  (..., (str += detail::to_string_like(args)));
+  (..., (str += to_string_like(args)));
   return str;
+}
+
+/*! \brief Substitute regex occurances in string
+ *
+ * This is a convenience wrapper around std::regex_replace.
+ */
+template <typename T>
+std::string regex_replace(const std::string &str,
+                          const std::string &pattern,
+                          const T &replacement) {
+  return std::regex_replace(str,
+                            std::regex(pattern),
+                            to_string_like(replacement));
 }
 
 }  // namespace transformer_engine

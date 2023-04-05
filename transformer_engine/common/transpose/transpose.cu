@@ -147,16 +147,24 @@ void transpose(const Tensor &input,
     const bool full_tile = row_length % tile_size == 0 && num_rows % tile_size == 0;
 
     if (full_tile && rtc::is_enabled() && input.data.dtype == DType::kFloat32) { /// TODO Support arbitrary types
+      constexpr const char *type_name = TypeInfo<Type>::name;
+      int load_size = 8;
+      int store_size = 8;
+
       // Tuned runtime-compiled kernel
       auto& rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = concat_strings("transpose"
-                                                      ",type=",int(input.data.dtype),
-                                                      ",load_size=",8,
-                                                      ",store_size",8);
+                                                      ",type=",type_name,
+                                                      ",load_size=",load_size,
+                                                      ",store_size",store_size);
       if (!rtc_manager.is_compiled(kernel_label)) {
+        std::string code = rtc_code_transpose;
+        code = regex_replace(code, "__TYPE__", type_name);
+        code = regex_replace(code, "__LOAD_SIZE__", load_size);
+        code = regex_replace(code, "__STORE_SIZE__", store_size);
         rtc_manager.compile(kernel_label,
                             "transpose_optimized_kernel",
-                            rtc_code_transpose,
+                            code,
                             "rtc/transpose.cu");
       }
       const int num_blocks = (row_length / tile_size) * (num_rows / tile_size);

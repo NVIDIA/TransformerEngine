@@ -24,7 +24,11 @@ namespace transformer_engine {
 
 namespace rtc {
 
-/*! \brief Whether NVRTC support is enabled */
+/*! \brief Whether NVRTC support is enabled
+ *
+ * NVRTC support can be disabled by setting NVTE_DISABLE_NVRTC=1 in
+ * the environment.
+ */
 bool is_enabled();
 
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
