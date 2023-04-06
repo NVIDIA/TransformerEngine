@@ -2,7 +2,7 @@ add_library(CUDNN::cudnn_all INTERFACE IMPORTED)
 
 find_path(
     CUDNN_INCLUDE_DIR cudnn.h
-    HINTS $ENV{CUDNN_PATH} ${CUDNN_PATH} ${CUDAToolkit_INCLUDE_DIRS}
+    HINTS $ENV{CUDNN_PATH} ${CUDNN_PATH} "/usr" ${CUDAToolkit_INCLUDE_DIRS}
     PATH_SUFFIXES include
 )
 
@@ -11,8 +11,8 @@ function(find_cudnn_library NAME)
 
     find_library(
         ${UPPERCASE_NAME}_LIBRARY ${NAME}
-        HINTS $ENV{CUDNN_PATH} ${CUDNN_PATH} ${CUDAToolkit_LIBRARY_DIR}
-        PATH_SUFFIXES lib64 lib/x64 lib
+	HINTS $ENV{CUDNN_PATH} ${CUDNN_PATH} "/usr" ${CUDAToolkit_LIBRARY_DIR}
+        PATH_SUFFIXES lib64 lib/x64 lib lib/x86_64-linux-gnu
     )
     
     if(${UPPERCASE_NAME}_LIBRARY)
