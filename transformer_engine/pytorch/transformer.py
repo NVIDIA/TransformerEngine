@@ -1243,9 +1243,12 @@ class TransformerLayer(torch.nn.Module):
                         attention_output, attention_bias, residual, self.hidden_dropout
                     )
             else:
-                bda_output = bias_dropout_add_func(
-                    attention_output, residual, self.hidden_dropout
+                out = torch.nn.functional.dropout(
+                    attention_output,
+                    p=self.hidden_dropout,
+                    training=self.training,
                 )
+                bda_output = residual + out
         # MLP.
         mlp_outputs = self.layernorm_mlp(
             bda_output, is_first_microbatch=is_first_microbatch
