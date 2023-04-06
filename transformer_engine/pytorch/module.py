@@ -234,24 +234,29 @@ def get_ub_p2p(shape: list,
         num_comm_sm: int = 2,
         set_sm_margin: int = 0):
     global ub_mgr
-    if ub_mgr is None:
-        ub_mgr = UserBufferManager(torch.distributed.get_rank())
-    key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
-    #print (f'get_ub_p2p {key}')
-    if key not in ub_mgr.free_list:
-        ub_mgr.free_list[key] = []
-    if not ub_mgr.free_list[key]:
-        ubuf = torch.empty(shape, dtype=dtype, device=device)
-        ub_obj = tex.UbufP2PCommOverlap(
-            ubuf,
-            ub_mgr.rank,          # rank id
-            pp_size,            # pp size
-            tp_size,            # tp size
-            num_comm_sm,        # num_comm_sm
-            set_sm_margin,      # set sm margin
-        )
-    else:
+    if ub_mgr is not None and ub_mgr.pre_initialized:
+        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
+        assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
         ub_obj = ub_mgr.free_list[key].pop()
+    else:
+        if ub_mgr is None:
+            ub_mgr = UserBufferManager(torch.distributed.get_rank())
+        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
+        #print (f'get_ub_p2p {key}')
+        if key not in ub_mgr.free_list:
+            ub_mgr.free_list[key] = []
+        if not ub_mgr.free_list[key]:
+            ubuf = torch.empty(shape, dtype=dtype, device=device)
+            ub_obj = tex.UbufP2PCommOverlap(
+                ubuf,
+                ub_mgr.rank,          # rank id
+                pp_size,            # pp size
+                tp_size,            # tp size
+                num_comm_sm,        # num_comm_sm
+                set_sm_margin,      # set sm margin
+            )
+        else:
+            ub_obj = ub_mgr.free_list[key].pop()
     return ub_obj, key
 
 #TODO: thread safety ???
@@ -2276,6 +2281,15 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
+        if ub_split_ag:
+            tp_world_size = get_distributed_world_size(tp_group)
+            if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
+                ub_split_ag = False
+        if ub_split_ag:
+            dim_size = list(inputmat.size())
+            dim_size[0] = dim_size[0] * tp_world_size
+            ub_obj_lnout, key_lnout = get_ub_p2p(dim_size, torch.uint8 if fp8 else inputmat.dtype, inputmat.device)
+            ln_out = ub_obj_lnout.get_ubuf_output(0)
         if ub_split_rs:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
@@ -2288,7 +2302,9 @@ class _LayerNormMLP(torch.autograd.Function):
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if not return_layernorm_output:
                 if is_grad_enabled:
-                    ln_out, mu, rsigma = layernorm_fwd_fp8(
+                    if not ub_split_ag:
+                        ln_out = torch.empty_like(inputmat, dtype=torch.uint8)
+                    _, mu, rsigma = layernorm_fwd_fp8(
                         inputmat,
                         ln_weight,
                         ln_bias,
@@ -2298,6 +2314,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fp8_dtype_forward,
                         fwd_ln_sm_margin,
                         zero_centered_gamma,
+                        ln_out = ln_out,
                     )
                 else:
                     ln_out = layernorm_fwd_fp8_inf(
@@ -2322,9 +2339,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
         else:
             if is_grad_enabled:
-                ln_out, mu, rsigma = tex.layernorm_fwd(
-                    inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
-                )
+                if ub_split_ag:
+                    _, mu, rsigma = tex.layernorm_fwd_noalloc(
+                        inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
+                    )
+                else:
+                    ln_out, mu, rsigma = tex.layernorm_fwd(
+                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
+                    )
             else:
                 ln_out, mu, rsigma = layernorm_fwd_inf(
                         inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
@@ -2332,7 +2354,10 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ln_out_return = ln_out
         # Column Parallel Linear
-        if set_parallel_mode and sequence_parallel:
+        if ub_split_ag:
+            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out = torch.empty_like(ln_out)
+        elif set_parallel_mode and sequence_parallel:
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
             ln_out_total = ln_out
@@ -2395,6 +2420,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc1_bias,
                 use_bias=True,
                 use_split_accumulator=_2X_ACC_FPROP,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                ub=ub_obj_lnout if ub_split_ag else None,
+                extra_output_tensor=ln_out if ub_split_ag else None,
             )
 
             gelu_out = fp8_gelu(
@@ -2448,6 +2476,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc1_bias,
                 use_bias=not bias_gelu_nvfusion,
                 gelu=not bias_gelu_nvfusion,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                ub=ub_obj_lnout if ub_split_ag else None,
+                extra_output_tensor=ln_out if ub_split_ag else None,
             )
 
             if bias_gelu_nvfusion:
@@ -2477,6 +2508,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc2_bias,
                 use_bias=use_bias,
             )
+        if ub_split_ag:
+            free_ub(ub_obj_lnout, key_lnout)
         if is_grad_enabled:
             ctx.save_for_backward(
                 inputmat,
