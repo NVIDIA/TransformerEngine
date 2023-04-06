@@ -84,7 +84,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
-ub_mgr = None
+_ub_communicators = None
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -130,141 +130,110 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
             delete_key_from_amax_buffer(forward=False)
 
 
-class UserBufferManager:
-    def __init__(self, rank: int) -> None:
-        # Dictionary of lists where key={shape}_{dtype}_{num_comm_sm}
-        self.free_list = {}
-        self.rank = rank
-        self.pre_initialized = False
+def initialize_ub(
+    shape: list,
+    tp_size: int,
+    use_fp8: bool = False,
+    ub_cfgs: Optional[dict] = None
+) -> None:
+    global _ub_communicators
+    assert _ub_communicators is None, "UB manager is already initialized."
+    _ub_communicators = {}
+    rank = torch.distributed.get_rank()
 
-def pre_init_ub_communicators(shape: list,
+    # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
+    fp8_buf = [
+        "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
+    ]
+    # Default overlap methods for layers
+    methods = {
+        "ring_exchange":["proj_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
+        "pipeline":["proj_fprop", "fc2_fprop"],
+        "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+    }
+
+    def get_method(name):
+        for method, names in methods.items():
+            if name in names:
+                return method
+
+    def add_ub(
+        name: str,
+        method: str,
+        shape: list,
         dtype: torch.dtype,
-        #device: torch.device,
-        pp_size: int = 1,
-        tp_size: int = 8,
-        num_comm_sm: int = 16,
-        comm_cga_size: int = 2,
-        num_splits: int = 1,
-        use_rr_kernel: int = 0,
-        set_sm_margin: int = 0):
-    global ub_mgr
-    if ub_mgr is not None:
-        pass
-    else:
-        ub_mgr = UserBufferManager(torch.distributed.get_rank())
-        # TODO: Register all userbuffers needed during training
-        # TODO: Set env vars for individual ub configs
-        ubufs = {}
-        # qkv,fc1 / dgrad / rs
-        _shape = shape
-        _dtype = torch.bfloat16
-        key = f'{_shape}_{_dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-        ubufs[key] = torch.empty(_shape, dtype=_dtype, device='cuda')
-        ub_mgr.free_list[key] = []
-        #print (f'get_ub {key}')
-
-        # qkv,fc1 / wgrad / ag
-        _shape = shape
-        _dtype = dtype
-        key = f'{_shape}_{_dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-        ubufs[key] = torch.empty(_shape, dtype=_dtype, device='cuda')
-        ub_mgr.free_list[key] = []
-        #print (f'get_ub {key}')
-
-        for key in ubufs:
+        tp_size: int,
+        num_sm: int = 16,
+        cga_size: int = 2,
+        set_sm_margin: int = 0,
+        num_splits: int = 4,
+        aggregate: int = 0,
+    ):
+        if method == 'ring_exchange':
             ub_obj = tex.UbufCommOverlap(
-                ubufs[key],
-                ub_mgr.rank,          # rank id
-                pp_size,            # pp size
-                tp_size,            # tp size
-                num_comm_sm,        # num_comm_sm
-                comm_cga_size,      # comm_cga_size
-                num_splits,         # num_splits
-                use_rr_kernel,      # number of buffers
-                set_sm_margin,      # set sm margin
-            )
-            ub_mgr.free_list[key].append(ub_obj)
-        ub_mgr.pre_initialized = True
-
-#TODO: thread safety ???
-def get_ub(shape: list,
-        dtype: torch.dtype,
-        device: torch.device,
-        pp_size: int = 1,
-        tp_size: int = 8,
-        num_comm_sm: int = 16,
-        comm_cga_size: int = 2,
-        num_splits: int = 1,
-        use_rr_kernel: int = 0,
-        set_sm_margin: int = 0):
-    global ub_mgr
-    if ub_mgr is not None and ub_mgr.pre_initialized:
-        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-        assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
-        ub_obj = ub_mgr.free_list[key].pop()
-    else:
-        if ub_mgr is None:
-            ub_mgr = UserBufferManager(torch.distributed.get_rank())
-        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-        #print (f'get_ub {key}')
-        if key not in ub_mgr.free_list:
-            ub_mgr.free_list[key] = []
-        if not ub_mgr.free_list[key]:
-            ubuf = torch.empty(shape, dtype=dtype, device=device)
+                    torch.empty(shape, dtype=dtype, device='cuda'),
+                    rank,           # rank id
+                    1,              # pp size
+                    tp_size,        # tp size
+                    1,              # num_sm
+                    1,              # cga_size
+                    num_splits,     # num_splits
+                    0,              # use_rr_kernel
+                    set_sm_margin,  # set sm margin
+                )
+        else:
             ub_obj = tex.UbufCommOverlap(
-                ubuf,
-                ub_mgr.rank,          # rank id
-                pp_size,            # pp size
-                tp_size,            # tp size
-                num_comm_sm,        # num_comm_sm
-                comm_cga_size,      # comm_cga_size
-                num_splits,         # num_splits
-                use_rr_kernel,      # number of buffers
-                set_sm_margin,      # set sm margin
+                    torch.empty(shape, dtype=dtype, device='cuda'),
+                    rank,           # rank id
+                    1,              # pp size
+                    tp_size,        # tp size
+                    num_sm,         # num_sm
+                    cga_size,       # cga_size
+                    num_splits,     # num_splits
+                    0,              # use_rr_kernel
+                    set_sm_margin,  # set sm margin
+                )
+        _ub_communicators[name] = ub_obj
+
+    for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
+        if ub_cfgs is not None and name in ub_cfgs:
+            try:
+                ub_cfg = ub_cfgs[name]
+                method = ub_cfg["method"]
+                dtype = ub_cfg["dtype"]
+                num_sm = ub_cfg["num_sm"]
+                cga_size = ub_cfg["cga_size"]
+                set_sm_margin = ub_cfg["set_sm_margin"]
+                num_splits = ub_cfg["num_splits"]
+                aggregate = ub_cfg["aggregate"]
+            except ValueError:
+                print(
+                    "Incomplete UB configurations. The config should include "
+                    "`method`, `dtype`, `num_sm`, `num_splits`, "
+                    "`cga_size`, `num_splits`, `set_sm_margin`, and `aggregate`"
+                )
+            assert dtype in ['bf16', 'fp8'], "Dtype should be `bf16` or `fp8`."
+            add_ub(
+                name,
+                method,
+                shape,
+                torch.uint8 if dtype == 'fp8' else torch.bfloat16,
+                tp_size,
+                num_sm,
+                cga_size,
+                set_sm_margin,
+                num_splits,
+                aggregate
             )
         else:
-            ub_obj = ub_mgr.free_list[key].pop()
-    return ub_obj, key
+            dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
+            add_ub(name, get_method(name), shape, dtype, tp_size)
 
-def get_ub_p2p(shape: list,
-        dtype: torch.dtype,
-        device: torch.device,
-        pp_size: int = 1,
-        tp_size: int = 8,
-        num_comm_sm: int = 2,
-        set_sm_margin: int = 0):
-    global ub_mgr
-    if ub_mgr is not None and ub_mgr.pre_initialized:
-        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
-        assert key in ub_mgr.free_list, f"UB for {key} is not pre-registered!"
-        ub_obj = ub_mgr.free_list[key].pop()
-    else:
-        if ub_mgr is None:
-            ub_mgr = UserBufferManager(torch.distributed.get_rank())
-        key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
-        #print (f'get_ub_p2p {key}')
-        if key not in ub_mgr.free_list:
-            ub_mgr.free_list[key] = []
-        if not ub_mgr.free_list[key]:
-            ubuf = torch.empty(shape, dtype=dtype, device=device)
-            ub_obj = tex.UbufP2PCommOverlap(
-                ubuf,
-                ub_mgr.rank,          # rank id
-                pp_size,            # pp size
-                tp_size,            # tp size
-                num_comm_sm,        # num_comm_sm
-                set_sm_margin,      # set sm margin
-            )
-        else:
-            ub_obj = ub_mgr.free_list[key].pop()
-    return ub_obj, key
-
-#TODO: thread safety ???
-def free_ub(ub_obj: tex.UbufCommOverlap, key: str):
-    global ub_mgr
-    assert ub_mgr is not None, 'UserBufferMgr uninitialized'
-    assert key in ub_mgr.free_list, 'Invalid key for free list'
-    ub_mgr.free_list[key].append(ub_obj)
+def get_ub(name: str):
+    global _ub_communicators
+    assert _ub_communicators is not None, "UB manager is not initialized."
+    assert name in _ub_communicators, f"UB for {name} is not registered."
+    return _ub_communicators[name]
 
 
 class _NoopCat(torch.autograd.Function):
@@ -1095,7 +1064,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if (not ctx.ub_bulk_dgrad) and ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            if ctx.ub_bulk_dgrad:
+                dim_size = list(ln_out.size())
+                if tp_world_size != 1:
+                    dim_size[0] = dim_size[0] * tp_world_size
+                ub_obj_lnout = get_ub("qkv_dgrad")
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+            elif ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -1113,7 +1088,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_size = list(grad_output.size())
             dgrad_size[1] = weight.size(1)
             if ctx.ub_bulk_wgrad: # allocate dgrad output
-                ub_obj_dgrad, key_dgrad = get_ub(dgrad_size, ctx.activation_dtype, weight.device)
+                ub_obj_dgrad = get_ub("qkv_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output 
             else:
                 dgrad = torch.empty (dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
@@ -1227,8 +1202,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
-            if ctx.ub_bulk_dgrad:
-                free_ub(ub_obj_lnout, key_lnout)
 
 
             if ctx.ub_bulk_wgrad:
@@ -1248,8 +1221,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 d_ln_out, inputmat, mu, rsigma, ln_weight,
                 ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
-            if ctx.ub_bulk_wgrad:
-                free_ub(ub_obj_dgrad, key_dgrad)
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -2626,7 +2597,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if (not ctx.ub_bulk_dgrad) and ctx.set_parallel_mode and ctx.sequence_parallel:
+            if ctx.ub_bulk_dgrad:
+                dim_size = list(ln_out.size())
+                if tp_world_size != 1:
+                    dim_size[0] = dim_size[0] * tp_world_size
+                ub_obj_lnout = get_ub("fc1_dgrad")
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+            elif ctx.set_parallel_mode and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -2734,7 +2711,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_dgrad_size = list(dgelu.size())
                 fc1_dgrad_size[1] = fc1_weight.size(1)
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
-                    ub_obj_dgrad, key_dgrad = get_ub(fc1_dgrad_size, ctx.activation_dtype, fc1_weight.device)
+                    ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
                 else:
                     fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
@@ -2792,7 +2769,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_dgrad_size = list(dgelu.size())
                 fc1_dgrad_size[1] = fc1_weight.size(1)
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
-                    ub_obj_dgrad, key_dgrad = get_ub(fc1_dgrad_size, ctx.activation_dtype, fc1_weight.device)
+                    ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
                 else:
                     fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
@@ -2893,8 +2870,6 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_wgrad, _, _ = fc1_wgrad_outputs
                     else:
                         fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
-            if ctx.ub_bulk_dgrad:
-                free_ub(ub_obj_lnout, key_lnout)
 
             # Column Parallel Linear
             if ctx.ub_bulk_wgrad:
@@ -2913,8 +2888,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 d_ln_out, inputmat, mu, rsigma, ln_weight,
                 ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
-            if ctx.ub_bulk_wgrad:
-                free_ub(ub_obj_dgrad, key_dgrad)
 
             if not ctx.use_bias:
                 fc2_bias_grad = None

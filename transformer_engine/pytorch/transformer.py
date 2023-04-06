@@ -980,9 +980,7 @@ class TransformerLayer(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
-        ub_bulk_wgrad: bool = False,
-        ub_bulk_dgrad: bool = False,
-        ub_split_ag: bool = False,
+        ub_tp_comm_overlap: bool = False,
     ) -> None:
         super().__init__()
 
@@ -992,6 +990,8 @@ class TransformerLayer(torch.nn.Module):
             category=DeprecationWarning,
         )
 
+        ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
+        ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
