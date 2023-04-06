@@ -1762,6 +1762,7 @@ class _Linear(torch.autograd.Function):
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.requires_wgrad = weight.requires_grad
+            ctx.ub_split_ag = False
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
