@@ -13,11 +13,12 @@
 #include "../util/string.h"
 #include "../util/rtc.h"
 
-#include "rtc_code_transpose.h"
-
 namespace transformer_engine {
 
 namespace {
+
+// String with RTC kernel implementation
+#include "code_string_transpose_rtc_transpose_cu.h"
 
 // STUFF TO TUNE
 constexpr int warps_per_tile = 4;
@@ -146,7 +147,7 @@ void transpose(const Tensor &input,
     constexpr int tile_size = vector_size / type_size * THREADS_PER_WARP;
     const bool full_tile = row_length % tile_size == 0 && num_rows % tile_size == 0;
 
-    if (full_tile && rtc::is_enabled() && input.data.dtype == DType::kFloat32) { /// TODO Support arbitrary types
+    if (full_tile && rtc::is_enabled()) {
       constexpr const char *type_name = TypeInfo<Type>::name;
       int load_size = 8;
       int store_size = 8;
@@ -158,25 +159,28 @@ void transpose(const Tensor &input,
                                                       ",load_size=",load_size,
                                                       ",store_size",store_size);
       if (!rtc_manager.is_compiled(kernel_label)) {
-        std::string code = rtc_code_transpose;
+        std::string code = code_string_transpose_rtc_transpose_cu;
         code = regex_replace(code, "__TYPE__", type_name);
         code = regex_replace(code, "__LOAD_SIZE__", load_size);
         code = regex_replace(code, "__STORE_SIZE__", store_size);
+        code = regex_replace(code, "__WARPS_PER_TILE__", warps_per_tile);
+        code = regex_replace(code, "__BLOCK_SIZE__", block_size);
         rtc_manager.compile(kernel_label,
                             "transpose_optimized_kernel",
                             code,
-                            "rtc/transpose.cu");
+                            "transformer_engine/common/transpose/rtc/transpose.cu");
       }
       const int num_blocks = (row_length / tile_size) * (num_rows / tile_size);
       rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
-                         input.data.dptr, output.data.dptr,
+                         static_cast<const Type *>(input.data.dptr),
+                         static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {
       // General kernel
       const int num_blocks = DIVUP(row_length, tile_size) * DIVUP(num_rows, tile_size);
       transpose_general_kernel<Type><<<num_blocks,block_size,0,stream>>>(
-        reinterpret_cast<const Type *>(input.data.dptr),
-        reinterpret_cast<Type *>(output.data.dptr),
+        static_cast<const Type *>(input.data.dptr),
+        static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
     }
   );  // NOLINT(*)

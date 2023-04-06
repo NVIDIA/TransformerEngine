@@ -4,57 +4,20 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/// TODO Get from cstdint header
-using uint32_t = size_t;
-using uint64_t = size_t;
+#include "utils.cuh"
 
-/// TODO Get from utils.cuh
-constexpr int THREADS_PER_WARP = 32;
+using namespace transformer_engine;
+
+namespace {
 
 // Parameters
 using Type = __TYPE__;
 constexpr int load_size = __LOAD_SIZE__;
 constexpr int store_size = __STORE_SIZE__;
-constexpr int warps_per_tile = 4;
+constexpr int warps_per_tile = __WARPS_PER_TILE__;
+constexpr int block_size = __BLOCK_SIZE__;
 
-namespace {
-
-constexpr int block_size = THREADS_PER_WARP * warps_per_tile;
-
-/// TODO Use existing impl in utils.cuh
-template<int BYTES>
-struct BytesToType {};
-template<>
-struct BytesToType<8> {
-    using Type = uint64_t;
-    static_assert(sizeof(Type) == 8, "Unexpected type size");
-};
-template<typename Elt_type, uint32_t NUM_ELT>
-struct Vec {
-    enum { BYTES = NUM_ELT * sizeof(Elt_type) };
-
-    using Vec_type = typename BytesToType<BYTES>::Type;
-    using type = Elt_type;
-
-    using Alias_type = union {
-        Vec_type vec;
-        Elt_type elt[NUM_ELT];
-    };
-
-    Alias_type data;
-
-    // Pointer is cast to vector type
-    inline __device__ void load_from(const void *base_ptr, size_t idx = 0) {
-        this->data.vec = static_cast<const Vec_type *>(base_ptr)[idx];
-    }
-
-    // Pointer is cast to vector type
-    inline __device__ void store_to(void *base_ptr, size_t idx = 0) const {
-        static_cast<Vec_type *>(base_ptr)[idx] = this->data.vec;
-    }
-};
-
-}  // namespace
+}
 
 __global__ void
 __launch_bounds__(block_size)

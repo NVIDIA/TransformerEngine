@@ -26,6 +26,9 @@ int current_device();
  */
 int sm_arch(int device_id);
 
+/* \brief Path to CUDA headers */
+const std::string &include_directory();
+
 }  // namespace cuda
 
 }  // namespace transformer_engine

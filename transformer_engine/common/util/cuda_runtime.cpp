@@ -36,6 +36,16 @@ int sm_arch(int device_id) {
   return cache[device_id];
 }
 
+const std::string &include_directory() {
+  static std::string path;
+  if (path.empty()) {
+    /// TODO Make configurable
+    /// TODO Make abspath
+    path = "/usr/local/cuda/include";
+  }
+  return path;
+}
+
 }  // namespace cuda
 
 }  // namespace transformer_engine

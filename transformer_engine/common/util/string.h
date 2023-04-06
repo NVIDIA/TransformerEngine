@@ -32,7 +32,7 @@ constexpr const char *to_string_like(const char *val) noexcept{
 template <typename... Ts>
 inline std::string concat_strings(const Ts &... args) {
   std::string str;
-  str.reserve(1024);
+  str.reserve(1024);  // Assume strings are <1 KB
   (..., (str += to_string_like(args)));
   return str;
 }

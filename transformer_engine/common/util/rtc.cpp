@@ -20,6 +20,9 @@ namespace rtc {
 
 namespace {
 
+// Strings with headers for RTC kernels
+#include "code_string_utils_cuh.h"
+
 /*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
@@ -55,8 +58,9 @@ bool is_enabled() {
   static bool is_enabled_ = true;
   static bool need_to_check_env = true;
   if (need_to_check_env) {
+    const auto& include_path = cuda::include_directory();
     const char *env = std::getenv("NVTE_DISABLE_NVRTC");
-    is_enabled_ = env == nullptr || std::string(env) == "0";
+    is_enabled_ = !include_path.empty() && (env == nullptr || std::string(env) == "0");
     need_to_check_env = false;
   }
   return is_enabled_;
@@ -153,12 +157,13 @@ void KernelManager::compile(const std::string &kernel_label,
 #if NDEBUG == 0
     "-G",
 #endif
-    "--std=c++14"};
+    "--std=c++17"};
   if (compile_ptx) {
     opts.push_back(concat_strings("--gpu-architecture=compute_",compile_sm_arch));
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_",compile_sm_arch));
   }
+  opts.push_back(concat_strings("-I",cuda::include_directory()));
   std::vector<const char*> opts_ptrs;
   for (const auto& opt: opts) {
     opts_ptrs.push_back(opt.c_str());
@@ -166,12 +171,15 @@ void KernelManager::compile(const std::string &kernel_label,
 
   // Compile source
   nvrtcProgram program;
+  constexpr int num_headers = 1;
+  constexpr const char* headers[num_headers] = {code_string_utils_cuh};
+  constexpr const char* include_names[num_headers] = {"utils.cuh"};
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
                                       code.c_str(),
                                       filename.c_str(),
-                                      0,            // num headers
-                                      nullptr,      // headers
-                                      nullptr));    // include names
+                                      num_headers,
+                                      headers,
+                                      include_names));
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
   const nvrtcResult compile_result = nvrtcCompileProgram(program,
                                                          opts_ptrs.size(),

@@ -2,15 +2,20 @@
 #
 # See LICENSE for license information.
 
-# Convert files to string headers
+# Function to convert file to C++ header with string
 function(convert_file_to_string_header file_ string_header string_name)
     file(READ "${file_}" STRING)
     set(STRING_NAME "${string_name}")
     configure_file(util/string_header.h.in "${string_header}" @ONLY)
 endfunction()
+
+# Convert local headers to strings
+convert_file_to_string_header(utils.cuh
+                              code_string_utils_cuh.h
+                              code_string_utils_cuh)
 convert_file_to_string_header(transpose/rtc/transpose.cu
-                              rtc_code_transpose.h
-                              rtc_code_transpose)
+                              code_string_transpose_rtc_transpose_cu.h
+                              code_string_transpose_rtc_transpose_cu)
 
 # Configure C++ library
 add_library(transformer_engine SHARED

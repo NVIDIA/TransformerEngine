@@ -17,6 +17,7 @@
 #include <cuda_runtime_api.h>
 #include <nvrtc.h>
 
+#include "../common.h"
 #include "../util/cuda_driver.h"
 #include "../util/cuda_runtime.h"
 
@@ -52,7 +53,7 @@ public:
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              ArgTs&... args);
+              ArgTs &&... args);
 
   /*! \brief CUDA function for given CUDA device
    *
@@ -108,7 +109,7 @@ public:
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              ArgTs&... args);
+              ArgTs &&... args);
 
 private:
   /*! \brief Compiled kernels */
@@ -144,7 +145,7 @@ void Kernel::launch(int device_id,
                     const dim3 block_dim,
                     unsigned int shared_mem_bytes,
                     cudaStream_t stream,
-                    ArgTs&... args) {
+                    ArgTs &&... args) {
   void* arg_ptrs[] = { const_cast<void*>(static_cast<const void*>(&args))... };
   NVTE_CHECK_CUDA_DRIVER(cuLaunchKernel(get_function(device_id),
                                         grid_dim.x,
@@ -165,7 +166,7 @@ void KernelManager::launch(const std::string &cache_key,
                            const dim3 block_dim,
                            unsigned int shared_mem_bytes,
                            cudaStream_t stream,
-                           ArgTs&... args) {
+                           ArgTs &&... args) {
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(cache_key, device_id);
   NVTE_CHECK(kernel_cache_.count(key) > 0,
@@ -175,13 +176,12 @@ void KernelManager::launch(const std::string &cache_key,
                                block_dim,
                                shared_mem_bytes,
                                stream,
-                               args...);
+                               std::forward<ArgTs>(args)...);
 
 }
 
 }  // namespace rtc
 
 }  // namespace transformer_engine
-
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
