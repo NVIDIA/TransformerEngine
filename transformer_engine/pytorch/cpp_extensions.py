@@ -400,9 +400,21 @@ def cast_to_fp8(
     fp8_meta_tensor: tex.FP8TensorMeta,
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Cast input to FP8"""
 
+    if out is not None:
+        tex.cast_to_fp8_noalloc(
+            inp,
+            fp8_meta_tensor.scale,
+            out,
+            fp8_meta_tensor.amax_history,
+            fp8_meta_tensor.scale_inv,
+            fp8_tensor,
+            otype
+        )
+        return
     return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
         fp8_meta_tensor.scale,

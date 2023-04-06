@@ -764,6 +764,29 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
 }
 
 
+void cast_to_fp8_noalloc(const at::Tensor &input,
+                               const at::Tensor &scale,
+                               at::Tensor output,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               transformer_engine::DType otype
+) {
+    using namespace transformer_engine;
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
+
+    nvte_fp8_quantize(input_cu.data(), output_cu.data(),
+                      at::cuda::getCurrentCUDAStream());
+
+    return;
+}
+
+
 at::Tensor cast_from_fp8(const at::Tensor &input,
                          const at::Tensor &scale_inv,
                          transformer_engine::DType itype,
@@ -1027,6 +1050,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
                                               "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
+  m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");

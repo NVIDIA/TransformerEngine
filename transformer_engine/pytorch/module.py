@@ -704,9 +704,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8:
             if gather_grad_output:
-                grad_output_mat, _ = gather_along_first_dim(
-                    grad_output_mat, ctx.tp_group
-                )
+                if not ctx.ub_split_ag:
+                    grad_output_mat, _ = gather_along_first_dim(
+                        grad_output_mat, ctx.tp_group
+                    )
+                else:
+                    ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
+                    grad_output_mat = ctx.ub_obj_gradout.get_ubuf_output(1)
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(
@@ -718,6 +722,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             gather_grad_output
             and ctx.fp8_meta["recipe"].override_linear_precision.wgrad
         ):
+            assert not ctx.ub_split_ag, "override_linear_precision.wgrad not supported with ub_split_ag"
             grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
         # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
         elif gather_grad_output:
@@ -725,14 +730,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output_mat.sum(dim=0)
             else:
                 grad_bias = None
-            grad_output_c = cast_to_fp8(
+            if ctx.ub_split_ag:
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
+            else:
+                grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
+            cast_to_fp8(
                 grad_output_mat,
                 ctx.fp8_meta["scaling_bwd"],
                 tex.FP8BwdTensors.GRAD_OUTPUT1,
                 fp8_dtype_backward,
+                out=grad_output_c,
             )
-            grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
-            grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+            if not ctx.ub_split_ag:
+                grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
+                grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+            else:
+                grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
+                grad_output_t = None
 
             return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
@@ -2589,6 +2603,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
                 ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+            if ctx.ub_split_ag:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_split_ag = False
+            if ctx.ub_split_ag:
+                dim_size = list(grad_outputs[0].size())
+                dim_size[0] = dim_size[0] * tp_world_size
+                ctx.ub_obj_gradout, key_gradout = get_ub_p2p(dim_size, torch.uint8 if ctx.fp8 else grad_outputs[0].dtype, grad_outputs[0].device)
+
             (
                 grad_output,
                 grad_output_c,
@@ -2597,7 +2620,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ) = TransformerEngineBaseModule.grad_output_preprocess(
                 ctx, grad_outputs[0], True
             )
-
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
@@ -2639,8 +2661,12 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.activation_dtype,
                     get_workspace(),
                     use_split_accumulator=_2X_ACC_DGRAD,
+                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                    ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                 )
-
+                if ctx.ub_split_ag:
+                    grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                    free_ub(ub_obj_gradout, key_gradout)
                 # FC2 WGRAD
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     if fc2_weight.requires_grad:
@@ -2740,6 +2766,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     gelu=not ctx.bias_gelu_nvfusion,
                     grad=True,
                     gelu_input=fc1_out,
+                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                    ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                 )
 
                 # FC2 WGRAD
