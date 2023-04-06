@@ -407,11 +407,10 @@ def cast_to_fp8(
     if out is not None:
         tex.cast_to_fp8_noalloc(
             inp,
-            fp8_meta_tensor.scale,
+            fp8_meta_tensor.scale[fp8_tensor],
             out,
-            fp8_meta_tensor.amax_history,
-            fp8_meta_tensor.scale_inv,
-            fp8_tensor,
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
             otype
         )
         return
