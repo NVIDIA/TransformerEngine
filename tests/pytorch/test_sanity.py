@@ -5,7 +5,7 @@
 import torch
 import pytest
 
-from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.fp8 import fp8_autocast, is_fp8_available
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -19,7 +19,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 
 # Only run FP8 tests on H100.
-fp8_available = torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9
+fp8_available, reason_for_no_fp8 = is_fp8_available()
 
 
 def custom_amax_to_scale(
@@ -263,7 +263,7 @@ def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad):
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -291,7 +291,7 @@ def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -316,7 +316,7 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -348,7 +348,7 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
 @pytest.mark.parametrize("bias", all_boolean)
 def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, bias):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -387,7 +387,7 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamm
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -425,7 +425,7 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -463,7 +463,7 @@ def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, bs, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -497,7 +497,7 @@ def test_sanity_amp_and_nvfuser(dtype, bs, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_drop_path(dtype, bs, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -534,7 +534,7 @@ def test_sanity_drop_path(dtype, bs, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, bs, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
@@ -572,7 +572,7 @@ def test_sanity_fused_qkv_params(dtype, bs, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
     if fp8_recipe is not None and not fp8_available:
-        pytest.skip("FP8 device not available.")
+        pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 

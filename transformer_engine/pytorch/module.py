@@ -41,6 +41,7 @@ from .fp8 import (
     copy_forward_fp8_meta_tensors_for_recompute,
     get_old_fp8_meta_tensors_for_recompute,
     restore_fp8_meta_tensors,
+    get_amax_reduce_handle_fwd,
 )
 from .jit import (
     bias_gelu_fused,
@@ -84,6 +85,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
+_amax_reduce_handle_bwd = None
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -106,6 +108,11 @@ def get_workspace() -> torch.Tensor:
 def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> None:
     """Checks and prep for BWD."""
     if fp8:
+        global _amax_reduce_handle_bwd
+        if _amax_reduce_handle_bwd is not None:
+            _amax_reduce_handle_bwd.wait()
+            _amax_reduce_handle_bwd = None
+
         # Update amax and scale; Skip all setup for global amax reduction
         if not fp8_meta["recipe"].reduce_amax:
             amax_and_scale_update(fp8_meta, False)
@@ -125,7 +132,7 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
 
     if fp8 and fp8_meta["recipe"].reduce_amax:
         if fp8_meta["first_module"]:
-            global_amax_reduction(fp8_meta, forward=False)
+            _amax_reduce_handle_bwd = global_amax_reduction(fp8_meta, forward=False)
             delete_key_from_amax_buffer(forward=False)
 
 
@@ -184,6 +191,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.fp8_weight_shapes = []
         self.fp8_meta["autocast_id_fwd_stack"] = []
+        self.fp8_meta["async_amax_reduction"] = bool(
+            int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "1"))
+        )
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -250,8 +260,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8 or self.fp8_calibration:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
             state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
             state["global_fp8_buffer"] = get_global_fp8_buffer()
 
@@ -324,6 +336,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
+
+        # Backwards compatibility: compute scale inv if it wasn't saved in the extra state.
+        if "scale_inv_fwd" not in state or "scale_inv_bwd" not in state:
+            assert (
+                "scale_inv_fwd" not in state and "scale_inv_bwd" not in state
+            ), "Invalid state, began saving scale_inv_fwd and scale_inv_bwd at the same time"
+            self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
+            self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
+        else:
+            self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
+            self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
+
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -483,6 +507,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if self.fp8_meta["recipe"].reduce_amax:
                     self.fp8_meta["first_module"] = is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
+                        # Wait for the prior AMAX reduction to finish
+                        amax_reduce_handle_fwd = get_amax_reduce_handle_fwd()
+                        if amax_reduce_handle_fwd is not None:
+                            amax_reduce_handle_fwd.wait()
                         self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
                         set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
                     else:

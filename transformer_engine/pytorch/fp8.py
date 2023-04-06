@@ -12,6 +12,7 @@ import transformer_engine_extensions as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
+from .utils import get_device_compute_capability
 
 _FP8_ENABLED = False
 _FP8_CALIBRATION = False
@@ -26,6 +27,30 @@ _fp8_tensors_recompute_buffer = []
 _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
+_amax_reduce_handle_fwd = None
+_is_fp8_available = None
+_reason_for_no_fp8 = ""
+
+
+def _check_fp8_support() -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    if get_device_compute_capability() >= 9.0: # hopper and above
+        return True, ""
+    if get_device_compute_capability() < 8.9: # pre-ada
+        return False, "Device compute capability 8.9 or higher required for FP8 execution."
+    if tex.get_cublasLt_version() < 120103:
+        return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
+    if float(torch.version.cuda) < 12.1:
+        return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
+    return True, ""
+
+
+def is_fp8_available() -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    global _is_fp8_available, _reason_for_no_fp8
+    if _is_fp8_available is None:
+        _is_fp8_available, _reason_for_no_fp8 = _check_fp8_support()
+    return _is_fp8_available, _reason_for_no_fp8
 
 
 def get_meta_tensor_key(forward: bool = True) -> str:
@@ -47,6 +72,12 @@ def get_autocast_key(forward: bool = True) -> str:
     if forward:
         return "autocast_id_fwd"
     return "autocast_id_bwd"
+
+
+def get_amax_reduce_handle_fwd() -> Union[bool, None]:
+    """Return AMAX reduction wait handle of forward prop."""
+    global _amax_reduce_handle_fwd
+    return _amax_reduce_handle_fwd
 
 
 def get_global_fp8_buffer() -> Dict[str, List[torch.Tensor]]:
@@ -240,6 +271,7 @@ def fp8_autocast(
     global _FP8_ENABLED, _FP8_CALIBRATION,  _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP, _FP8_AUTOCAST_DEPTH
     global _IS_FIRST_FP8_MODULE, _FP8_AUTOCAST_COUNTER
     global _global_fp8_buffer, _buffer_delete_key_fwd
+    global _amax_reduce_handle_fwd
     fp8_state = (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP)
     try:
         _FP8_ENABLED = enabled
@@ -253,9 +285,8 @@ def fp8_autocast(
         _FP8_AUTOCAST_DEPTH += 1
 
         if enabled:
-            assert (
-                torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9
-            ), "Device compute capability 9.x required for FP8 execution."
+            fp8_available, reason_for_no_fp8 = is_fp8_available()
+            assert fp8_available, reason_for_no_fp8
         yield
     finally:
         _FP8_ENABLED,_FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP = fp8_state
@@ -264,7 +295,7 @@ def fp8_autocast(
 
         if _FP8_AUTOCAST_DEPTH == 0:
             if callable(_amax_forward_global_reduce_func):
-                _amax_forward_global_reduce_func()
+                _amax_reduce_handle_fwd = _amax_forward_global_reduce_func()
             delete_key_from_amax_buffer(forward=True)
 
 
@@ -290,9 +321,11 @@ def is_fp8_enabled() -> bool:
     """Is FP8 enabled"""
     return _FP8_ENABLED
 
+
 def is_fp8_calibration() -> bool:
     """Is FP8 calibration"""
     return _FP8_CALIBRATION
+
 
 def is_first_fp8_module():
     """Returns `True` only the first time when called multiple
@@ -496,16 +529,18 @@ def get_fp8_te_dtype(
 
 
 def reduce_tensor_across_group_op_max(
-    tensor: torch.Tensor, group: dist_group_type
+    tensor: torch.Tensor, group: dist_group_type, async_op: bool
 ) -> None:
     """Reduce tensor across given group."""
     if torch.distributed.is_initialized():
-        torch.distributed.all_reduce(
+        wait_handle = torch.distributed.all_reduce(
             tensor,
             op=torch.distributed.ReduceOp.MAX,
             group=group,
-            async_op=False,
+            async_op=async_op,
         )
+        return wait_handle
+    return None
 
 
 def global_amax_reduction(
@@ -518,14 +553,19 @@ def global_amax_reduction(
 
     # Key already deleted.
     if amax_buffer_key not in _global_fp8_buffer:
-        return
+        return None
 
     chunk_sizes = [x.numel() for x in _global_fp8_buffer[amax_buffer_key]]
     contiguous_amax = torch.cat(_global_fp8_buffer[amax_buffer_key])
 
-    reduce_tensor_across_group_op_max(contiguous_amax, fp8_meta["fp8_group"])
+    wait_handle = reduce_tensor_across_group_op_max(
+        contiguous_amax,
+        fp8_meta["fp8_group"],
+        fp8_meta["async_amax_reduction"],
+    )
 
     _global_fp8_buffer[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
+    return wait_handle
 
 
 def delete_key_from_amax_buffer(forward: bool = True) -> None:
