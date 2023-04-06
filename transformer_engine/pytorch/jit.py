@@ -77,8 +77,7 @@ def dgelu_fused_(
         (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
     ) + 0.5 * (1 + tanh_out)
     dgelu = ff * grad_output
-    bgrad = dgelu.sum(dim=0)
-    return bgrad, dgelu
+    return dgelu
 
 
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
