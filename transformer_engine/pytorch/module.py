@@ -870,6 +870,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.return_layernorm_output = return_layernorm_output
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -1040,7 +1041,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 grad_bias = None
 
         return (
-            dxmat.view(ctx.inp_shape),
+            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             wgrad if weight.requires_grad else None,
@@ -2281,6 +2282,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
         if set_parallel_mode and sequence_parallel:
@@ -2575,7 +2577,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_bias_grad = None
 
         return (
-            dxmat.view(ctx.inp_shape),
+            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             fc1_wgrad if fc1_weight.requires_grad else None,
