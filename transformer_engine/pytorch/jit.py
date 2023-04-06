@@ -96,7 +96,7 @@ def bgrad_dgelu_fused(
     with torch.cuda.amp.autocast(enabled=False):
         if bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
-        return dgelu_fused_(grad_output, inp)
+        return torch.zeros_like(bias), dgelu_fused_(grad_output, inp)
 
 
 def bias_dropout_add(
