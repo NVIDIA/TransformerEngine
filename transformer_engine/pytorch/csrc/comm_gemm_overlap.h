@@ -725,7 +725,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         at::Tensor workspace,
         size_t workspaceSize,
         bool accumulate,
-        bool use_split_accumulator)
+        bool use_split_accumulator,
+        at::Tensor B_copy)
     {
         // Get GEMM dimensions between TN and NN input layouts
         const int m = (transa) ? A.size(0) : A.size(1);
@@ -797,12 +798,25 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                 CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));
                 CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i+1], _stop_comm, 0));
             }
+            else if (B_copy.numel() > 0) {
+                assert (B_copy.numel() == _ubufs[_local_rank].numel());
+                assert (B_copy.element_size() == _ubufs[_local_rank].element_size());
+                CHECK_CUDA(cudaMemcpyAsync(
+                    B_copy.data_ptr(),
+                    _ubufs[_local_rank].data_ptr(),
+                    _ubufs[_local_rank].numel() * _ubufs[_local_rank].element_size(),
+                    cudaMemcpyDeviceToDevice,
+                    (cudaStream_t) _stream_comm)
+                );
+            }
+
             cur_ouput_chunk_id = (_tp_size + cur_ouput_chunk_id - 1) % _tp_size;
         }
         at::cuda::setCurrentCUDAStream(stream_main);
 
         CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[_tp_size-1]));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_compute, 0));
+        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _stop_compute, 0));
 
         return D;
     } // split_overlap_ag

@@ -30,7 +30,8 @@ def fp8_gemm(
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     ub_algo: tex.UbufOverlapAlgo = None,
-    ub: tex.UbufCommOverlap = None,
+    ub: Union[tex.UbufCommOverlap, tex.UbufP2PCommOverlap] = None,
+    extra_output_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
@@ -86,11 +87,13 @@ def fp8_gemm(
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
             args = tuple(args + (1,))
-        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             args = tuple(args + (0,))
-        if ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
             fn = ub.split_overlap_ag
+            extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
+            args = tuple(args + (extra_output_tensor,))
     _ = fn(*args)
 
     if return_output:
@@ -117,6 +120,7 @@ def gemm(
     use_bias: bool = False,
     ub_algo: tex.UbufOverlapAlgo = None,
     ub: tex.UbufCommOverlap = None,
+    extra_output_tensor: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
@@ -187,9 +191,13 @@ def gemm(
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
             args = tuple(args + (1,))
-        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             args = tuple(args + (0,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
+            fn = ub.split_overlap_ag
+            extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
+            args = tuple(args + (extra_output_tensor,))
     _ = fn(*args)
 
     if return_output:

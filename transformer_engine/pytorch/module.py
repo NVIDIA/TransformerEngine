@@ -206,7 +206,7 @@ def get_ub(shape: list,
         if ub_mgr is None:
             ub_mgr = UserBufferManager(torch.distributed.get_rank())
         key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_cga{comm_cga_size}_spl{num_splits}_#rr{use_rr_kernel}_margin{set_sm_margin}'
-        print (f'get_ub {key}')
+        #print (f'get_ub {key}')
         if key not in ub_mgr.free_list:
             ub_mgr.free_list[key] = []
         if not ub_mgr.free_list[key]:
@@ -237,7 +237,7 @@ def get_ub_p2p(shape: list,
     if ub_mgr is None:
         ub_mgr = UserBufferManager(torch.distributed.get_rank())
     key = f'{shape}_{dtype}_rank{ub_mgr.rank}_pp{pp_size}_tp{tp_size}_sm{num_comm_sm}_margin{set_sm_margin}_p2p'
-    print (f'get_ub_p2p {key}')
+    #print (f'get_ub_p2p {key}')
     if key not in ub_mgr.free_list:
         ub_mgr.free_list[key] = []
     if not ub_mgr.free_list[key]:
@@ -900,8 +900,6 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             if is_grad_enabled:
                 if ub_split_ag:
-                    #print ('layernorm_fwd_noalloc')
-                    #ln_out = torch.empty_like(inputmat)
                     _, mu, rsigma = tex.layernorm_fwd_noalloc(
                         inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
                     )
@@ -914,10 +912,10 @@ class _LayerNormLinear(torch.autograd.Function):
                         inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
                 ), None, None
             ln_out_return = ln_out
-
         # Column Parallel Linear
         if ub_split_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out = torch.empty_like(ln_out)
         elif parallel_mode == "column" and sequence_parallel:
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
         else:
@@ -964,7 +962,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
-                ub=ub_obj_lnout if ctx.ub_split_ag else None
+                ub=ub_obj_lnout if ub_split_ag else None,
+                extra_output_tensor=ln_out if ub_split_ag else None,
             )
         else:
             # Cast for native AMP
@@ -987,7 +986,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
-                ub=ub_obj_lnout if ub_split_ag else None
+                ub=ub_obj_lnout if ub_split_ag else None,
+                extra_output_tensor=ln_out if ub_split_ag else None,
             )
 
         if ub_split_ag:
