@@ -153,7 +153,7 @@ class TestFP8Helper(unittest.TestCase):
 class TestFP8Functions(unittest.TestCase):
 
     def _check_defult_state(self):
-        self.assertFalse(FP8Helper.enable_fp8())
+        self.assertFalse(FP8Helper.is_fp8_enabled())
         self.assertEqual(infer_major_sharding_type(), MajorShardingType.SINGLE)
 
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
@@ -162,13 +162,13 @@ class TestFP8Functions(unittest.TestCase):
         self._check_defult_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
-            self.assertFalse(FP8Helper.enable_fp8())
+            self.assertFalse(FP8Helper.is_fp8_enabled())
 
         self._check_defult_state()
 
         ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
-            self.assertTrue(FP8Helper.enable_fp8())
+            self.assertTrue(FP8Helper.is_fp8_enabled())
             self.assertEqual(FP8Helper.MARGIN, ds.margin)
             self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
             self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)
@@ -177,7 +177,7 @@ class TestFP8Functions(unittest.TestCase):
 
         ds = DelayedScaling(margin=3.0, interval=1, fp8_format=FP8Format.HYBRID, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
-            self.assertTrue(FP8Helper.enable_fp8())
+            self.assertTrue(FP8Helper.is_fp8_enabled())
             self.assertEqual(FP8Helper.MARGIN, ds.margin)
             self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
             self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)
@@ -210,7 +210,7 @@ class TestFP8Functions(unittest.TestCase):
         with maps.Mesh(devices, ('dp', 'tp')):
             for sr, mst in srs:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, sharding_resource=sr):
-                    self.assertTrue(FP8Helper.enable_fp8())
+                    self.assertTrue(FP8Helper.is_fp8_enabled())
                     self.assertEqual(FP8Helper.MARGIN, ds.margin)
                     self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
                     self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)

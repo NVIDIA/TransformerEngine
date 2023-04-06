@@ -144,7 +144,7 @@ class FP8Helper:
     FP8_2X_ACC_WGRAD: bool = True
 
     @staticmethod
-    def enable_fp8():
+    def is_fp8_enabled():
         """
         Indicate if fp8 training is enable or not.
         """

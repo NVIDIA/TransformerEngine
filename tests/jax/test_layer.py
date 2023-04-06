@@ -200,7 +200,7 @@ class TestEncoderLayer:
 
         ref_params, test_params = TestEncoderLayer.sync_params(ref_params, test_params, attrs)
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             for _ in range(4):
                 _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
                                                  has_aux=False)(inputs, test_masks, test_params,
@@ -411,7 +411,7 @@ class TestDecoderLayer:
 
         ref_params, test_params = TestDecoderLayer.sync_params(ref_params, test_params, attrs)
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             for _ in range(4):
                 _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
                                                  has_aux=False)(inputs, test_masks, test_params,
