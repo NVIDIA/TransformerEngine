@@ -66,7 +66,7 @@ def bgrad_dgelu_fused_(
 @torch.jit.script
 def dgelu_fused_(
     grad_output: torch.Tensor, inp: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     Dgelu fused, this is copy of bgrad_dgelu_fused_ cause jit fusion doesn't allow conditioning.
     """
