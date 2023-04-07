@@ -12,13 +12,17 @@
 #include <cuda_fp8.h>
 
 #if !defined(__CUDACC_RTC__)
-#include <cassert>
 #include <cstdint>
 #else
+// Importing C++ standard headers is a pain with NVRTC
 using uint8_t = unsigned char;
 using uint16_t = unsigned short int;
 using uint32_t = unsigned int;
 using uint64_t = unsigned long long int;
+static_assert(sizeof(uint8_t) == 1);
+static_assert(sizeof(uint16_t) == 2);
+static_assert(sizeof(uint32_t) == 4);
+static_assert(sizeof(uint64_t) == 8);
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

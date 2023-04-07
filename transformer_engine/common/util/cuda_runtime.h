@@ -26,7 +26,12 @@ int current_device();
  */
 int sm_arch(int device_id);
 
-/* \brief Path to CUDA headers */
+/* \brief Path to CUDA headers
+ *
+ * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
+ * environment. Otherwise searches in common install paths and returns
+ * an empty string if headers are not found.
+ */
 const std::string &include_directory();
 
 }  // namespace cuda

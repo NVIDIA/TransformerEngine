@@ -53,7 +53,21 @@ public:
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              ArgTs &&... args);
+              ArgTs &&... args) {
+    void* arg_ptrs[] = { const_cast<void*>(static_cast<const void*>(&args))... };
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchKernel,
+                                get_function(device_id),
+                                grid_dim.x,
+                                grid_dim.y,
+                                grid_dim.z,
+                                block_dim.x,
+                                block_dim.y,
+                                block_dim.z,
+                                shared_mem_bytes,
+                                static_cast<CUstream>(stream),
+                                arg_ptrs,
+                                nullptr);
+  }
 
   /*! \brief CUDA function for given CUDA device
    *
@@ -109,7 +123,18 @@ public:
               const dim3 block_dim,
               unsigned int shared_mem_bytes,
               cudaStream_t stream,
-              ArgTs &&... args);
+              ArgTs &&... args) {
+    const int device_id = cuda::current_device();
+    const auto key = get_kernel_cache_key(kernel_label, device_id);
+    NVTE_CHECK(kernel_cache_.count(key) > 0,
+               "Attempted to launch RTC kernel before compilation");
+    kernel_cache_.at(key).launch(device_id,
+                                 grid_dim,
+                                 block_dim,
+                                 shared_mem_bytes,
+                                 stream,
+                                 std::forward<ArgTs>(args)...);
+  }
 
 private:
   /*! \brief Compiled kernels */
@@ -126,59 +151,6 @@ private:
   std::string get_kernel_cache_key(const std::string &kernel_label,
                                    int device_id) const;
 };
-
-}  // namespace rtc
-
-}  // namespace transformer_engine
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// Template implementations
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-namespace transformer_engine {
-
-namespace rtc {
-
-template <typename... ArgTs>
-void Kernel::launch(int device_id,
-                    const dim3 grid_dim,
-                    const dim3 block_dim,
-                    unsigned int shared_mem_bytes,
-                    cudaStream_t stream,
-                    ArgTs &&... args) {
-  void* arg_ptrs[] = { const_cast<void*>(static_cast<const void*>(&args))... };
-  NVTE_CHECK_CUDA_DRIVER(cuLaunchKernel(get_function(device_id),
-                                        grid_dim.x,
-                                        grid_dim.y,
-                                        grid_dim.z,
-                                        block_dim.x,
-                                        block_dim.y,
-                                        block_dim.z,
-                                        shared_mem_bytes,
-                                        static_cast<CUstream>(stream),
-                                        arg_ptrs,
-                                        nullptr));
-}
-
-template <typename... ArgTs>
-void KernelManager::launch(const std::string &cache_key,
-                           const dim3 grid_dim,
-                           const dim3 block_dim,
-                           unsigned int shared_mem_bytes,
-                           cudaStream_t stream,
-                           ArgTs &&... args) {
-  const int device_id = cuda::current_device();
-  const auto key = get_kernel_cache_key(cache_key, device_id);
-  NVTE_CHECK(kernel_cache_.count(key) > 0,
-             "Attempted to launch RTC kernel before compilation");
-  kernel_cache_.at(key).launch(device_id,
-                               grid_dim,
-                               block_dim,
-                               shared_mem_bytes,
-                               stream,
-                               std::forward<ArgTs>(args)...);
-
-}
 
 }  // namespace rtc
 

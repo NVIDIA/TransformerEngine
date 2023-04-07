@@ -24,7 +24,7 @@ inline const std::string& to_string_like(const std::string& val) noexcept {
   return val;
 }
 
-constexpr const char *to_string_like(const char *val) noexcept{
+constexpr const char *to_string_like(const char *val) noexcept {
   return val;
 }
 

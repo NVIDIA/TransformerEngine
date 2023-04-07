@@ -11,6 +11,7 @@
 #include "../common.h"
 #include "../util/cuda_driver.h"
 #include "../util/string.h"
+#include "../util/system.h"
 
 #include "../util/rtc.h"
 
@@ -55,12 +56,19 @@ inline int max_supported_sm_arch() {
 }  // namespace
 
 bool is_enabled() {
-  static bool is_enabled_ = true;
+  static bool is_enabled_ = false;
   static bool need_to_check_env = true;
   if (need_to_check_env) {
-    const auto& include_path = cuda::include_directory();
-    const char *env = std::getenv("NVTE_DISABLE_NVRTC");
-    is_enabled_ = !include_path.empty() && (env == nullptr || std::string(env) == "0");
+    if (!getenv<bool>("NVTE_DISABLE_NVRTC")) {
+      if (!cuda::include_directory().empty()) {
+        is_enabled_ = true;
+      } else {
+        std::cerr << ("Transformer Engine could not find CUDA SDK headers, "
+                      "disabling NVRTC support. "
+                      "Set NVTE_CUDA_INCLUDE_DIR to enable NVRTC support "
+                      "or set NVTE_DISABLE_NVRTC=1 to silence this warning.\n");
+      }
+    }
     need_to_check_env = false;
   }
   return is_enabled_;
@@ -79,14 +87,16 @@ Kernel::~Kernel() {
     if (modules_[device_id] != null_module) {
       CUdevice device;
       CUcontext context;
-      if (cuDeviceGet(&device, device_id) != CUDA_SUCCESS) {
+      if (cuda_driver::call("cuDeviceGet", &device, device_id)
+          != CUDA_SUCCESS) {
         continue;
       }
-      if (cuDevicePrimaryCtxRetain(&context, device) != CUDA_SUCCESS) {
+      if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, device)
+          != CUDA_SUCCESS) {
         continue;
       }
-      cuModuleUnload(modules_[device_id]);
-      cuDevicePrimaryCtxRelease(device);
+      cuda_driver::call("cuModuleUnload", modules_[device_id]);
+      cuda_driver::call("cuDevicePrimaryCtxRelease", device);
     }
   }
 }
@@ -115,21 +125,23 @@ CUfunction Kernel::get_function(int device_id) {
     // Set driver context to proper device
     CUdevice device;
     CUcontext context;
-    NVTE_CHECK_CUDA_DRIVER(cuDeviceGet(&device, device_id));
-    NVTE_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain(&context, device));
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
 
     // Load function into driver context
-    NVTE_CHECK_CUDA_DRIVER(cuModuleLoadDataEx(&modules_[device_id],
-                                              compiled_code_.c_str(),
-                                              0,            // numOptions
-                                              nullptr,      // options
-                                              nullptr));    // optionValues
-    NVTE_CHECK_CUDA_DRIVER(cuModuleGetFunction(&functions_[device_id],
-                                               modules_[device_id],
-                                               mangled_name_.c_str()));
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx,
+                                &modules_[device_id],
+                                compiled_code_.c_str(),
+                                0,            // numOptions
+                                nullptr,      // options
+                                nullptr);    // optionValues
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction,
+                                &functions_[device_id],
+                                modules_[device_id],
+                                mangled_name_.c_str());
 
     // Reset driver context
-    NVTE_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease(device));
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
   }
   return functions_[device_id];
 }

@@ -4,8 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <filesystem>
+
 #include "../common.h"
 #include "../util/cuda_runtime.h"
+#include "../util/system.h"
 
 namespace transformer_engine {
 
@@ -38,10 +41,22 @@ int sm_arch(int device_id) {
 
 const std::string &include_directory() {
   static std::string path;
-  if (path.empty()) {
-    /// TODO Make configurable
-    /// TODO Make abspath
-    path = "/usr/local/cuda/include";
+  static bool need_to_check_env = true;
+  if (need_to_check_env) {
+    path = getenv("NVTE_CUDA_INCLUDE_DIR");
+    if (path.empty()) {
+      const std::vector<std::filesystem::path> search_paths = {
+        getenv("CUDA_HOME"),
+        getenv("CUDA_DIR"),
+        "/usr/local/cuda"};
+      for (const auto &p : search_paths) {
+        if (!p.empty() && file_exists(p / "include" / "cuda_runtime.h")) {
+          path = p / "include";
+          break;
+        }
+      }
+    }
+    need_to_check_env = false;
   }
   return path;
 }
