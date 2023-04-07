@@ -137,7 +137,7 @@ def initialize_ub(
     ub_cfgs: Optional[dict] = None
 ) -> None:
     global _ub_communicators
-    assert _ub_communicators is None, "UB manager is already initialized."
+    assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
     rank = torch.distributed.get_rank()
 
@@ -225,7 +225,11 @@ def initialize_ub(
             )
         else:
             dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
-            add_ub(name, get_method(name), shape, dtype, tp_size)
+            method = get_method(name)
+            if method == "ring_exchange":
+                add_ub(name, method, shape, dtype, tp_size, num_sm=1, cga_size=1)
+            else:
+                add_ub(name, method, shape, dtype, tp_size)
 
 def get_ub(name: str):
     global _ub_communicators
