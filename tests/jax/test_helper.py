@@ -13,7 +13,7 @@ from jax.experimental import maps
 from utils import assert_allclose, is_fp8_supported
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import fp8_autocast, get_delayed_scaling
 from transformer_engine.jax.fp8 import FP8Helper
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import MajorShardingType
@@ -156,6 +156,13 @@ class TestFP8Functions(unittest.TestCase):
         self.assertFalse(FP8Helper.is_fp8_enabled())
         self.assertEqual(infer_major_sharding_type(), MajorShardingType.SINGLE)
 
+    def _compare_delay_scaling(self, ref, test):
+        self.assertTrue(ref.margin == test.margin)
+        self.assertTrue(ref.interval == test.interval)
+        self.assertTrue(ref.fp8_format == test.fp8_format)
+        self.assertTrue(ref.amax_history_len == test.amax_history_len)
+        self.assertTrue(ref.amax_compute_algo == test.amax_compute_algo)
+
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
     def test_fp8_autocast(self):
         FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
@@ -163,25 +170,22 @@ class TestFP8Functions(unittest.TestCase):
 
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
             self.assertFalse(FP8Helper.is_fp8_enabled())
+            self._compare_delay_scaling(get_delayed_scaling(), DelayedScaling())
 
         self._check_defult_state()
 
         ds = DelayedScaling(margin=5.0, interval=3, fp8_format=FP8Format.E4M3, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             self.assertTrue(FP8Helper.is_fp8_enabled())
-            self.assertEqual(FP8Helper.MARGIN, ds.margin)
-            self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
-            self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)
-            self.assertEqual(FP8Helper.AMAX_HISTORY_LEN, ds.amax_history_len)
+            self._compare_delay_scaling(get_delayed_scaling(), ds)
+
         self._check_defult_state()
 
         ds = DelayedScaling(margin=3.0, interval=1, fp8_format=FP8Format.HYBRID, amax_history_len=1)
         with fp8_autocast(enabled=True, fp8_recipe=ds):
             self.assertTrue(FP8Helper.is_fp8_enabled())
-            self.assertEqual(FP8Helper.MARGIN, ds.margin)
-            self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
-            self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)
-            self.assertEqual(FP8Helper.AMAX_HISTORY_LEN, ds.amax_history_len)
+            self._compare_delay_scaling(get_delayed_scaling(), ds)
+
         self._check_defult_state()
 
     @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
@@ -211,10 +215,7 @@ class TestFP8Functions(unittest.TestCase):
             for sr, mst in srs:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, sharding_resource=sr):
                     self.assertTrue(FP8Helper.is_fp8_enabled())
-                    self.assertEqual(FP8Helper.MARGIN, ds.margin)
-                    self.assertEqual(FP8Helper.UPDATE_FP8META_INTERVAL, ds.interval)
-                    self.assertEqual(FP8Helper.FP8_FORMAT, ds.fp8_format)
-                    self.assertEqual(FP8Helper.AMAX_HISTORY_LEN, ds.amax_history_len)
+                    self._compare_delay_scaling(get_delayed_scaling(), ds)
                     self.assertEqual(infer_major_sharding_type(), mst)
 
                 self._check_defult_state()
