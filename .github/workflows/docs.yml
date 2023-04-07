@@ -3,13 +3,14 @@
 # See LICENSE for license information.
 
 # A workflow to trigger the build of TE documentation on GitHub
-name: 'Build documentation'
+name: 'Documentation'
 on:
   pull_request:
   workflow_dispatch:
   workflow_call:
 jobs:
   build_docs:
+    name: 'Build'
     runs-on: ubuntu-latest
     steps:
       - name: 'Checkout'

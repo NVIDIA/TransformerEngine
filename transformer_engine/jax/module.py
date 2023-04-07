@@ -412,7 +412,7 @@ class DenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             fp8_gemm_package = \
                 TransformerEngineBase.get_fp8_gemm_package(1, inputs, [kernel])
             y = fp8_dot(fp8_gemm_package,
@@ -537,7 +537,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         """
         ln_output = None
 
-        fuse_layernorm = FP8Helper.enable_fp8(
+        fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         if self.enable_layernorm:
@@ -583,7 +583,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             fp8_gemm_package = \
                     TransformerEngineBase.get_fp8_gemm_package(1, y, [kernel])
 
@@ -683,6 +683,8 @@ class LayerNormMLP(TransformerEngineBase):
         Each activation has its own transformation layer.
     intermediate_dropout_rate: float, default = 0.1
         Dropout probability for the dropout op after the :attr:`activations`.
+    intermediate_hidden_dropout_dims: Sequence[int], default = ()
+        Dimensions that will share the same dropout mask for hidden
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
 
@@ -716,6 +718,7 @@ class LayerNormMLP(TransformerEngineBase):
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ('relu',)
     intermediate_dropout_rate: float = 0.1
+    intermediate_hidden_dropout_dims: Sequence[int] = ()
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
@@ -748,7 +751,7 @@ class LayerNormMLP(TransformerEngineBase):
         """
         ln_output = None
 
-        fuse_layernorm = FP8Helper.enable_fp8(
+        fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         use_fused_ln_mlp = fuse_layernorm \
@@ -837,7 +840,7 @@ class LayerNormMLP(TransformerEngineBase):
             def fp8_meta_generator():
                 fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = (None, None, None,
                                                                                  None)
-                if FP8Helper.enable_fp8():
+                if FP8Helper.is_fp8_enabled():
                     fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
                         TransformerEngineBase.get_fp8_metas(num_of_gemm)
                 return fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv
@@ -864,7 +867,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel = jnp.reshape(kernel, kernel_shape)
             contract_ind = tuple(range(0, len(axis)))
 
-            if FP8Helper.enable_fp8():
+            if FP8Helper.is_fp8_enabled():
                 fp8_gemm_package = FP8GemmPackage(
                     1, y, [kernel], fp8_max[:FP8Helper.NUM_META_PER_GEMM, :],
                     fp8_metas_amax[:FP8Helper.NUM_META_PER_GEMM, :],
@@ -912,8 +915,9 @@ class LayerNormMLP(TransformerEngineBase):
                 z = functools.reduce(operator.mul, activations)
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
 
-            z = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
-                z, deterministic=deterministic)    # Broadcast along length.
+            z = nn.Dropout(rate=self.intermediate_dropout_rate,
+                           broadcast_dims=self.intermediate_hidden_dropout_dims)(
+                               z, deterministic=deterministic)
 
             # DenseGeneral 2
             hidden_size = inputs.shape[-1]
@@ -932,7 +936,7 @@ class LayerNormMLP(TransformerEngineBase):
 
             contract_ind = tuple(range(0, len(axis)))
 
-            if FP8Helper.enable_fp8():
+            if FP8Helper.is_fp8_enabled():
                 fp8_gemm_package = FP8GemmPackage(
                     1, z, [kernel], fp8_max[FP8Helper.NUM_META_PER_GEMM:, :],
                     fp8_metas_amax[FP8Helper.NUM_META_PER_GEMM:, :],

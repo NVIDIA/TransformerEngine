@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """Transformer Engine bindings for JAX"""
-from .fp8 import fp8_autocast, update_collections, update_fp8_metas
+from .fp8 import fp8_autocast, update_collections, update_fp8_metas, get_delayed_scaling
 from .module import DenseGeneral, LayerNorm
 from .module import LayerNormDenseGeneral, LayerNormMLP, TransformerEngineBase
 from .transformer import extend_logical_axis_rules
