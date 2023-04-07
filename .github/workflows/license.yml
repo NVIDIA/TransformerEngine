@@ -1,0 +1,20 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to trigger the TE license check on GitHub
+name: 'License'
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  check:
+    name: 'Check'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Check License'
+        run: |
+          export TE_PATH=.
+          bash ./qa/L0_license/test.sh
