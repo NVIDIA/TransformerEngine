@@ -128,8 +128,8 @@ class FP8Helper:
     FWD_DTYPE: DType = DType.kFloat8E4M3
     BWD_DTYPE: DType = DType.kFloat8E5M2
     UPDATE_FP8META_INTERVAL: int = 1
-    AMAX_HISTORY_LEN: int = 1
-    AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MOST_RECENT
+    AMAX_HISTORY_LEN: int = 1024
+    AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
     NUM_META_PER_GEMM: int = 3
     INPUT_META_IDX_PER_GEMM: int = 0
     KERNEL_META_IDX_PER_GEMM: int = 1
@@ -144,7 +144,7 @@ class FP8Helper:
     FP8_2X_ACC_WGRAD: bool = True
 
     @staticmethod
-    def enable_fp8():
+    def is_fp8_enabled():
         """
         Indicate if fp8 training is enable or not.
         """
@@ -182,7 +182,8 @@ class FP8Helper:
         FP8Helper.FWD_DTYPE = DType.kFloat8E4M3
         FP8Helper.BWD_DTYPE = DType.kFloat8E5M2
         FP8Helper.UPDATE_FP8META_INTERVAL = 1
-        FP8Helper.AMAX_HISTORY_LEN = 1
+        FP8Helper.AMAX_HISTORY_LEN = 1024
+        FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
 
     @staticmethod
     def update_amax_history(amax_buffers: jnp.ndarray) -> jnp.ndarray:
@@ -385,3 +386,27 @@ def update_fp8_metas(state: Collection) -> Collection:
         The collection with updated FP8 metas.
     """
     return FP8Helper.update_fp8_metas(state)
+
+
+def get_delayed_scaling():
+    r"""
+    Obtain an instance of  DelayedScaling which is set via fp8_autocast.
+
+    .. note::
+        We only store :attr:`margin`, :attr:`fp8_format`, :attr:`interval`,
+        :attr:`amax_history_len` and :attr:`amax_compute_algo` via fp8_autocast.
+        Other parameters in recipe.DelayedScaling would be returned as the default
+        values.
+
+    Returns
+    -------
+    delay_scaling : DelayedScaling
+        an instance of  DelayedScaling which is set via fp8_autocast.
+    """
+    amax_compute_algo = "max" if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX \
+                        else "most_recent"
+    return DelayedScaling(margin=FP8Helper.MARGIN,
+                          interval=FP8Helper.UPDATE_FP8META_INTERVAL,
+                          fp8_format=FP8Helper.FP8_FORMAT,
+                          amax_history_len=FP8Helper.AMAX_HISTORY_LEN,
+                          amax_compute_algo=amax_compute_algo)

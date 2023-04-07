@@ -412,7 +412,7 @@ class DenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             fp8_gemm_package = \
                 TransformerEngineBase.get_fp8_gemm_package(1, inputs, [kernel])
             y = fp8_dot(fp8_gemm_package,
@@ -537,7 +537,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         """
         ln_output = None
 
-        fuse_layernorm = FP8Helper.enable_fp8(
+        fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         if self.enable_layernorm:
@@ -583,7 +583,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        if FP8Helper.enable_fp8():
+        if FP8Helper.is_fp8_enabled():
             fp8_gemm_package = \
                     TransformerEngineBase.get_fp8_gemm_package(1, y, [kernel])
 
@@ -751,7 +751,7 @@ class LayerNormMLP(TransformerEngineBase):
         """
         ln_output = None
 
-        fuse_layernorm = FP8Helper.enable_fp8(
+        fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         use_fused_ln_mlp = fuse_layernorm \
@@ -840,7 +840,7 @@ class LayerNormMLP(TransformerEngineBase):
             def fp8_meta_generator():
                 fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = (None, None, None,
                                                                                  None)
-                if FP8Helper.enable_fp8():
+                if FP8Helper.is_fp8_enabled():
                     fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
                         TransformerEngineBase.get_fp8_metas(num_of_gemm)
                 return fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv
@@ -867,7 +867,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel = jnp.reshape(kernel, kernel_shape)
             contract_ind = tuple(range(0, len(axis)))
 
-            if FP8Helper.enable_fp8():
+            if FP8Helper.is_fp8_enabled():
                 fp8_gemm_package = FP8GemmPackage(
                     1, y, [kernel], fp8_max[:FP8Helper.NUM_META_PER_GEMM, :],
                     fp8_metas_amax[:FP8Helper.NUM_META_PER_GEMM, :],
@@ -936,7 +936,7 @@ class LayerNormMLP(TransformerEngineBase):
 
             contract_ind = tuple(range(0, len(axis)))
 
-            if FP8Helper.enable_fp8():
+            if FP8Helper.is_fp8_enabled():
                 fp8_gemm_package = FP8GemmPackage(
                     1, z, [kernel], fp8_max[FP8Helper.NUM_META_PER_GEMM:, :],
                     fp8_metas_amax[FP8Helper.NUM_META_PER_GEMM:, :],
