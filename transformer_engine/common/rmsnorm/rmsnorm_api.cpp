@@ -97,7 +97,7 @@ BwdFunction &get_bwd_launcher(DType wtype, DType itype, DType otype, DType ctype
 // ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline size_t product(const std::vector<size_t> &shape) {
-    return std::reduce(shape.cbegin(), shape.cend(), size_t{1}, std::multiplies<>());
+    return std::accumulate(shape.cbegin(), shape.cend(), size_t{1}, std::multiplies<>());
 }
 
 }  // namespace rmsnorm

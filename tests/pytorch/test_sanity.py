@@ -351,7 +351,8 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("bias", all_boolean)
+def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, bias):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -375,6 +376,7 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamm
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             zero_centered_gamma=zero_centered_gamma,
+            bias=bias,
         )
         .to(dtype=dtype)
         .cuda()

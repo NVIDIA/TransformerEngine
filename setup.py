@@ -105,7 +105,6 @@ for s in args:
     if s.startswith("--framework="):
         framework = s.replace("--framework=", "")
         sys.argv.remove(s)
-
 if framework not in supported_frameworks.keys():
     raise ValueError("Unsupported framework " + framework)
 
