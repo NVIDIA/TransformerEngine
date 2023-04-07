@@ -142,17 +142,56 @@ void transpose(const Tensor &input,
              "Input and output type must match.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(input.data.dtype, Type,
-    // Check if data dims match tiling scheme
+    constexpr const char *type_name = TypeInfo<Type>::name;
     constexpr int type_size = sizeof(Type);
+
+    // Choose between runtime-compiled or statically-compiled kernel
     constexpr int tile_size = vector_size / type_size * THREADS_PER_WARP;
     const bool full_tile = row_length % tile_size == 0 && num_rows % tile_size == 0;
-
-    if (full_tile && rtc::is_enabled()) {
-      constexpr const char *type_name = TypeInfo<Type>::name;
+    if (full_tile && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
+      // Determine kernel config
       int load_size = 8;
       int store_size = 8;
+      auto num_blocks = [&](int load_size_, int store_size_) -> int {
+        const int row_tile_size = load_size_ / type_size * THREADS_PER_WARP;
+        const int col_tile_size = store_size_ / type_size * THREADS_PER_WARP;
+        return (row_length / row_tile_size) * (num_rows / col_tile_size);
+      };
+      do {
+        // Try maximizing SM occupancy without sacrificing cache
+        // efficiency
+        // Note: 32 threads/warp access 128B L1 cache line, so 4B
+        // loads/stores achieve full cache efficiency
+        const int sm_count = cuda::sm_count();
+        if constexpr (type_size > 4) break;
+        if (num_blocks(load_size, store_size) >= 2*sm_count) break;
+        load_size = 8; store_size = 4;
+        if (num_blocks(load_size, store_size) >= 2*sm_count) break;
+        load_size = 4; store_size = 4;
+        if (num_blocks(load_size, store_size) >= sm_count) break;
 
-      // Tuned runtime-compiled kernel
+        // Simple performance model to balance SM occupancy and cache
+        // efficiency
+        auto cost = [&](int load_size_, int store_size_) -> double {
+          int active_sms = std::min(sm_count, num_blocks(load_size_, store_size_));
+          // Amortize memory accesses over 128B L1 cache line
+          double load_cost = 1.0 / std::min(128u, load_size_ * THREADS_PER_WARP);
+          double store_cost = 1.0 / std::min(128u, store_size_ * THREADS_PER_WARP);
+          return (load_cost + store_cost) / active_sms;
+        };
+        if constexpr (type_size > 2) break;
+        if (cost(4,2) >= cost(load_size, store_size)) break;
+        load_size = 4; store_size = 2;
+        if (cost(2,2) >= cost(load_size, store_size)) break;
+        load_size = 2; store_size = 2;
+        if constexpr (type_size > 1) break;
+        if (cost(2,1) >= cost(load_size, store_size)) break;
+        load_size = 2; store_size = 1;
+        if (cost(1,1) >= cost(load_size, store_size)) break;
+        load_size = 1; store_size = 1;
+      } while (false);
+
+      // Compile NVRTC kernel if needed and launch
       auto& rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = concat_strings("transpose"
                                                       ",type=",type_name,
@@ -170,13 +209,12 @@ void transpose(const Tensor &input,
                             code,
                             "transformer_engine/common/transpose/rtc/transpose.cu");
       }
-      const int num_blocks = (row_length / tile_size) * (num_rows / tile_size);
-      rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
+      rtc_manager.launch(kernel_label,
+                         num_blocks(load_size, store_size), block_size, 0, stream,
                          static_cast<const Type *>(input.data.dptr),
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
-    } else {
-      // General kernel
+    } else {  // Statically-compiled general kernel
       const int num_blocks = DIVUP(row_length, tile_size) * DIVUP(num_rows, tile_size);
       transpose_general_kernel<Type><<<num_blocks,block_size,0,stream>>>(
         static_cast<const Type *>(input.data.dptr),

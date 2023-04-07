@@ -30,11 +30,28 @@ int current_device() {
 
 int sm_arch(int device_id) {
   static std::vector<int> cache(num_devices(), -1);
+  if (device_id < 0) {
+    device_id = current_device();
+  }
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
   if (cache[device_id] < 0) {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     cache[device_id] = 10*prop.major + prop.minor;
+  }
+  return cache[device_id];
+}
+
+int sm_count(int device_id) {
+  static std::vector<int> cache(num_devices(), -1);
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  if (cache[device_id] < 0) {
+    cudaDeviceProp prop;
+    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
+    cache[device_id] = prop.multiProcessorCount;
   }
   return cache[device_id];
 }

@@ -46,6 +46,14 @@ public:
    *
    * Loads the kernel into the device the first time the device is
    * accessed.
+   *
+   * \param[in] device_id        CUDA device
+   * \param[in] grid_dim         Grid dimensions in blocks
+   * \param[in] block_dim        Thread block dimensions
+   * \param[in] shared_mem_bytes Dynamic shared-memory size per thread block in
+   *                             bytes
+   * \param[in] stream           CUDA stream
+   * \param[in] args             Kernel arguments
    */
   template <typename... ArgTs>
   void launch(int device_id,
@@ -98,24 +106,45 @@ private:
 /*! \brief Singleton class to manage runtime-compiled CUDA kernels */
 class KernelManager {
 public:
-  /*! \brief Access singleton */
+  /*! \brief Get singleton instance */
   static KernelManager& instance();
 
   /*! \brief Compile CUDA kernel for current CUDA device
+   *
+   * The compiled kernel is cached and made available for launching.
+   *
+   * \param[in] kernel_label Unique identifying string for kernel
+   * \param[in] kernel_name  Kernel name within source code
+   * \param[in] code         Kernel source code
+   * \param[in] filename     Path to associate with source code,
+   *                         primarily for debugging
    */
   void compile(const std::string &kernel_label,
                const std::string &kernel_name,
                const std::string &code,
                const std::string &filename);
 
-  /*! \brief Whether CUDA kernel has been compiled for current CUDA
-   * device.
+  /*! \brief Whether CUDA kernel has been compiled for CUDA device
+   *
+   * \param[in] kernel_label Unique identifying string for kernel
+   * \param[in] device_id    CUDA device (default is current device)
+
+   * \return Whether kernel has been compiled
    */
-  bool is_compiled(const std::string &kernel_label) const;
+  bool is_compiled(const std::string &kernel_label,
+                   int device_id = -1) const;
 
   /*! \brief Launch CUDA kernel on current CUDA device
    *
    * Assumes the kernel has already been compiled.
+   *
+   * \param[in] kernel_label     Unique identifying string for kernel
+   * \param[in] grid_dim         Grid dimensions in blocks
+   * \param[in] block_dim        Thread block dimensions
+   * \param[in] shared_mem_bytes Dynamic shared-memory size per thread block in
+   *                             bytes
+   * \param[in] stream           CUDA stream
+   * \param[in] args             Kernel arguments
    */
   template <typename... ArgTs>
   void launch(const std::string &kernel_label,
@@ -147,7 +176,13 @@ private:
   KernelManager(const KernelManager&) = delete;
   KernelManager& operator=(const KernelManager&) = delete;
 
-  /*! \brief Construct key for kernel cache */
+  /*! \brief Construct key for kernel cache
+   *
+   * \param[in] kernel_label     Unique identifying string for kernel
+   * \param[in] device_id    CUDA device (default is current device)
+   *
+   * \return Key for kernel cache
+   */
   std::string get_kernel_cache_key(const std::string &kernel_label,
                                    int device_id) const;
 };

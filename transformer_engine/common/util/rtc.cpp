@@ -63,7 +63,7 @@ bool is_enabled() {
       if (!cuda::include_directory().empty()) {
         is_enabled_ = true;
       } else {
-        std::cerr << ("Transformer Engine could not find CUDA SDK headers, "
+        std::cerr << ("Transformer Engine could not find CUDA Toolkit headers, "
                       "disabling NVRTC support. "
                       "Set NVTE_CUDA_INCLUDE_DIR to enable NVRTC support "
                       "or set NVTE_DISABLE_NVRTC=1 to silence this warning.\n");
@@ -239,8 +239,7 @@ void KernelManager::compile(const std::string &kernel_label,
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
 }
 
-bool KernelManager::is_compiled(const std::string &kernel_label) const {
-  const int device_id = cuda::current_device();
+  bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   return kernel_cache_.count(key) > 0;
 }

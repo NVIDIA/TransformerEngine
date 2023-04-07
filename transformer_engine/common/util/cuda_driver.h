@@ -24,10 +24,13 @@ void *get_symbol(const char *symbol);
 /*! \brief Call function in CUDA driver library
  *
  * The CUDA driver library (libcuda.so.1 on Linux) may be different at
- * compile-time and run-time. In particular, the CUDA SDK provides
+ * compile-time and run-time. In particular, the CUDA Toolkit provides
  * stubs for the driver library in case compilation is on a system
  * without GPUs. Indirect function calls into a lazily-initialized
  * library ensures we are accessing the correct version.
+ *
+ * \param[in] symbol Function name
+ * \param[in] args   Function arguments
  */
 template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {

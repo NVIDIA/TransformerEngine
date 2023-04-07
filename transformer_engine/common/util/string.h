@@ -28,7 +28,7 @@ constexpr const char *to_string_like(const char *val) noexcept {
   return val;
 }
 
-/*! \brief Convert arguments to string and concatenate */
+/*! \brief Convert arguments to strings and concatenate */
 template <typename... Ts>
 inline std::string concat_strings(const Ts &... args) {
   std::string str;
