@@ -237,9 +237,12 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     torch.cuda.synchronize()
 
 
-def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad):
+def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad):
+    if skip_dgrad and skip_wgrad:
+        pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")
+
     te_inp = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=not skip_dgrad
     ).cuda()
 
     if skip_wgrad:
@@ -261,7 +264,8 @@ def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad):
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("skip_dgrad", all_boolean)
+def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -281,7 +285,7 @@ def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -289,7 +293,8 @@ def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
-def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
+@pytest.mark.parametrize("skip_dgrad", all_boolean)
+def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad, skip_dgrad):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -305,7 +310,7 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -314,7 +319,8 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("skip_dgrad", all_boolean)
+def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -336,7 +342,7 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
         .to(dtype=dtype)
         .cuda()
     )
-    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
