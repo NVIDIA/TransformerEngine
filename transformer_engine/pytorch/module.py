@@ -2627,7 +2627,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     eps : float, default = 1e-5
          a value added to the denominator of layer normalization for numerical stability.
     bias : bool, default = `True`
-          if set to `False`, the FC2 layer will not learn an additive bias.
+          if set to `False`, the FC1 and FC2 layers will not learn an additive bias.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.

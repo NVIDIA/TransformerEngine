@@ -891,6 +891,9 @@ class TransformerLayer(torch.nn.Module):
                             interpretation is that the individual `q`, `k`, and `v` weights for each
                             attention head are interleaved. This parameter is set to `False` when
                             using :attr:`fuse_qkv_params=False`.
+    bias : bool, default = `True`
+          if set to `False`, the transformer layer will not learn any additive biases.
+
     Parallelism parameters
     ----------------------
     set_parallel_mode : bool, default = `False`
