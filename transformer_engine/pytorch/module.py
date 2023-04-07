@@ -2026,11 +2026,12 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_weight_fp8: Union[torch.Tensor, None],
         fc1_weight_t_fp8: Union[torch.Tensor, None],
         fc1_bias: torch.Tensor,
+        use_fc1_bias: bool,
         fc2_weight: torch.Tensor,
         fc2_weight_fp8: Union[torch.Tensor, None],
         fc2_weight_t_fp8: Union[torch.Tensor, None],
         fc2_bias: torch.Tensor,
-        use_bias: bool,
+        use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -2126,8 +2127,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if activation_dtype == torch.float32
                 else activation_dtype
             )
-            fc1_bias = cast_if_needed(fc1_bias, bias_dtype) if use_bias else fc1_bias
-            fc2_bias = cast_if_needed(fc2_bias, bias_dtype) if use_bias else fc2_bias
+            fc1_bias = cast_if_needed(fc1_bias, bias_dtype) if use_fc1_bias else fc1_bias
+            fc2_bias = cast_if_needed(fc2_bias, bias_dtype) if use_fc2_bias else fc2_bias
 
             if update_fp8_weights:
                 if is_grad_enabled:
@@ -2176,7 +2177,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc1_bias,
-                use_bias=use_bias,
+                use_bias=use_fc1_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
             )
 
@@ -2199,7 +2200,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc2_bias,
-                use_bias=use_bias,
+                use_bias=use_fc2_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
             )
         else:
@@ -2207,10 +2208,10 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_weight = cast_if_needed(fc1_weight, activation_dtype)
             fc2_weight = cast_if_needed(fc2_weight, activation_dtype)
             fc1_bias = (
-                cast_if_needed(fc1_bias, activation_dtype) if use_bias else fc1_bias
+                cast_if_needed(fc1_bias, activation_dtype) if use_fc1_bias else fc1_bias
             )
             fc2_bias = (
-                cast_if_needed(fc2_bias, activation_dtype) if use_bias else fc2_bias
+                cast_if_needed(fc2_bias, activation_dtype) if use_fc2_bias else fc2_bias
             )
 
             if fp8_calibration:
@@ -2227,7 +2228,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc1_bias,
-                use_bias=(not bias_gelu_nvfusion) and use_bias,
+                use_bias=(not bias_gelu_nvfusion) and use_fc1_bias,
                 gelu=not bias_gelu_nvfusion,
             )
 
@@ -2252,7 +2253,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
                 bias=fc2_bias,
-                use_bias=use_bias,
+                use_bias=use_fc2_bias,
             )
         if is_grad_enabled:
             ctx.save_for_backward(
@@ -2275,7 +2276,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_bias = use_bias
+            ctx.use_fc1_bias = use_fc1_bias
+            ctx.use_fc2_bias = use_fc2_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp.shape
@@ -2322,6 +2324,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            ctx.use_bias = ctx.use_fc2_bias # For grad_output_preprocess
             (
                 grad_output,
                 grad_output_c,
@@ -2415,7 +2418,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             get_workspace(),
                             layout="NT",
                             grad=True,
-                            use_bias=ctx.use_bias,
+                            use_bias=False,
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=fc2_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
@@ -2470,7 +2473,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         get_workspace(),
                         layout="NT",
                         grad=True,
-                        use_bias=ctx.use_bias,
+                        use_bias=ctx.use_fc2_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
@@ -2576,9 +2579,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
             )
 
-            if not ctx.use_bias:
-                fc2_bias_grad = None
-
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
@@ -2586,11 +2586,12 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_wgrad if fc1_weight.requires_grad else None,
             None,
             None,
-            fc1_bias_grad,
+            fc1_bias_grad if ctx.use_fc1_bias else None,
+            None,
             fc2_wgrad if fc2_weight.requires_grad else None,
             None,
             None,
-            fc2_bias_grad,
+            fc2_bias_grad if ctx.use_fc2_bias else None,
             None,
             None,
             None,
@@ -2669,7 +2670,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              if set to `True`, enables fusing of creation and accumulation of
                              the weight gradient.
     return_bias : bool, default = `False`
-                 when set to `True`, this module will not apply the additive bias itself, but
+                 when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
@@ -2890,6 +2891,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.weight1_fp8 if self.fp8 else None,
                 self.weight1_t_fp8 if self.fp8 else None,
                 self.fc1_bias,
+                self.use_bias,
                 self.fc2_weight,
                 self.weight2_fp8 if self.fp8 else None,
                 self.weight2_t_fp8 if self.fp8 else None,
