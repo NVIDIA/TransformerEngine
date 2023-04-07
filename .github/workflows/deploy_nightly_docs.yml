@@ -9,7 +9,7 @@ on:
     branches: [ "main" ]
 jobs:
   build:
-    uses: ./.github/workflows/build_docs.yml
+    uses: ./.github/workflows/docs.yml
 
   prepare:
     needs: build
