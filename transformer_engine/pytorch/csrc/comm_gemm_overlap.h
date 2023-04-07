@@ -624,8 +624,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     int _local_rank;
     int _tp_size;
     int _reg;
-    int _next_rank, _prev_rank;
+    int _next_rank, _prev_rank, _rank, _rank_round_tp;
     int _math_sms;
+    int _aggregate2;
     communicator* _ub_comm;
     at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
     at::cuda::CUDAStream _stream_accum = at::cuda::getStreamFromPool();
@@ -642,6 +643,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         int pp_size,
         int tp_size,
         int comm_sm,
+        bool aggregate2,
         bool set_sm_margin)
     {
         // Initialize userbuf communicator
@@ -674,11 +676,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         }
 
         _tp_size = tp_size;
-        _local_rank = (rank % tp_size);
+        _aggregate2 = aggregate2;
 
-        int base_tp_rank = (rank / tp_size) * tp_size;
-        _next_rank = (tp_size + rank + 1) % tp_size + base_tp_rank;
-        _prev_rank = (tp_size + rank + -1) % tp_size + base_tp_rank;
+        _rank = rank;
+        _local_rank = (rank % tp_size);
+        _rank_round_tp = (rank / tp_size) * tp_size;
+        _next_rank = (tp_size + rank + 1) % tp_size + _rank_round_tp;
+        _prev_rank = (tp_size + rank + -1) % tp_size + _rank_round_tp;
 
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, 0);
@@ -732,12 +736,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         const int m = (transa) ? A.size(0) : A.size(1);
         const int k = (transa) ? A.size(1) : A.size(0);
         const int n_chunk = _ubufs[0].size(0);
+
         // Get communication and GEMM output chunk sizes
         const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
-        int output_chunk_bytes = (n_chunk * m) * BFLOAT16_BYTES;
+        const int output_chunk_bytes = (n_chunk * m) * BFLOAT16_BYTES;
         // Create GEMM output buffer and a pointer to its current chunk
         char* output_ptr = reinterpret_cast<char*>(D.data_ptr());
-        int cur_ouput_chunk_id = _local_rank;
 
         // Catch up the default torch stream
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -746,75 +750,162 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_compute, 0));
 
         assert (pre_gelu_out.numel() == 0);
-        torch::Tensor dummy = torch::empty({});
-        for (int i = 0; i < _tp_size; i++) {
-            // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
-            // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks to 
-            // be contiguous after the ring exchanges
-            int send_chunk_id = (_tp_size + _local_rank - i) % _tp_size;
-            int recv_chunk_id = (_tp_size + _local_rank - i - 1) % _tp_size;
+        if (_aggregate2) {
+            const int num_steps = (_aggregate2) ? _tp_size/2 : _tp_size;
+            char* input_b_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
+
+            // Initial 1X input chunk exchange between neighboring peers
+            int send_chunk_id = _local_rank;
+            int recv_chunk_id = (_local_rank%2 == 0) ? _local_rank+1:_local_rank-1;
             int send_offset = comm_bytes * send_chunk_id;
             int recv_offset = comm_bytes * recv_chunk_id;
+            int peer_rank = (_local_rank%2 == 0) ? _next_rank : _prev_rank;
+            userbuffers_send(_reg, send_offset, _reg, send_offset, comm_bytes, _ub_comm, peer_rank, (cudaStream_t) _stream_comm);
+            userbuffers_recv(_reg, recv_offset, _reg, recv_offset, comm_bytes, _ub_comm, peer_rank, (cudaStream_t) _stream_comm);
+            CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t) _stream_comm));
+            CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[0], _start_compute, 0));
 
-            // GEMM
-            torch::Tensor output_chunk = torch::from_blob(
-                output_ptr + (cur_ouput_chunk_id * output_chunk_bytes),
-                {n_chunk, m},
-                D.options()
-            );
-            if (A_scale_inverse.numel())
-                A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+            int local_rank_round2 = (_local_rank%2 == 0) ? _local_rank : _local_rank-1;
+            const int next_rank = (_tp_size + _local_rank + 2) % _tp_size + _rank_round_tp;
+            const int prev_rank = (_tp_size + _local_rank - 2) % _tp_size + _rank_round_tp;
 
-            if (B_scale_inverse.numel())
-                B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+            // Ring exchange of 2X inputs chunks
+            for (int i = 0; i < num_steps; i++) {
+                send_chunk_id = (_tp_size + local_rank_round2 - i*2) % _tp_size;
+                recv_chunk_id = (_tp_size + local_rank_round2 - i*2 - 2) % _tp_size;
+                send_offset = comm_bytes * send_chunk_id;
+                recv_offset = comm_bytes * recv_chunk_id;
 
-            at::cuda::setCurrentCUDAStream(_stream_compute[i]);
-            te_gemm(A,
-                A_scale_inverse,
-                A_type,
-                transa,
-                _ubufs[send_chunk_id],
-                B_scale_inverse,
-                B_type,
-                transb,
-                output_chunk,
-                D_scale,
-                D_type,
-                D_amax,
-                bias,
-                bias_type,
-                pre_gelu_out,
-                grad,
-                _lt_workspaces[i],
-                _lt_workspaces[i].numel(),
-                accumulate,
-                use_split_accumulator,
-                _math_sms);
-
-            if (i < _tp_size - 1) {
-                // P2P communication
-                userbuffers_send(_reg, send_offset, _reg, send_offset, comm_bytes, _ub_comm, _next_rank, (cudaStream_t) _stream_comm);
-                userbuffers_recv(_reg, recv_offset, _reg, recv_offset, comm_bytes, _ub_comm, _prev_rank, (cudaStream_t) _stream_comm);
-                CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));
-                CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i+1], _stop_comm, 0));
-            }
-            else if (B_copy.numel() > 0) {
-                assert (B_copy.numel() == _ubufs[_local_rank].numel());
-                assert (B_copy.element_size() == _ubufs[_local_rank].element_size());
-                CHECK_CUDA(cudaMemcpyAsync(
-                    B_copy.data_ptr(),
-                    _ubufs[_local_rank].data_ptr(),
-                    _ubufs[_local_rank].numel() * _ubufs[_local_rank].element_size(),
-                    cudaMemcpyDeviceToDevice,
-                    (cudaStream_t) _stream_comm)
+                // GEMM
+                torch::Tensor input_b_chunk = torch::from_blob(
+                    input_b_ptr + send_offset,
+                    {n_chunk*2, k},
+                    _ubuf.options()
                 );
+                torch::Tensor output_chunk = torch::from_blob(
+                    output_ptr + (send_chunk_id * output_chunk_bytes),
+                    {n_chunk*2, m},
+                    D.options()
+                );
+                if (A_scale_inverse.numel())
+                    A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+                if (B_scale_inverse.numel())
+                    B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
+                at::cuda::setCurrentCUDAStream(_stream_compute[i]);
+                te_gemm(A,
+                    A_scale_inverse,
+                    A_type,
+                    transa,
+                    input_b_chunk,
+                    B_scale_inverse,
+                    B_type,
+                    transb,
+                    output_chunk,
+                    D_scale,
+                    D_type,
+                    D_amax,
+                    bias,
+                    bias_type,
+                    pre_gelu_out,
+                    grad,
+                    _lt_workspaces[i],
+                    _lt_workspaces[i].numel(),
+                    accumulate,
+                    use_split_accumulator,
+                    _math_sms);
+
+                if (i < num_steps - 1) {
+                    // P2P communication
+                    userbuffers_send(_reg, send_offset, _reg, send_offset, comm_bytes*2, _ub_comm, next_rank, (cudaStream_t) _stream_comm);
+                    userbuffers_recv(_reg, recv_offset, _reg, recv_offset, comm_bytes*2, _ub_comm, prev_rank, (cudaStream_t) _stream_comm);
+                    CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));
+                    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i+1], _stop_comm, 0));
+                }
+                else if (B_copy.numel() > 0) {
+                    assert (B_copy.numel() == _ubufs[_local_rank].numel());
+                    assert (B_copy.element_size() == _ubufs[_local_rank].element_size());
+                    CHECK_CUDA(cudaMemcpyAsync(
+                        B_copy.data_ptr(),
+                        _ubufs[_local_rank].data_ptr(),
+                        _ubufs[_local_rank].numel() * _ubufs[_local_rank].element_size(),
+                        cudaMemcpyDeviceToDevice,
+                        (cudaStream_t) _stream_comm)
+                    );
+                }
             }
+            at::cuda::setCurrentCUDAStream(stream_main);
+            CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[num_steps-1]));
+        } else {
+            // Ring exchange of 1X inputs chunks
 
-            cur_ouput_chunk_id = (_tp_size + cur_ouput_chunk_id - 1) % _tp_size;
+            for (int i = 0; i < _tp_size; i++) {
+                // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
+                // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks to 
+                // be contiguous after the ring exchanges
+                int send_chunk_id = (_tp_size + _local_rank - i) % _tp_size;
+                int recv_chunk_id = (_tp_size + _local_rank - i - 1) % _tp_size;
+                int send_offset = comm_bytes * send_chunk_id;
+                int recv_offset = comm_bytes * recv_chunk_id;
+
+                // GEMM
+                torch::Tensor output_chunk = torch::from_blob(
+                    output_ptr + (send_chunk_id * output_chunk_bytes),
+                    {n_chunk, m},
+                    D.options()
+                );
+                if (A_scale_inverse.numel())
+                    A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+                if (B_scale_inverse.numel())
+                    B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
+                at::cuda::setCurrentCUDAStream(_stream_compute[i]);
+                te_gemm(A,
+                    A_scale_inverse,
+                    A_type,
+                    transa,
+                    _ubufs[send_chunk_id],
+                    B_scale_inverse,
+                    B_type,
+                    transb,
+                    output_chunk,
+                    D_scale,
+                    D_type,
+                    D_amax,
+                    bias,
+                    bias_type,
+                    pre_gelu_out,
+                    grad,
+                    _lt_workspaces[i],
+                    _lt_workspaces[i].numel(),
+                    accumulate,
+                    use_split_accumulator,
+                    _math_sms);
+
+                if (i < _tp_size - 1) {
+                    // P2P communication
+                    userbuffers_send(_reg, send_offset, _reg, send_offset, comm_bytes, _ub_comm, _next_rank, (cudaStream_t) _stream_comm);
+                    userbuffers_recv(_reg, recv_offset, _reg, recv_offset, comm_bytes, _ub_comm, _prev_rank, (cudaStream_t) _stream_comm);
+                    CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));
+                    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i+1], _stop_comm, 0));
+                }
+                else if (B_copy.numel() > 0) {
+                    assert (B_copy.numel() == _ubufs[_local_rank].numel());
+                    assert (B_copy.element_size() == _ubufs[_local_rank].element_size());
+                    CHECK_CUDA(cudaMemcpyAsync(
+                        B_copy.data_ptr(),
+                        _ubufs[_local_rank].data_ptr(),
+                        _ubufs[_local_rank].numel() * _ubufs[_local_rank].element_size(),
+                        cudaMemcpyDeviceToDevice,
+                        (cudaStream_t) _stream_comm)
+                    );
+                }
+            }
+            at::cuda::setCurrentCUDAStream(stream_main);
+            CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[_tp_size-1]));
         }
-        at::cuda::setCurrentCUDAStream(stream_main);
-
-        CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[_tp_size-1]));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_compute, 0));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _stop_compute, 0));
 

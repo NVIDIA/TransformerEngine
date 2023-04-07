@@ -147,7 +147,7 @@ def initialize_ub(
     ]
     # Default overlap methods for layers
     methods = {
-        "ring_exchange":["proj_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
+        "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
         "pipeline":["proj_fprop", "fc2_fprop"],
         "bulk":["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
@@ -170,15 +170,13 @@ def initialize_ub(
         aggregate: int = 0,
     ):
         if method == 'ring_exchange':
-            ub_obj = tex.UbufCommOverlap(
+            ub_obj = tex.UbufP2PCommOverlap(
                     torch.empty(shape, dtype=dtype, device='cuda'),
                     rank,           # rank id
                     1,              # pp size
                     tp_size,        # tp size
-                    1,              # num_sm
-                    1,              # cga_size
-                    num_splits,     # num_splits
-                    0,              # use_rr_kernel
+                    num_sm,         # num_sm
+                    aggregate,      # aggregate 2 chunks into single chunk
                     set_sm_margin,  # set sm margin
                 )
         else:
@@ -836,7 +834,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_split_ag:
             dim_size = list(inputmat.size())
             dim_size[0] = dim_size[0] * tp_world_size
-            ub_obj_lnout, key_lnout = get_ub_p2p(dim_size, torch.uint8 if fp8 else inputmat.dtype, inputmat.device)
+            ub_obj_lnout = get_ub("qkv_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -978,8 +976,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
 
-        if ub_split_ag:
-            free_ub(ub_obj_lnout, key_lnout)
         if is_grad_enabled:
             ctx.save_for_backward(
                 inputmat,
@@ -1046,7 +1042,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
+                ub_obj_lnout = get_ub("qkv_dgrad")
                 ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
             (
                 grad_output,
@@ -1064,13 +1060,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.ub_bulk_dgrad:
-                dim_size = list(ln_out.size())
-                if tp_world_size != 1:
-                    dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout = get_ub("qkv_dgrad")
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
-            elif ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            if (not ctx.ub_bulk_dgrad) and ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -1630,9 +1620,11 @@ class _Linear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        ub_split_ag: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
+        print (f'weight {weight.shape}[-1] != inp {inp.shape}[-1]')
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (
@@ -1762,7 +1754,7 @@ class _Linear(torch.autograd.Function):
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.requires_wgrad = weight.requires_grad
-            ctx.ub_split_ag = False
+            ctx.ub_split_ag = ub_split_ag
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -1787,6 +1779,14 @@ class _Linear(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            if ctx.ub_split_ag:
+                tp_world_size = get_distributed_world_size(ctx.tp_group)
+                if tp_world_size == 1:
+                    ctx.ub_split_ag = False
+            if ctx.ub_split_ag:
+                dim_size = list(grad_output.size())
+                dim_size[0] = dim_size[0] * tp_world_size
+                ctx.ub_obj_gradout = get_ub("proj_dgrad")
             (
                 grad_output,
                 grad_output_c,
@@ -1839,6 +1839,8 @@ class _Linear(torch.autograd.Function):
                     ctx.activation_dtype,
                     get_workspace(),
                     use_split_accumulator=_2X_ACC_DGRAD,
+                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                    ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                 )
             else:
                 # DGRAD
@@ -1849,6 +1851,8 @@ class _Linear(torch.autograd.Function):
                     get_workspace(),
                     layout="NN",
                     grad=True,
+                    ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                    ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                 )
 
             # Overlap dgrad-RS/AR with wgrad
@@ -1864,6 +1868,8 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                        if ctx.ub_split_ag:
+                            grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                         wgrad = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
@@ -1917,6 +1923,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape),
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -2010,6 +2017,7 @@ class Linear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
+        ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -2019,6 +2027,7 @@ class Linear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
+        self.ub_split_ag = ub_split_ag
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -2199,6 +2208,7 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                self.ub_split_ag,
             )
             out = linear_fn(*args)
 
@@ -2274,7 +2284,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if ub_split_ag:
             dim_size = list(inputmat.size())
             dim_size[0] = dim_size[0] * tp_world_size
-            ub_obj_lnout, key_lnout = get_ub_p2p(dim_size, torch.uint8 if fp8 else inputmat.dtype, inputmat.device)
+            ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         if ub_split_rs:
             tp_world_size = get_distributed_world_size(tp_group)
@@ -2421,7 +2431,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_split_rs:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
-                ub_obj_fc2out, key_fc2out = get_ub(dim_size, activation_dtype, fc2_weight.device, num_splits=4, use_rr_kernel=1)
+                ub_obj_fc2out = get_ub("fc2_fprop")
             fc2_out = fp8_gemm(
                 fc2_weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -2484,7 +2494,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_split_rs:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
-                ub_obj_fc2out, key_fc2out = get_ub(dim_size, activation_dtype, fc2_weight.device, num_splits=4, use_rr_kernel=1)
+                ub_obj_fc2out = get_ub("fc2_fprop")
             # fc2_out row: 4096 x 12288
             fc2_out, _, _ = gemm(
                 fc2_weight, #row: 12288 x 6144 --> T --> 6144 x 12288 -> col: 12288 x 6144
@@ -2494,8 +2504,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc2_bias,
                 use_bias=use_bias,
             )
-        if ub_split_ag:
-            free_ub(ub_obj_lnout, key_lnout)
         if is_grad_enabled:
             ctx.save_for_backward(
                 inputmat,
@@ -2573,7 +2581,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout, key_lnout = get_ub(dim_size, ln_out.dtype, ln_out.device)
+                ub_obj_lnout = get_ub("fc1_dgrad")
                 ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
             if ctx.ub_split_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -2582,7 +2590,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.ub_split_ag:
                 dim_size = list(grad_outputs[0].size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ctx.ub_obj_gradout, key_gradout = get_ub_p2p(dim_size, torch.uint8 if ctx.fp8 else grad_outputs[0].dtype, grad_outputs[0].device)
+                ctx.ub_obj_gradout = get_ub("fc2_dgrad")
 
             (
                 grad_output,
@@ -2598,13 +2606,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.ub_bulk_dgrad:
-                dim_size = list(ln_out.size())
-                if tp_world_size != 1:
-                    dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout = get_ub("fc1_dgrad")
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
-            elif ctx.set_parallel_mode and ctx.sequence_parallel:
+            if (not ctx.ub_bulk_dgrad) and ctx.set_parallel_mode and ctx.sequence_parallel:
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
@@ -2644,7 +2646,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 if ctx.ub_split_ag:
                     grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                    free_ub(ub_obj_gradout, key_gradout)
                 # FC2 WGRAD
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     if fc2_weight.requires_grad:
