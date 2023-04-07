@@ -16,9 +16,9 @@
 #else
 // Importing C++ standard headers is a pain with NVRTC
 using uint8_t = unsigned char;
-using uint16_t = unsigned short int;
+using uint16_t = unsigned short int;  // NOLINT(*)
 using uint32_t = unsigned int;
-using uint64_t = unsigned long long int;
+using uint64_t = unsigned long long int;  // NOLINT(*)
 static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);

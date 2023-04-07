@@ -50,7 +50,7 @@ inline void check_cuda_driver_(CUresult status) {
   if (status != CUDA_SUCCESS) {
     const char *description;
     transformer_engine::cuda_driver::call("cuGetErrorString", &description);
-    NVTE_ERROR(transformer_engine::concat_strings("CUDA Error: ",description));
+    NVTE_ERROR(transformer_engine::concat_strings("CUDA Error: ", description));
   }
 }
 

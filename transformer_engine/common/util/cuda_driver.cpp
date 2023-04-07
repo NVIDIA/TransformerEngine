@@ -19,9 +19,8 @@ namespace {
  * \todo Windows support
  */
 class Library {
-public:
-
-  Library(const char *filename) {
+ public:
+  explicit Library(const char *filename) {
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__)
     // TODO Windows support
     NVTE_ERROR("Shared library initialization is not supported with Windows");
@@ -75,9 +74,8 @@ public:
 #endif  // _WIN32 or _WIN64 or __WINDOW__
   }
 
-private:
+ private:
   void *handle_ = nullptr;
-
 };
 
 void swap(Library& first, Library& second) noexcept {

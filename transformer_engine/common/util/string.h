@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_STRING_H_
 
-#include <regex>
+#include <regex>  // NOLINT(*)
 #include <string>
 #include <type_traits>
 

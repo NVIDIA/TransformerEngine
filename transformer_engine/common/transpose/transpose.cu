@@ -126,8 +126,9 @@ transpose_general_kernel(const Type * const input,
 }
 
 void transpose(const Tensor &input,
-               Tensor &output,
+               Tensor *output_,
                cudaStream_t stream) {
+  Tensor &output = *output_;
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output.data.shape.size() == 2, "Output must have 2 dimensions.");
   const int row_length = input.data.shape[1];
@@ -180,23 +181,23 @@ void transpose(const Tensor &input,
           return (load_cost + store_cost) / active_sms;
         };
         if constexpr (type_size > 2) break;
-        if (cost(4,2) >= cost(load_size, store_size)) break;
+        if (cost(4, 2) >= cost(load_size, store_size)) break;
         load_size = 4; store_size = 2;
-        if (cost(2,2) >= cost(load_size, store_size)) break;
+        if (cost(2, 2) >= cost(load_size, store_size)) break;
         load_size = 2; store_size = 2;
         if constexpr (type_size > 1) break;
-        if (cost(2,1) >= cost(load_size, store_size)) break;
+        if (cost(2, 1) >= cost(load_size, store_size)) break;
         load_size = 2; store_size = 1;
-        if (cost(1,1) >= cost(load_size, store_size)) break;
+        if (cost(1, 1) >= cost(load_size, store_size)) break;
         load_size = 1; store_size = 1;
       } while (false);
 
       // Compile NVRTC kernel if needed and launch
       auto& rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = concat_strings("transpose"
-                                                      ",type=",type_name,
-                                                      ",load_size=",load_size,
-                                                      ",store_size",store_size);
+                                                      ",type=", type_name,
+                                                      ",load_size=", load_size,
+                                                      ",store_size", store_size);
       if (!rtc_manager.is_compiled(kernel_label)) {
         std::string code = code_string_transpose_rtc_transpose_cu;
         code = regex_replace(code, "__TYPE__", type_name);
@@ -216,7 +217,7 @@ void transpose(const Tensor &input,
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
       const int num_blocks = DIVUP(row_length, tile_size) * DIVUP(num_rows, tile_size);
-      transpose_general_kernel<Type><<<num_blocks,block_size,0,stream>>>(
+      transpose_general_kernel<Type><<<num_blocks, block_size, 0, stream>>>(
         static_cast<const Type *>(input.data.dptr),
         static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
@@ -232,6 +233,6 @@ void nvte_transpose(const NVTETensor input,
   NVTE_API_CALL(nvte_transpose);
   using namespace transformer_engine;
   transpose(*reinterpret_cast<const Tensor*>(input),
-            *reinterpret_cast<Tensor*>(output),
+            reinterpret_cast<Tensor*>(output),
             stream);
 }

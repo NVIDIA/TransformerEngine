@@ -171,13 +171,13 @@ void KernelManager::compile(const std::string &kernel_label,
 #endif
     "--std=c++17"};
   if (compile_ptx) {
-    opts.push_back(concat_strings("--gpu-architecture=compute_",compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
   } else {
-    opts.push_back(concat_strings("--gpu-architecture=sm_",compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
-  opts.push_back(concat_strings("-I",cuda::include_directory()));
+  opts.push_back(concat_strings("-I", cuda::include_directory()));
   std::vector<const char*> opts_ptrs;
-  for (const auto& opt: opts) {
+  for (const auto& opt : opts) {
     opts_ptrs.push_back(opt.c_str());
   }
 
@@ -246,7 +246,7 @@ void KernelManager::compile(const std::string &kernel_label,
 
 std::string KernelManager::get_kernel_cache_key(const std::string &kernel_label,
                                                 int device_id) const {
-  return concat_strings("sm=",cuda::sm_arch(device_id),",",kernel_label);
+  return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);
 }
 
 }  // namespace rtc

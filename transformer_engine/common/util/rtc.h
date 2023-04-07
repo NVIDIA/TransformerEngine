@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
-#include <mutex>
+#include <mutex>  // NOLINT(*)
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -34,7 +34,7 @@ bool is_enabled();
 
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
-public:
+ public:
   Kernel(std::string mangled_name, std::string compiled_code);
   ~Kernel();
   Kernel(const Kernel&) = delete;  // move-only
@@ -84,7 +84,7 @@ public:
    */
   CUfunction get_function(int device_id);
 
-private:
+ private:
   /*! \brief Mangled function name */
   std::string mangled_name_;
   /*! \brief  Compiled assembly, either in PTX or cubin format */
@@ -105,7 +105,7 @@ private:
 
 /*! \brief Singleton class to manage runtime-compiled CUDA kernels */
 class KernelManager {
-public:
+ public:
   /*! \brief Get singleton instance */
   static KernelManager& instance();
 
@@ -165,7 +165,7 @@ public:
                                  std::forward<ArgTs>(args)...);
   }
 
-private:
+ private:
   /*! \brief Compiled kernels */
   std::unordered_map<std::string, Kernel> kernel_cache_;
   /*! \brief Mutex for thread-safe compilation */

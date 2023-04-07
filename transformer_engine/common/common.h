@@ -60,10 +60,11 @@ using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 
 namespace detail {
+
 template <typename T>
-constexpr const char *type_name() noexcept;
+constexpr inline const char *type_name() noexcept;
 #define TRANSFORMER_ENGINE_TYPE_NAME(T) \
-template <> constexpr const char *type_name<T>() noexcept { return #T; }
+  template <> inline constexpr const char *type_name<T>() noexcept { return #T; }
 TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
@@ -72,7 +73,8 @@ TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #undef TRANSFORMER_ENGINE_TYPE_NAME
-}
+
+}  // namespace detail
 
 template <typename T>
 struct TypeInfo{
