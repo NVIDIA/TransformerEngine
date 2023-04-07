@@ -1088,7 +1088,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("split_overlap_rs", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output)
-//    .def("test_p2p_exchange", &ubuf::UbufP2PCommOverlap::test_p2p_exchange)
+    .def("test_p2p_exchange", &ubuf::UbufP2PCommOverlap::test_p2p_exchange)
     .def("test_send_recv", &ubuf::UbufP2PCommOverlap::test_send_recv);
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
