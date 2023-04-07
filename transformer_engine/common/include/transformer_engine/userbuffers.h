@@ -201,6 +201,10 @@ for(int slice=0;slice<ncslices;slice++)
 */
 void reducescatter2_userbuff_inplace(const int handler,const int offset,const int elements,communicator* comm,cudaStream_t stream=0);
 void reducescatter2_userbuff(void* output, const int handler,const int offset,const int elements, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_stridedoutput(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
+/* everything should be 16byte aligned = 8 elts aligned
+output is strided: row starts separated by stride elements*/
+
 
 /*  inplace allreduce: works only with buffers registered by previous call. offset should be same for all peers */
 
