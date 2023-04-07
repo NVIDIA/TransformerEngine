@@ -42,9 +42,9 @@ inline std::string concat_strings(const Ts &... args) {
  * This is a convenience wrapper around std::regex_replace.
  */
 template <typename T>
-std::string regex_replace(const std::string &str,
-                          const std::string &pattern,
-                          const T &replacement) {
+inline std::string regex_replace(const std::string &str,
+                                 const std::string &pattern,
+                                 const T &replacement) {
   return std::regex_replace(str,
                             std::regex(pattern),
                             to_string_like(replacement));
