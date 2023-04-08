@@ -1620,6 +1620,7 @@ class _Linear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        ub_split_rs: bool,
         ub_split_ag: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
@@ -1935,6 +1936,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -2016,6 +2018,7 @@ class Linear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
+        ub_split_rs: bool = False,
         ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
@@ -2026,6 +2029,7 @@ class Linear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
+        self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
 
         if tp_group is None:
@@ -2207,6 +2211,7 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                self.ub_split_rs,
                 self.ub_split_ag,
             )
             out = linear_fn(*args)
@@ -2281,8 +2286,6 @@ class _LayerNormMLP(torch.autograd.Function):
             if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
                 ub_split_ag = False
         if ub_split_ag:
-            dim_size = list(inputmat.size())
-            dim_size[0] = dim_size[0] * tp_world_size
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         if ub_split_rs:
@@ -2428,10 +2431,14 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ub_split_rs:
+                ub_obj_fc2out = get_ub("fc2_fprop")
+                fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+            else:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
-                ub_obj_fc2out = get_ub("fc2_fprop")
-            fc2_out = fp8_gemm(
+                fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
+
+            _ = fp8_gemm(
                 fc2_weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM2_WEIGHT,
@@ -2445,6 +2452,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc2_bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
+                out=fc2_out,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
+                ub=ub_obj_fc2out if ub_split_rs else None
             )
         else:
             # Cast for native AMP
@@ -2491,17 +2501,23 @@ class _LayerNormMLP(torch.autograd.Function):
                     torch.amax(fc2_weight).float()
 
             if ub_split_rs:
+                ub_obj_fc2out = get_ub("fc2_fprop")
+                fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+            else:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
-                ub_obj_fc2out = get_ub("fc2_fprop")
+                fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
             # fc2_out row: 4096 x 12288
-            fc2_out, _, _ = gemm(
+            _, _, _ = gemm(
                 fc2_weight, #row: 12288 x 6144 --> T --> 6144 x 12288 -> col: 12288 x 6144
                 gelu_out,   #row: 4096 x 6144  --> N --> 4096 x 6144  -> col: 6144 x 4096
                 activation_dtype,
                 get_workspace(),
                 bias=fc2_bias,
                 use_bias=use_bias,
+                out=fc2_out,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
+                ub=ub_obj_fc2out if ub_split_rs else None
             )
         if is_grad_enabled:
             ctx.save_for_backward(
@@ -2539,7 +2555,9 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_split_ag = ub_split_ag
 
         # Row Parallel Linear
-        if not ub_split_rs and set_parallel_mode and sequence_parallel:
+        if ub_split_rs:
+            fc2_out = ub_obj_fc2out.get_ubuf_output(0)
+        elif set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
         elif set_parallel_mode and tensor_parallel:
             fc2_out, _ = allreduce(fc2_out, tp_group)

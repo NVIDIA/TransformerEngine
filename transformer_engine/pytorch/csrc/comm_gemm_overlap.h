@@ -34,7 +34,8 @@ enum COMM_TYPE{
 enum UBOverlapAlgo{
   BULK_OVERLAP_AG = 0,
   BULK_OVERLAP_RS = 1,
-  SPLIT_PIPELINED_AG = 2
+  SPLIT_PIPELINED_AG = 2,
+  SPLIT_PIPELINED_RS = 3
 };
 
 
@@ -239,6 +240,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         if (B_scale_inverse.numel())
             B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
+        assert (pre_gelu_out.numel() == 0);
         te_gemm(A,
             A_scale_inverse,
             A_type,
@@ -280,28 +282,44 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     /*
     ** Split FPROP GEMM + ReduceScatter
     */
-    torch::Tensor split_overlap_rs(torch::Tensor input_a, torch::Tensor input_b, bool fp8, bool gemm_overlap)
+    torch::Tensor split_overlap_rs(at::Tensor A,
+                      at::Tensor A_scale_inverse,
+                      int64_t A_fp8_tensor,
+                      transformer_engine::DType A_type,
+                      bool transa,
+                      at::Tensor B,
+                      at::Tensor B_scale_inverse,
+                      int64_t B_fp8_tensor,
+                      transformer_engine::DType B_type,
+                      bool transb,
+                      at::Tensor D,
+                      at::Tensor D_scale,
+                      transformer_engine::DType D_type,
+                      at::Tensor D_amax,
+                      at::Tensor bias,
+                      transformer_engine::DType bias_type,
+                      at::Tensor pre_gelu_out,
+                      bool grad,
+                      at::Tensor workspace,
+                      size_t workspaceSize,
+                      bool accumulate,
+                      bool use_split_accumulator)
     {
-        // FPROP only
-        bool transa = true;
-        bool transb = false;
-
         // Get GEMM dimensions
-        int m = input_a.size(0);
-        int k = input_a.size(1);
-        int n = input_b.size(0);
+        int m = A.size(0);
+        int k = A.size(1);
+        int n = B.size(0);
         int m_chunk = m / _num_splits;
         int input_a_chunk_size = m_chunk * k;
         int output_chunk_size = n * m_chunk;
 
         // Get input and output data pointers
-        char* input_a_chunk_ptr = reinterpret_cast<char*>(input_a.data_ptr());
+        char* input_a_chunk_ptr = reinterpret_cast<char*>(A.data_ptr());
         char* output_buf_chunk_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
 
         torch::Tensor rs_output = torch::empty({n / _tp_size, m}, _ubuf.options());
         char* rs_output_ptr = reinterpret_cast<char*>(rs_output.data_ptr());
         int ubuf_offset = 0;
-        torch::Tensor dummy = torch::empty({});
 
         // Catch up the default torch stream
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -310,150 +328,115 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_compute[i], _start_compute, 0));
         }
 
-        if (gemm_overlap) {
+        torch::Tensor input_a_chunk = torch::from_blob(
+            input_a_chunk_ptr,
+            {m_chunk, k},
+            A.options()
+        );
+        torch::Tensor output_chunk = torch::from_blob(
+            output_buf_chunk_ptr,
+            {n, m_chunk},
+            _ubuf.options()
+        );
+        if (A_scale_inverse.numel())
+            A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+        if (B_scale_inverse.numel())
+            B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
+        assert (pre_gelu_out.numel() == 0);
+        at::cuda::setCurrentCUDAStream(_stream_compute[0]);
+        te_gemm(input_a_chunk,
+            A_scale_inverse,
+            A_type,
+            transa,
+            B,
+            B_scale_inverse,
+            B_type,
+            transb,
+            output_chunk,
+            D_scale,
+            D_type,
+            D_amax,
+            bias,
+            bias_type,
+            pre_gelu_out,
+            grad,
+            _lt_workspaces[0],
+            workspaceSize,
+            accumulate,
+            use_split_accumulator,
+            _math_sms);
+
+        for (int i = 1; i < _num_splits; i++) {
+            input_a_chunk_ptr += input_a_chunk_size * B.element_size();
+            output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
+
             torch::Tensor input_a_chunk = torch::from_blob(
                 input_a_chunk_ptr,
                 {m_chunk, k},
-                input_a.options()
+                A.options()
             );
             torch::Tensor output_chunk = torch::from_blob(
                 output_buf_chunk_ptr,
                 {n, m_chunk},
                 _ubuf.options()
             );
-            matmul_cuda(
-                input_a_chunk,
-                input_b,
-                output_chunk,
-                dummy,
-                m_chunk,
-                n,
-                k,
+            at::cuda::setCurrentCUDAStream(_stream_compute[i]);
+            te_gemm(input_a_chunk,
+                A_scale_inverse,
+                A_type,
                 transa,
+                B,
+                B_scale_inverse,
+                B_type,
                 transb,
-                (cudaStream_t) _stream_compute[0],
-                (void*) _lt_workspaces[0].data_ptr(),
-                _math_sms,
-                true,   // fast accum
-                fp8,
-                false   // no wgrad accum
-            );
+                output_chunk,
+                D_scale,
+                D_type,
+                D_amax,
+                bias,
+                bias_type,
+                pre_gelu_out,
+                grad,
+                _lt_workspaces[i],
+                workspaceSize,
+                accumulate,
+                use_split_accumulator,
+                _math_sms);
 
-            for (int i = 1; i < _num_splits; i++) {
-                input_a_chunk_ptr += input_a_chunk_size * input_b.element_size();
-                output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
-
-                torch::Tensor input_a_chunk = torch::from_blob(
-                    input_a_chunk_ptr,
-                    {m_chunk, k},
-                    input_a.options()
-                );
-                torch::Tensor output_chunk = torch::from_blob(
-                    output_buf_chunk_ptr,
-                    {n, m_chunk},
-                    _ubuf.options()
-                );
-                matmul_cuda(
-                    input_a_chunk,
-                    input_b,
-                    output_chunk,
-                    dummy,
-                    m_chunk,
-                    n,
-                    k,
-                    transa,
-                    transb,
-                    (cudaStream_t) _stream_compute[i],
-                    (void*) _lt_workspaces[i].data_ptr(),
-                    _math_sms,
-                    true,   // fast accum
-                    fp8,
-                    false   // no wgrad accum
-                );
-
-                CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t) _stream_compute[i-1]));
-                CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_comm, 0));
-
-                // Communication chunk
-                reducescatter2_userbuff_stridedoutput(
-                    rs_output_ptr,
-                    _handle,
-                    (i-1) * output_chunk_size,
-                    m_chunk,
-                    n,
-                    m,
-                    _ub_comm,
-                    (cudaStream_t) _stream_comm
-                );
-
-                rs_output_ptr += m_chunk * _ubuf.element_size();
-            }
-            CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t) _stream_compute[_num_splits-1]));
+            CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t) _stream_compute[i-1]));
             CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_comm, 0));
 
             // Communication chunk
             reducescatter2_userbuff_stridedoutput(
                 rs_output_ptr,
                 _handle,
-                (_num_splits-1) * output_chunk_size,
+                (i-1) * output_chunk_size,
                 m_chunk,
                 n,
                 m,
                 _ub_comm,
                 (cudaStream_t) _stream_comm
             );
-        } else {
-            for (int i = 0; i < _num_splits; i++) {
-                torch::Tensor input_a_chunk = torch::from_blob(
-                    input_a_chunk_ptr,
-                    {m_chunk, k},
-                    input_a.options()
-                );
-                torch::Tensor output_chunk = torch::from_blob(
-                    output_buf_chunk_ptr,
-                    {n, m_chunk},
-                    _ubuf.options()
-                );
 
-                // GEMM chunk
-                matmul_cuda(
-                    input_a_chunk,
-                    input_b,
-                    output_chunk,
-                    dummy,
-                    m_chunk,
-                    n,
-                    k,  
-                    transa,
-                    transb,
-                    (cudaStream_t) _stream_compute[i],
-                    (void*) _lt_workspaces[i].data_ptr(),
-                    _math_sms,
-                    true,   // fast accum
-                    fp8,
-                    false   // no wgrad accum
-                );
-
-                CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t) _stream_compute[i]));
-                CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_comm, 0));
-
-                // Communication chunk
-                reducescatter2_userbuff_stridedoutput(
-                    rs_output_ptr,
-                    _handle,
-                    i * output_chunk_size,
-                    m_chunk,
-                    n,
-                    m,
-                    _ub_comm,
-                    (cudaStream_t) _stream_comm
-                );
-
-                rs_output_ptr += m_chunk * _ubuf.element_size();
-                input_a_chunk_ptr += input_a_chunk_size * input_b.element_size();
-                output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
-            }
+            rs_output_ptr += m_chunk * _ubuf.element_size();
         }
+        at::cuda::setCurrentCUDAStream(stream_main);
+        CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t) _stream_compute[_num_splits-1]));
+        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) _stream_comm, _start_comm, 0));
+
+        // Communication chunk
+        reducescatter2_userbuff_stridedoutput(
+            rs_output_ptr,
+            _handle,
+            (_num_splits-1) * output_chunk_size,
+            m_chunk,
+            n,
+            m,
+            _ub_comm,
+            (cudaStream_t) _stream_comm
+        );
 
         CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t) _stream_compute[_num_splits-1]));
         CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t) _stream_comm));

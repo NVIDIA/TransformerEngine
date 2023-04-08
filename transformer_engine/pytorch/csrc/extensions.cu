@@ -1069,6 +1069,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
     .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
     .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
+    .value("SPLIT_PIPELINED_RS", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS)
     .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")

@@ -94,6 +94,8 @@ def fp8_gemm(
             fn = ub.split_overlap_ag
             extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
             args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+            fn = ub.split_overlap_rs
     _ = fn(*args)
 
     if return_output:
@@ -198,6 +200,8 @@ def gemm(
             fn = ub.split_overlap_ag
             extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
             args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+            fn = ub.split_overlap_rs
     _ = fn(*args)
 
     if return_output:
