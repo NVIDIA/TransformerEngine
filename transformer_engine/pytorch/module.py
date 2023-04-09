@@ -1353,6 +1353,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
+        print (f'LayerNormLinear ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1633,6 +1634,10 @@ class _Linear(torch.autograd.Function):
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
+        if ub_split_rs:
+            tp_world_size = get_distributed_world_size(tp_group)
+            if tp_world_size == 1:
+                ub_split_rs = False
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
@@ -1696,7 +1701,14 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                     )
 
-            out = fp8_gemm(
+            if ub_split_rs:
+                ub_obj_projout = get_ub("proj_fprop")
+                out = ub_obj_projout.get_ubuf_output(1)
+            else:
+                dim_size = list(inputmat_total.size())
+                dim_size[1] = weight.size(0)
+                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+            _ = fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -1710,6 +1722,9 @@ class _Linear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
+                out=out,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
+                ub=ub_obj_projout if ub_split_rs else None
             )
         else:
             # Cast for native AMP
@@ -1724,13 +1739,23 @@ class _Linear(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
                     torch.amax(weight).float()
 
-            out, _, _ = gemm(
+            if ub_split_rs:
+                ub_obj_projout = get_ub("proj_fprop")
+                out = ub_obj_projout.get_ubuf_output(1)
+            else:
+                dim_size = list(inputmat_total.size())
+                dim_size[1] = weight.size(0)
+                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+            _, _, _ = gemm(
                 weight,
                 inputmat_total,
                 activation_dtype,
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
+                out=out,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
+                ub=ub_obj_projout if ub_split_rs else None
             )
 
         if is_grad_enabled:
@@ -1757,7 +1782,9 @@ class _Linear(torch.autograd.Function):
             ctx.ub_split_ag = ub_split_ag
 
         # Row Parallel Linear
-        if parallel_mode == "row" and sequence_parallel:
+        if ub_split_rs:
+            out = ub_obj_projout.get_ubuf_output(0)
+        elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
         elif parallel_mode == "row" and tensor_parallel:
             out, _ = allreduce(out, tp_group)
@@ -2031,6 +2058,7 @@ class Linear(TransformerEngineBaseModule):
         self.parameters_split = parameters_split
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+        print (f'Linear ub_split_rs {ub_split_rs} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -3062,6 +3090,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+        print (f'LayerNormMLP ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_rs {ub_split_rs} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
