@@ -103,8 +103,9 @@ def do_export(
                 opset_version=opset,
                 input_names=input_names,
                 output_names=output_names,
-                # Do Not constant-fold because torch.onnx incorrectly folds LN(data, scale=gamma+1) which
-                # happens when we use LN with zero-centered gamma.
+                # Do not constant-fold because torch.onnx incorrectly folds
+                # layer_norm(data, scale=add(gamma,1)) to layer_norm(data, scale=gamma)
+                # when we use LN with zero-centered gamma.
                 do_constant_folding=False,
                 operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
