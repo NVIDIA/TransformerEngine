@@ -20,15 +20,13 @@ namespace {
 // String with RTC kernel implementation
 #include "code_string_transpose_rtc_transpose_cu.h"
 
-// STUFF TO TUNE
+// Hard-coded kernel parameters
 constexpr int warps_per_tile = 4;
-constexpr int vector_size = 8;
-
 constexpr int block_size = THREADS_PER_WARP * warps_per_tile;
 
 }  // namespace
 
-template <typename Type>
+template <int load_size, int store_size, typename Type>
 __global__ void
 __launch_bounds__(block_size)
 transpose_general_kernel(const Type * const input,
@@ -36,8 +34,8 @@ transpose_general_kernel(const Type * const input,
                          const int row_length,
                          const int num_rows) {
   // Vectorized load/store sizes
-  constexpr int nvec_in = vector_size / sizeof(Type);
-  constexpr int nvec_out = vector_size / sizeof(Type);
+  constexpr int nvec_in = load_size / sizeof(Type);
+  constexpr int nvec_out = store_size / sizeof(Type);
   using IVec = Vec<Type, nvec_in>;
   using OVec = Vec<Type, nvec_out>;
 
@@ -147,29 +145,39 @@ void transpose(const Tensor &input,
     constexpr int type_size = sizeof(Type);
 
     // Choose between runtime-compiled or statically-compiled kernel
-    constexpr int tile_size = vector_size / type_size * THREADS_PER_WARP;
-    const bool full_tile = row_length % tile_size == 0 && num_rows % tile_size == 0;
-    if (full_tile && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
+    const bool aligned = (row_length % THREADS_PER_WARP == 0
+                          && num_rows % THREADS_PER_WARP == 0);
+    if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
       // Determine kernel config
       int load_size = 8;
       int store_size = 8;
+      auto is_tile_aligned = [&](int load_size_, int store_size_) -> bool {
+        return (row_length % (load_size / type_size * THREADS_PER_WARP) == 0
+                && num_rows % (store_size / type_size * THREADS_PER_WARP) == 0);
+      };
       auto num_blocks = [&](int load_size_, int store_size_) -> int {
         const int row_tile_size = load_size_ / type_size * THREADS_PER_WARP;
         const int col_tile_size = store_size_ / type_size * THREADS_PER_WARP;
         return (row_length / row_tile_size) * (num_rows / col_tile_size);
       };
       do {
+        const int sm_count = cuda::sm_count();
+
         // Try maximizing SM occupancy without sacrificing cache
         // efficiency
         // Note: 32 threads/warp access 128B L1 cache line, so 4B
         // loads/stores achieve full cache efficiency
-        const int sm_count = cuda::sm_count();
         if constexpr (type_size > 4) break;
-        if (num_blocks(load_size, store_size) >= 2*sm_count) break;
+        if (is_tile_aligned(load_size, store_size)
+            && num_blocks(load_size, store_size) >= 2*sm_count) {
+          break;
+        }
         load_size = 8; store_size = 4;
-        if (num_blocks(load_size, store_size) >= 2*sm_count) break;
+        if (is_tile_aligned(load_size, store_size)
+            && num_blocks(load_size, store_size) >= 2*sm_count) {
+          break;
+        }
         load_size = 4; store_size = 4;
-        if (num_blocks(load_size, store_size) >= sm_count) break;
 
         // Simple performance model to balance SM occupancy and cache
         // efficiency
@@ -181,16 +189,30 @@ void transpose(const Tensor &input,
           return (load_cost + store_cost) / active_sms;
         };
         if constexpr (type_size > 2) break;
-        if (cost(4, 2) >= cost(load_size, store_size)) break;
+        if (is_tile_aligned(load_size, store_size)
+            && cost(4, 2) < cost(load_size, store_size)) {
+          break;
+        }
         load_size = 4; store_size = 2;
-        if (cost(2, 2) >= cost(load_size, store_size)) break;
+        if (is_tile_aligned(load_size, store_size)
+            && cost(2, 2) < cost(load_size, store_size)) {
+          break;
+        }
         load_size = 2; store_size = 2;
         if constexpr (type_size > 1) break;
-        if (cost(2, 1) >= cost(load_size, store_size)) break;
+        if (is_tile_aligned(load_size, store_size)
+            && cost(2, 1) < cost(load_size, store_size)) {
+          break;
+        }
         load_size = 2; store_size = 1;
-        if (cost(1, 1) >= cost(load_size, store_size)) break;
+        if (is_tile_aligned(load_size, store_size)
+            && cost(1, 1) < cost(load_size, store_size)) {
+          break;
+        }
         load_size = 1; store_size = 1;
       } while (false);
+      NVTE_CHECK(is_tile_aligned(load_size, store_size),
+                 "memory accesses are not properly aligned");
 
       // Compile NVRTC kernel if needed and launch
       auto& rtc_manager = rtc::KernelManager::instance();
@@ -216,8 +238,13 @@ void transpose(const Tensor &input,
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
-      const int num_blocks = DIVUP(row_length, tile_size) * DIVUP(num_rows, tile_size);
-      transpose_general_kernel<Type><<<num_blocks, block_size, 0, stream>>>(
+      constexpr int load_size = 8;
+      constexpr int store_size = 8;
+      constexpr int row_tile_size = load_size / type_size * THREADS_PER_WARP;
+      constexpr int col_tile_size = store_size / type_size * THREADS_PER_WARP;
+      const int num_blocks = (DIVUP(row_length, row_tile_size)
+                              * DIVUP(num_rows, col_tile_size));
+      transpose_general_kernel<load_size, store_size, Type><<<num_blocks, block_size, 0, stream>>>(
         static_cast<const Type *>(input.data.dptr),
         static_cast<Type *>(output.data.dptr),
         row_length, num_rows);
