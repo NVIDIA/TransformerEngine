@@ -1094,7 +1094,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
   #define SETUP_LAUNCH_CONFIG(sms,threads,stream) cudaLaunchConfig_t cfg = {sms,threads,0,stream,NULL,0}; \
     cudaLaunchAttribute attribute_ub[2]; \
     attribute_ub[1].id = cudaLaunchAttributeClusterDimension; \
-    attribute_ub[1].val.clusterDim.x = comm->cga_size; \
+    attribute_ub[1].val.clusterDim.x = sms%comm->cga_size==0?comm->cga_size:1; \
     attribute_ub[1].val.clusterDim.y = 1; \
     attribute_ub[1].val.clusterDim.z = 1; \
     attribute_ub[0].id = cudaLaunchAttributeCooperative; \
@@ -1104,7 +1104,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
 int allreduce_userbuff_inplace_gpu(const int handler,const  int offset,const int elements,const int blocksize, communicator* comm, cudaStream_t stream) {
 //schedule GPU kernel only
 //CPU/SHARP part is responsibility of caller
-  const int ar_step=1;
+  const int ar_step=comm->ar2_nvsize;
   const int op = userbuffers_allreduceop_nonsharp;
   const int ar_nvsize=comm->nvsize;
   const int ar_firstgpu=comm->ar_firstgpu;
@@ -1143,7 +1143,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit,const int handler,const 
   const int my_node =  op==userbuffers_allreduceop_nonsharp? comm->my_node : comm->my2_node;
 #endif
   const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
+  const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
   const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
 
@@ -1188,7 +1188,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit,const int handler,const 
 
 #define callranks_rs_oop(x)   if(ar_nvsize==x) { \
   int arg1=op-MAX_OPS,arg2=REG0_OFFSET(comm)-(op==userbuffers_allreduceop_nonsharp?2:1)*REG0_SINGLENODE+MAX_OPS,\
-  arg3=ar_firstgpu,arg4=ar_nvrank,arg5=ar_step,arg7=elements/8/x,arg6=offset/8+arg4*arg7,arg8=rowelements/8,arg9=strideelements/8;\
+      arg3=ar_firstgpu,arg4=ar_nvrank,arg5=ar_step,arg7=elements/8/x,arg6=offset/8+arg4*arg7,arg8=rowelements/8,arg9=strideelements/8;\
   void **arg10=(void**)(comm->gpu_ptrs);int arg11=handler*comm->nvsize;void* arg12=output;\
   void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11,(void*)&arg12}; \
   CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>, kernelArgs)); \
@@ -1202,7 +1202,7 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit,const int handler,co
   const int num_nodes = op==userbuffers_allreduceop_nonsharp? comm->num_nodes : comm->num2_nodes;
   const int my_node =  op==userbuffers_allreduceop_nonsharp? comm->my_node : comm->my2_node;
   const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
+  const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
   const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
 
@@ -1233,7 +1233,7 @@ int allgather2_userbuff_inplace_gpu(const int maxcredit,const int handler,const 
   const int num_nodes = op==userbuffers_allreduceop_nonsharp? comm->num_nodes : comm->num2_nodes;
   const int my_node =  op==userbuffers_allreduceop_nonsharp? comm->my_node : comm->my2_node;
   const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
+  const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
   const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
 
@@ -1264,7 +1264,7 @@ void allgather2_userbuff_inplace(const int handler,const  int offset,const int e
 const int op=userbuffers_allreduceop_nonsharp2;
 const int blocksize=elements*2;
   const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
+  const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
   const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
 
@@ -1293,47 +1293,43 @@ void allgather2_userbuff_inplace_sliced(const int handler,const int offset,const
 void reducescatter2_userbuff_inplace(const int handler,const  int offset,const int elements, communicator* comm, cudaStream_t stream) {
   const int op=userbuffers_allreduceop_nonsharp2;
   const int blocksize=elements*2;
-  const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
-  const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
+    const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
+    const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
+    const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
+    const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
+  
+      if(elements<64) return;
+      int sms=ar_nvsize==1?2:comm->sms;
+      int warps=comm->threads/32;
+      if(warps<ar_nvsize) warps=ar_nvsize;
 
-  if(elements<64) return;
-  int sms=ar_nvsize==1?2:comm->sms;
-  int warps=comm->threads/32;
-  if(warps<ar_nvsize) warps=ar_nvsize;
+      SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
+      callranks_rs(2)
+      callranks_rs(4)
+      callranks_rs(8)
+  }
+  void reducescatter2_userbuff_stridedoutput(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream) {
+    const int elements = rowelements*colelements;
+    const int op=userbuffers_allreduceop_nonsharp2;
+    const int blocksize=elements*2;
+      const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
+      const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
+      const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
+      const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
+    
+        if(elements<64) return;
+        int sms=ar_nvsize==1?2:comm->sms;
+        int warps=comm->threads/32;
+        if(warps<ar_nvsize) warps=ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
-  callranks_rs(2)
-  callranks_rs(4)
-  callranks_rs(8)
-}
-void reducescatter2_userbuff_stridedoutput(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream) {
-
-  const int elements = rowelements*colelements;
-
-  const int op=userbuffers_allreduceop_nonsharp2;
-  const int blocksize=elements*2;
-  const int ar_firstgpu = op==userbuffers_allreduceop_nonsharp? comm->ar_firstgpu : comm->ar2_firstgpu;
-  const int ar_step = op==userbuffers_allreduceop_nonsharp? 1 : comm->ar_nvsize;
-  const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
-
-  if(elements<64) return;
-  int sms=ar_nvsize==1?2:comm->sms;
-  int warps=comm->threads/32;
-  if(warps<ar_nvsize) warps=ar_nvsize;
-
-  SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
-  callranks_rs_oop(2)
-  callranks_rs_oop(4)
-  callranks_rs_oop(8)
-}
-void reducescatter2_userbuff(void* output, const int handler,const int offset,const int elements, communicator* comm, cudaStream_t stream) {
-  reducescatter2_userbuff_stridedoutput(output,handler,offset,elements,1,0,comm,stream);
-}
-
-
+        SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
+        callranks_rs_oop(2)
+        callranks_rs_oop(4)
+        callranks_rs_oop(8)
+    }
+    void reducescatter2_userbuff(void* output, const int handler,const int offset,const int elements, communicator* comm, cudaStream_t stream) {
+      reducescatter2_userbuff_stridedoutput(output,handler,offset,elements,1,0,comm,stream);
+    }
 
 
 
@@ -1494,8 +1490,14 @@ if(comm->push==0)
     void *dstptr = (comm->peer_ptr[dsthandler][peerlocal])+dstoffset;
 
     if(comm->use_ce) CUDACHECK(cudaMemcpyAsync(dstptr,srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
-    kuserbuffers_pushsend<<<signalonly?1:comm->sms,signalonly?1:1024,0,stream>>>
-          (&comm->send_id[peer],(int*)flagptr,(int4*)srcptr,(int4*)dstptr,signalonly?0:bytes/16);
+    //kuserbuffers_pushsend<<<signalonly?1:comm->sms,signalonly?1:1024,0,stream>>>
+    //      (&comm->send_id[peer],(int*)flagptr,(int4*)srcptr,(int4*)dstptr,signalonly?0:bytes/16);
+    SETUP_LAUNCH_CONFIG(signalonly?1:comm->sms,signalonly?1:1024,stream);
+    int* arg1=&comm->send_id[peer],*arg2=(int*)flagptr;
+    int4* arg3 = (int4*)srcptr, *arg4 = (int4*)dstptr;
+    int arg5 = signalonly?0:bytes/16;
+    void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5};
+    CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsend, kernelArgs));
   }
 }
 

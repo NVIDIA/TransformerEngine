@@ -190,12 +190,12 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   int divgpus = pipegpus * tensorgpus;
   int datagpus = numlocal/ divgpus;
   (*comm) -> ar_nvsize = datagpus;
-  (*comm) -> ar_firstgpu = mylocal - mylocal % datagpus;
-  (*comm) -> ar_nvrank = mylocal - (*comm) -> ar_firstgpu;
+  (*comm) -> ar_firstgpu = mylocal - ((mylocal/tensorgpus)%datagpus) * tensorgpus;
+  (*comm) -> ar_nvrank = (mylocal - (*comm) -> ar_firstgpu) / tensorgpus;
   //ar2 is tensor
   (*comm) -> ar2_nvsize = tensorgpus;
-  (*comm) -> ar2_firstgpu = mylocal - ((mylocal/datagpus)%tensorgpus) * datagpus ;
-  (*comm) -> ar2_nvrank = (mylocal - (*comm) -> ar2_firstgpu) / datagpus;
+  (*comm) -> ar2_firstgpu =  mylocal - mylocal % tensorgpus;
+  (*comm) -> ar2_nvrank = mylocal - (*comm) -> ar2_firstgpu;
   //ar2 has step equal to ar_nvsize
   int allnodes = nranks/numlocal;
   int mynode = myrank/numlocal;
@@ -297,12 +297,12 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   int divgpus = pipegpus * tensorgpus;
   int datagpus = nranks/divgpus;
   (*comm) -> ar_nvsize = datagpus;
-  (*comm) -> ar_firstgpu = myrank - myrank % datagpus;
-  (*comm) -> ar_nvrank = myrank - (*comm) -> ar_firstgpu;
+  (*comm) -> ar_firstgpu = myrank - ((myrank/tensorgpus)%datagpus) * tensorgpus;
+  (*comm) -> ar_nvrank = (myrank - (*comm) -> ar_firstgpu) / tensorgpus;
   //ar2 is tensor
   (*comm) -> ar2_nvsize = tensorgpus;
-  (*comm) -> ar2_firstgpu = myrank - ((myrank/datagpus)%tensorgpus) * datagpus ;
-  (*comm) -> ar2_nvrank = (myrank - (*comm) -> ar2_firstgpu) / datagpus;
+  (*comm) -> ar2_firstgpu = myrank - myrank % tensorgpus;
+  (*comm) -> ar2_nvrank = myrank - (*comm) -> ar2_firstgpu;
 
   (*comm)-> pipe_id = myrank / (datagpus * tensorgpus);
   MPI_Comm_dup(MPI_COMM_WORLD,&(*comm)->comm_intra);
