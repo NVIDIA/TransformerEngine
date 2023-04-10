@@ -202,8 +202,20 @@ class LayerNorm(nn.Module):
         A value added to the denominator of layer normalization for numerical stability.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
-    scale_init : Initializer, default = flax.linen.initializers.ones
+    zero_centered_gamma: bool, default = False
+        If set to `True`, the LayerNorm formula changes to
+
+        .. math::
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            (1 + \gamma) + \beta
+
+        The default of `scale_init` will also be changed. See `scale_init`
+    scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
+        If `None` is provided, the following rules will be applied to `scale_init`
+        `scale_init` is `flax.linen.initializers.ones` when `zero_centered_gamma == False`.
+        Otherwise, `scale_init` is
+        `flax.linen.initializers.zeros` when `zero_centered_gamma == True`
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
@@ -228,13 +240,22 @@ class LayerNorm(nn.Module):
     """
     epsilon: float = 1e-6
     layernorm_type: str = 'layernorm'
-    scale_init: Initializer = nn.initializers.ones
+    zero_centered_gamma: bool = False
+    scale_init: Initializer = None
     scale_axes: Tuple[str, ...] = ('embed',)
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ('embed',)
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
     sharding_type: ShardingType = ShardingType.SINGLE
+
+    def __post_init__(self):
+        if self.scale_init is None:
+            if not self.zero_centered_gamma:
+                self.scale_init = nn.initializers.ones
+            else:
+                self.scale_init = nn.initializers.zeros
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -256,14 +277,14 @@ class LayerNorm(nn.Module):
         scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
                                                       self.scale_init, self.scale_axes,
                                                       self.bias_init, self.bias_axes, self.dtype)
-
         return layernorm(x,
                          scale,
                          ln_bias,
-                         self.layernorm_type,
+                         layernorm_type=self.layernorm_type,
+                         zero_centered_gamma=self.zero_centered_gamma,
+                         epsilon=self.epsilon,
                          sharding_type=self.sharding_type,
-                         dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                         epsilon=self.epsilon)
+                         dp_dim_index=1 if self.transpose_batch_sequence else 0)
 
 
 class TransformerEngineBase(nn.Module):
@@ -443,8 +464,20 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    scale_init : Initializer, default = flax.linen.initializers.ones
+    zero_centered_gamma: bool, default = False
+        If set to `True`, the LayerNorm formula changes to
+
+        .. math::
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            (1 + \gamma) + \beta
+
+        The default of `scale_init` will also be changed. See `scale_init`
+    scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
+        If `None` is provided, the following rules will be applied to `scale_init`
+        `scale_init` is `flax.linen.initializers.ones` when `zero_centered_gamma == False`.
+        Otherwise, `scale_init` is
+        `flax.linen.initializers.zeros` when `zero_centered_gamma == True`
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
@@ -496,7 +529,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     enable_layernorm: bool = True
     layernorm_type: str = 'layernorm'
     epsilon: float = 1e-6
-    scale_init: Initializer = nn.initializers.ones
+    zero_centered_gamma: bool = False
+    scale_init: Initializer = None
     scale_axes: Tuple[str, ...] = ('embed',)
     ln_bias_init: Initializer = nn.initializers.zeros
     ln_bias_axes: Tuple[str, ...] = ('embed',)
@@ -515,6 +549,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        if self.scale_init is None:
+            if not self.zero_centered_gamma:
+                self.scale_init = nn.initializers.ones
+            else:
+                self.scale_init = nn.initializers.zeros
         super().__post_init__()
 
     @nn.compact
@@ -553,9 +592,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                               scale,
                               ln_bias,
                               layernorm_type=self.layernorm_type,
+                              zero_centered_gamma=self.zero_centered_gamma,
+                              epsilon=self.epsilon,
                               sharding_type=self.sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                              epsilon=self.epsilon)
+                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -600,9 +640,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                       self.layernorm_type,
                                       FP8Helper.FWD_DTYPE,
                                       FP8Helper.BWD_DTYPE, (axis, contract_ind),
+                                      zero_centered_gamma=self.zero_centered_gamma,
+                                      epsilon=self.epsilon,
                                       sharding_type=self.sharding_type,
-                                      dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                                      epsilon=self.epsilon)
+                                      dp_dim_index=1 if self.transpose_batch_sequence else 0)
         else:
             kernel = jnp.asarray(kernel, self.dtype)
             z = lax.dot_general(y, kernel, ((axis, contract_ind), ((), ())))
@@ -638,8 +679,20 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    scale_init : Initializer, default = flax.linen.initializers.ones
+    zero_centered_gamma: bool, default = False
+        If set to `True`, the LayerNorm formula changes to
+
+        .. math::
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            (1 + \gamma) + \beta
+
+        The default of `scale_init` will also be changed. See `scale_init`
+    scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
+        If `None` is provided, the following rules will be applied to `scale_init`
+        `scale_init` is `flax.linen.initializers.ones` when `zero_centered_gamma == False`.
+        Otherwise, `scale_init` is
+        `flax.linen.initializers.zeros` when `zero_centered_gamma == True`
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
@@ -704,7 +757,8 @@ class LayerNormMLP(TransformerEngineBase):
     enable_layernorm: bool = True
     layernorm_type: str = 'layernorm'
     epsilon: float = 1e-6
-    scale_init: Initializer = nn.initializers.ones
+    zero_centered_gamma: bool = False
+    scale_init: Initializer = None
     scale_axes: Tuple[str, ...] = ('embed',)
     ln_bias_init: Initializer = nn.initializers.zeros
     ln_bias_axes: Tuple[str, ...] = ('embed',)
@@ -727,6 +781,11 @@ class LayerNormMLP(TransformerEngineBase):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
+        if self.scale_init is None:
+            if not self.zero_centered_gamma:
+                self.scale_init = nn.initializers.ones
+            else:
+                self.scale_init = nn.initializers.zeros
         super().__post_init__()
 
     @nn.compact
@@ -774,9 +833,10 @@ class LayerNormMLP(TransformerEngineBase):
                               scale,
                               ln_bias,
                               layernorm_type=self.layernorm_type,
+                              zero_centered_gamma=self.zero_centered_gamma,
+                              epsilon=self.epsilon,
                               sharding_type=first_sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                              epsilon=self.epsilon)
+                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -830,6 +890,7 @@ class LayerNormMLP(TransformerEngineBase):
                              self.layernorm_type,
                              FP8Helper.FWD_DTYPE,
                              FP8Helper.BWD_DTYPE,
+                             zero_centered_gamma=self.zero_centered_gamma,
                              epsilon=self.epsilon,
                              contracting_dims=(axis, contract_ind),
                              major_sharding_type=self.major_sharding_type,
@@ -887,9 +948,10 @@ class LayerNormMLP(TransformerEngineBase):
                                           self.layernorm_type,
                                           FP8Helper.FWD_DTYPE,
                                           FP8Helper.BWD_DTYPE, (axis, contract_ind),
+                                          zero_centered_gamma=self.zero_centered_gamma,
+                                          epsilon=self.epsilon,
                                           sharding_type=first_sharding_type,
-                                          dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                                          epsilon=self.epsilon)
+                                          dp_dim_index=1 if self.transpose_batch_sequence else 0)
             else:    # not enable fp8
                 kernel = jnp.asarray(kernel, self.dtype)
                 x = lax.dot_general(y, kernel, ((axis, contract_ind), ((), ())))
