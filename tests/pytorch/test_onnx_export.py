@@ -12,6 +12,12 @@ validate the output against TE's output.
 
 Until FP8 is introduced to the ONNX standard, FP8 QuantizeLinear/DequantizeLinear is implemented
 using custom ORT operations.
+
+To run many repetitive tests use pytest-loop:
+    $ python3 -m pip install pytest-loop
+    $ pytest --loop 1000 tests/pytorch/test_onnx_export.py::test_export_layernorm
+
+For reproducability use: torch.manual_seed(0)
 """
 
 
@@ -89,15 +95,18 @@ def do_export(
         fname = os.path.join(TEST_ARTIFACTS_DIR, fname)
         inps = inp if isinstance(inp, list) or isinstance(inp, tuple) else (inp,)
         with te.onnx_export(True):
-            torch.onnx.export(model,
-                            inps,
-                            fname,
-                            verbose=False,
-                            opset_version=opset,
-                            input_names=input_names,
-                            output_names=output_names,
-                            do_constant_folding=False,
-                            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
+            torch.onnx.export(
+                model,
+                inps,
+                fname,
+                verbose=True,
+                opset_version=opset,
+                input_names=input_names,
+                output_names=output_names,
+                # Do Not constant-fold because torch.onnx incorrectly folds LN(data, scale=gamma+1) which
+                # happens when we use LN with zero-centered gamma.
+                do_constant_folding=False,
+                operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
 def to_numpy(tensor):
@@ -201,26 +210,27 @@ def validate_result(
     def compare_outputs(onnx_outputs, te_outputs):
         """ Compare ORT and TE outputs."""
         assert len(onnx_outputs) == len(te_outputs)
+        # Compare ORT and PyTorch outputs.
         for onnx_output, te_output in zip(onnx_outputs, te_outputs):
-
-            # Compare ORT and PyTorch outputs.
             # np.isclose: abs(a - b) <= (atol + rtol * abs(b))
             ac = ~np.isclose(onnx_output, te_output, atol=atol, rtol=rtol)
-
             mismatches = ac.nonzero()
             mismatched_ids = [loc for loc in zip(*mismatches)]
             if mismatched_ids:
                 # Log some information in case of error.
                 print("*" * 100)
-                print(onnx_output.shape)
-                nb_vals = min(len(mismatched_ids), max_errors_printed)
-                print(f"Detected {len(mismatched_ids)} diverging values.\nShowing first {nb_vals} errors (ONNX -- TE):")
-                abs_err = abs(onnx_output - te_output)
+                nb_errors = len(mismatched_ids)
+                nb_vals = min(nb_errors, max_errors_printed)
+                print(f"Detected {nb_errors} diverging values (output shape={onnx_output.shape})")
+                print(f"Showing first {nb_vals} errors (ONNX -- TE):")
+                abs_err = np.abs(onnx_output - te_output)
+                errors = abs_err[mismatches]
                 for loc in mismatched_ids[:nb_vals]:
                     ref = te_output[loc]
                     print(f"{onnx_output[loc]} -- {te_output[loc]} err={abs_err[loc]} > {atol + rtol * abs(ref)}")
-                if len(mismatched_ids) > allow_cnt_errors:
-                    raise ValueError(f"Output validation of {fname} failed with {len(mismatched_ids)} errors")
+                print(f"Max error: {np.max(errors)}")
+                if nb_errors > allow_cnt_errors:
+                    raise ValueError(f"Output validation of {fname} failed with {nb_errors} errors")
 
     # Run ORT session and TE model.
     fname = os.path.join(TEST_ARTIFACTS_DIR, fname)
