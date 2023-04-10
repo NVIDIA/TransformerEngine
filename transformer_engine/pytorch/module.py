@@ -1708,10 +1708,15 @@ class _Linear(torch.autograd.Function):
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
+                dim_size = list(inputmat_total.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = weight.size(0)
+                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+
             _ = fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -1728,7 +1733,8 @@ class _Linear(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_projout if ub_split_rs else None
+                ub=ub_obj_projout if ub_split_rs else None,
+                extra_output_tensor=rs_out if ub_split_rs else None,
             )
         else:
             # Cast for native AMP
@@ -1746,10 +1752,15 @@ class _Linear(torch.autograd.Function):
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
+                dim_size = list(inputmat_total.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = weight.size(0)
+                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+
             _, _, _ = gemm(
                 weight,
                 inputmat_total,
@@ -1759,7 +1770,8 @@ class _Linear(torch.autograd.Function):
                 use_bias=use_bias,
                 out=out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_projout if ub_split_rs else None
+                ub=ub_obj_projout if ub_split_rs else None,
+                extra_output_tensor=rs_out if ub_split_rs else None,
             )
 
         if is_grad_enabled:
@@ -1787,7 +1799,7 @@ class _Linear(torch.autograd.Function):
 
         # Row Parallel Linear
         if ub_split_rs:
-            out = ub_obj_projout.get_ubuf_output(0)
+            out = rs_out
         elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
         elif parallel_mode == "row" and tensor_parallel:
@@ -2465,6 +2477,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_split_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+                dim_size = list(gelu_out.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = fc2_weight.size(0)
+                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
             else:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
@@ -2486,7 +2502,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=fc2_out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_fc2out if ub_split_rs else None
+                ub=ub_obj_fc2out if ub_split_rs else None,
+                extra_output_tensor=rs_out if ub_split_rs else None,
             )
         else:
             # Cast for native AMP
@@ -2535,6 +2552,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_split_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
+                dim_size = list(gelu_out.size())
+                dim_size[0] = dim_size[0] // tp_world_size
+                dim_size[1] = fc2_weight.size(0)
+                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
             else:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
@@ -2549,7 +2570,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 use_bias=use_bias,
                 out=fc2_out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_fc2out if ub_split_rs else None
+                ub=ub_obj_fc2out if ub_split_rs else None,
+                extra_output_tensor=rs_out if ub_split_rs else None,
             )
         if is_grad_enabled:
             ctx.save_for_backward(
@@ -2588,7 +2610,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Row Parallel Linear
         if ub_split_rs:
-            fc2_out = ub_obj_fc2out.get_ubuf_output(0)
+            fc2_out = rs_out
         elif set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
         elif set_parallel_mode and tensor_parallel:

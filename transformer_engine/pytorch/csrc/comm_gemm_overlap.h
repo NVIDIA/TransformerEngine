@@ -282,7 +282,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     /*
     ** Split FPROP GEMM + ReduceScatter
     */
-    torch::Tensor split_overlap_rs(at::Tensor A,
+    void split_overlap_rs(at::Tensor A,
                       at::Tensor A_scale_inverse,
                       int64_t A_fp8_tensor,
                       transformer_engine::DType A_type,
@@ -303,7 +303,9 @@ struct UbufCommOverlap : torch::CustomClassHolder {
                       at::Tensor workspace,
                       size_t workspaceSize,
                       bool accumulate,
-                      bool use_split_accumulator)
+                      bool use_split_accumulator,
+                      at::Tensor rs_output
+                      )
     {
         // Get GEMM dimensions
         int m = A.size(0);
@@ -317,7 +319,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         char* input_a_chunk_ptr = reinterpret_cast<char*>(A.data_ptr());
         char* output_buf_chunk_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
 
-        torch::Tensor rs_output = torch::empty({n / _tp_size, m}, _ubuf.options());
         char* rs_output_ptr = reinterpret_cast<char*>(rs_output.data_ptr());
         int ubuf_offset = 0;
 
@@ -443,7 +444,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_compute, 0));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t) stream_main, _stop_comm, 0));
 
-        return rs_output;
+        return;
     } // split_overlap_rs
 
 
@@ -724,6 +725,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         // Create GEMM output buffer and a pointer to its current chunk
         char* output_ptr = reinterpret_cast<char*>(D.data_ptr());
 
+        if (A_scale_inverse.numel())
+            A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+        if (B_scale_inverse.numel())
+            B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
         // Catch up the default torch stream
         at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
         CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t) stream_main));
@@ -749,12 +756,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             int local_rank_round2 = (_local_rank%2 == 0) ? _local_rank : _local_rank-1;
             const int next_rank = (_tp_size + _local_rank + 2) % _tp_size + _rank_round_tp;
             const int prev_rank = (_tp_size + _local_rank - 2) % _tp_size + _rank_round_tp;
-
-            if (A_scale_inverse.numel())
-                A_scale_inverse = A_scale_inverse[A_fp8_tensor];
-
-            if (B_scale_inverse.numel())
-                B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
             // Ring exchange of 2X inputs chunks
             for (int i = 0; i < num_steps; i++) {
