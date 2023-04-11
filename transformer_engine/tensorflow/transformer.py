@@ -9,7 +9,6 @@ from typing import Callable, Optional, Tuple, Union
 import os
 
 from keras import backend, layers, initializers
-from keras.mixed_precision import autocast_variable
 import tensorflow as tf
 
 from transformer_engine.tensorflow.module import (
@@ -770,29 +769,27 @@ class TransformerLayer(tf.keras.Model): # pylint: disable=too-few-public-methods
             bias_dropout_add_func = get_bias_dropout_add(training)
 
         # Bias dropout add.
-        # The autocast scope is used to enforce the correct dtype for the bias.
-        with autocast_variable.enable_auto_cast_variables(
-            self._compute_dtype_object):
-            if self.drop_path is None:
-                bda_output = bias_dropout_add_func(
-                    attention_output,
-                    attention_bias,
-                    residual,
-                    self.hidden_dropout,
+        attention_bias = tf.cast(attention_bias, dtype=self.compute_dtype)
+        if self.drop_path is None:
+            bda_output = bias_dropout_add_func(
+                attention_output,
+                attention_bias,
+                residual,
+                self.hidden_dropout,
+            )
+        else:
+            # TODO(kaixih): Use stateless_dropout and specify the seed
+            # mainly for debugging purpose. Should allow random seed.
+            out = (
+                tf.nn.experimental.stateless_dropout(
+                    attention_output + attention_bias,
+                    rate=self.hidden_dropout,
+                    seed=[1, 0],
                 )
-            else:
-                # TODO(kaixih): Use stateless_dropout and specify the seed
-                # mainly for debugging purpose. Should allow random seed.
-                out = (
-                    tf.nn.experimental.stateless_dropout(
-                        attention_output + attention_bias,
-                        rate=self.hidden_dropout,
-                        seed=[1, 0],
-                    )
-                    if training
-                    else attention_output + attention_bias
-                )
-                bda_output = residual + self.drop_path(out, training)
+                if training
+                else attention_output + attention_bias
+            )
+            bda_output = residual + self.drop_path(out, training)
 
         # Cross attention.
         if self.layer_type == "decoder":
@@ -809,17 +806,13 @@ class TransformerLayer(tf.keras.Model): # pylint: disable=too-few-public-methods
                 attention_output, attention_bias = inter_attention_outputs
                 residual = bda_output
 
-            # The autocast scope is used to enforce the correct dtype for the
-            # bias.
-            with autocast_variable.enable_auto_cast_variables(
-                self._compute_dtype_object
-            ):
-                bda_output = bias_dropout_add_func(
-                    attention_output,
-                    attention_bias,
-                    residual,
-                    self.hidden_dropout,
-                )
+            attention_bias = tf.cast(attention_bias, dtype=self.compute_dtype)
+            bda_output = bias_dropout_add_func(
+                attention_output,
+                attention_bias,
+                residual,
+                self.hidden_dropout,
+            )
 
         # MLP.
         mlp_outputs = self.layernorm_mlp(
@@ -833,29 +826,27 @@ class TransformerLayer(tf.keras.Model): # pylint: disable=too-few-public-methods
             residual = bda_output
 
         # Bias dropout add.
-        # The autocast scope is used to enforce the correct dtype for the bias.
-        with autocast_variable.enable_auto_cast_variables(
-            self._compute_dtype_object):
-            if self.drop_path is None:
-                output = bias_dropout_add_func(
-                    mlp_output,
-                    mlp_bias,
-                    residual,
-                    self.hidden_dropout,
+        mlp_bias = tf.cast(mlp_bias, dtype=self.compute_dtype)
+        if self.drop_path is None:
+            output = bias_dropout_add_func(
+                mlp_output,
+                mlp_bias,
+                residual,
+                self.hidden_dropout,
+            )
+        else:
+            # TODO(kaixih): Use stateless_dropout and specify the seed
+            # mainly for debugging purpose. Should allow random seed.
+            output = (
+                tf.nn.experimental.stateless_dropout(
+                    mlp_output + mlp_bias,
+                    rate=self.hidden_dropout,
+                    seed=[1, 0],
                 )
-            else:
-                # TODO(kaixih): Use stateless_dropout and specify the seed
-                # mainly for debugging purpose. Should allow random seed.
-                output = (
-                    tf.nn.experimental.stateless_dropout(
-                        mlp_output + mlp_bias,
-                        rate=self.hidden_dropout,
-                        seed=[1, 0],
-                    )
-                    if training
-                    else mlp_output + mlp_bias
-                )
-                output = residual + self.drop_path(output, training)
+                if training
+                else mlp_output + mlp_bias
+            )
+            output = residual + self.drop_path(output, training)
 
         # For BERT like architectures.
         if self.output_layernorm:
