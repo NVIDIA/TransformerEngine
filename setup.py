@@ -65,23 +65,6 @@ def extra_compiler_flags():
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "--use_fast_math",
-        "-DMULTINODE",
-        "-DNOSHARP",
-        "-DUCP",
-    ]
-
-
-def dlink_library_dirs():
-    return [
-        "/usr/local/ucx/lib",
-    ]
-
-
-def dlink_libraries():
-    return [
-        "ucs",
-        "ucp",
-        "gdrapi",
     ]
 
 
@@ -219,8 +202,6 @@ if framework in ("all", "pytorch"):
                 "cxx": ["-O3"],
                 "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
             },
-            library_dirs=dlink_library_dirs(),
-            libraries=dlink_libraries(),
             include_dirs=include_dirs,
         )
     )
