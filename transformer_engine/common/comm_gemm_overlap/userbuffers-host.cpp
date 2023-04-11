@@ -461,7 +461,8 @@ using namespace std;
   param.sched_priority = sched_get_priority_max(SCHED_FIFO);;
   pthread_attr_setschedparam (&attr, &param);
 
-  ret = pthread_create(&(*comm)->proxythread,&attr,&proxythread,*comm);
+  // Disable proxy thread
+  //ret = pthread_create(&(*comm)->proxythread,&attr,&proxythread,*comm);
 
   if(getenv("UBDEBUG")) printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP %dx%d PIPE_ID %d/%d\n",myrank,nranks,myrank/numlocal,myrank%numlocal,(*comm)->my_node,(*comm)->ar_nvrank,
           (*comm)->my2_node,(*comm)->ar2_nvrank,
@@ -485,7 +486,8 @@ void destroy_communicator(communicator* comm) {
 #ifdef MULTINODE
   comm->activeproxy=0;
   if(!comm->myrank && getenv("UBDEBUG")) printf("waiting for userbuffers proxy thread to exit()\n");
-  pthread_join(comm->proxythread,NULL);
+  // Disable proxy thread
+  //pthread_join(comm->proxythread,NULL);
   gdr_close(comm->g);
 #endif
 }
