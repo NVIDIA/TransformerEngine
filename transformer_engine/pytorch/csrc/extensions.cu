@@ -1074,11 +1074,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, int, int, int, bool>())
-    .def("rs", &ubuf::UbufCommOverlap::rs)
-    .def("ag", &ubuf::UbufCommOverlap::ag)
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
-    .def("split_overlap_ag", &ubuf::UbufCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
     .def("get_output", &ubuf::UbufCommOverlap::get_output);
@@ -1086,11 +1083,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, int, bool, bool>())
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
-    .def("split_overlap_rs", &ubuf::UbufP2PCommOverlap::split_overlap_rs)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output)
-    .def("test_p2p_exchange", &ubuf::UbufP2PCommOverlap::test_p2p_exchange)
-    .def("test_send_recv", &ubuf::UbufP2PCommOverlap::test_send_recv);
+    .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)
