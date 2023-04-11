@@ -166,7 +166,7 @@ For JAX and Tensorflow, pybind11 must be installed:
 
 .. code-block:: bash
 
-  pip install pybind11[global]
+  pip install pybind11
 
 Then, you can install this optional dependency:
 
