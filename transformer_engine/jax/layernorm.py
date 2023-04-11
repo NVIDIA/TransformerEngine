@@ -51,7 +51,8 @@ def layernorm(inputs: jnp.ndarray,
     if layernorm_type == 'rmsnorm':
         assert beta is None, "beta should be None if layernorm_type is 'rmsnorm'"
         if zero_centered_gamma:
-            raise NotImplementedError
+            assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+            "if layernorm_type is 'rmsnorm'"
 
     if sharding_type is ShardingType.SINGLE:
         output = _layernorm(inputs,
@@ -113,7 +114,8 @@ def _layernorm_fwd(
     if layernorm_type == 'layernorm':
         output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
     else:
-        assert not zero_centered_gamma, "zero_centered_gamma is only supported by layernorm"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         output, rsigma = rmsnorm_fwd(x, gamma, epsilon)
         mu = None
     return output, (mu, rsigma, x, gamma)
@@ -132,7 +134,8 @@ def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, 
                                                           zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
-        assert not zero_centered_gamma, "zero_centered_gamma is only supported by layernorm"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(g, rsigma, x, gamma, epsilon=epsilon)
         grad_beta = None
 
@@ -167,7 +170,8 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
     if layernorm_type == 'rmsnorm':
         assert beta is None, "beta should be None if layernorm_type is 'rmsnorm'"
         if zero_centered_gamma:
-            raise NotImplementedError
+            assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+            "if layernorm_type is 'rmsnorm'"
 
     assert fp8_gemm_pkg.num_of_gemm == 1
     inputs = fp8_gemm_pkg.inputs
@@ -313,7 +317,8 @@ def _layernorm_fp8_dot_fwd(
                                                            zero_centered_gamma=zero_centered_gamma,
                                                            epsilon=epsilon)
     else:
-        assert not zero_centered_gamma, "zero_centered_gamma is only supported by layernorm"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         ln_out, rsigma, input_amax = rmsnorm_fwd_fp8(inputs,
                                                      gamma,
                                                      input_amax,
@@ -403,6 +408,8 @@ def _layernorm_fp8_dot_bwd(
                                                           zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(dgrad, rsigma, inputs, gamma, epsilon=epsilon)
         grad_beta = None
 

@@ -1108,7 +1108,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
-            0,    # RMSNorm doesn't support zero_centered_gamma
+            False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 
@@ -1209,7 +1209,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
-            0,    # RMSNorm doesn't support zero_centered_gamma
+            False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 
@@ -1300,7 +1300,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
             hidden_size,
             jax_dtype_to_te_dtype(x_aval.dtype),
             jax_dtype_to_te_dtype(gamma_aval.dtype),
-            0,    # RMSNorm doesn't support zero_centered_gamma
+            False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
         )
 

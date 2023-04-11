@@ -127,7 +127,8 @@ def fp8_ln_mlp(
     if layernorm_type == 'rmsnorm':
         assert ln_bias is None, "ln_bias should be None if layernorm_type is 'rmsnorm'"
         if zero_centered_gamma:
-            raise NotImplementedError
+            assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+            "if layernorm_type is 'rmsnorm'"
 
     assert activations == ('gelu', 'linear')
     if major_sharding_type is MajorShardingType.SINGLE:
@@ -286,7 +287,8 @@ def _fp8_mlp_fwd(
                                                             zero_centered_gamma=zero_centered_gamma,
                                                             epsilon=epsilon)
     else:
-        assert not zero_centered_gamma, "zero_centered_gamma is only supported by layernorm"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         ln_out, rsigma, ln_out_amax = rmsnorm_fwd_fp8(inputs_,
                                                       gamma,
                                                       input_amax,
@@ -410,7 +412,8 @@ def _fp8_mlp_bwd(
                                                           zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
-        assert not zero_centered_gamma, "zero_centered_gamma is only supported by layernorm"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported "
+        "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(dgrad_1, rsigma, inputs_, gamma, epsilon=epsilon)
         grad_beta = None
 

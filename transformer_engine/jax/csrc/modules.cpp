@@ -294,7 +294,7 @@ void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, flo
 
     auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
     if (!is_layer_norm) {
-        assert(!zero_centered_gamma && "rmsnorm doesn't support zero_centered_gamma.");
+        NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     }
 
     // The first call is to query the required workspace
@@ -369,7 +369,7 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
 
     auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
     if (!is_layer_norm) {
-        assert(!zero_centered_gamma && "rmsnorm doesn't support zero_centered_gamma.");
+        NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     }
 
     // The first call is to query the workspace
