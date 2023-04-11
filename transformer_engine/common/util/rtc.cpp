@@ -239,7 +239,7 @@ void KernelManager::compile(const std::string &kernel_label,
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
 }
 
-  bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {
+bool KernelManager::is_compiled(const std::string &kernel_label, int device_id) const {
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   return kernel_cache_.count(key) > 0;
 }
