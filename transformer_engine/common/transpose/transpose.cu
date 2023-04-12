@@ -190,23 +190,23 @@ void transpose(const Tensor &input,
         };
         if constexpr (type_size > 2) break;
         if (is_tile_aligned(load_size, store_size)
-            && cost(4, 2) < cost(load_size, store_size)) {
+            && cost(4, 2) >= cost(load_size, store_size)) {
           break;
         }
         load_size = 4; store_size = 2;
         if (is_tile_aligned(load_size, store_size)
-            && cost(2, 2) < cost(load_size, store_size)) {
+            && cost(2, 2) >= cost(load_size, store_size)) {
           break;
         }
         load_size = 2; store_size = 2;
         if constexpr (type_size > 1) break;
         if (is_tile_aligned(load_size, store_size)
-            && cost(2, 1) < cost(load_size, store_size)) {
+            && cost(2, 1) >= cost(load_size, store_size)) {
           break;
         }
         load_size = 2; store_size = 1;
         if (is_tile_aligned(load_size, store_size)
-            && cost(1, 1) < cost(load_size, store_size)) {
+            && cost(1, 1) >= cost(load_size, store_size)) {
           break;
         }
         load_size = 1; store_size = 1;
@@ -238,8 +238,8 @@ void transpose(const Tensor &input,
                          static_cast<Type*>(output.data.dptr),
                          row_length, num_rows);
     } else {  // Statically-compiled general kernel
-      constexpr int load_size = 8;
-      constexpr int store_size = 8;
+      constexpr int load_size = 4;
+      constexpr int store_size = 4;
       constexpr int row_tile_size = load_size / type_size * THREADS_PER_WARP;
       constexpr int col_tile_size = store_size / type_size * THREADS_PER_WARP;
       const int num_blocks = (DIVUP(row_length, row_tile_size)
