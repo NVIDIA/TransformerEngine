@@ -46,9 +46,11 @@ transpose_optimized_kernel(const Type * const input,
   constexpr int tile_dim_n = THREADS_PER_WARP * nvec_in;
 
   // Position of tile within tensor
+  // Note: Avoid partition camping with diagonal coordinates
+  const int num_tiles_m = num_rows / tile_dim_m;
   const int num_tiles_n = row_length / tile_dim_n;
-  const int tile_id_m = bid / num_tiles_n;
-  const int tile_id_n = bid % num_tiles_n;
+  const int tile_id_m = bid % num_tiles_m;
+  const int tile_id_n = (bid / num_tiles_m + tile_id_m) % num_tiles_n;
   const int tile_row = tile_id_m * tile_dim_m;
   const int tile_col = tile_id_n * tile_dim_n;
 
