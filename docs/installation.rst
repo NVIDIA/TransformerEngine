@@ -15,8 +15,9 @@ Prerequisites
 2. `CUDA 11.8 <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 11.8 or later.
 
-For the best performance, the CUDA Toolkit headers should also be
-available at runtime (see :doc:`NVRTC support<nvrtc>`).
+If the CUDA Toolkit headers are not available at runtime in a standard
+installation path, e.g. within `CUDA_HOME`, set
+`NVTE_CUDA_INCLUDE_PATH` in the environment.
 
 Transformer Engine in NGC Containers
 ------------------------------------

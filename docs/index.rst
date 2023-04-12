@@ -49,5 +49,4 @@ Transformer Engine documentation
    :hidden:
    :caption: Advanced
 
-   nvrtc
    api/c/index
