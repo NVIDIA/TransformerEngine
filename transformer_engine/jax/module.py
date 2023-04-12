@@ -213,9 +213,9 @@ class LayerNorm(nn.Module):
         The default of `scale_init` will also be changed. See `scale_init`.
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, the following rules will be applied to `scale_init`:
-            If `zero_centered_gamma == False`: `scale_init` = `flax.linen.initializers.ones`.
-            If `zero_centered_gamma == True`: `scale_init` = `flax.linen.initializers.zeros`.
+        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
+        Otherwise, scale_init is `flax.linen.initializers.ones`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
@@ -475,9 +475,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         The default of `scale_init` will also be changed. See `scale_init`
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, the following rules will be applied to `scale_init`:
-            If `zero_centered_gamma == False`: `scale_init` = `flax.linen.initializers.ones`.
-            If `zero_centered_gamma == True`: `scale_init` = `flax.linen.initializers.zeros`.
+        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
+        Otherwise, scale_init is `flax.linen.initializers.ones`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
@@ -690,9 +690,9 @@ class LayerNormMLP(TransformerEngineBase):
         The default of `scale_init` will also be changed. See `scale_init`.
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, the following rules will be applied to `scale_init`:
-            If `zero_centered_gamma == False`: `scale_init` = `flax.linen.initializers.ones`.
-            If `zero_centered_gamma == True`: `scale_init` = `flax.linen.initializers.zeros`.
+        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
+        Otherwise, scale_init is `flax.linen.initializers.ones`.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
