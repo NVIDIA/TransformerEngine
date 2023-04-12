@@ -56,25 +56,67 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
-const std::string &include_directory() {
+const std::string &include_directory(bool required) {
   static std::string path;
+
+  // Update cached path if needed
   static bool need_to_check_env = true;
+  if (path.empty() && required) {
+    need_to_check_env = true;
+  }
   if (need_to_check_env) {
-    path = getenv("NVTE_CUDA_INCLUDE_DIR");
-    if (path.empty()) {
-      const std::vector<std::filesystem::path> search_paths = {
-        getenv("CUDA_HOME"),
-        getenv("CUDA_DIR"),
-        "/usr/local/cuda"};
-      for (const auto &p : search_paths) {
-        if (!p.empty() && file_exists(p / "include" / "cuda_runtime.h")) {
+    // Search for CUDA headers in common paths
+    using Path = std::filesystem::path;
+    std::vector<std::pair<std::string, Path>> search_paths = {
+      {"NVTE_CUDA_INCLUDE_DIR", ""},
+      {"CUDA_HOME", ""},
+      {"CUDA_DIR", ""},
+      {"", "/usr/local/cuda"}};
+    for (auto &[env, p] : search_paths) {
+      if (p.empty()) {
+        p = getenv<Path>(env);
+      }
+      if (!p.empty()) {
+        if (file_exists(p / "cuda_runtime.h")) {
+          path = p;
+          break;
+        }
+        if (file_exists(p / "include" / "cuda_runtime.h")) {
           path = p / "include";
           break;
         }
       }
     }
+
+    // Throw exception if path is required but not found
+    if (path.empty() && required) {
+      std::string message;
+      message.reserve(2048);
+      message += "Could not find cuda_runtime.h in";
+      bool is_first = true;
+      for (const auto &[env, p] : search_paths) {
+        message += is_first ? " " : ", ";
+        is_first = false;
+        if (!env.empty()) {
+          message += env;
+          message += "=";
+        }
+        if (p.empty()) {
+          message += "<unset>";
+        } else {
+          message += p;
+        }
+      }
+      message += (". "
+                  "Specify path to CUDA Toolkit headers "
+                  "with NVTE_CUDA_INCLUDE_DIR "
+                  "or disable NVRTC support with NVTE_DISABLE_NVRTC=1.");
+      NVTE_ERROR(message);
+    }
     need_to_check_env = false;
   }
+
+  // Return cached path
   return path;
 }
 

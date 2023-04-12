@@ -59,16 +59,7 @@ bool is_enabled() {
   static bool is_enabled_ = false;
   static bool need_to_check_env = true;
   if (need_to_check_env) {
-    if (!getenv<bool>("NVTE_DISABLE_NVRTC")) {
-      if (!cuda::include_directory().empty()) {
-        is_enabled_ = true;
-      } else {
-        std::cerr << ("Transformer Engine could not find CUDA Toolkit headers, "
-                      "disabling NVRTC support. "
-                      "Set NVTE_CUDA_INCLUDE_DIR to enable NVRTC support "
-                      "or set NVTE_DISABLE_NVRTC=1 to silence this warning.\n");
-      }
-    }
+    is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
     need_to_check_env = false;
   }
   return is_enabled_;
@@ -175,7 +166,7 @@ void KernelManager::compile(const std::string &kernel_label,
   } else {
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
-  opts.push_back(concat_strings("-I", cuda::include_directory()));
+  opts.push_back(concat_strings("-I", cuda::include_directory(true)));
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
     opts_ptrs.push_back(opt.c_str());

@@ -39,10 +39,13 @@ int sm_count(int device_id = -1);
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
- * environment. Otherwise searches in common install paths and returns
- * an empty string if headers are not found.
+ * environment. Otherwise searches in common install paths.
+ *
+ * \param[in] required Whether to throw exception if not found
+ *
+ * \return Path to include directory, or an empty string if not found
  */
-const std::string &include_directory();
+const std::string &include_directory(bool required = false);
 
 }  // namespace cuda
 
