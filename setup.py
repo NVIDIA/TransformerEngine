@@ -30,22 +30,22 @@ def get_cuda_bare_metal_version(cuda_dir):
     release = output[release_idx].split(".")
     bare_metal_major = release[0]
     bare_metal_minor = release[1][0]
-    return float(bare_metal_major + "." + bare_metal_minor)
+    return (int(bare_metal_major), int(bare_metal_minor))
 
 
 def append_nvcc_threads(nvcc_extra_args):
     cuda_bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if cuda_bare_metal_version >= 11.2:
+    if cuda_bare_metal_version >= (11, 2):
         return nvcc_extra_args + ["--threads", "4"]
     return nvcc_extra_args
 
 
 def extra_gencodes(cc_flag):
     cuda_bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if cuda_bare_metal_version >= 11.0:
+    if cuda_bare_metal_version >= (11, 0):
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_80,code=sm_80")
-    if cuda_bare_metal_version >= 11.8:
+    if cuda_bare_metal_version >= (11, 8):
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_90,code=sm_90")
 
