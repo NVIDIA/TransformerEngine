@@ -173,7 +173,6 @@ def initialize_ub(
             ub_obj = tex.UbufP2PCommOverlap(
                     torch.empty(shape, dtype=dtype, device='cuda'),
                     rank,           # rank id
-                    1,              # pp size
                     tp_size,        # tp size
                     num_sm,         # num_sm
                     aggregate,      # aggregate 2 chunks into single chunk
@@ -183,12 +182,10 @@ def initialize_ub(
             ub_obj = tex.UbufCommOverlap(
                     torch.empty(shape, dtype=dtype, device='cuda'),
                     rank,           # rank id
-                    1,              # pp size
                     tp_size,        # tp size
                     num_sm,         # num_sm
                     cga_size,       # cga_size
                     num_splits,     # num_splits
-                    0,              # use_rr_kernel
                     set_sm_margin,  # set sm margin
                 )
         _ub_communicators[name] = ub_obj
