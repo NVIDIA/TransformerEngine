@@ -604,8 +604,17 @@ class LayerNorm(nn.Module):
     epsilon: float = 1e-6
     dtype: Any = jnp.float32
     layernorm_type: str = 'layernorm'
-    scale_init: Initializer = nn.initializers.ones
+    zero_centered_gamma: bool = False
+    scale_init: Initializer = None
     bias_init: Initializer = nn.initializers.zeros
+
+    def __post_init__(self):
+        if self.scale_init is None:
+            if not self.zero_centered_gamma:
+                self.scale_init = nn.initializers.ones
+            else:
+                self.scale_init = nn.initializers.zeros
+        super().__post_init__()
 
     @nn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -632,9 +641,13 @@ class LayerNorm(nn.Module):
             bias = jnp.asarray(bias, self.dtype)
 
             y = jnp.asarray(y, self.dtype)
-            z = y * scale + bias
+            if not self.zero_centered_gamma:
+                z = y * scale + bias
+            else:
+                z = y * (scale + 1) + bias
         else:
             assert self.layernorm_type == 'rmsnorm'
+            assert not self.zero_centered_gamma
             mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
             y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
             z = y * scale
@@ -768,6 +781,7 @@ class EncoderLayer(nn.Module):
     dtype: Any = jnp.float32
     apply_residual_connection_post_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    zero_centered_gamma: bool = False
     output_layernorm: bool = False
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -797,6 +811,7 @@ class EncoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_attention_layer_norm")(inputs)
 
@@ -831,6 +846,7 @@ class EncoderLayer(nn.Module):
         # MLP block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(x)
 
@@ -857,6 +873,7 @@ class EncoderLayer(nn.Module):
 
         if self.output_layernorm:
             y = LayerNorm(layernorm_type=self.layernorm_type,
+                          zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layer_norm")(y)
         return y
@@ -878,6 +895,7 @@ class DecoderLayer(nn.Module):
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     layernorm_type: str = 'layernorm'
+    zero_centered_gamma: bool = False
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
@@ -914,6 +932,7 @@ class DecoderLayer(nn.Module):
         if not self.output_layernorm:
             # Attention block.
             x = LayerNorm(layernorm_type=self.layernorm_type,
+                          zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="pre_self_attention_layer_norm")(inputs)
 
@@ -949,6 +968,7 @@ class DecoderLayer(nn.Module):
         # Encoder-Decoder block.
         residual = x
         y = LayerNorm(layernorm_type=self.layernorm_type,
+                      zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_cross_attention_layer_norm')(x)
 
@@ -974,6 +994,7 @@ class DecoderLayer(nn.Module):
         # MLP block.
         residual = y
         z = LayerNorm(layernorm_type=self.layernorm_type,
+                      zero_centered_gamma=self.zero_centered_gamma,
                       dtype=self.dtype,
                       name='pre_mlp_layer_norm')(y)
         if self.apply_residual_connection_post_layernorm:
@@ -997,6 +1018,7 @@ class DecoderLayer(nn.Module):
 
         if self.output_layernorm:
             z = LayerNorm(layernorm_type=self.layernorm_type,
+                          zero_centered_gamma=self.zero_centered_gamma,
                           dtype=self.dtype,
                           name="output_layer_norm")(z)
 
