@@ -39,18 +39,18 @@ enum UBOverlapAlgo{
 
 
 struct UbufCommOverlap : torch::CustomClassHolder {
+    communicator* _ub_comm;
     int _tp_id;
     int _tp_size;
     int _num_splits;
     int _math_sms;
-    communicator* _ub_comm;
+    int _ub_reg;
+    void* _ubuf_ptr;
+    torch::Tensor _ubuf;
+    torch::Tensor output_tensor;
     at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
     std::vector<at::cuda::CUDAStream> _stream_compute;
-    torch::Tensor _ubuf;
-    int _ub_reg;
     cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
-    torch::Tensor output_tensor;
-    void* _ubuf_ptr;
 
     UbufCommOverlap(
         torch::Tensor sample,
@@ -130,6 +130,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     {
         // Get the current userbuf offset
         char* ubuf_wt_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());
+        int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size(); // UBUF uses 2Byte element size
         COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
         if (_comm_type == COMM_TYPE::RS) {
             ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
@@ -145,7 +146,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             allgather2_userbuff_inplace(
                 _ub_reg,
                 0,
-                (_ubuf.numel() / 2) * _ubuf.element_size(), // UBUF uses 2Byte element size
+                comm_elements,
                 _ub_comm,
                 (cudaStream_t) _stream_comm
             );
@@ -153,7 +154,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             reducescatter2_userbuff_inplace(
                 _ub_reg,
                 0,
-                _ubuf.numel(),
+                comm_elements,
                 _ub_comm,
                 (cudaStream_t) _stream_comm
             );
@@ -506,34 +507,32 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
 
 struct UbufP2PCommOverlap : torch::CustomClassHolder {
+    communicator* _ub_comm;
     int _tp_id;
     int _tp_size;
     int _ub_reg;
     int _next_rank, _prev_rank, _rank, _rank_round_tp;
-    int _math_sms;
     int _aggregate2;
-    communicator* _ub_comm;
-    at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
-    std::vector<at::cuda::CUDAStream> _stream_compute;
+    int _math_sms;
+    void* _ubuf_ptr;
     torch::Tensor _ubuf;
     std::vector<torch::Tensor> _ubufs;
+    at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
+    std::vector<at::cuda::CUDAStream> _stream_compute;
     cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _start_accum, _stop_accum;
-    void* _ubuf_ptr;
 
     UbufP2PCommOverlap(
         torch::Tensor sample,
         int rank,
         int tp_size,
-        int comm_sm,
         bool aggregate2,
-        bool set_sm_margin,
         int num_max_streams)
     {
         // Initialize userbuf communicator
         create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
         _ub_comm->use_ce = 1;
         _ub_comm->push = 1;
-        _ub_comm->sms = comm_sm;
+        _ub_comm->sms = 1;
         _ub_comm->cga_size = 1;
 
         // Create workspace tensor with userbuffer
@@ -559,6 +558,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             _stream_compute.push_back(at::cuda::getStreamFromExternal(stream, stream_main.device_index()));
         }
 
+        // Set the number of SMs for GEMM with margin
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+        _math_sms = prop.multiProcessorCount;
+
         _tp_size = tp_size;
         _aggregate2 = aggregate2;
 
@@ -567,11 +571,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         _rank_round_tp = (rank / tp_size) * tp_size;
         _next_rank = (tp_size + rank + 1) % tp_size + _rank_round_tp;
         _prev_rank = (tp_size + rank + -1) % tp_size + _rank_round_tp;
-
-        // Set the number of SMs for GEMM with margin
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
-        _math_sms = (set_sm_margin) ? prop.multiProcessorCount - comm_sm : prop.multiProcessorCount;
 
         // CUDA event creation
         cudaEventCreateWithFlags(&_start_compute, 0);
@@ -803,15 +802,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
         return D;
     } // split_overlap_ag
-
-
-    /*
-    ** Get ubuf-registered tensor
-    */
-    torch::Tensor& get_ubuf_tensor()
-    {
-        return _ubuf;
-    }
 
 
     /*

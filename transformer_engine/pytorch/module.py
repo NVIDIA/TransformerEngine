@@ -165,7 +165,6 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
-        shape: list,
         dtype: torch.dtype,
         tp_size: int,
         num_sm: int = 16,
@@ -174,20 +173,19 @@ def initialize_ub(
         num_splits: int = 4,
         aggregate: int = 0,
     ):
+        sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
-                    torch.empty(shape, dtype=dtype, device='cuda'),
-                    rank_id,                   # Rank id
+                    sample_buffer,          # Sample userbuffer
+                    rank_id,                # Rank id
                     tp_size,                # TP size
-                    num_sm,                 # Number of communication SMs
-                    aggregate,              # Aggregate GEMM chunks
-                    set_sm_margin,          # Set SM margin
+                    aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
-                    torch.empty(shape, dtype=dtype, device='cuda'),
-                    rank_id,                   # Rank id
+                    sample_buffer,          # Sample userbuffer
+                    rank_id,                # Rank id
                     tp_size,                # TP size
                     num_sm,                 # Number of communication SMs
                     cga_size,               # CGA cluster size
@@ -202,24 +200,22 @@ def initialize_ub(
             try:
                 ub_cfg = ub_cfgs[name]
                 method = ub_cfg["method"]
-                dtype = ub_cfg["dtype"]
-                num_sm = ub_cfg["num_sm"]
-                cga_size = ub_cfg["cga_size"]
-                set_sm_margin = ub_cfg["set_sm_margin"]
-                num_splits = ub_cfg["num_splits"]
-                aggregate = ub_cfg["aggregate"]
+                num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
+                cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
+                num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
+                set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
+                aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
             except ValueError:
                 print(
                     "Incomplete UB configurations. The config should include "
                     "`method`, `dtype`, `num_sm`, `num_splits`, "
                     "`cga_size`, `num_splits`, `set_sm_margin`, and `aggregate`"
                 )
-            assert dtype in ['bf16', 'fp8'], "Dtype should be `bf16` or `fp8`."
+            dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
             add_ub(
                 name,
                 method,
-                shape,
-                torch.uint8 if dtype == 'fp8' else torch.bfloat16,
+                dtype,
                 tp_size,
                 num_sm,
                 cga_size,
@@ -230,12 +226,10 @@ def initialize_ub(
         else:
             dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
             method = get_method(name)
-            if method == "ring_exchange":
-                add_ub(name, method, shape, dtype, tp_size, num_sm=1, cga_size=1)
-            elif method == "pipeline":
-                add_ub(name, method, shape, dtype, tp_size)
+            if method == "bulk":
+                add_ub(name, method, dtype, tp_size, num_splits=0)
             else:
-                add_ub(name, method, shape, dtype, tp_size, num_splits=0)
+                add_ub(name, method, dtype, tp_size)
 
 def get_ub(name: str):
     global _ub_communicators

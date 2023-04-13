@@ -1073,15 +1073,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, int, int, bool>())
+    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int>())
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
-    .def("get_output", &ubuf::UbufCommOverlap::get_output);
+    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, bool, bool>())
+    .def(py::init<torch::Tensor&, int, int, bool, int>())
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
