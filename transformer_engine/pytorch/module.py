@@ -85,6 +85,7 @@ _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _cublas_workspace = None
 _ub_communicators = None
+_NUM_MAX_UB_STREAMS = 3
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -139,7 +140,11 @@ def initialize_ub(
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
-    rank = torch.distributed.get_rank()
+    rank_id = torch.distributed.get_rank()
+
+    # Increase the workspace by the number of maximum concurrent streams
+    global _cublas_workspace
+    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     fp8_buf = [
@@ -172,21 +177,23 @@ def initialize_ub(
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
                     torch.empty(shape, dtype=dtype, device='cuda'),
-                    rank,           # rank id
-                    tp_size,        # tp size
-                    num_sm,         # num_sm
-                    aggregate,      # aggregate 2 chunks into single chunk
-                    set_sm_margin,  # set sm margin
+                    rank_id,                   # Rank id
+                    tp_size,                # TP size
+                    num_sm,                 # Number of communication SMs
+                    aggregate,              # Aggregate GEMM chunks
+                    set_sm_margin,          # Set SM margin
+                    _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
                     torch.empty(shape, dtype=dtype, device='cuda'),
-                    rank,           # rank id
-                    tp_size,        # tp size
-                    num_sm,         # num_sm
-                    cga_size,       # cga_size
-                    num_splits,     # num_splits
-                    set_sm_margin,  # set sm margin
+                    rank_id,                   # Rank id
+                    tp_size,                # TP size
+                    num_sm,                 # Number of communication SMs
+                    cga_size,               # CGA cluster size
+                    num_splits,             # Number of communication splits
+                    set_sm_margin,          # Set SM margin
+                    _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
                 )
         _ub_communicators[name] = ub_obj
 
@@ -225,8 +232,10 @@ def initialize_ub(
             method = get_method(name)
             if method == "ring_exchange":
                 add_ub(name, method, shape, dtype, tp_size, num_sm=1, cga_size=1)
-            else:
+            elif method == "pipeline":
                 add_ub(name, method, shape, dtype, tp_size)
+            else:
+                add_ub(name, method, shape, dtype, tp_size, num_splits=0)
 
 def get_ub(name: str):
     global _ub_communicators
