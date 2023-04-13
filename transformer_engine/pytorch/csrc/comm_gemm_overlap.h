@@ -8,7 +8,6 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <transformer_engine/userbuffers.h>
-#include "gemm.h"
 #include <torch/cuda.h>
 
 
@@ -466,12 +465,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             (cudaStream_t) _stream_comm)
         );
     }
-    torch::Tensor get_output()
-    {
-        if (output_tensor.numel() == 0)
-            NVTE_ERROR("Empty output");
-        return output_tensor;
-    }
+
+
     torch::Tensor & get_ubuf_output(int comm_type)
     {
         char* ubuf_wt_ptr = reinterpret_cast<char*>(_ubuf.data_ptr());

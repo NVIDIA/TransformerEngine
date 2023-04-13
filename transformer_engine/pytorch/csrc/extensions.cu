@@ -1077,8 +1077,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
-    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output)
-    .def("get_output", &ubuf::UbufCommOverlap::get_output);
+    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
     .def(py::init<torch::Tensor&, int, int, int, bool, bool>())
