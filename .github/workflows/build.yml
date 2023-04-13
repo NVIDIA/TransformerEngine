@@ -43,8 +43,7 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Build'
         run: |
-          apt-get -y update && \
-          apt -y install ninja-build pybind11-dev && \
+          pip install ninja pybind11 && \
           pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=jax pip wheel -w wheelhouse . -v
@@ -69,8 +68,7 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Build'
         run: |
-          apt-get -y update && \
-          apt -y install ninja-build pybind11-dev && \
+          pip install ninja pybind11 && \
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'
