@@ -318,7 +318,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         if isinstance(state, torch.Tensor):
-            state = pickle.loads(state.detach().numpy().tobytes())
+            state = pickle.loads(state.detach().cpu().numpy().tobytes())
             if state is None:
                 return
 
