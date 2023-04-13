@@ -66,6 +66,7 @@ _KEY_OF_DROPOUT_RATE = "dropout_rate"
 _KEY_OF_MLP_ACTIVATIONS = "mlp_activations"
 _KEY_OF_FUSE_MLP_WI = "fuse_mlp_wi"
 _KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
+_KEY_OF_ZERO_CENTERED_GAMMA = 'zero_centered_gamma'
 _KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
 
 BASE_ATTRS = {_KEY_OF_TRANSPOSE_BS: True}
@@ -74,6 +75,9 @@ ATTRS = [{
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+}, {
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_ZERO_CENTERED_GAMMA: True
 }, {
     _KEY_OF_LAYERNORM_TYPE: 'rmsnorm',
     _KEY_OF_RESIDUAL_POST_LAYERNORM: True

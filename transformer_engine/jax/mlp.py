@@ -103,6 +103,7 @@ def fp8_ln_mlp(
     layernorm_type: str,
     fwd_dtype: TEDType,
     bwd_dtype: TEDType,
+    zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
     major_sharding_type: MajorShardingType = MajorShardingType.SINGLE,
@@ -125,12 +126,14 @@ def fp8_ln_mlp(
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'rmsnorm':
         assert ln_bias is None, "ln_bias should be None if layernorm_type is 'rmsnorm'"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
 
     assert activations == ('gelu', 'linear')
     if major_sharding_type is MajorShardingType.SINGLE:
         res = _fp8_mlp(inputs, ln_scale, ln_bias, kernel_1, kernel_2, fp8_max, amax, scale,
-                       scale_inv, layernorm_type, activations, epsilon, fwd_dtype, bwd_dtype,
-                       contracting_dims, major_sharding_type, "", "")
+                       scale_inv, layernorm_type, activations, zero_centered_gamma, epsilon,
+                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -177,6 +180,7 @@ def fp8_ln_mlp(
         partial_fp8_mlp = partial(_fp8_mlp,
                                   layernorm_type=layernorm_type,
                                   activations=activations,
+                                  zero_centered_gamma=zero_centered_gamma,
                                   epsilon=epsilon,
                                   fwd_dtype=fwd_dtype,
                                   bwd_dtype=bwd_dtype,
@@ -196,12 +200,13 @@ def fp8_ln_mlp(
     return res
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
              scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str,
-             activations: Sequence[Union[str, Callable]], epsilon: float, fwd_dtype: TEDType,
-             bwd_dtype: TEDType, contracting_dims: Tuple[Sequence[int], Sequence[int]],
+             activations: Sequence[Union[str, Callable]], zero_centered_gamma: bool, epsilon: float,
+             fwd_dtype: TEDType, bwd_dtype: TEDType, contracting_dims: Tuple[Sequence[int],
+                                                                             Sequence[int]],
              major_sharding_type: MajorShardingType, dp_axis_name: str, tp_axis_name: str):
     res, _ = _fp8_mlp_fwd(inputs,
                           ln_scale,
@@ -214,6 +219,7 @@ def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
                           scale_inv,
                           layernorm_type,
                           activations,
+                          zero_centered_gamma,
                           epsilon,
                           fwd_dtype,
                           bwd_dtype,
@@ -236,6 +242,7 @@ def _fp8_mlp_fwd(
         scale_inv,
         layernorm_type,
         activations,
+        zero_centered_gamma,
         epsilon,
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
@@ -276,8 +283,11 @@ def _fp8_mlp_fwd(
                                                             input_amax,
                                                             input_scale,
                                                             input_scale_inv,
+                                                            zero_centered_gamma=zero_centered_gamma,
                                                             epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         ln_out, rsigma, ln_out_amax = rmsnorm_fwd_fp8(inputs_,
                                                       gamma,
                                                       input_amax,
@@ -334,6 +344,7 @@ def _fp8_mlp_fwd(
 def _fp8_mlp_bwd(
         layernorm_type,
         activations,    # pylint: disable=unused-argument
+        zero_centered_gamma,
         epsilon,
         fwd_dtype,
         bwd_dtype,
@@ -397,8 +408,11 @@ def _fp8_mlp_bwd(
                                                           rsigma,
                                                           inputs_,
                                                           gamma,
+                                                          zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(dgrad_1, rsigma, inputs_, gamma, epsilon=epsilon)
         grad_beta = None
 
