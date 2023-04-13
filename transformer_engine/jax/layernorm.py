@@ -37,6 +37,7 @@ def layernorm(inputs: jnp.ndarray,
               gamma: jnp.ndarray,
               beta: jnp.ndarray,
               layernorm_type: str,
+              zero_centered_gamma: bool = False,
               epsilon: float = 1e-6,
               sharding_type: ShardingType = ShardingType.SINGLE,
               dp_dim_index: int = 0):
@@ -49,15 +50,18 @@ def layernorm(inputs: jnp.ndarray,
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'rmsnorm':
         assert beta is None, "beta should be None if layernorm_type is 'rmsnorm'"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
 
     if sharding_type is ShardingType.SINGLE:
         output = _layernorm(inputs,
                             gamma,
                             beta,
                             layernorm_type=layernorm_type,
+                            zero_centered_gamma=zero_centered_gamma,
+                            epsilon=epsilon,
                             sharding_type=sharding_type,
-                            dp_axis_name="",
-                            epsilon=epsilon)
+                            dp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -75,9 +79,10 @@ def layernorm(inputs: jnp.ndarray,
 
         partial_ln = partial(_layernorm,
                              layernorm_type=layernorm_type,
+                             zero_centered_gamma=zero_centered_gamma,
+                             epsilon=epsilon,
                              sharding_type=sharding_type,
-                             dp_axis_name=dp_axis_name,
-                             epsilon=epsilon)
+                             dp_axis_name=dp_axis_name)
 
         output = xmap_runner(partial_ln, in_axes, sharding_meta.out_axes,
                              sharding_meta.axis_resources, (inputs_, gamma_, beta_))
@@ -87,9 +92,11 @@ def layernorm(inputs: jnp.ndarray,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
-def _layernorm(x, gamma, beta, layernorm_type, sharding_type, dp_axis_name, epsilon=1e-6):
-    output, _ = _layernorm_fwd(x, gamma, beta, layernorm_type, sharding_type, dp_axis_name, epsilon)
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+def _layernorm(x, gamma, beta, layernorm_type, zero_centered_gamma, epsilon, sharding_type,
+               dp_axis_name):
+    output, _ = _layernorm_fwd(x, gamma, beta, layernorm_type, zero_centered_gamma, epsilon,
+                               sharding_type, dp_axis_name)
     return output
 
 
@@ -98,23 +105,36 @@ def _layernorm_fwd(
         gamma,
         beta,
         layernorm_type,
+        zero_centered_gamma,
+        epsilon,
         sharding_type,    # pylint: disable=unused-argument
-        dp_axis_name,    # pylint: disable=unused-argument
-        epsilon):
+        dp_axis_name    # pylint: disable=unused-argument
+):
     if layernorm_type == 'layernorm':
-        output, mu, rsigma = layernorm_fwd(x, gamma, beta, epsilon)
+        output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         output, rsigma = rmsnorm_fwd(x, gamma, epsilon)
         mu = None
     return output, (mu, rsigma, x, gamma)
 
 
-def _layernorm_bwd(layernorm_type, sharding_type, dp_axis_name, epsilon, ctx, g):
+def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, dp_axis_name, ctx,
+                   g):
     mu, rsigma, x, gamma = ctx
 
     if layernorm_type == 'layernorm':
-        grad_input, grad_gamma, grad_beta = layernorm_bwd(g, mu, rsigma, x, gamma, epsilon=epsilon)
+        grad_input, grad_gamma, grad_beta = layernorm_bwd(g,
+                                                          mu,
+                                                          rsigma,
+                                                          x,
+                                                          gamma,
+                                                          zero_centered_gamma=zero_centered_gamma,
+                                                          epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(g, rsigma, x, gamma, epsilon=epsilon)
         grad_beta = None
 
@@ -135,9 +155,10 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                       fwd_dtype: TEDType,
                       bwd_dtype: TEDType,
                       contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
+                      zero_centered_gamma: bool = False,
+                      epsilon: float = 1e-6,
                       sharding_type: ShardingType = ShardingType.SINGLE,
-                      dp_dim_index: int = 0,
-                      epsilon: float = 1e-6) -> jnp.ndarray:
+                      dp_dim_index: int = 0) -> jnp.ndarray:
     """
     LN + fp8 dot fusion wrapper
     """
@@ -147,6 +168,8 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'rmsnorm':
         assert beta is None, "beta should be None if layernorm_type is 'rmsnorm'"
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
 
     assert fp8_gemm_pkg.num_of_gemm == 1
     inputs = fp8_gemm_pkg.inputs
@@ -169,10 +192,11 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                     fwd_dtype,
                                     bwd_dtype,
                                     contracting_dims,
+                                    zero_centered_gamma=zero_centered_gamma,
+                                    epsilon=epsilon,
                                     sharding_type=sharding_type,
                                     dp_axis_name="",
-                                    tp_axis_name="",
-                                    epsilon=epsilon)
+                                    tp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -214,10 +238,11 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                      fwd_dtype=fwd_dtype,
                                      bwd_dtype=bwd_dtype,
                                      contracting_dims=contracting_dims,
+                                     zero_centered_gamma=zero_centered_gamma,
+                                     epsilon=epsilon,
                                      sharding_type=sharding_type,
                                      dp_axis_name=dp_axis_name,
-                                     tp_axis_name=tp_axis_name,
-                                     epsilon=epsilon)
+                                     tp_axis_name=tp_axis_name)
 
         # input, kernel, gamma, beta, fp8_metas
         in_axes = (ln_sharding_meta.in_axes[0], dot_sharding_meta.in_axes[1],
@@ -230,27 +255,18 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15))
-def _layernorm_fp8_dot(inputs: jnp.ndarray,
-                       kernel: jnp.ndarray,
-                       gamma: jnp.ndarray,
-                       beta: jnp.ndarray,
-                       fp8_maxs: jnp.ndarray,
-                       amax: jnp.ndarray,
-                       scale: jnp.ndarray,
-                       scale_inv: jnp.ndarray,
-                       layernorm_type: str,
-                       fwd_dtype: TEDType,
-                       bwd_dtype: TEDType,
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16))
+def _layernorm_fp8_dot(inputs: jnp.ndarray, kernel: jnp.ndarray, gamma: jnp.ndarray,
+                       beta: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
+                       scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str,
+                       fwd_dtype: TEDType, bwd_dtype: TEDType,
                        contracting_dims: Tuple[Sequence[int], Sequence[int]],
-                       sharding_type: ShardingType,
-                       dp_axis_name: str,
-                       tp_axis_name: str,
-                       epsilon: float = 1e-6) -> jnp.ndarray:
+                       zero_centered_gamma: bool, epsilon: float, sharding_type: ShardingType,
+                       dp_axis_name: str, tp_axis_name: str) -> jnp.ndarray:
     output, _ = _layernorm_fp8_dot_fwd(inputs, kernel, gamma, beta, fp8_maxs, amax, scale,
                                        scale_inv, layernorm_type, fwd_dtype, bwd_dtype,
-                                       contracting_dims, sharding_type, dp_axis_name, tp_axis_name,
-                                       epsilon)
+                                       contracting_dims, zero_centered_gamma, epsilon,
+                                       sharding_type, dp_axis_name, tp_axis_name)
     return output
 
 
@@ -267,10 +283,11 @@ def _layernorm_fp8_dot_fwd(
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
         contracting_dims,
+        zero_centered_gamma,
+        epsilon,
         sharding_type,
         dp_axis_name,    # pylint: disable=unused-argument
-        tp_axis_name,
-        epsilon):
+        tp_axis_name):
 
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
     input_shape_pre = inputs.shape[:min(lhs_contracting_dims)]
@@ -295,8 +312,11 @@ def _layernorm_fp8_dot_fwd(
                                                            input_amax,
                                                            input_scale,
                                                            input_scale_inv,
+                                                           zero_centered_gamma=zero_centered_gamma,
                                                            epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         ln_out, rsigma, input_amax = rmsnorm_fwd_fp8(inputs,
                                                      gamma,
                                                      input_amax,
@@ -337,10 +357,11 @@ def _layernorm_fp8_dot_bwd(
         fwd_dtype,
         bwd_dtype,
         contracting_dims,    # pylint: disable=unused-argument
+        zero_centered_gamma,
+        epsilon,
         sharding_type,
         dp_axis_name,
         tp_axis_name,
-        epsilon,
         ctx,
         g):
     ln_out_, kernel_cast, \
@@ -377,8 +398,16 @@ def _layernorm_fp8_dot_bwd(
         dgrad = jax.lax.psum(dgrad, tp_axis_name)
 
     if layernorm_type == 'layernorm':
-        grad_input, grad_gamma, grad_beta = layernorm_bwd(dgrad, mu, rsigma, inputs, gamma, epsilon)
+        grad_input, grad_gamma, grad_beta = layernorm_bwd(dgrad,
+                                                          mu,
+                                                          rsigma,
+                                                          inputs,
+                                                          gamma,
+                                                          zero_centered_gamma=zero_centered_gamma,
+                                                          epsilon=epsilon)
     else:
+        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
+            "if layernorm_type is 'rmsnorm'"
         grad_input, grad_gamma = rmsnorm_bwd(dgrad, rsigma, inputs, gamma, epsilon=epsilon)
         grad_beta = None
 
