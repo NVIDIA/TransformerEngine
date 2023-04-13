@@ -48,7 +48,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     communicator* _ub_comm;
     at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
     std::vector<at::cuda::CUDAStream> _stream_compute;
-    cudaStream_t* stream_math;
     torch::Tensor _ubuf;
     int _handle;
     cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
@@ -81,8 +80,11 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         _handle = register_user_buffer_collective((void**)&_ubuf_ptr, ubuf_bytes, _ub_comm);
         _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
+        at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
         for (int i = 0; i < num_splits; i++) {
-            _stream_compute.push_back(at::cuda::getStreamFromPool());
+            cudaStream_t stream;
+            cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, -1);
+            _stream_compute.push_back(at::cuda::getStreamFromExternal(stream, stream_main.device_index()));
             _lt_workspaces.push_back(torch::empty({1 << 25}, at::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA)));
         }
 
@@ -492,8 +494,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             ubuf_byte_ptr += ubuf_chunk_bytes;
         }
 
+        at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
         for (int i = 0; i < tp_size; i++) {
-            _stream_compute.push_back(at::cuda::getStreamFromPool());
+            cudaStream_t stream;
+            cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, -1);
+            _stream_compute.push_back(at::cuda::getStreamFromExternal(stream, stream_main.device_index()));
             _lt_workspaces.push_back(torch::empty({1 << 25}, at::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA)));
         }
 
