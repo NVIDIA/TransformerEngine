@@ -10,6 +10,7 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include "../common.h"
+#include <iostream>
 
 namespace {
 
@@ -49,6 +50,7 @@ void cublas_gemm(const Tensor *inputA,
                  size_t workspaceSize,
                  bool accumulate,
                  bool use_split_accumulator,
+                 int math_sm_count,
                  cudaStream_t stream
 ) {
   void *A = inputA->data.dptr;
@@ -124,6 +126,12 @@ void cublas_gemm(const Tensor *inputA,
                                                    &transa, sizeof(transa)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB,
                                                    &transb, sizeof(transb)));
+  // Set math SM count
+  if (math_sm_count != 0) {
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+          operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &math_sm_count, sizeof(math_sm_count)));
+  }
+
 
   // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
   // Note: gelu fusion isn't available right now, and we don't need
@@ -227,6 +235,7 @@ void cublas_gemm(const Tensor *inputA,
   if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
 
   // D = alpha * (A * B) + beta * C
+
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle,
                                    operationDesc,
                                    static_cast<const void*>(&one),         /* alpha */
@@ -266,6 +275,7 @@ void nvte_cublas_gemm(const NVTETensor A,
                       NVTETensor workspace,
                       bool accumulate,
                       bool use_split_accumulator,
+                      int math_sm_count,
                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
   using namespace transformer_engine;
@@ -308,5 +318,6 @@ void nvte_cublas_gemm(const NVTETensor A,
               grad, wspace->data.dptr,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
+              math_sm_count,
               stream);
 }

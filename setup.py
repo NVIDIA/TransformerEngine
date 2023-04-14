@@ -79,6 +79,8 @@ def make_abs_path(l):
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
+    "/usr/local/mpi/include",
+    "/usr/local/ucx/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
@@ -158,7 +160,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
     @staticmethod
     def install_requires():
-        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
+        return []#"flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
 
 class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
