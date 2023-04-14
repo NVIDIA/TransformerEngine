@@ -144,6 +144,7 @@ def initialize_ub(
     use_fp8: bool = False,
     ub_cfgs: Optional[dict] = None
 ) -> None:
+    """Initialize communicators for TP comm overlap using userbuffers."""
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
@@ -168,6 +169,7 @@ def initialize_ub(
         for method, names in methods.items():
             if name in names:
                 return method
+        raise KeyError(f"Given layer name {name} does not exist.")
 
     def add_ub(
         name: str,
@@ -179,7 +181,7 @@ def initialize_ub(
         set_sm_margin: int = 0,
         num_splits: int = 4,
         aggregate: int = 0,
-    ):
+    ) -> None:
         sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
@@ -238,7 +240,9 @@ def initialize_ub(
             else:
                 add_ub(name, method, dtype, tp_size)
 
+
 def get_ub(name: str):
+    """Get userbuffer communicator corresponding to give key."""
     global _ub_communicators
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
@@ -707,7 +711,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             gather_grad_output
             and ctx.fp8_meta["recipe"].override_linear_precision.wgrad
         ):
-            assert not ctx.ub_split_ag, "override_linear_precision.wgrad not supported with ub_split_ag"
+            assert (
+                not ctx.ub_split_ag
+            ), "override_linear_precision.wgrad not supported with ub_split_ag"
             grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
         # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
         elif gather_grad_output:
@@ -905,7 +911,8 @@ class _LayerNormLinear(torch.autograd.Function):
             if is_grad_enabled:
                 if ub_split_ag:
                     _, mu, rsigma = tex.layernorm_fwd_noalloc(
-                        inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
+                        inputmat, ln_weight, ln_bias, ln_out, eps,
+                        fwd_ln_sm_margin, zero_centered_gamma
                     )
                 else:
                     ln_out, mu, rsigma = tex.layernorm_fwd(
@@ -1173,7 +1180,8 @@ class _LayerNormLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
-                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
+                            if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                         )
                     else:
@@ -1193,7 +1201,8 @@ class _LayerNormLinear(torch.autograd.Function):
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
+                            if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                         )
                 else:
@@ -2393,7 +2402,8 @@ class _LayerNormMLP(torch.autograd.Function):
             if is_grad_enabled:
                 if ub_split_ag:
                     _, mu, rsigma = tex.layernorm_fwd_noalloc(
-                        inputmat, ln_weight, ln_bias, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma
+                        inputmat, ln_weight, ln_bias, ln_out, eps,
+                        fwd_ln_sm_margin, zero_centered_gamma
                     )
                 else:
                     ln_out, mu, rsigma = tex.layernorm_fwd(
@@ -2803,7 +2813,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
                 else:
-                    fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
+                    fc1_dgrad = torch.empty(
+                        fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
+                    )
                 # FC1 DGRAD: Unconditional
                 _ = fp8_gemm(
                     fc1_weight_t_fp8,
@@ -2861,7 +2873,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
                 else:
-                    fc1_dgrad = torch.empty (fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device)
+                    fc1_dgrad = torch.empty(
+                        fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
+                    )
                 # FC1 DGRAD: Unconditional
                 _, _, _ = gemm(
                     fc1_weight,
@@ -2909,7 +2923,8 @@ class _LayerNormMLP(torch.autograd.Function):
                             if ctx.fuse_wgrad_accumulation
                             else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
-                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
+                            if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                         )
                     else:
@@ -2931,7 +2946,8 @@ class _LayerNormMLP(torch.autograd.Function):
                             out=fc1_weight.main_grad
                             if ctx.fuse_wgrad_accumulation
                             else None,
-                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                            ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
+                            if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                         )
                 else:

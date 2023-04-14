@@ -92,11 +92,15 @@ def fp8_gemm(
             args = tuple(args + (0,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
             fn = ub.split_overlap_ag
-            extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
             args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
-            assert extra_output_tensor is not None, 'SPLIT_PIPELINED_RS requires extra output tensor'
+            assert (
+                extra_output_tensor is not None
+            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
             args = tuple(args + (True, extra_output_tensor,))
     _ = fn(*args)
 
@@ -200,11 +204,15 @@ def gemm(
             args = tuple(args + (0,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
             fn = ub.split_overlap_ag
-            extra_output_tensor = empty_tensor if extra_output_tensor is None else extra_output_tensor
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
             args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
-            assert extra_output_tensor is not None, 'SPLIT_PIPELINED_RS requires extra output tensor'
+            assert (
+                extra_output_tensor is not None
+            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
             args = tuple(args + (False, extra_output_tensor,))
     _ = fn(*args)
 
@@ -409,7 +417,7 @@ def cast_to_fp8(
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
     out: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> Optional[torch.Tensor]:
     """Cast input to FP8"""
 
     if out is not None:
@@ -421,7 +429,6 @@ def cast_to_fp8(
             fp8_meta_tensor.scale_inv[fp8_tensor],
             otype
         )
-        return
     return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
         fp8_meta_tensor.scale,
