@@ -1,5 +1,11 @@
+#include <cuda.h>
+#include <cuda_runtime.h>
+#if __CUDA_ARCH__ >= 800
 #include <cuda_bf16.h>
 #define half nv_bfloat16
+#else
+#include <cuda_fp16.h>
+#endif
 #include <transformer_engine/userbuffers.h>
 #include <stdio.h>
 #include <assert.h>
@@ -33,7 +39,7 @@ userbuffers_fp16_sum_inplace_gpu_rw(const int op,const int flagoffset,const int 
     reduce_id=(*reduceidptr)+1;
     flagptr = (reinterpret_cast<int*>(commbuff[targetgpu]))+flagoffset+blockflagoffset;
     myptr+=blockflagoffset;
-    
+
     flagptr[physgpu]=reduce_id;
     volatile int* flag = (volatile int*)&(myptr[targetgpu]);
     userptr[threadIdx.x]=reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
@@ -46,22 +52,22 @@ userbuffers_fp16_sum_inplace_gpu_rw(const int op,const int flagoffset,const int 
   int warp=blockIdx.x+(threadIdx.x>>5);
   int dest[RANKS];
   #pragma unroll
-  for(int i=0;i<RANKS;i++) 
+  for(int i=0;i<RANKS;i++)
     dest[i] = (i+myrank+warp)&(RANKS-1);
 
   __syncthreads();
        for (int line=threadIdx.x+blockDim.x*(myrank+RANKS*blockIdx.x);line<numlines;line+=blockDim.x*gridDim.x*RANKS) {
         int4 val[RANKS];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS;i++) {
            //int dest = (i+myrank+warp)&(RANKS-1);
            val[i] = userptr[dest[i]][lineoffset+line];
         }
-        
+
         int4 sum = val[0];
         half *s = reinterpret_cast<half*>(&sum);
-        
+
         #pragma unroll
         for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
@@ -74,7 +80,7 @@ userbuffers_fp16_sum_inplace_gpu_rw(const int op,const int flagoffset,const int 
           userptr[dest[i]][lineoffset+line]=sum;
        }
       }
-      
+
       __syncthreads();
       if(threadIdx.x==0) __threadfence_system();
       __syncthreads();
@@ -106,7 +112,7 @@ userbuffers_fp16_sum_inplace_gpu_rr(const int op,const int flagoffset,const int 
     reduce_id=(*reduceidptr)+1;
     flagptr = (reinterpret_cast<int*>(commbuff[targetgpu]))+flagoffset+blockflagoffset;
     myptr+=blockflagoffset;
-    
+
     flagptr[physgpu]=reduce_id;
     volatile int* flag = (volatile int*)&(myptr[targetgpu]);
     userptr[threadIdx.x]=reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
@@ -119,22 +125,22 @@ userbuffers_fp16_sum_inplace_gpu_rr(const int op,const int flagoffset,const int 
   int warp=blockIdx.x+(threadIdx.x>>5);
   int dest[RANKS];
   #pragma unroll
-  for(int i=0;i<RANKS;i++) 
+  for(int i=0;i<RANKS;i++)
     dest[i] = (i+myrank+warp)&(RANKS-1);
 
   __syncthreads();
        for (int line=threadIdx.x+blockDim.x*(myrank+RANKS*blockIdx.x);line<numlines;line+=blockDim.x*gridDim.x*RANKS) {
         int4 val[RANKS];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS;i++) {
            //int dest = (i+myrank+warp)&(RANKS-1);
            val[i] = userptr[dest[i]][lineoffset+line];
         }
-        
+
         int4 sum = val[0];
         half *s = reinterpret_cast<half*>(&sum);
-        
+
         #pragma unroll
         for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
@@ -147,7 +153,7 @@ userbuffers_fp16_sum_inplace_gpu_rr(const int op,const int flagoffset,const int 
 #ifdef ALLREDUCEONLYRS
   if(threadIdx.x==0 && blockIdx.x==0) *reduceidptr=reduce_id;
   return;
-#endif      
+#endif
       __syncthreads();
       if(threadIdx.x==0) __threadfence();
       __syncthreads();
@@ -170,7 +176,7 @@ userbuffers_fp16_sum_inplace_gpu_rr(const int op,const int flagoffset,const int 
 
       for (int line=threadIdx.x+blockDim.x*RANKS*blockIdx.x;line<numlines;line+=blockDim.x*gridDim.x*RANKS) {
         int4 val[RANKS-1];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS-1;i++) {
            //int dest = (i+1+myrank)&(RANKS-1);
@@ -203,7 +209,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs(const int op,const int flagoffset,const i
     reduce_id=(*reduceidptr)+1;
     flagptr = (reinterpret_cast<int*>(commbuff[targetgpu]))+flagoffset+blockflagoffset;
     myptr+=blockflagoffset;
-    
+
     flagptr[physgpu]=reduce_id;
     volatile int* flag = (volatile int*)&(myptr[targetgpu]);
     userptr[threadIdx.x]=reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
@@ -215,22 +221,22 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs(const int op,const int flagoffset,const i
   int warp=blockIdx.x+(threadIdx.x>>5);
   int dest[RANKS];
   #pragma unroll
-  for(int i=0;i<RANKS;i++) 
+  for(int i=0;i<RANKS;i++)
     dest[i] = (i+myrank+warp)&(RANKS-1);
 
   __syncthreads();
        for (int line=threadIdx.x+blockDim.x*blockIdx.x;line<totallines;line+=blockDim.x*gridDim.x) {
         int4 val[RANKS];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS;i++) {
            //int dest = (i+myrank+warp)&(RANKS-1);
            val[i] = userptr[dest[i]][mylineoffset+line];
         }
-        
+
         int4 sum = val[0];
         half *s = reinterpret_cast<half*>(&sum);
-        
+
         #pragma unroll
         for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
@@ -261,7 +267,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop(const int op,const int flagoffset,con
     reduce_id=(*reduceidptr)+1;
     flagptr = (reinterpret_cast<int*>(commbuff[targetgpu]))+flagoffset+blockflagoffset;
     myptr+=blockflagoffset;
-    
+
     flagptr[physgpu]=reduce_id;
     volatile int* flag = (volatile int*)&(myptr[targetgpu]);
     userptr[threadIdx.x]=reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
@@ -273,22 +279,22 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop(const int op,const int flagoffset,con
   int warp=blockIdx.x+(threadIdx.x>>5);
   int dest[RANKS];
   #pragma unroll
-  for(int i=0;i<RANKS;i++) 
+  for(int i=0;i<RANKS;i++)
     dest[i] = (i+myrank+warp)&(RANKS-1);
 
   __syncthreads();
        for (int line=threadIdx.x+blockDim.x*blockIdx.x;line<totallines;line+=blockDim.x*gridDim.x) {
         int4 val[RANKS];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS;i++) {
            //int dest = (i+myrank+warp)&(RANKS-1);
            val[i] = userptr[dest[i]][mylineoffset+line];
         }
-        
+
         int4 sum = val[0];
         half *s = reinterpret_cast<half*>(&sum);
-        
+
         #pragma unroll
         for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
@@ -319,7 +325,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_ag(const int op,const int flagoffset,const i
     reduce_id=(*reduceidptr)+1;
     flagptr = (reinterpret_cast<int*>(commbuff[targetgpu]))+flagoffset+blockflagoffset;
     myptr+=blockflagoffset;
-    
+
     flagptr[physgpu]=reduce_id;
     volatile int* flag = (volatile int*)&(myptr[targetgpu]);
     userptr[threadIdx.x]=reinterpret_cast<int4*>(commbuff[targetgpu+handleridx]);
@@ -340,7 +346,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_ag(const int op,const int flagoffset,const i
 
       for (int line=threadIdx.x+blockDim.x*blockIdx.x;line<totallines;line+=blockDim.x*gridDim.x) {
         int4 val[RANKS-1];
-        
+
         #pragma unroll
         for(int i=0;i<RANKS-1;i++) {
            //int dest = (i+1+myrank)&(RANKS-1);
@@ -400,10 +406,10 @@ userbuffers_fp16_sum_inplace_gpu_rw_ag(const int op,const int flagoffset,const i
 
        for (int line=start_elem;line<end_aligned;line+=loop_step) {
         int4 val[UNROLLAG];
-        #pragma unroll  
+        #pragma unroll
         for(int j=0;j<UNROLLAG;j++)
           val[j] = localptr[mylineoffset+line+loop_step0*j];
- 
+
         #pragma unroll
         for(int j=0;j<UNROLLAG;j++)
         #pragma unroll
@@ -420,8 +426,8 @@ userbuffers_fp16_sum_inplace_gpu_rw_ag(const int op,const int flagoffset,const i
           //int dest = (i+myrank+warp)&(RANKS-1);
           userptr[dest[i]][mylineoffset+line]=sum;
        }
-      } 
-      
+      }
+
       __syncthreads();
       if(threadIdx.x==0) __threadfence_system();
       __syncthreads();
@@ -457,7 +463,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
       while(*flag<basecounter) {}
     }
     __syncthreads();
-    
+
     int startblock=0,endblock=numblocks;
     //if(numblocks>1) {startblock++;endblock--;}
 
@@ -481,7 +487,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
     }
 
     int cachedflag=basecounter;
-  
+
 #define ALLGATHERFLAG GF_IBSHARPDONE
 
   if(blockIdx.x==0 && threadIdx.x<RANKS) {
@@ -496,7 +502,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
   if(blockIdx.x==0 && threadIdx.x==0)
     gpuflag[GF_STATE+op]=basecounter+numblocks;
 
-  } else 
+  } else
 
   {
     const int warp=blockIdx.x+(threadIdx.x>>5);
@@ -514,18 +520,18 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
        const int remainder = min(numlines-blocklineoffset,peerblocklines*RANKS);
        const int blocklines = remainder/RANKS;
        const int blockstart = lineoffset+blocklineoffset+blocklines*myrank;
-       
+
         for (int line=threadIdx.x-32+REDUCETHREADS*blockIdx.x;line<blocklines;line+=REDUCETHREADS*gridDim.x) {
           int4 val[RANKS];
-        
+
           #pragma unroll
           for(int i=0;i<RANKS;i++) {
             val[i] = userptr[i][blockstart+line];
           }
-        
+
           int4 sum = val[0];
           half *s = reinterpret_cast<half*>(&sum);
-        
+
           #pragma unroll
           for(int i=1;i<RANKS;i++) {
             half *x = reinterpret_cast<half*>(&val[i]);
@@ -560,7 +566,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
 #define UNROLL 6
       int4* myptr = &userptrmyrank[blockstart+blocklines*mydest];
       int4* peerptr = &userptrmydest[blockstart+blocklines*mydest];
-      
+
       if(threadIdx.x<maxthreadIdx)  {
         const int start_elem = mythreadIdx + myblockDim*blockIdx.x;
         const int end_elem = max(start_elem,blocklines);
@@ -571,7 +577,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
           while(*flag<gathercounter) {}
           gathercounter++;
         }
-        
+
         asm volatile ("bar.sync %0, %1;" :: "r"(1+mydest), "r"(myblockDim));
 
         for (int line=start_elem;line<end_aligned;line+=myblockDim*gridDim.x*UNROLL) {
@@ -580,7 +586,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
           for(int i=0;i<UNROLL;i++)
             val[i] = peerptr[line+i*myblockDim*gridDim.x];
             #pragma unroll
-          for(int i=0;i<UNROLL;i++)            
+          for(int i=0;i<UNROLL;i++)
             myptr[line+i*myblockDim*gridDim.x]=val[i];
         }
         for (int line=end_aligned;line<end_elem;line+=myblockDim*gridDim.x)
@@ -592,7 +598,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked(const int op,const int flagoffset,co
     } //worker warps else block
 } //fp16 inplace reduce kernel with SHARP / in blocks
 
- //threadfence and SMs sync to SM0 
+ //threadfence and SMs sync to SM0
 #define SMBAR(offset,block) asm volatile ("bar.sync 13, %0;" :: "r"(blockDim.x)); \
                 if(threadIdx.x==0) { \
                 __threadfence_system();  \
@@ -632,9 +638,9 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
         if(!blockIdx.x && !threadIdx.x) hostflags[HF_NVRSDONE+(op&1)]=nblock+basecounter+1;
       }
 
-      
+
       if(nblock>=headstart) {
-          for(int ibflag=threadIdx.x;ibflag<ibranks;ibflag+=32) 
+          for(int ibflag=threadIdx.x;ibflag<ibranks;ibflag+=32)
             if(ibflag!=myibrank) while(localflag[REG0_IBRS+ibflag]<basecounter+nblock-headstart+1) {}
         asm volatile ("bar.sync 13, %0;" :: "r"(blockDim.x));
         //REDUCE happens here
@@ -643,7 +649,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
       }
     }
     // final part doing NVAG based on responses from NIC-RMW:IBAG
-    
+
     if(blockIdx.x==0)
       for(int nblock=0;nblock<numblocks;nblock++) {
         const int expected=basecounter+nblock+1;
@@ -656,7 +662,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
     gpuflag[GF_STATE+op]=basecounter+numblocks;
 
   } //sync warp
-  else 
+  else
   { //reducethreads
     const int warp=blockIdx.x+(threadIdx.x>>5);
     int4* userptr[RANKS];
@@ -679,15 +685,15 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
         if(RANKS>1)
         for (int line=threadIdx.x-32+REDUCETHREADS*blockIdx.x;line<blocklines;line+=REDUCETHREADS*gridDim.x) {
           int4 val[RANKS];
-        
+
           #pragma unroll
           for(int i=0;i<RANKS;i++) {
             val[i] = userptr[i][blockstart+line];
           }
-        
+
           int4 sum = val[0];
           half *s = reinterpret_cast<half*>(&sum);
-        
+
           #pragma unroll
           for(int i=1;i<RANKS;i++) {
             half *x = reinterpret_cast<half*>(&val[i]);
@@ -711,12 +717,12 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
             const int tempstart = lineoffset+(nblock-headstart)*peerblocklines*RANKS+myrank*blocklines+ibblocklines*myibrank;
             //if(threadIdx.x==32) printf("[%d] block%d thread %d offset %d line %d ibblocklines %d ptr %lx commbufoffset %d\n",myrank,blockIdx.x,threadIdx.x,tempstart,0,ibblocklines,(void*)&tempbufptr[(1-myibrank)*ibblocklines],(1-myibrank)*ibblocklines*16);
 
-            asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));      
+            asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));
 
             for (int line=threadIdx.x-32+REDUCETHREADS*blockIdx.x;line<ibblocklines;line+=REDUCETHREADS*gridDim.x) {
 
             int4 val[UNROLLRS];
-        
+
             #pragma unroll
             for(int i=0;i<UNROLLRS;i++)
               val[i] = i==myibrank ? userptrmyrank[tempstart+line]:tempbufptr[i*ibblocklines+line];
@@ -738,13 +744,13 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
             }
             userptrmyrank[tempstart+line]=sum;
           }
-          
-          asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));      
+
+          asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));
         }
       }    //nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
-      
+
       //if(blockIdx.x==0 && threadIdx.x==32) printf("%d:kernel32[%d] ready to AG phase, size %d numblocks %d\n",myrank,REDUCETHREADS,numlines*16,numblocks);
-      if(RANKS!=1) { 
+      if(RANKS!=1) {
       const int nwarps = (REDUCETHREADS>>5) / (RANKS-1);
       const int myblockDim = nwarps<<5;
       const int mywarp = ((threadIdx.x-32)>>5)/(RANKS-1);
@@ -765,7 +771,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
 #define UNROLL 6
       int4* myptr = &userptrmyrank[blockstart+blocklines*mydest];
       int4* peerptr = &userptrmydest[blockstart+blocklines*mydest];
-      
+
       if(threadIdx.x<maxthreadIdx)  {
         const int start_elem = mythreadIdx + myblockDim*blockIdx.x;
         const int end_elem = max(start_elem,blocklines);
@@ -776,7 +782,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
           while(*flag<gathercounter) {}
           gathercounter++;
         }
-        
+
         asm volatile ("bar.sync %0, %1;" :: "r"(1+mydest), "r"(myblockDim));
 
         for (int line=start_elem;line<end_aligned;line+=myblockDim*gridDim.x*UNROLL) {
@@ -785,7 +791,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
           for(int i=0;i<UNROLL;i++)
             val[i] = peerptr[line+i*myblockDim*gridDim.x];
             #pragma unroll
-          for(int i=0;i<UNROLL;i++)            
+          for(int i=0;i<UNROLL;i++)
             myptr[line+i*myblockDim*gridDim.x]=val[i];
         }
         for (int line=end_aligned;line<end_elem;line+=myblockDim*gridDim.x)
@@ -819,17 +825,17 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
         while(*flag<basecounter) {}
       }
       __syncthreads();
-  
+
       for(int nblock=0;nblock<numblocks+headstart;nblock++) {
         if(nblock<numblocks) {
           //RS happens here
           SMBAR(op*2*MAX_SMS,nblock);
           if(!blockIdx.x && !threadIdx.x) hostflags[HF_NVRSDONE+(op&1)]=nblock+basecounter+1;
         }
-  
-        
+
+
         if(nblock>=headstart) {
-            for(int ibflag=threadIdx.x;ibflag<ibranks;ibflag+=32) 
+            for(int ibflag=threadIdx.x;ibflag<ibranks;ibflag+=32)
               if(ibflag!=myibrank) while(localflag[REG0_IBRS+ibflag]<basecounter+nblock-headstart+1) {}
           asm volatile ("bar.sync 13, %0;" :: "r"(blockDim.x));
           //REDUCE happens here
@@ -837,7 +843,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
         }
       }
     } //sync warp
-    else 
+    else
     { //reducethreads
       const int warp=blockIdx.x+(threadIdx.x>>5);
       int4* userptr[RANKS];
@@ -848,9 +854,9 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
       userptrmyrank=reinterpret_cast<int4*>(commbuff[gpustep*myrank+handleridx+firstrank]);
       int4* internalbuf=reinterpret_cast<int4*>(commbuff[myrank*gpustep+firstrank]+commbufoffset*sizeof(int));
        __syncthreads();
-  
+
     int blocklineoffset=0,rblocklineoffset=0;
-  
+
     for(int nblock=0;nblock<numblocks+headstart;nblock++) {
           //NVRS part(only first numblocks steps)
          if(blocklineoffset<numlines) {
@@ -860,25 +866,25 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
           if(RANKS>1)
           for (int line=threadIdx.x-32+REDUCETHREADS*blockIdx.x;line<blocklines;line+=REDUCETHREADS*gridDim.x) {
             int4 val[RANKS];
-          
+
             #pragma unroll
             for(int i=0;i<RANKS;i++) {
               val[i] = userptr[i][blockstart+line];
             }
-          
+
             int4 sum = val[0];
             half *s = reinterpret_cast<half*>(&sum);
-          
+
             #pragma unroll
             for(int i=1;i<RANKS;i++) {
               half *x = reinterpret_cast<half*>(&val[i]);
               #pragma unroll
               for(int j=0;j<sizeof(int4)/sizeof(half);j++) s[j]+=x[j];
             }
-  
+
             userptrmyrank[blockstart+line]=sum;
           } //single block loop
-  
+
           asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));
           blocklineoffset+=peerblocklines*RANKS;
           }
@@ -891,20 +897,20 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
               int4* tempbufptr = &internalbuf[((nblock-headstart) % maxcredit)*peerblocklines];
               const int tempstart = lineoffset+(nblock-headstart)*peerblocklines*RANKS+myrank*blocklines+ibblocklines*myibrank;
               //if(threadIdx.x==32) printf("[%d] block%d thread %d offset %d line %d ibblocklines %d ptr %lx commbufoffset %d\n",myrank,blockIdx.x,threadIdx.x,tempstart,0,ibblocklines,(void*)&tempbufptr[(1-myibrank)*ibblocklines],(1-myibrank)*ibblocklines*16);
-  
-              asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));      
-  
+
+              asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));
+
               for (int line=threadIdx.x-32+REDUCETHREADS*blockIdx.x;line<ibblocklines;line+=REDUCETHREADS*gridDim.x) {
-  
+
               int4 val[UNROLLRS];
-          
+
               #pragma unroll
               for(int i=0;i<UNROLLRS;i++)
                 val[i] = i==myibrank ? userptrmyrank[tempstart+line]:tempbufptr[i*ibblocklines+line];
-  
+
               int4 sum = val[0];
               half *s = reinterpret_cast<half*>(&sum);
-  
+
               for(int i=0;i<ibranks-UNROLLRS;i++) {
                 val[i%UNROLLRS] = i==myibrank ? userptrmyrank[tempstart+line]:tempbufptr[i*ibblocklines+line];
                 half *x = reinterpret_cast<half*>(&val[(i+1)%UNROLLRS]);
@@ -919,12 +925,12 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2(const int op,const int maxcredit,co
               }
               userptrmyrank[tempstart+line]=sum;
             }
-            
-            asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));      
+
+            asm volatile ("bar.sync 13, %0;" :: "r"(REDUCETHREADS+32));
           }
         }    //nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
       } //worker warps else block
-  
+
     } //fp16 inplace reduce kernel with SHARP / in blocks
 
     template<int RANKS>
@@ -947,7 +953,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
     //tell CPU proxy all blocks are done and ready for NVAG
 
     // final part doing NVAG based on responses from NIC-RMW:IBAG
-    
+
     if(blockIdx.x==0)
       for(int nblock=0;nblock<numblocks;nblock++) {
         const int expected=basecounter+nblock+1;
@@ -960,7 +966,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
     gpuflag[GF_STATE+op]=basecounter+numblocks;
 
   } //sync warp
-  else 
+  else
   { //reducethreads
     const int warp=blockIdx.x+(threadIdx.x>>5);
     int4* userptr[RANKS];
@@ -972,9 +978,9 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
      __syncthreads();
 
   int blocklineoffset=0,rblocklineoffset=0;
-      
+
       //if(blockIdx.x==0 && threadIdx.x==32) printf("%d:kernel32[%d] ready to AG phase, size %d numblocks %d\n",myrank,REDUCETHREADS,numlines*16,numblocks);
-      if(RANKS!=1) { 
+      if(RANKS!=1) {
       const int nwarps = (REDUCETHREADS>>5) / (RANKS-1);
       const int myblockDim = nwarps<<5;
       const int mywarp = ((threadIdx.x-32)>>5)/(RANKS-1);
@@ -995,7 +1001,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
 #define UNROLL 6
       int4* myptr = &userptrmyrank[blockstart+blocklines*mydest];
       int4* peerptr = &userptrmydest[blockstart+blocklines*mydest];
-      
+
       if(threadIdx.x<maxthreadIdx)  {
         const int start_elem = mythreadIdx + myblockDim*blockIdx.x;
         const int end_elem = max(start_elem,blocklines);
@@ -1006,7 +1012,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
           while(*flag<gathercounter) {}
           gathercounter++;
         }
-        
+
         asm volatile ("bar.sync %0, %1;" :: "r"(1+mydest), "r"(myblockDim));
 
         for (int line=start_elem;line<end_aligned;line+=myblockDim*gridDim.x*UNROLL) {
@@ -1015,7 +1021,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag(const int op,const int maxcredit
           for(int i=0;i<UNROLL;i++)
             val[i] = peerptr[line+i*myblockDim*gridDim.x];
             #pragma unroll
-          for(int i=0;i<UNROLL;i++)            
+          for(int i=0;i<UNROLL;i++)
             myptr[line+i*myblockDim*gridDim.x]=val[i];
         }
         for (int line=end_aligned;line<end_elem;line+=myblockDim*gridDim.x)
@@ -1066,7 +1072,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
                     REG0_OFFSET(comm)+REG0_FLAGS+(op==userbuffers_allreduceop_nonsharp?REG0_COMMBUFFER:0), \
                     REG0_OFFSET(comm)+REG0_OPFLAGS*op, \
                     ar_firstgpu,ar_nvrank,ar_step,offset/8,elements/8,(void**)(comm->gpu_ptrs),handler*comm->nvsize,blocksize/sizeof(int4)/ar_nvsize,(int*)comm->hostflags,comm->flags,numblocks); }\
-                     
+
 #define callranks2_block_ag(x)   if(ar_nvsize==x) {\
                       int numblocks=(elements*2+blocksize-1)/blocksize; \
                       int headstart=numblocks-1;/*<3?numblocks-1:3;*/ \
@@ -1079,7 +1085,7 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
                           REG0_OFFSET(comm)+REG0_FLAGS+(op==userbuffers_allreduceop_nonsharp?REG0_COMMBUFFER:0), \
                           REG0_OFFSET(comm)+REG0_OPFLAGS*op, \
                           ar_firstgpu,ar_nvrank,ar_step,offset/8,elements/8,(void**)(comm->gpu_ptrs),handler*comm->nvsize,blocksize/sizeof(int4)/ar_nvsize,(int*)comm->hostflags,comm->flags,numblocks); }\
-             
+
 
 #endif
 
@@ -1115,7 +1121,7 @@ int allreduce_userbuff_inplace_gpu(const int handler,const  int offset,const int
   if(warps<comm->ar_nvsize) warps=comm->ar_nvsize;
   //if(!comm->myrank) printf("allreduce %d bytes running %d x %d\n",elements*2,sms,warps*32);
 
-  if(comm->launch_mode & LAUNCH_GPU) 
+  if(comm->launch_mode & LAUNCH_GPU)
   {
   #ifdef MULTINODE
 
@@ -1297,7 +1303,7 @@ void reducescatter2_userbuff_inplace(const int handler,const  int offset,const i
     const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
     const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
     const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
-  
+
       if(elements<64) return;
       int sms=ar_nvsize==1?2:comm->sms;
       int warps=comm->threads/32;
@@ -1316,7 +1322,7 @@ void reducescatter2_userbuff_inplace(const int handler,const  int offset,const i
       const int ar_step = op==userbuffers_allreduceop_nonsharp2? 1 : comm->ar2_nvsize;
       const int ar_nvsize = op==userbuffers_allreduceop_nonsharp? comm->ar_nvsize : comm->ar2_nvsize;
       const int ar_nvrank = op==userbuffers_allreduceop_nonsharp? comm->ar_nvrank : comm->ar2_nvrank;
-    
+
         if(elements<64) return;
         int sms=ar_nvsize==1?2:comm->sms;
         int warps=comm->threads/32;
@@ -1377,7 +1383,7 @@ kuserbuffers_pullrecv(int myrank, int peer, int* recv_id, int* flagptr,int4 *src
                    return; }//otherwise need an extra kernel
   }
   __syncthreads();
-  
+
   if(end_elem<=start_elem) return;
 
     for (int line=start_elem;line<end_aligned;line+=blockDim.x*gridDim.x*UNROLLCOPY) {
@@ -1386,7 +1392,7 @@ kuserbuffers_pullrecv(int myrank, int peer, int* recv_id, int* flagptr,int4 *src
       for(int i=0;i<UNROLLCOPY;i++)
         val[i] = srcptr[line+i*blockDim.x*gridDim.x];
         #pragma unroll
-      for(int i=0;i<UNROLLCOPY;i++)            
+      for(int i=0;i<UNROLLCOPY;i++)
         dstptr[line+i*blockDim.x*gridDim.x]=val[i];
     }
     for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x)
@@ -1409,14 +1415,14 @@ if(lines) {
       for(int i=0;i<UNROLLCOPY;i++)
         val[i] = srcptr[line+i*blockDim.x*gridDim.x];
         #pragma unroll
-      for(int i=0;i<UNROLLCOPY;i++)            
+      for(int i=0;i<UNROLLCOPY;i++)
         dstptr[line+i*blockDim.x*gridDim.x]=val[i];
     }
       for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x)
       dstptr[line] = srcptr[line];
   }
   __syncthreads();
-  if(threadIdx.x) return; 
+  if(threadIdx.x) return;
   __threadfence_system();
   atomicAdd(flagptr,1); //otherwise need local SM sync before sending flag
   //if(blockIdx.x==0) (*send_id)+=gridDim.x;
@@ -1485,7 +1491,7 @@ if(!intranode && (comm->launch_mode & LAUNCH_GPU)) {
 if(!(comm->launch_mode & LAUNCH_GPU)) return;
 if(comm->push==0)
     kuserbuffers_pullsend<<<1,1,0,stream>>> (comm->myrank,peer,&(comm->send_id[peer]),(int*)flagptr);
-  else {  
+  else {
     void* srcptr = (comm->mem_ptr[srchandler])+srcoffset;
     void *dstptr = (comm->peer_ptr[dsthandler][peerlocal])+dstoffset;
 
@@ -1524,18 +1530,18 @@ if(lines) {
       for(int i=0;i<UNROLLCOPY;i++)
         val[i] = srcptr[line+i*blockDim.x];
         #pragma unroll
-      for(int i=0;i<UNROLLCOPY;i++)            
+      for(int i=0;i<UNROLLCOPY;i++)
         dstptr[line+i*blockDim.x]=val[i];
     }
       for (int line=end_aligned;line<end_elem;line+=blockDim.x)
       dstptr[line] = srcptr[line];
   }
   __syncthreads();
-  if(threadIdx.x) return; 
+  if(threadIdx.x) return;
   __threadfence_system();
   atomicAdd(flagptr,1);
 
-  } else { 
+  } else {
     atomicAdd(flagptr,1);
   }
 }
@@ -1597,7 +1603,7 @@ void userbuffers_recv(const int srchandler,const size_t srcoffset, const int dst
       (comm->myrank,peer,&(comm->recv_id[peer*MAX_REGIONS+dsthandler]), (int*)flagptr, (int4*)srcptr, (int4*)dstptr, signalonly ? 0 : bytes/16);
       if(!signalonly) kuserbuffers_inc<<<1,1,0,stream>>> (&(comm->recv_id[peer*MAX_REGIONS+dsthandler]));
       if(comm->use_ce) {
-        CUDACHECK(cudaMemcpyAsync(dstptr,srcptr,bytes,cudaMemcpyDeviceToDevice,stream));  
+        CUDACHECK(cudaMemcpyAsync(dstptr,srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
         //kuserbuffers_dummy<<<1,1,0,stream>>> ();
       }
   } else {

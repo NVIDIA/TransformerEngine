@@ -10,7 +10,6 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include "../common.h"
-#include <iostream>
 
 namespace {
 

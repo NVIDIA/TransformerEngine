@@ -41,7 +41,7 @@
 
 //gpuflags map offsets
 #define GF_STATE 16000
-#define GF_IBSHARPDONE 0 
+#define GF_IBSHARPDONE 0
 
 #define HF_NVRSDONE (userbuffers_op_types+1)
 #define HF_NVREDUCEDONE (userbuffers_op_types+3)
@@ -78,7 +78,7 @@ struct communicator {
     int free_region;
 
     int launch_mode;
-    
+
     void* gpu_ptrs;
     int sms,threads;
     int use_rr_kernel; // Whether to use RR (or RW) for NVLink-only kernel
@@ -105,7 +105,7 @@ struct communicator {
 	struct sharp_coll_comm *sharp_coll_comm;
     void* mem_mr[MAX_REGIONS];
 
-    
+
     pthread_t proxythread;
     ub_request* fifo;
     volatile int activeproxy;
@@ -123,7 +123,7 @@ struct communicator {
 #endif
 
 #endif
-    MPI_Comm 
+    MPI_Comm
     comm_inter, //reduction group communicator (subset of the nodes) along GPU rail
     comm_intra; //full intranode (all ndev GPUS)
     int ibnvsize;//can be used to fake smaller or larger nvlink domain to use ib instead of nvlink or force MNNVL
@@ -152,15 +152,15 @@ int create_communicator( communicator** comm);
 
 int create_communicator_grouped( communicator** comm, int pipegpus, int pipenodes);
 int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
-/*  creates communicator with 
-    allreduce1 to happen in datagpus x datanodes groups, 
+/*  creates communicator with
+    allreduce1 to happen in datagpus x datanodes groups,
     allreduce2 to happen in tensorgpus x tensor nodes,
         where num_nodes = pipenodes x tensornodes x datanodes
             nvlink_size = pipegpus x tensorgpus x datagpus
  */
 
 //int check_user_buffer_registration(void* gpubuff, int bytes, communicator* comm, size_t* offset);
-/* 
+/*
     local calls, doesnt communicate between peers
     returns handler if buffer is registered already, or -1 if not.
     returned offset is offset of gpubuff relative to buffer registered
@@ -170,7 +170,7 @@ int pipe_rank(communicator *comm,int step); //helper function to help walk acros
                                             //data-parallel and tensor-parallel position within data and tensor groups would be preserved
 
 int register_user_buffer_collective(void** gpubuff, size_t bytes, communicator* comm, bool alloc=false);
-/*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and dont mix buffers for different operations 
+/*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and dont mix buffers for different operations
     returns -1 if cant register (too many preregistered regions already)
     if alloc==true will allocate memory and fill the pointers (required for NVL SHARP and NSO/MNNVL)
 */
@@ -186,8 +186,8 @@ void allreduce2_userbuff_inplace(const int handler,const int offset,const int el
 //for TP-parallelism, only single node is implemented
 void allgather2_userbuff_inplace(const int handler,const int offset,const int elements,communicator* comm,cudaStream_t stream=0);
 void allgather2_userbuff_inplace_sliced(const int handler,const int offset,const int elements,communicator* comm,const int slice_id, const int nslices, cudaStream_t stream=0);
-/* 
-each Rank input is 
+/*
+each Rank input is
 allgather2_userbuff_inplace: offset+myrank*elements
 allgather2_userbuff_inplace_sliced: offset+myrank*elements*nslices+slice_id*elements
 

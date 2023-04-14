@@ -82,7 +82,7 @@ int stringCmp( const void *a, const void *b)
     }                                                                                            \
   } while (0);
 
-int pipe_rank(communicator *comm,int step) { 
+int pipe_rank(communicator *comm,int step) {
     int mynode = comm->myrank / comm->nvsize;
     int mylocal = comm->nvrank;
     int numlocal = comm->nvsize;
@@ -107,7 +107,7 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   (*comm) -> nranks = nranks;
   (*comm) -> myrank = myrank;
   (*comm) -> free_region = 0;
-  (*comm) -> launch_mode = LAUNCH_GPU | LAUNCH_CPU; 
+  (*comm) -> launch_mode = LAUNCH_GPU | LAUNCH_CPU;
 
   cudaDeviceProp device_prop;
   CUDACHECK(cudaGetDevice(&cur_dev));
@@ -116,7 +116,7 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   (*comm) -> sm_arch = device_prop.major;
   (*comm) -> use_rr_kernel = device_prop.major == 8;
   if(getenv("OVERRIDERR")) (*comm) -> use_rr_kernel = atoi(getenv("OVERRIDERR"));
-  (*comm) -> push = device_prop.major != 8; 
+  (*comm) -> push = device_prop.major != 8;
   (*comm) -> use_ce = getenv("USECE")?1:0;
   (*comm) -> cga_size = getenv("CGASIZE") ? atoi(getenv("CGASIZE")) : (device_prop.major == 9 && !(*comm) -> use_rr_kernel) ? 4 : 1;
 
@@ -130,7 +130,7 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
   (*comm) -> active_nreqs = 0;
   for(int i=0;i<userbuffers_op_types;i++)
     (*comm) -> active_req[i].active = -1;
-  
+
   int ret=0;
 #ifndef NOSHARP
   struct sharp_coll_comm_init_spec comm_spec;
@@ -148,7 +148,7 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
 	for (int n=0; n<size; n++)
 		MPI_Bcast(&(host_names[n]),MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, MPI_COMM_WORLD);
 	qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
-  
+
 	color = 0;
 	for (int n=0; n<size; n++)  {
   		if(n>0 && strcmp(host_names[n-1], host_names[n])) color++;
@@ -349,7 +349,7 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
 
   worker_params.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
   worker_params.thread_mode = UCS_THREAD_MODE_SINGLE;
-  
+
   ucp_address_t* myucxaddr;
   UCXCHECK(ucp_worker_create((*comm)->ucp_context, &worker_params, &(*comm)->ucp_worker));
   UCXCHECK(ucp_worker_get_address((*comm)->ucp_worker, &myucxaddr, &(*comm)->ucx_addr_len));
@@ -359,8 +359,8 @@ int create_communicator_grouped2( communicator** comm, int pipegpus, int pipenod
 
   ucp_ep_params_t ep_params;
   ep_params.field_mask      =  UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
- 
-  for(int r=0;r<(*comm)->nranks;r++) 
+
+  for(int r=0;r<(*comm)->nranks;r++)
     (*comm)->ucxep[r]=NULL;
 
   //preconnect all peers (for alltoall)
@@ -474,7 +474,7 @@ using namespace std;
 
   return 0;
 }
-int create_communicator_grouped( communicator** comm, int pipegpus, int pipenodes) 
+int create_communicator_grouped( communicator** comm, int pipegpus, int pipenodes)
 { return create_communicator_grouped2(comm,pipegpus,pipenodes,1,1); }
 
 int create_communicator( communicator** comm ) {
@@ -515,7 +515,7 @@ if(alloc) {
   CUCHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
   //MPI_Allreduce MAX of granularity check
   aligned_size = (bytes + granularity - 1) / granularity * granularity;
-  
+
   prop.location.id = comm->mydev;
   CUCHECK(cuMemCreate(&(comm->mhndl[hndl]), aligned_size, &prop, 0));
   CUCHECK(cuMemExportToShareableHandle(static_cast<void *>(&exphndl[comm->nvrank]),comm->mhndl[hndl], CU_MEM_HANDLE_TYPE_FABRIC, 0));
@@ -553,12 +553,12 @@ CUDACHECK(cudaMalloc(gpubuff,bytes)); }
 #endif
   assert(comm->nvsize<=8);
   cudaIpcMemHandle_t *memhndl=(cudaIpcMemHandle_t*)malloc(sizeof(cudaIpcMemHandle_t)*(comm->nvsize));
-  
+
   CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank],*gpubuff));
-  
+
   MPI_Allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl, sizeof(cudaIpcMemHandle_t), MPI_BYTE,comm->comm_intra);
 
-  for(int i=0;i<comm->nvsize;i++) 
+  for(int i=0;i<comm->nvsize;i++)
     if(i!=comm->nvrank) CUDACHECK(cudaIpcOpenMemHandle((void**)&(comm->peer_ptr[hndl][i]),memhndl[i], cudaIpcMemLazyEnablePeerAccess));
   comm->peer_ptr[hndl][comm->nvrank]=*gpubuff;
   CUDACHECK(cudaDeviceSynchronize());
@@ -579,7 +579,7 @@ CUDACHECK(cudaMalloc(gpubuff,bytes)); }
 #ifdef UCP
   ucp_mem_h ucp_memh;
   ucp_mem_map_params_t ucp_memmap_params;
-  ucp_memmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS | 
+  ucp_memmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
 	                           UCP_MEM_MAP_PARAM_FIELD_LENGTH;
   ucp_memmap_params.address    = (void *) *gpubuff;
   ucp_memmap_params.length     = bytes;
@@ -638,7 +638,7 @@ void progress_sharp_allreduce(communicator * comm) {
   if( req->nblock == req->numblocks || (req->nblock<req->numblocks && ( req->unconfirmed_ib_in_flight + comm->asyncblocks == req->nblock || hf[op] < expecting) ) ) {
       if(sharp_coll_req_test(comm->sharphndl[req->unconfirmed_ib_in_flight%MAX_SHARP]))
       {
-        comm->map_flags[GF_IBSHARPDONE]=req->basecounter+req->unconfirmed_ib_in_flight+1; 
+        comm->map_flags[GF_IBSHARPDONE]=req->basecounter+req->unconfirmed_ib_in_flight+1;
         _mm_mfence();
         req->unconfirmed_ib_in_flight++;
         if(req->nblock == req->numblocks && req->unconfirmed_ib_in_flight == req->numblocks) {
@@ -666,7 +666,7 @@ void progress_sharp_allreduce(communicator * comm) {
     long peerblock = req->blocksize/comm->ar_nvsize;
     long blockstart=req->nblock*req->blocksize;
     long adder = req->offset*2+blockstart+peerblock*comm->ar_nvrank;
-      
+
     if(blockstart+req->blocksize>req->elements*2) { //last block might be shorter
       peerblock = (req->elements*2-blockstart)/comm->ar_nvsize;
       adder = req->offset*2+blockstart+peerblock*comm->ar_nvrank;
@@ -764,8 +764,8 @@ void progress_ucp_allreduce(communicator * comm, int op) {
 
     size_t blockstart=(req->nblock-req->numblocks)*req->blocksize;
     size_t useroffset = req->offset*2 + blockstart;
-    
-          
+
+
     if(blockstart+req->blocksize>req->elements*2) { //last block might be shorter
       peerblock = (req->elements*2-blockstart)/ar_nvsize;
       ibblock=peerblock/num_nodes;
@@ -801,7 +801,7 @@ void progress_ucp_send(communicator * comm) {
       ucp_ep_params_t ep_params;
       ep_params.field_mask      =  UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
       ep_params.address         = (ucp_address_t*) ((comm)->ucxaddr+(comm)->ucx_addr_len*dest);
-      UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest])); 
+      UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest]));
       for(int hndl=0;hndl<comm->free_region;hndl++)
         UCXCHECK(ucp_ep_rkey_unpack(comm->ucxep[dest],comm->rkeys_packed[hndl]+dest*comm->rkey_size[hndl], &comm->rkeys[hndl][dest]));
     }
@@ -839,7 +839,7 @@ void progress_ucp_alltoall(communicator * comm) {
       ucp_ep_params_t ep_params;
       ep_params.field_mask      =  UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
       ep_params.address         = (ucp_address_t*) ((comm)->ucxaddr+(comm)->ucx_addr_len*dest);
-      UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest])); 
+      UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest]));
       for(int hndl=0;hndl<comm->free_region;hndl++)
         UCXCHECK(ucp_ep_rkey_unpack(comm->ucxep[dest],comm->rkeys_packed[hndl]+dest*comm->rkey_size[hndl], &comm->rkeys[hndl][dest]));
     }
@@ -890,7 +890,7 @@ void allreduce_nonsharp_inplace(const int handler,const int offset,const int ele
   int sms = allreduce2_userbuff_inplace_gpu(maxcredit,handler, offset, elements, blocksize, comm, stream,op);
 
 #ifdef MULTINODE
-  if(num_nodes>1 && comm->launch_mode & LAUNCH_CPU) 
+  if(num_nodes>1 && comm->launch_mode & LAUNCH_CPU)
   {
   if(!sms) return;
   comm->fifo[comm->head].optype=op;
@@ -904,7 +904,7 @@ void allreduce_nonsharp_inplace(const int handler,const int offset,const int ele
   int newhead=(comm->head+1)&(MAX_REQUESTS-1);
   while(newhead==comm->tail) {}
   comm->head=newhead;
-  
+
   comm->basecounter[op]+=(elements*2+blocksize-1)/blocksize;
   }
 #endif
@@ -931,7 +931,7 @@ void allreduce_userbuff_inplace(const int handler,const int offset,const int ele
   int sms = allreduce_userbuff_inplace_gpu(handler, offset, elements, blocksize, comm, stream);
 
 #ifdef MULTINODE
-  if(comm->launch_mode & LAUNCH_CPU) 
+  if(comm->launch_mode & LAUNCH_CPU)
   {
   if(!sms) return;
   comm->fifo[comm->head].optype=userbuffers_allreduceop_sharp;
@@ -945,7 +945,7 @@ void allreduce_userbuff_inplace(const int handler,const int offset,const int ele
   int newhead=(comm->head+1)&(MAX_REQUESTS-1);
   while(newhead==comm->tail) {}
   comm->head=newhead;
-  
+
   comm->basecounter[userbuffers_allreduceop_sharp]+=(elements*2+blocksize-1)/blocksize;
   //if(comm->myrank==0) fprintf(stderr,"cpu launched basecounter=%d\n",comm->basecounter);
   }
@@ -972,7 +972,7 @@ void reducescatter_userbuff_inplace(const int handler,const int offset,const int
 
   int sms = reducescatter2_userbuff_inplace_gpu(maxcredit,handler, offset, elements, blocksize, comm, stream,op);
 
-  if(num_nodes>1 && comm->launch_mode & LAUNCH_CPU) 
+  if(num_nodes>1 && comm->launch_mode & LAUNCH_CPU)
   {
   if(!sms) return;
   comm->fifo[comm->head].optype=op;
@@ -986,7 +986,7 @@ void reducescatter_userbuff_inplace(const int handler,const int offset,const int
   int newhead=(comm->head+1)&(MAX_REQUESTS-1);
   while(newhead==comm->tail) {}
   comm->head=newhead;
-  
+
   comm->basecounter[op]+=(elements*2+blocksize-1)/blocksize;
 }
 }
@@ -1015,7 +1015,7 @@ void allgather_userbuff_inplace(const int handler,const int offset,const int ele
 #ifdef MULTINODE
 void* proxythread(void* c) {
   communicator * comm=(communicator*) c;
-  
+
   cpu_set_t cpuset;
 	CPU_ZERO(&cpuset);
   int core;
@@ -1033,7 +1033,7 @@ void* proxythread(void* c) {
 	if(getenv("DOPIN")) pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
   while(true) {
-     do { 
+     do {
       if(!comm->activeproxy && comm->active_nreqs==0) goto exitpoint;
   #ifdef NOSHARP
       progress_ucp_allreduce(comm,userbuffers_allreduceop_nonsharp);

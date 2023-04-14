@@ -88,7 +88,6 @@ def initialize_affine_weight_gpu(
         tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
     )
 
-#    torch.manual_seed(12345)
     if get_rng_state_tracker is None:
         init_method(weight)
         return

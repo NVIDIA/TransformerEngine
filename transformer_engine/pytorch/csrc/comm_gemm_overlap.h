@@ -584,7 +584,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
     /*
     ** Split AllGather + GEMM using P2P communication
-    ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG outputs 
+    ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG outputs
     ** in each rank to be in the contiguous memory space after all ring exchange phases.
     */
     torch::Tensor split_overlap_ag(
@@ -733,7 +733,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
             for (int i = 0; i < _tp_size; i++) {
                 // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
-                // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks to 
+                // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks to
                 // be contiguous after the ring exchanges
                 int send_chunk_id = (_tp_size + _tp_id - i) % _tp_size;
                 int recv_chunk_id = (_tp_size + _tp_id - i - 1) % _tp_size;

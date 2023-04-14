@@ -1071,7 +1071,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ) = TransformerEngineBaseModule.grad_output_preprocess(
                 ctx, grad_outputs[0], ctx.parallel_mode == "row"
             )
-            
+
             if ctx.ub_bulk_wgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
@@ -1098,7 +1098,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_size[1] = weight.size(1)
             if ctx.ub_bulk_wgrad: # allocate dgrad output
                 ub_obj_dgrad = get_ub("qkv_wgrad")
-                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output 
+                dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
                 dgrad = torch.empty (dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
@@ -1372,7 +1372,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
-        print (f'LayerNormLinear ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -2085,7 +2084,6 @@ class Linear(TransformerEngineBaseModule):
         self.parameters_split = parameters_split
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
-        print (f'Linear ub_split_rs {ub_split_rs} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -2575,10 +2573,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
                 fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
-            # fc2_out row: 4096 x 12288
             _, _, _ = gemm(
-                fc2_weight, #row: 12288 x 6144 --> T --> 6144 x 12288 -> col: 12288 x 6144
-                gelu_out,   #row: 4096 x 6144  --> N --> 4096 x 6144  -> col: 6144 x 4096
+                fc2_weight,
+                gelu_out,
                 activation_dtype,
                 get_workspace(),
                 bias=fc2_bias,
@@ -2877,8 +2874,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
                     ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                 )
-                #print ('bf16 fc1_weight {} dgelu {} fc1 dgrad.size {}'.format(fc1_weight.shape, dgelu.shape, fc1_dgrad.shape))
-                #print ('fc1_dgrad {}, fc1_dgrad_ub {} diff {}'.format(fc1_dgrad, fc1_dgrad_ub, torch.max(torch.abs(fc1_dgrad-fc1_dgrad_ub))))
 
             if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
@@ -2892,9 +2887,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
             elif ctx.set_parallel_mode and ctx.tensor_parallel:
                 fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
-            #print ('ln_out_total {}, ln_out_total_ub {} dif {}'.format(ln_out_total, ln_out_total_ub, torch.max(torch.abs(ln_out_total-ln_out_total_ub))))
-            #print ('ln_out_total{} {}'.format('_ub' if ctx.ub_bulk_dgrad else '', ln_out_total))
-            #print ('fc1_dgrad{} {}'.format('_ub' if ctx.ub_bulk_dgrad else '', fc1_dgrad))
 
             if fc1_weight.requires_grad:
                 if ctx.fp8:
@@ -3133,7 +3125,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
-        print (f'LayerNormMLP ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_rs {ub_split_rs} ub_split_ag {ub_split_ag}')
 
         if tp_group is None:
             self.tp_size = tp_size
