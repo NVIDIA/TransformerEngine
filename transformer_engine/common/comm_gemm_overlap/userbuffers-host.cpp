@@ -241,36 +241,15 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   int PREOS = getenv("PREOS") ? atoi(getenv("PREOS")) : 0;
 
   switch (mylocal) {
-    case 0:
-      ib_dev_list = "mlx5_0:1";
-      break;
-    case 1:
-      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_3:1" : "mlx5_1:1");
-      break;
-    case 2:
-      ib_dev_list = reinterpret_cast<char *>(ZIONROCE ? "mlx5_4:1"
-                                             : PREOS  ? "mlx5_4:1"
-                                                      : "mlx5_2:1");
-      break;
-    case 3:
-      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_5:1" : "mlx5_3:1");
-      break;
-    case 4:
-      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_6:1" : "mlx5_6:1");
-      break;
-    case 5:
-      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_9:1" : "mlx5_7:1");
-      break;
-    case 6:
-      ib_dev_list = reinterpret_cast<char *>(ZIONROCE ? "mlx5_10:1"
-                                             : PREOS  ? "mlx5_10:1"
-                                                      : "mlx5_8:1");
-      break;
-    case 7:
-      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_11:1" : "mlx5_9:1");
-      break;
-    default:
-      break;
+		case 0:ib_dev_list = "mlx5_0:1"; break;  // NOLINT(*)
+		case 1:ib_dev_list = (char*)(PREOS?"mlx5_3:1":"mlx5_1:1"); break;  // NOLINT(*)
+		case 2:ib_dev_list = (char*)(ZIONROCE?"mlx5_4:1":PREOS?"mlx5_4:1":"mlx5_2:1"); break;  // NOLINT(*)
+		case 3:ib_dev_list = (char*)(PREOS?"mlx5_5:1":"mlx5_3:1"); break;  // NOLINT(*)
+		case 4:ib_dev_list = (char*)(PREOS?"mlx5_6:1":"mlx5_6:1"); break;  // NOLINT(*)
+		case 5:ib_dev_list = (char*)(PREOS?"mlx5_9:1":"mlx5_7:1"); break;  // NOLINT(*)
+		case 6:ib_dev_list = (char*)(ZIONROCE?"mlx5_10:1":PREOS?"mlx5_10:1":"mlx5_8:1"); break;  // NOLINT(*)
+		case 7:ib_dev_list = (char*)(PREOS?"mlx5_11:1":"mlx5_9:1"); break;  // NOLINT(*)
+                default: break;
   }
 
 #ifndef NOSHARP

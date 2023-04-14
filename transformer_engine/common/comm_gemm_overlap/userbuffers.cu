@@ -674,7 +674,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }    // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
 
-  // threadfence and SMs sync to SM0
+// threadfence and SMs sync to SM0
 #define SMBAR(offset, block)                                                \
   asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));                       \
   if (threadIdx.x == 0) {                                                   \
@@ -702,8 +702,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   // basecounter,peerblocklines,commbufoffset,maxcredit);
   if (threadIdx.x < 32) {
     int *flagptr;
-    volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
+    volatile int *localflag = (volatile int *)&(
+        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     // initial intranode barrier - once
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
@@ -858,8 +858,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
       const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
       const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
       volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest +
-                                                   MAX_NVLINK + firstrank]);
+          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest + MAX_NVLINK +
+                                                   firstrank]);
 
       int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
 
@@ -918,8 +918,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   //     myrank,gpustep*myrank+firstrank,myibrank,ibranks,op,numlines*16,numblocks,headstart,basecounter,peerblocklines,commbufoffset,maxcredit);
   if (threadIdx.x < 32) {
     int *flagptr;
-    volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
+    volatile int *localflag = (volatile int *)&(
+        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     // initial intranode barrier - once
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
@@ -1062,8 +1062,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   // basecounter,peerblocklines,commbufoffset,maxcredit);
   if (threadIdx.x < 32) {
     int *flagptr;
-    volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
+    volatile int *localflag = (volatile int *)&(
+        ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
         flagptr = reinterpret_cast<int *>(commbuff[gpustep * threadIdx.x + firstrank]);
@@ -1114,8 +1114,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
       const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
       const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
       volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
-          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest +
-                                                          MAX_NVLINK + firstrank]);
+          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest + MAX_NVLINK +
+                                                   firstrank]);
 
       int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
 
@@ -1174,80 +1174,86 @@ __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostfla
   if (comm->ar_nvsize == x)                                                                   \
     userbuffers_fp16_sum_inplace_gpu_rr_blocked<x><<<sms, warps * 32, 0, stream>>>(           \
         userbuffers_allreduceop_sharp, REG0_OFFSET(comm), comm->ar_firstgpu, comm->ar_nvrank, \
-        offset / 8, elements / 8, (void **)(comm->gpu_ptrs), handler * comm->nvsize,          \
-        blocksize / sizeof(int4) / comm->ar_nvsize, (int *)comm->hostflags, comm->flags,      \
+        offset / 8, elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs),                  \
+        handler * comm->nvsize, blocksize / sizeof(int4) / comm->ar_nvsize,                   \
+        reinterpret_cast<int *>(comm->hostflags), comm->flags,                                \
         (elements * 2 + blocksize - 1) / blocksize);
 
-#define callranks2_block(x)                                                                    \
-  if (ar_nvsize == x) {                                                                        \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                       \
-    if (headstart > maxcredit) headstart = maxcredit;                                          \
-    if (x == 1) headstart = maxcredit;                                                         \
-    if (headstart > numblocks) headstart = numblocks;                                          \
-    if (headstart == 0) headstart = 1;                                                         \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2<x><<<sms, warps * 32, 0, stream>>>(           \
-        op, maxcredit, headstart, my_node, num_nodes,                                          \
-        REG0_OFFSET(comm) + REG0_FLAGS +                                                       \
-            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                    \
-        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8,    \
-        elements / 8, (void **)(comm->gpu_ptrs), handler * comm->nvsize,                       \
-        blocksize / sizeof(int4) / ar_nvsize, (int *)comm->hostflags, comm->flags, numblocks); \
+#define callranks2_block(x)                                                                 \
+  if (ar_nvsize == x) {                                                                     \
+    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                             \
+    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                    \
+    if (headstart > maxcredit) headstart = maxcredit;                                       \
+    if (x == 1) headstart = maxcredit;                                                      \
+    if (headstart > numblocks) headstart = numblocks;                                       \
+    if (headstart == 0) headstart = 1;                                                      \
+    userbuffers_fp16_sum_inplace_gpu_rr_blocked2<x><<<sms, warps * 32, 0, stream>>>(        \
+        op, maxcredit, headstart, my_node, num_nodes,                                       \
+        REG0_OFFSET(comm) + REG0_FLAGS +                                                    \
+            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                 \
+        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8, \
+        elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs), handler * comm->nvsize,    \
+        blocksize / sizeof(int4) / ar_nvsize, reinterpret_cast<int *>(comm->hostflags),     \
+        comm->flags, numblocks);                                                            \
   }
 
-#define callranks2_block_rs(x)                                                                 \
-  if (ar_nvsize == x) {                                                                        \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                       \
-    if (headstart > maxcredit) headstart = maxcredit;                                          \
-    if (x == 1) headstart = maxcredit;                                                         \
-    if (headstart > numblocks) headstart = numblocks;                                          \
-    if (headstart == 0) headstart = 1;                                                         \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_rs<x><<<sms, warps * 32, 0, stream>>>(        \
-        op, maxcredit, headstart, my_node, num_nodes,                                          \
-        REG0_OFFSET(comm) + REG0_FLAGS +                                                       \
-            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                    \
-        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8,    \
-        elements / 8, (void **)(comm->gpu_ptrs), handler * comm->nvsize,                       \
-        blocksize / sizeof(int4) / ar_nvsize, (int *)comm->hostflags, comm->flags, numblocks); \
+#define callranks2_block_rs(x)                                                              \
+  if (ar_nvsize == x) {                                                                     \
+    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                             \
+    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                    \
+    if (headstart > maxcredit) headstart = maxcredit;                                       \
+    if (x == 1) headstart = maxcredit;                                                      \
+    if (headstart > numblocks) headstart = numblocks;                                       \
+    if (headstart == 0) headstart = 1;                                                      \
+    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_rs<x><<<sms, warps * 32, 0, stream>>>(     \
+        op, maxcredit, headstart, my_node, num_nodes,                                       \
+        REG0_OFFSET(comm) + REG0_FLAGS +                                                    \
+            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                 \
+        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8, \
+        elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs), handler * comm->nvsize,    \
+        blocksize / sizeof(int4) / ar_nvsize, reinterpret_cast<int *>(comm->hostflags),     \
+        comm->flags, numblocks);                                                            \
   }
 
-#define callranks2_block_ag(x)                                                                 \
-  if (ar_nvsize == x) {                                                                        \
-    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                                \
-    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                       \
-    if (headstart > maxcredit) headstart = maxcredit;                                          \
-    if (x == 1) headstart = maxcredit;                                                         \
-    if (headstart > numblocks) headstart = numblocks;                                          \
-    if (headstart == 0) headstart = 1;                                                         \
-    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag<x><<<sms, warps * 32, 0, stream>>>(        \
-        op, maxcredit, headstart, my_node, num_nodes,                                          \
-        REG0_OFFSET(comm) + REG0_FLAGS +                                                       \
-            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                    \
-        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8,    \
-        elements / 8, (void **)(comm->gpu_ptrs), handler * comm->nvsize,                       \
-        blocksize / sizeof(int4) / ar_nvsize, (int *)comm->hostflags, comm->flags, numblocks); \
+#define callranks2_block_ag(x)                                                              \
+  if (ar_nvsize == x) {                                                                     \
+    int numblocks = (elements * 2 + blocksize - 1) / blocksize;                             \
+    int headstart = numblocks - 1; /*<3?numblocks-1:3;*/                                    \
+    if (headstart > maxcredit) headstart = maxcredit;                                       \
+    if (x == 1) headstart = maxcredit;                                                      \
+    if (headstart > numblocks) headstart = numblocks;                                       \
+    if (headstart == 0) headstart = 1;                                                      \
+    userbuffers_fp16_sum_inplace_gpu_rr_blocked2_ag<x><<<sms, warps * 32, 0, stream>>>(     \
+        op, maxcredit, headstart, my_node, num_nodes,                                       \
+        REG0_OFFSET(comm) + REG0_FLAGS +                                                    \
+            (op == userbuffers_allreduceop_nonsharp ? REG0_COMMBUFFER : 0),                 \
+        REG0_OFFSET(comm) + REG0_OPFLAGS * op, ar_firstgpu, ar_nvrank, ar_step, offset / 8, \
+        elements / 8, reinterpret_cast<void **>(comm->gpu_ptrs), handler * comm->nvsize,    \
+        blocksize / sizeof(int4) / ar_nvsize, reinterpret_cast<int *>(comm->hostflags),     \
+        comm->flags, numblocks);                                                            \
   }
 
 #endif
 
-#define callranks(x)                                                                         \
-  if (ar_nvsize == x) {                                                                      \
-    int arg1 = op - MAX_OPS,                                                                 \
-        arg2 = REG0_OFFSET(comm) -                                                           \
-               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS, \
-        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg6 = offset / 8,             \
-        arg7 = elements / 8;                                                                 \
-    void **arg8 = (void **)(comm->gpu_ptrs);                                                 \
-    int arg9 = handler * comm->nvsize;                                                       \
-    void *kernelArgs[] = {                                                                   \
-        (void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4, (void *)&arg5,           \
-        (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9};                         \
-    CUDACHECK(cudaLaunchKernelExC(                                                           \
-        &cfg,                                                                                \
-        (void *)(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr<x>                \
-                                     : userbuffers_fp16_sum_inplace_gpu_rw<x>),              \
-        kernelArgs));                                                                        \
+#define callranks(x)                                                                            \
+  if (ar_nvsize == x) {                                                                         \
+    int arg1 = op - MAX_OPS,                                                                    \
+        arg2 = REG0_OFFSET(comm) -                                                              \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS,    \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg6 = offset / 8,                \
+        arg7 = elements / 8;                                                                    \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                    \
+    int arg9 = handler * comm->nvsize;                                                          \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),     \
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),     \
+                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),     \
+                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),     \
+                          reinterpret_cast<void *>(&arg9)};                                     \
+    CUDACHECK(cudaLaunchKernelExC(                                                              \
+        &cfg,                                                                                   \
+        reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr<x>   \
+                                                     : userbuffers_fp16_sum_inplace_gpu_rw<x>), \
+        kernelArgs));                                                                           \
   }
 
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
@@ -1281,7 +1287,7 @@ int allreduce_userbuff_inplace_gpu(const int handler, const int offset, const in
 
     if (comm->ar_nvsize == 1)
       userbuffers_fp16_sum_inplace_gpu_null<<<1, 1, 0, stream>>>(
-          userbuffers_allreduceop_sharp, (int *)comm->hostflags, comm->flags,
+          userbuffers_allreduceop_sharp, reinterpret_cast<int *>(comm->hostflags), comm->flags,
           (elements * 2 + blocksize - 1) / blocksize);
     callranks_block(2) callranks_block(4) callranks_block(8)
 
@@ -1327,39 +1333,43 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
   return sms;
 }
 
-#define callranks_ag(x)                                                                      \
-  if (ar_nvsize == x) {                                                                      \
-    int arg1 = op - MAX_OPS,                                                                 \
-        arg2 = REG0_OFFSET(comm) -                                                           \
-               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS, \
-        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,       \
-        arg6 = offset / 8 + (comm->use_rr_kernel ? 0 : arg4 * arg7);                         \
-    void **arg8 = (void **)(comm->gpu_ptrs);                                                 \
-    int arg9 = handler * comm->nvsize;                                                       \
-    void *kernelArgs[] = {                                                                   \
-        (void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4, (void *)&arg5,           \
-        (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9};                         \
-    CUDACHECK(cudaLaunchKernelExC(                                                           \
-        &cfg,                                                                                \
-        (void *)(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>             \
-                                     : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>),           \
-        kernelArgs));                                                                        \
-  }
-
-#define callranks_rs(x)                                                                            \
+#define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - MAX_OPS,                                                                       \
         arg2 = REG0_OFFSET(comm) -                                                                 \
                (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS,       \
         arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,             \
-        arg6 = offset / 8 + arg4 * arg7;                                                           \
-    void **arg8 = (void **)(comm->gpu_ptrs);                                                       \
+        arg6 = offset / 8 + (comm->use_rr_kernel ? 0 : arg4 * arg7);                               \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                       \
     int arg9 = handler * comm->nvsize;                                                             \
-    void *kernelArgs[] = {                                                                         \
-        (void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4, (void *)&arg5,                 \
-        (void *)&arg6, (void *)&arg7, (void *)&arg8, (void *)&arg9};                               \
-    CUDACHECK(                                                                                     \
-        cudaLaunchKernelExC(&cfg, (void *)userbuffers_fp16_sum_inplace_gpu_rr_rs<x>, kernelArgs)); \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),        \
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),        \
+                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
+                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
+                          reinterpret_cast<void *>(&arg9)};                                        \
+    CUDACHECK(cudaLaunchKernelExC(                                                                 \
+        &cfg,                                                                                      \
+        reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>   \
+                                                     : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>), \
+        kernelArgs));                                                                              \
+  }
+
+#define callranks_rs(x)                                                                          \
+  if (ar_nvsize == x) {                                                                          \
+    int arg1 = op - MAX_OPS,                                                                     \
+        arg2 = REG0_OFFSET(comm) -                                                               \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS,     \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,           \
+        arg6 = offset / 8 + arg4 * arg7;                                                         \
+    void **arg8 = reinterpret_cast<void **>(comm->gpu_ptrs);                                     \
+    int arg9 = handler * comm->nvsize;                                                           \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),      \
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),      \
+                          reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),      \
+                          reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
+                          reinterpret_cast<void *>(&arg9)};                                      \
+    CUDACHECK(cudaLaunchKernelExC(                                                               \
+        &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x>), kernelArgs)); \
   }
 
 #define callranks_rs_oop(x)                                                                    \
@@ -1369,14 +1379,18 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
                (op == userbuffers_allreduceop_nonsharp ? 2 : 1) * REG0_SINGLENODE + MAX_OPS,   \
         arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step, arg7 = elements / 8 / x,         \
         arg6 = offset / 8 + arg4 * arg7, arg8 = rowelements / 8, arg9 = strideelements / 8;    \
-    void **arg10 = (void **)(comm->gpu_ptrs);                                                  \
+    void **arg10 = reinterpret_cast<void **>(comm->gpu_ptrs);                                  \
     int arg11 = handler * comm->nvsize;                                                        \
     void *arg12 = output;                                                                      \
-    void *kernelArgs[] = {(void *)&arg1, (void *)&arg2,  (void *)&arg3,  (void *)&arg4,        \
-                          (void *)&arg5, (void *)&arg6,  (void *)&arg7,  (void *)&arg8,        \
-                          (void *)&arg9, (void *)&arg10, (void *)&arg11, (void *)&arg12};      \
-    CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>, \
-                                  kernelArgs));                                                \
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),  reinterpret_cast<void *>(&arg2),   \
+                          reinterpret_cast<void *>(&arg3),  reinterpret_cast<void *>(&arg4),   \
+                          reinterpret_cast<void *>(&arg5),  reinterpret_cast<void *>(&arg6),   \
+                          reinterpret_cast<void *>(&arg7),  reinterpret_cast<void *>(&arg8),   \
+                          reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
+                          reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12)}; \
+    CUDACHECK(cudaLaunchKernelExC(                                                             \
+        &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x>),         \
+        kernelArgs));                                                                          \
   }
 
 #if defined(MULTINODE) && defined(NOSHARP)
@@ -1693,13 +1707,11 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
-    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),
-                          reinterpret_cast<void *>(&arg2),
-                          reinterpret_cast<void *>(&arg3),
-                          reinterpret_cast<void *>(&arg4),
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
+                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
-    CUDACHECK(cudaLaunchKernelExC(&cfg,
-                                  reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
+    CUDACHECK(
+        cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
   }
 }
 
@@ -1707,8 +1719,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     kuserbuffers_alltoall(void **baseflagptrs, int flagoffset, int4 *basesrcptr, void **dstptrs,
                           size_t dstoffset, const int lines, const int myrank) {
   if (blockIdx.x == myrank) return;
-  int4 *dstptr = (int4 *)(dstptrs[blockIdx.x] + dstoffset);
-  int *flagptr = (int *)(baseflagptrs[blockIdx.x] + flagoffset);
+  int4 *dstptr = reinterpret_cast<int4 *>(dstptrs[blockIdx.x] + dstoffset);
+  int *flagptr = reinterpret_cast<int *>(baseflagptrs[blockIdx.x] + flagoffset);
   const size_t myblockoffset = blockIdx.x * lines;
   int4 *srcptr = basesrcptr + myblockoffset;
   dstptr += myblockoffset;
@@ -1769,17 +1781,20 @@ void userbuffers_alltoall_send(const int srchandler, const size_t srcoffset, con
   SETUP_LAUNCH_CONFIG(comm->nranks, lines == 0 ? 1 : 1024, stream);
   // kuserbuffers_alltoall<<<comm->nranks,lines==0?1:1024,0,stream>>>
   //           ((void**)(comm->gpu_ptrs),flagoffset,(int4*)srcptr,(void**)(comm->gpu_ptrs+dsthandler*comm->nvsize*sizeof(void*)),dstoffset,lines,comm->myrank);
-  void **arg1 = (void **)(comm->gpu_ptrs);
+  void **arg1 = reinterpret_cast<void **>(comm->gpu_ptrs);
   size_t arg2 = flagoffset;
   void *arg3 = srcptr;
-  void **arg4 = (void **)(comm->gpu_ptrs + dsthandler * comm->nvsize * sizeof(void *));
+  void **arg4 =
+      reinterpret_cast<void **>(comm->gpu_ptrs + dsthandler * comm->nvsize * sizeof(void *));
   size_t arg5 = dstoffset;
   int arg6 = lines;
   int arg7 = comm->myrank;
 
-  void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4,
-                        (void *)&arg5, (void *)&arg6, (void *)&arg7};
-  CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)kuserbuffers_alltoall, kernelArgs));
+  void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
+                        reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
+                        reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),
+                        reinterpret_cast<void *>(&arg7)};
+  CUDACHECK(cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_alltoall), kernelArgs));
 #endif
 }
 
@@ -1799,8 +1814,9 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     void *srcptr = (comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
-        comm->myrank, peer, &(comm->recv_id[peer * MAX_REGIONS + dsthandler]), (int *)flagptr,
-        (int4 *)srcptr, (int4 *)dstptr, signalonly ? 0 : bytes / 16);
+        comm->myrank, peer, &(comm->recv_id[peer * MAX_REGIONS + dsthandler]),
+        reinterpret_cast<int *>(flagptr), reinterpret_cast<int4 *>(srcptr),
+        reinterpret_cast<int4 *>(dstptr), signalonly ? 0 : bytes / 16);
     if (!signalonly)
       kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * MAX_REGIONS + dsthandler]));
     if (comm->use_ce) {
@@ -1809,8 +1825,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
-        comm->myrank, peer, &comm->recv_id[peer * MAX_REGIONS + dsthandler], (int *)flagptr,
-        signalonly || !intranode ? 1 : comm->sms);
+        comm->myrank, peer, &comm->recv_id[peer * MAX_REGIONS + dsthandler],
+        reinterpret_cast<int *>(flagptr), signalonly || !intranode ? 1 : comm->sms);
   }
 }
 
@@ -1819,6 +1835,6 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream) {
                   ((REG0_OFFSET(comm) + REG0_OPFLAGS * userbuffers_alltoall) * sizeof(int));
 
   if (!(comm->launch_mode & LAUNCH_GPU)) return;
-  kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(comm->myrank, -1, (int *)(flagptr + 4), (int *)flagptr,
-                                             comm->nranks - 1);
+  kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(comm->myrank, -1, reinterpret_cast<int *>(flagptr + 4),
+                                             reinterpret_cast<int *>(flagptr), comm->nranks - 1);
 }
