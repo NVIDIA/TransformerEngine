@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """FP8 utilities for TransformerEngine"""
+import os
 from contextlib import contextmanager
 from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
@@ -30,6 +31,9 @@ _buffer_delete_key_bwd = None
 _amax_reduce_handle_fwd = None
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
+_dp_amax_reduce_interval = None
+_dp_amax_reduce_forward_idx = 0
+_dp_amax_reduce_backward_idx = 0
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
@@ -545,6 +549,7 @@ def reduce_tensor_across_group_op_max(
 
 def global_amax_reduction(
     fp8_meta: Dict[str, Any],
+    tp_group: dist_group_type,
     forward: bool = True,
 ) -> None:
     """Concatenate, reduce, and split amaxes in the global buffer."""
@@ -555,12 +560,30 @@ def global_amax_reduction(
     if amax_buffer_key not in _global_fp8_buffer:
         return None
 
+    # Reduce AMAX in DP-domain at an interval.
+    global _dp_amax_reduce_interval, _dp_amax_reduce_forward_idx, _dp_amax_reduce_backward_idx
+    if _dp_amax_reduce_interval == None:
+        _dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
+    reduce_group = tp_group
+    if forward:
+        if _dp_amax_reduce_forward_idx == 0:
+            reduce_group = fp8_meta["fp8_group"]
+        _dp_amax_reduce_forward_idx = (_dp_amax_reduce_forward_idx + 1) % _dp_amax_reduce_interval
+    else:
+        if _dp_amax_reduce_backward_idx == 0:
+            reduce_group = fp8_meta["fp8_group"]
+        _dp_amax_reduce_backward_idx = (_dp_amax_reduce_backward_idx + 1) % _dp_amax_reduce_interval
+
+    # A case to reduce AMAX only in TP-domain and TP-group is not initialized.
+    if reduce_group is None:
+        return None
+
     chunk_sizes = [x.numel() for x in _global_fp8_buffer[amax_buffer_key]]
     contiguous_amax = torch.cat(_global_fp8_buffer[amax_buffer_key])
 
     wait_handle = reduce_tensor_across_group_op_max(
         contiguous_amax,
-        fp8_meta["fp8_group"],
+        reduce_group,
         fp8_meta["async_amax_reduction"],
     )
 

@@ -105,7 +105,7 @@ def get_workspace() -> torch.Tensor:
     return _cublas_workspace
 
 @contextmanager
-def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> None:
+def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any], tp_group: dist_group_type, name: str = "") -> None:
     """Checks and prep for BWD."""
     if fp8:
         global _amax_reduce_handle_bwd
@@ -132,7 +132,7 @@ def _prepare_backward(fp8: bool, fp8_meta: Dict[str, Any],  name: str = "") -> N
 
     if fp8 and fp8_meta["recipe"].reduce_amax:
         if fp8_meta["first_module"]:
-            _amax_reduce_handle_bwd = global_amax_reduction(fp8_meta, forward=False)
+            _amax_reduce_handle_bwd = global_amax_reduction(fp8_meta, tp_group, forward=False)
             delete_key_from_amax_buffer(forward=False)
 
 
@@ -541,7 +541,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
             set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
-            reduce_func = partial(global_amax_reduction, self.fp8_meta, forward=True)
+            reduce_func = partial(
+                global_amax_reduction, self.fp8_meta, self.tp_group, forward=True
+            )
             setup_amax_forward_global_reduce_func(reduce_func)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
@@ -890,7 +892,7 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_LayerNormLinear"):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.tp_group, name="_LayerNormLinear"):
             (
                 inputmat,
                 ln_weight,
@@ -1579,7 +1581,7 @@ class _Linear(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_Linear"):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.tp_group, name="_Linear"):
             (
                 inputmat,
                 inputmat_t,
@@ -2307,7 +2309,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_LayerNormMLP"):
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, ctx.tp_group, name="_LayerNormMLP"):
             (
                 inputmat,
                 ln_weight,
