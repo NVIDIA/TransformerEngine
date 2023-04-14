@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -57,7 +63,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     // Allocate and register extra userbuffers
     int ubuf_bytes = sample.numel() * sample.element_size();
-    _ub_reg = register_user_buffer_collective((void **)&_ubuf_ptr, ubuf_bytes, _ub_comm, true);
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -306,7 +313,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
     return output_tensor;
   }
-
 };  // UbufCommOverlap
 
 struct UbufP2PCommOverlap : torch::CustomClassHolder {
@@ -336,7 +342,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     // Create workspace tensor with userbuffer
     int ubuf_bytes = sample.numel() * sample.element_size();
     int ubuf_chunk_bytes = ubuf_bytes / tp_size;
-    _ub_reg = register_user_buffer_collective((void **)&_ubuf_ptr, ubuf_bytes, _ub_comm, true);
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     // Create tensor chunks for easy management
@@ -569,7 +576,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     int output_c_dim1 = _ubuf.size(1);
     return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
   }
-
 };  // UbufP2PCommOverlap
 
 }  // namespace ubuf

@@ -43,7 +43,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -129,7 +129,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -245,7 +245,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -314,7 +314,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -359,7 +359,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
       for (int j = 0; j < 8; j++) s[j] += x[j];
     }
 
-    ((int4 *)outbuf)[(line / rowlines) * skiplines + (line % rowlines)] = sum;
+    (reinterpret_cast<int4 *>(outbuf))[(line / rowlines) * skiplines + (line % rowlines)] = sum;
   }
 
   if (threadIdx.x == 0 && blockIdx.x == 0) *reduceidptr = reduce_id;
@@ -381,7 +381,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -443,7 +443,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     targetgpu = threadIdx.x * gpustep + firstrank;
     const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
     myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
-    reduceidptr = myptr - MAX_OPS;  //+op;
+    reduceidptr = myptr - MAX_OPS;  // +op;
     reduce_id = (*reduceidptr) + 1;
     flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) + flagoffset + blockflagoffset;
     myptr += blockflagoffset;
@@ -536,8 +536,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
         flagptr = reinterpret_cast<int *>(commbuff[threadIdx.x + firstrank]);
         flagptr[flagoffset + myrank + firstrank] = basecounter;
       }
-      volatile int *flag = (volatile int *)&(
-          ((int *)commbuff[myrank + firstrank])[flagoffset + threadIdx.x + firstrank]);
+      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
+          commbuff[myrank + firstrank]))[flagoffset + threadIdx.x + firstrank]);
       while (*flag < basecounter) {
       }
     }
@@ -578,10 +578,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
 
     if (blockIdx.x == 0 && threadIdx.x == 0) gpuflag[GF_STATE + op] = basecounter + numblocks;
-
-  } else
-
-  {
+  } else {
     const int warp = blockIdx.x + (threadIdx.x >> 5);
     int4 *userptr[RANKS];
     int4 *userptrmyrank;
@@ -631,8 +628,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
     const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
     const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
     const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-    volatile int *flag = (volatile int *)&(
-        ((int *)commbuff[myrank + firstrank])[flagoffset + mydest + 32 + firstrank]);
+    volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
+        commbuff[myrank + firstrank]))[flagoffset + mydest + 32 + firstrank]);
 
     int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
 
@@ -673,12 +670,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
           myptr[line] = peerptr[line];
       }
       blocklineoffset += peerblocklines * RANKS;
-
     }  // block loop for NVLINK-ALLGATHER
   }    // worker warps else block
 }  // fp16 inplace reduce kernel with SHARP / in blocks
 
-   // threadfence and SMs sync to SM0
+  // threadfence and SMs sync to SM0
 #define SMBAR(offset, block)                                                \
   asm volatile("bar.sync 13, %0;" ::"r"(blockDim.x));                       \
   if (threadIdx.x == 0) {                                                   \
@@ -702,11 +698,12 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   const int basecounter = gpuflag[GF_STATE + op];
   // if(blockIdx.x==0 && threadIdx.x==0) printf("%d(%d)[%d/%d]:AR2kernel(%d) start, size %d
   // numblocks %d(%d) basecounter %d peerblocklines %d commbufoffset %d maxcredit %d\n",
-  //     myrank,gpustep*myrank+firstrank,myibrank,ibranks,op,numlines*16,numblocks,headstart,basecounter,peerblocklines,commbufoffset,maxcredit);
+  // myrank,gpustep*myrank+firstrank,myibrank,ibranks,op,numlines*16,numblocks,headstart,
+  // basecounter,peerblocklines,commbufoffset,maxcredit);
   if (threadIdx.x < 32) {
     int *flagptr;
     volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);
+        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     // initial intranode barrier - once
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
@@ -741,7 +738,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
     }
     // final part doing NVAG based on responses from NIC-RMW:IBAG
 
-    if (blockIdx.x == 0)
+    if (blockIdx.x == 0) {
       for (int nblock = 0; nblock < numblocks; nblock++) {
         const int expected = basecounter + nblock + 1;
         for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
@@ -752,11 +749,11 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
         if (threadIdx.x < RANKS)
           flagptr[flagoffset + gpustep * myrank + MAX_NVLINK + firstrank] = expected;
       }
+    }
 
     if (blockIdx.x == 0 && threadIdx.x == 0) gpuflag[GF_STATE + op] = basecounter + numblocks;
-
-  }       // sync warp
-  else {  // reducethreads
+  } else {  // sync warp
+    // reducethreads
     const int warp = blockIdx.x + (threadIdx.x >> 5);
     int4 *userptr[RANKS];
     int4 *userptrmyrank;
@@ -777,7 +774,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
         const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
         const int blocklines = remainder / RANKS;
         const int blockstart = lineoffset + blocklineoffset + blocklines * myrank;
-        if (RANKS > 1)
+        if (RANKS > 1) {
           for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < blocklines;
                line += REDUCETHREADS * gridDim.x) {
             int4 val[RANKS];
@@ -799,6 +796,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
 
             userptrmyrank[blockstart + line] = sum;
           }  // single block loop
+        }
 
         asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
         blocklineoffset += peerblocklines * RANKS;
@@ -859,9 +857,9 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
       const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
       const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
       const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-      volatile int *flag = (volatile int *)&(
-          ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset + gpustep * mydest +
-                                                          MAX_NVLINK + firstrank]);
+      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
+          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest +
+                                                   MAX_NVLINK + firstrank]);
 
       int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
 
@@ -902,11 +900,9 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
             myptr[line] = peerptr[line];
         }
         blocklineoffset += peerblocklines * RANKS;
-
       }  // block loop for NVLINK-ALLGATHER
     }    // RANKS!=1
   }      // worker warps else block
-
 }  // fp16 inplace reduce kernel with SHARP / in blocks
 
 template <int RANKS>
@@ -923,7 +919,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   if (threadIdx.x < 32) {
     int *flagptr;
     volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);
+        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     // initial intranode barrier - once
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
@@ -954,8 +950,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
         SMBAR(op * 2 * MAX_SMS + MAX_SMS, nblock - headstart);
       }
     }
-  }       // sync warp
-  else {  // reducethreads
+  } else {  // sync warp
+    // reducethreads
     const int warp = blockIdx.x + (threadIdx.x >> 5);
     int4 *userptr[RANKS];
     int4 *userptrmyrank;
@@ -976,7 +972,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
         const int remainder = min(numlines - blocklineoffset, peerblocklines * RANKS);
         const int blocklines = remainder / RANKS;
         const int blockstart = lineoffset + blocklineoffset + blocklines * myrank;
-        if (RANKS > 1)
+        if (RANKS > 1) {
           for (int line = threadIdx.x - 32 + REDUCETHREADS * blockIdx.x; line < blocklines;
                line += REDUCETHREADS * gridDim.x) {
             int4 val[RANKS];
@@ -998,6 +994,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
 
             userptrmyrank[blockstart + line] = sum;
           }  // single block loop
+        }
 
         asm volatile("bar.sync 13, %0;" ::"r"(REDUCETHREADS + 32));
         blocklineoffset += peerblocklines * RANKS;
@@ -1049,7 +1046,6 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
       }
     }  // nblock loop NVLINK-REDUCESCATTER + IBREDUCE LOCAL COMPUTE
   }    // worker warps else block
-
 }  // fp16 inplace reduce kernel with SHARP / in blocks
 
 template <int RANKS>
@@ -1062,11 +1058,12 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   const int basecounter = gpuflag[GF_STATE + op];
   // if(blockIdx.x==0 && threadIdx.x==0) printf("%d(%d)[%d/%d]:AR2kernel(%d) start, size %d
   // numblocks %d(%d) basecounter %d peerblocklines %d commbufoffset %d maxcredit %d\n",
-  //     myrank,gpustep*myrank+firstrank,myibrank,ibranks,op,numlines*16,numblocks,headstart,basecounter,peerblocklines,commbufoffset,maxcredit);
+  // myrank,gpustep*myrank+firstrank,myibrank,ibranks,op,numlines*16,numblocks,headstart,
+  // basecounter,peerblocklines,commbufoffset,maxcredit);
   if (threadIdx.x < 32) {
     int *flagptr;
     volatile int *localflag =
-        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);
+        (volatile int *)&(((int *)commbuff[gpustep * myrank + firstrank])[flagoffset]);  // NOLINT(*)
     if (threadIdx.x < RANKS) {
       if (!blockIdx.x) {
         flagptr = reinterpret_cast<int *>(commbuff[gpustep * threadIdx.x + firstrank]);
@@ -1079,7 +1076,7 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
 
     // final part doing NVAG based on responses from NIC-RMW:IBAG
 
-    if (blockIdx.x == 0)
+    if (blockIdx.x == 0) {
       for (int nblock = 0; nblock < numblocks; nblock++) {
         const int expected = basecounter + nblock + 1;
         for (int ibflag = threadIdx.x; ibflag < ibranks; ibflag += 32)
@@ -1090,11 +1087,11 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
         if (threadIdx.x < RANKS)
           flagptr[flagoffset + gpustep * myrank + MAX_NVLINK + firstrank] = expected;
       }
+    }
 
     if (blockIdx.x == 0 && threadIdx.x == 0) gpuflag[GF_STATE + op] = basecounter + numblocks;
-
-  }       // sync warp
-  else {  // reducethreads
+  } else {  // sync warp
+    // reducethreads
     const int warp = blockIdx.x + (threadIdx.x >> 5);
     int4 *userptr[RANKS];
     int4 *userptrmyrank;
@@ -1116,8 +1113,8 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
       const int maxthreadIdx = myblockDim * (RANKS - 1) + 32;
       const int mydest = (myrank + 1 + ((threadIdx.x - 32) >> 5) % (RANKS - 1)) & (RANKS - 1);
       const int mythreadIdx = (mywarp << 5) + (threadIdx.x & 31);
-      volatile int *flag = (volatile int *)&(
-          ((int *)commbuff[gpustep * myrank + firstrank])[flagoffset + gpustep * mydest +
+      volatile int *flag = (volatile int *)&((reinterpret_cast<int *>(
+          commbuff[gpustep * myrank + firstrank]))[flagoffset + gpustep * mydest +
                                                           MAX_NVLINK + firstrank]);
 
       int4 *userptrmydest = userptr[((RANKS << 10) + mydest - myrank - warp) & (RANKS - 1)];
@@ -1159,11 +1156,9 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
             myptr[line] = peerptr[line];
         }
         blocklineoffset += peerblocklines * RANKS;
-
       }  // block loop for NVLINK-ALLGATHER
     }    // RANKS!=1
   }      // worker warps else block
-
 }  // fp16 inplace reduce kernel with SHARP / in blocks
 
 __global__ void userbuffers_fp16_sum_inplace_gpu_null(const int op, int *hostflags, int *gpuflag,
@@ -1523,9 +1518,9 @@ void reducescatter2_userbuff(void *output, const int handler, const int offset, 
 
 __global__ void kuserbuffers_pullsend(int myrank, int peer, int *send_id, int *flagptr) {
   // const int signal_id=(*send_id)+1;
-  //*send_id=signal_id;
+  // *send_id=signal_id;
   // printf("%d to %d pullsend: sending incremented %d\n",myrank,peer,signal_id);
-  //*flagptr=signal_id;
+  // *flagptr=signal_id;
   atomicAdd(flagptr, 1);
 }
 
@@ -1612,9 +1607,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
     // if(blockIdx.x==0) (*send_id)+=gridDim.x;
   } else {  // 0 bytes and 1 SM only
     // const int signal_id=(*send_id)+1;
-    //*flagptr=signal_id;
+    // *flagptr=signal_id;
     atomicAdd(flagptr, 1);
-    //*send_id=signal_id;
+    // *send_id=signal_id;
   }
 }
 
@@ -1683,10 +1678,10 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   }
 #endif
   if (!(comm->launch_mode & LAUNCH_GPU)) return;
-  if (comm->push == 0)
+  if (comm->push == 0) {
     kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
-                                               (int *)flagptr);
-  else {
+                                               reinterpret_cast<int *>(flagptr));
+  } else {
     void *srcptr = (comm->mem_ptr[srchandler]) + srcoffset;
     void *dstptr = (comm->peer_ptr[dsthandler][peerlocal]) + dstoffset;
 
@@ -1695,12 +1690,16 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     // kuserbuffers_pushsend<<<signalonly?1:comm->sms,signalonly?1:1024,0,stream>>>
     //       (&comm->send_id[peer],(int*)flagptr,(int4*)srcptr,(int4*)dstptr,signalonly?0:bytes/16);
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
-    int *arg1 = &comm->send_id[peer], *arg2 = (int *)flagptr;
-    int4 *arg3 = (int4 *)srcptr, *arg4 = (int4 *)dstptr;
+    int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
+    int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
-    void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4,
-                          (void *)&arg5};
-    CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)kuserbuffers_pushsend, kernelArgs));
+    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1),
+                          reinterpret_cast<void *>(&arg2),
+                          reinterpret_cast<void *>(&arg3),
+                          reinterpret_cast<void *>(&arg4),
+                          reinterpret_cast<void *>(&arg5)};
+    CUDACHECK(cudaLaunchKernelExC(&cfg,
+                                  reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
   }
 }
 

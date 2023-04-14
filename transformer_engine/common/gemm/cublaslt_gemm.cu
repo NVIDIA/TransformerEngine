@@ -128,7 +128,8 @@ void cublas_gemm(const Tensor *inputA,
   // Set math SM count
   if (math_sm_count != 0) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &math_sm_count, sizeof(math_sm_count)));
+          operationDesc, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET,
+          &math_sm_count, sizeof(math_sm_count)));
   }
 
 
