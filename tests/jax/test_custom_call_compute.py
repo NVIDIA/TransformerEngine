@@ -523,32 +523,44 @@ class TestLayerNorm:
 
     @pytest.mark.parametrize('n, hidden', LN_CASES)
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward_backward(self, n, hidden, dtype):
+    @pytest.mark.parametrize('zero_centered_gamma', [False, True])
+    def test_forward_backward(self, n, hidden, zero_centered_gamma, dtype):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 3)
 
-        x = jax.random.uniform(subkeys[0], (n, hidden), dtype, -2, 1)
-        scale = jax.random.uniform(subkeys[1], (hidden,), jnp.float32, -2, 1)
+        x = jax.random.uniform(subkeys[0], (n, hidden), dtype, -1, 1)
+        scale_range = (-1, 1) if zero_centered_gamma else (0, 2)
+        scale = jax.random.uniform(subkeys[1], (hidden,), jnp.float32, *scale_range)
         scale = jnp.asarray(scale, dtype)
-        bias = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -2, 1)
+        bias = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -1, 1)
         bias = jnp.asarray(bias, dtype)
         epsilon = 1e-6
 
-        def reference_layernorm(x, scale, bias):
-            x = jnp.asarray(x, jnp.float32)
-            mean = jnp.mean(x, axis=-1, keepdims=True)
-            var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
-            normed_input = (x - mean) * jax.lax.rsqrt(var + epsilon)
+        def reference_layernorm(x, scale, bias, zero_centered_gamma, eps):
+            x_ = jnp.asarray(x, jnp.float32)
+            mean = jnp.mean(x_, axis=-1, keepdims=True)
+            var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+            normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
             # Align TE implementation
-            return jnp.asarray(normed_input * scale + bias)
+            if zero_centered_gamma:
+                return jnp.asarray(normed_input * (scale + 1) + bias).astype(x.dtype)
+            return jnp.asarray(normed_input * scale + bias).astype(x.dtype)
+
+        def compute_loss(x):
+            # Higher precision to compute the loss
+            x_ = x.astype(jnp.float32)
+            return jnp.mean(jnp.square(x_)).astype(x.dtype)
 
         jitted_primitive = jit(
-            value_and_grad(lambda x, scale, bias: jnp.mean(layernorm(x, scale, bias, "layernorm")),
-                           (0, 1, 2)))
+            value_and_grad(
+                lambda x, scale, bias: compute_loss(
+                    layernorm(x, scale, bias, "layernorm", zero_centered_gamma, epsilon)),
+                (0, 1, 2)))
 
         jitted_reference = jit(
-            value_and_grad(lambda x, scale, bias: jnp.mean(reference_layernorm(x, scale, bias)),
-                           (0, 1, 2)))
+            value_and_grad(
+                lambda x, scale, bias: compute_loss(
+                    reference_layernorm(x, scale, bias, zero_centered_gamma, epsilon)), (0, 1, 2)))
 
         primitive_out, (primitive_dx, primitive_dgamma,
                         primitive_dbeta) = jitted_primitive(x, scale, bias)
@@ -561,7 +573,7 @@ class TestLayerNorm:
             assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-7)
             assert_allclose(primitive_dbeta, reference_dbeta, rtol=1e-7)
         else:
-            assert_allclose(primitive_out, reference_out, rtol=1e-3)
-            assert_allclose(primitive_dx, reference_dx, rtol=1e-4, atol=5e-8)
-            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-4, atol=5e-8)
-            assert_allclose(primitive_dbeta, reference_dbeta, rtol=1e-4, atol=5e-8)
+            assert_allclose(primitive_out, reference_out, rtol=1e-7)
+            assert_allclose(primitive_dx, reference_dx, rtol=1e-5, atol=1e-6)
+            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-5, atol=3e-5)
+            assert_allclose(primitive_dbeta, reference_dbeta, rtol=1e-5, atol=3e-5)

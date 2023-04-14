@@ -163,7 +163,8 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
 class TensorFlowBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
-        return ["-DENABLE_TENSORFLOW=ON"]
+        p = [d for d in sys.path if 'dist-packages' in d][0]
+        return ["-DENABLE_TENSORFLOW=ON", "-DCMAKE_PREFIX_PATH="+p]
 
     def run(self, extensions):
         print("Building TensorFlow extensions!")
