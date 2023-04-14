@@ -107,7 +107,6 @@ for s in args:
     if s.startswith("--framework="):
         framework = s.replace("--framework=", "")
         sys.argv.remove(s)
-
 if framework not in supported_frameworks.keys():
     raise ValueError("Unsupported framework " + framework)
 
@@ -162,13 +161,6 @@ class PyTorchBuilder(FrameworkBuilderBase):
     def install_requires():
         return []#"flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
 
-class JaxBuilder(FrameworkBuilderBase):
-    def cmake_flags(self):
-        return ["-DENABLE_JAX=ON"]
-
-    def run(self, extensions):
-        print("Building jax extensions!")
-
 class TensorFlowBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
         return ["-DENABLE_TENSORFLOW=ON"]
@@ -176,9 +168,17 @@ class TensorFlowBuilder(FrameworkBuilderBase):
     def run(self, extensions):
         print("Building TensorFlow extensions!")
 
-    @staticmethod
+class JaxBuilder(FrameworkBuilderBase):
+    def cmake_flags(self):
+        p = [d for d in sys.path if 'dist-packages' in d][0]
+        return ["-DENABLE_JAX=ON", "-DCMAKE_PREFIX_PATH="+p]
+
+    def run(self, extensions):
+        print("Building jax extensions!")
+
     def install_requires():
-        return ["pydantic",]
+        # TODO: find a way to install pybind11 and ninja directly.
+        return ['cmake', 'flax']
 
 ext_modules = []
 dlfw_builder_funcs = []
@@ -209,11 +209,16 @@ if framework in ("all", "pytorch"):
 
 if framework in ("all", "jax"):
     dlfw_builder_funcs.append(JaxBuilder)
+    # Trigger a better error when pybind11 isn't present.
+    # Sadly, if pybind11 was installed with `apt -y install pybind11-dev`
+    # This doesn't install a python packages. So the line bellow is too strict.
+    # When it fail, we need to detect if cmake will find pybind11.
+    # import pybind11
 
 if framework in ("all", "tensorflow"):
     dlfw_builder_funcs.append(TensorFlowBuilder)
 
-dlfw_install_requires = []
+dlfw_install_requires = ['pydantic']
 for builder in dlfw_builder_funcs:
     dlfw_install_requires = dlfw_install_requires + builder.install_requires()
 
@@ -274,10 +279,16 @@ class CMakeBuildExtension(build_ext, object):
         build_dir = os.path.abspath(build_dir)
 
         cmake_args = [
-            "-GNinja",
             "-DCMAKE_BUILD_TYPE=" + config,
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
         ]
+        try:
+            import ninja
+        except ImportError:
+            pass
+        else:
+            cmake_args.append("-GNinja")
+
         cmake_args = cmake_args + self.dlfw_flags
 
         cmake_build_args = ["--config", config]
@@ -401,5 +412,10 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": TEBuildExtension},
     install_requires=dlfw_install_requires,
+    extras_require={
+        'test': ['pytest',
+                 'tensorflow_datasets'],
+        'test_pytest': ['onnxruntime',],
+    },
     license_files=("LICENSE",),
 )

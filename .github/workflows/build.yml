@@ -3,16 +3,16 @@
 # See LICENSE for license information.
 
 # A workflow to trigger TE build on GitHub
-name: 'Test build'
+name: 'Build'
 on:
   pull_request:
   workflow_dispatch:
 jobs:
-  pyTorch:
-    name: 'pyTorch build'
+  pytorch:
+    name: 'PyTorch'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/pytorch:22.09-py3
+      image: nvcr.io/nvidia/pytorch:23.03-py3
       options: --user root
     steps:
       - name: 'Checkout'
@@ -20,29 +20,57 @@ jobs:
       - name: 'Build'
         run: |
           mkdir -p wheelhouse && \
-          pip wheel -w wheelhouse . -v
+          NVTE_FRAMEWORK=pytorch pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'
         uses: actions/upload-artifact@v3
         with:
-          name: te_wheel
+          name: te_wheel_pyt
           path: wheelhouse/transformer_engine*.whl
           retention-days: 7
       - name: 'Install'
         run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
       - name: 'Sanity check'
         run: python tests/pytorch/test_sanity_import.py
-  TensorFlow:
-    name: 'TensorFlow build'
+  jax:
+    name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/tensorflow:23.02-tf2-py3
+      #image: nvcr.io/nvidia/jax:XX.XX-py3  # Not yet available
+      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
       options: --user root
     steps:
       - name: 'Checkout'
         uses: actions/checkout@v3
       - name: 'Build'
         run: |
-          apt-get update && apt-get install -y ninja-build pybind11-dev
+          apt-get -y update && \
+          apt -y install ninja-build pybind11-dev && \
+          pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
+          mkdir -p wheelhouse && \
+          NVTE_FRAMEWORK=jax pip wheel -w wheelhouse . -v
+      - name: 'Upload wheel'
+        uses: actions/upload-artifact@v3
+        with:
+          name: te_wheel_jax
+          path: wheelhouse/transformer_engine*.whl
+          retention-days: 7
+      - name: 'Install'
+        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+      - name: 'Sanity check'
+        run: python tests/jax/test_sanity_import.py
+  tensorflow:
+    name: 'TensorFlow'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
+      options: --user root
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+      - name: 'Build'
+        run: |
+          apt-get -y update && \
+          apt -y install ninja-build pybind11-dev && \
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'

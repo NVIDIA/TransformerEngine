@@ -12,23 +12,23 @@ from keras import backend, layers, initializers
 from keras.mixed_precision import autocast_variable
 import tensorflow as tf
 
-from transformer_engine.tensorflow import (
+from transformer_engine.tensorflow.module import (
     LayerNorm,
     LayerNormDense,
     LayerNormMLP,
     Dense,
 )
-from .softmax import FusedScaleMaskSoftmax
-from .constants import (
+from transformer_engine.tensorflow.softmax import FusedScaleMaskSoftmax
+from transformer_engine.tensorflow.constants import (
     AttnMaskTypes,
     AttnTypes,
     LayerTypes,
 )
-from .utils import (
+from transformer_engine.tensorflow.utils import (
     divide,
     attention_mask_func,
 )
-from .jit import (
+from transformer_engine.tensorflow.jit import (
     get_bias_dropout_add,
     bias_dropout_add_fused_train,
     bias_dropout_add_fused_inference,

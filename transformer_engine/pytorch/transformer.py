@@ -498,6 +498,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
+        bias: bool = True,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -543,7 +544,7 @@ class MultiHeadAttention(torch.nn.Module):
                     3 * hidden_size,
                     eps=layernorm_epsilon,
                     init_method=init_method,
-                    bias=True,
+                    bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
@@ -559,7 +560,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     3 * hidden_size,
                     init_method=init_method,
-                    bias=True,
+                    bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
@@ -572,7 +573,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     eps=layernorm_epsilon,
                     init_method=init_method,
-                    bias=True,
+                    bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
@@ -587,7 +588,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     hidden_size,
                     init_method=init_method,
-                    bias=True,
+                    bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     **common_gemm_kwargs,
@@ -596,7 +597,7 @@ class MultiHeadAttention(torch.nn.Module):
                 hidden_size,
                 2 * hidden_size,
                 init_method=init_method,
-                bias=True,
+                bias=bias,
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key_", "value_") if not fuse_qkv_params else None,
@@ -621,7 +622,7 @@ class MultiHeadAttention(torch.nn.Module):
             hidden_size,
             hidden_size,
             init_method=output_layer_init_method,
-            bias=True,
+            bias=bias,
             return_bias=True,
             parallel_mode="row" if set_parallel_mode else None,
             ub_split_rs=ub_split_rs,
@@ -902,6 +903,9 @@ class TransformerLayer(torch.nn.Module):
                             interpretation is that the individual `q`, `k`, and `v` weights for each
                             attention head are interleaved. This parameter is set to `False` when
                             using :attr:`fuse_qkv_params=False`.
+    bias : bool, default = `True`
+          if set to `False`, the transformer layer will not learn any additive biases.
+
     Parallelism parameters
     ----------------------
     set_parallel_mode : bool, default = `False`
@@ -984,6 +988,7 @@ class TransformerLayer(torch.nn.Module):
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
+        bias: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1066,6 +1071,7 @@ class TransformerLayer(torch.nn.Module):
             attn_mask_type=self_attn_mask_type,
             input_layernorm=not output_layernorm,
             attention_type="self",
+            bias=bias,
         )
 
         if layer_type == "decoder":
@@ -1075,6 +1081,7 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type="padding",
                 input_layernorm=True,
                 attention_type="cross",
+                bias=bias,
             )
 
         # LayerNorm -> gelu(Linear + Bias) -> Linear
@@ -1090,7 +1097,7 @@ class TransformerLayer(torch.nn.Module):
             get_rng_state_tracker=get_rng_state_tracker,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
-            bias=True,
+            bias=bias,
             return_bias=True,
             sequence_parallel=self.sequence_parallel,
             params_dtype=params_dtype,
@@ -1215,6 +1222,7 @@ class TransformerLayer(torch.nn.Module):
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
         )
+
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
             attention_output, attention_bias, residual = self_attention_outputs
         else:
@@ -1231,18 +1239,22 @@ class TransformerLayer(torch.nn.Module):
             bias_dropout_add_func = get_bias_dropout_add(self.training)
 
         # Bias dropoout add.
-        if self.drop_path is None:
+        if self.drop_path is None and attention_bias.numel() != 0:
             with self.bias_dropout_add_exec_handler():
                 bda_output = bias_dropout_add_func(
                     attention_output, attention_bias, residual, self.hidden_dropout
                 )
         else:
+            if attention_bias.numel() != 0:
+                attention_output = attention_output + attention_bias
             out = torch.nn.functional.dropout(
-                attention_output + attention_bias,
+                attention_output,
                 p=self.hidden_dropout,
                 training=self.training,
             )
-            bda_output = residual + self.drop_path(out)
+            if self.drop_path is not None:
+                out = self.drop_path(out)
+            bda_output = residual + out
 
         # Cross attention.
         if self.layer_type == "decoder":
@@ -1259,11 +1271,18 @@ class TransformerLayer(torch.nn.Module):
                 attention_output, attention_bias = inter_attention_outputs
                 residual = bda_output
 
-            with self.bias_dropout_add_exec_handler():
-                bda_output = bias_dropout_add_func(
-                    attention_output, attention_bias, residual, self.hidden_dropout
+            if attention_bias.numel() != 0:
+                with self.bias_dropout_add_exec_handler():
+                    bda_output = bias_dropout_add_func(
+                        attention_output, attention_bias, residual, self.hidden_dropout
+                    )
+            else:
+                out = torch.nn.functional.dropout(
+                    attention_output,
+                    p=self.hidden_dropout,
+                    training=self.training,
                 )
-
+                bda_output = residual + out
         # MLP.
         mlp_outputs = self.layernorm_mlp(
             bda_output, is_first_microbatch=is_first_microbatch
@@ -1275,16 +1294,20 @@ class TransformerLayer(torch.nn.Module):
             residual = bda_output
 
         # Bias dropoout add.
-        if self.drop_path is None:
+        if self.drop_path is None and mlp_bias.numel() != 0:
             with self.bias_dropout_add_exec_handler():
                 output = bias_dropout_add_func(
                     mlp_output, mlp_bias, residual, self.hidden_dropout
                 )
         else:
+            if mlp_bias.numel() != 0:
+                mlp_output = mlp_output + mlp_bias
             out = torch.nn.functional.dropout(
-                mlp_output + mlp_bias, p=self.hidden_dropout, training=self.training
+                mlp_output, p=self.hidden_dropout, training=self.training
             )
-            output = residual + self.drop_path(out)
+            if self.drop_path is not None:
+                out = self.drop_path(out)
+            output = residual + out
 
         # For BERT like architectures.
         if self.output_layernorm:
