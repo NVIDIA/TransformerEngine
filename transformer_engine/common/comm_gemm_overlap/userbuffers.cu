@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #if __CUDA_ARCH__ >= 800

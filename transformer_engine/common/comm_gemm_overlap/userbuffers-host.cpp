@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #include <assert.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
@@ -43,18 +49,19 @@ typedef struct CUmemFabricHandle_st {
 #include <x86intrin.h>
 void *proxythread(void *c);
 static int oob_bcast(void *comm_context, void *buf, int size, int root) {
-  MPI_Bcast(buf, size, MPI_BYTE, root, ((communicator *)comm_context)->comm_inter);
+  MPI_Bcast(buf, size, MPI_BYTE, root,
+            (reinterpret_cast<communicator *>(comm_context))->comm_inter);
   return 0;
 }
 
 static int oob_barrier(void *comm_context) {
-  MPI_Barrier(((communicator *)comm_context)->comm_inter);
+  MPI_Barrier((reinterpret_cast<communicator *>(comm_context))->comm_inter);
   return 0;
 }
 
 static int oob_gather(void *comm_context, int root, void *sbuf, void *rbuf, int len) {
   MPI_Gather(sbuf, len, MPI_BYTE, rbuf, len, MPI_BYTE, root,
-             ((communicator *)comm_context)->comm_inter);
+             (reinterpret_cast<communicator *>(comm_context))->comm_inter);
   return 0;
 }
 
@@ -99,7 +106,7 @@ int pipe_rank(communicator *comm, int step) {
 
 int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenodes, int tensorgpus,
                                  int tensornodes) {
-  *comm = (communicator *)malloc(sizeof(communicator));
+  *comm = reinterpret_cast<communicator *>(malloc(sizeof(communicator)));
 
   int myrank, nranks, cur_dev, ndev;
   MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
@@ -143,7 +150,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   MPI_Get_processor_name(host_name, &namelen);
   bytes = size * sizeof(char[MPI_MAX_PROCESSOR_NAME]);
   host_names = (char(*)[MPI_MAX_PROCESSOR_NAME])malloc(bytes);
-  strcpy(host_names[rank], host_name);
+  strcpy(host_names[rank], host_name);  // NOLINT(*)
   for (int n = 0; n < size; n++)
     MPI_Bcast(&(host_names[n]), MPI_MAX_PROCESSOR_NAME, MPI_CHAR, n, MPI_COMM_WORLD);
   qsort(host_names, size, sizeof(char[MPI_MAX_PROCESSOR_NAME]), stringCmp);
@@ -238,25 +245,29 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
       ib_dev_list = "mlx5_0:1";
       break;
     case 1:
-      ib_dev_list = (char *)(PREOS ? "mlx5_3:1" : "mlx5_1:1");
+      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_3:1" : "mlx5_1:1");
       break;
     case 2:
-      ib_dev_list = (char *)(ZIONROCE ? "mlx5_4:1" : PREOS ? "mlx5_4:1" : "mlx5_2:1");
+      ib_dev_list = reinterpret_cast<char *>(ZIONROCE ? "mlx5_4:1"
+                                             : PREOS  ? "mlx5_4:1"
+                                                      : "mlx5_2:1");
       break;
     case 3:
-      ib_dev_list = (char *)(PREOS ? "mlx5_5:1" : "mlx5_3:1");
+      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_5:1" : "mlx5_3:1");
       break;
     case 4:
-      ib_dev_list = (char *)(PREOS ? "mlx5_6:1" : "mlx5_6:1");
+      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_6:1" : "mlx5_6:1");
       break;
     case 5:
-      ib_dev_list = (char *)(PREOS ? "mlx5_9:1" : "mlx5_7:1");
+      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_9:1" : "mlx5_7:1");
       break;
     case 6:
-      ib_dev_list = (char *)(ZIONROCE ? "mlx5_10:1" : PREOS ? "mlx5_10:1" : "mlx5_8:1");
+      ib_dev_list = reinterpret_cast<char *>(ZIONROCE ? "mlx5_10:1"
+                                             : PREOS  ? "mlx5_10:1"
+                                                      : "mlx5_8:1");
       break;
     case 7:
-      ib_dev_list = (char *)(PREOS ? "mlx5_11:1" : "mlx5_9:1");
+      ib_dev_list = reinterpret_cast<char *>(PREOS ? "mlx5_11:1" : "mlx5_9:1");
       break;
     default:
       break;
@@ -279,7 +290,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   init_spec.config.ib_dev_list = ib_dev_list;
 #endif
 
-  (*comm)->fifo = (ub_request *)malloc(sizeof(ub_request) * MAX_REQUESTS);
+  (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * MAX_REQUESTS));
   (*comm)->nblocks = getenv("NBLOCKS") ? atoi(getenv("NBLOCKS")) : 8;
   (*comm)->alignblock = 1024 * (getenv("ALIGNBLOCK") ? atoi(getenv("ALIGNBLOCK")) : 512);
   (*comm)->minblock = 1024 * (getenv("MINBLOCK") ? atoi(getenv("MINBLOCK")) : 2 * 1024);
@@ -294,7 +305,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   /* create sharp group */
   comm_spec.rank = my_node;
   comm_spec.size = num_nodes;
-  comm_spec.oob_ctx = (void *)(*comm);
+  comm_spec.oob_ctx = reinterpret_cast<void *>(*comm);
   comm_spec.group_world_ranks = NULL;
   ret = sharp_coll_comm_init((*comm)->sharp_coll_context, &comm_spec, &((*comm)->sharp_coll_comm));
 
@@ -304,7 +315,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   }
 #endif
 
-  CUDACHECK(cudaMallocHost((void **)&(*comm)->hostflags, (MAX_SMS + 100) * sizeof(int)));
+  CUDACHECK(
+      cudaMallocHost((void **)&(*comm)->hostflags, (MAX_SMS + 100) * sizeof(int)));  // NOLINT(*)
   for (int i = 0; i < 100 + MAX_SMS; i++) (*comm)->hostflags[i] = 0;
   _mm_mfence();
   sleep(1);
@@ -342,7 +354,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   ucp_worker_params_t worker_params;
   ucp_config_t *config;
 
-  (*comm)->ucxep = (ucp_ep_h *)malloc((*comm)->nranks * sizeof(ucp_ep_h));  // endpoint to all peers
+  (*comm)->ucxep = reinterpret_cast<ucp_ep_h *>(
+      malloc((*comm)->nranks * sizeof(ucp_ep_h)));  // endpoint to all peers
 
   memset(&ucp_params, 0, sizeof(ucp_params));
   memset(&worker_params, 0, sizeof(worker_params));
@@ -390,34 +403,38 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   // preconnect all peers (for alltoall)
   for (int r = 0; r < (*comm)->nranks; r++) {
     if (r == (*comm)->myrank) continue;
-    ep_params.address = (ucp_address_t *)((*comm)->ucxaddr + (*comm)->ucx_addr_len * r);
+    ep_params.address =
+        reinterpret_cast<ucp_address_t *>((*comm)->ucxaddr + (*comm)->ucx_addr_len * r);
     UCXCHECK(ucp_ep_create((*comm)->ucp_worker, &ep_params, &(*comm)->ucxep[r]));
   }
 #if 0
-  //preconnect pipeline neighbours (prev and next only)
-  for(int r=-1;r<2;r++) {
-    if(r==0) continue;
-    //printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
-    ep_params.address         = (ucp_address_t*) ((*comm)->ucxaddr+(*comm)->ucx_addr_len*pipe_rank(*comm,r));
-    UCXCHECK(ucp_ep_create((*comm)->ucp_worker, &ep_params, &(*comm)->ucxep[pipe_rank(*comm,r)]));
+  // preconnect pipeline neighbours (prev and next only)
+  for (int r = -1; r < 2; r++) {
+    if (r == 0) continue;
+    // printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
+    ep_params.address = reinterpret_cast<ucp_address_t*>
+                        ((*comm)->ucxaddr+(*comm)->ucx_addr_len*pipe_rank(*comm, r));
+    UCXCHECK(ucp_ep_create((*comm)->ucp_worker, &ep_params, &(*comm)->ucxep[pipe_rank(*comm, r)]));
   }
 
 #ifdef NOSHARP
-  //preconnect all data-allreduce rail partners
-  for(int r=0;r<(*comm)->num_nodes;r++) {
-    if(r==(*comm)->my_node) continue;
-    int dest=((*comm)->first_node+r)*(*comm)->nvsize+(*comm)->nvrank;
-    //printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
-    ep_params.address         = (ucp_address_t*) ((*comm)->ucxaddr+(*comm)->ucx_addr_len*dest);
+  // preconnect all data-allreduce rail partners
+  for (int r = 0; r < (*comm)->num_nodes; r++) {
+    if (r == (*comm)->my_node) continue;
+    int dest = ((*comm)->first_node+r)*(*comm)->nvsize+(*comm)->nvrank;
+    // printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
+    ep_params.address = reinterpret_cast<ucp_address_t*>
+                        ((*comm)->ucxaddr+(*comm)->ucx_addr_len*dest);
     UCXCHECK(ucp_ep_create((*comm)->ucp_worker, &ep_params, &(*comm)->ucxep[dest]));
   }
 #endif
-  //preconnect all tensor-allreduce rail partners
-  for(int r=0;r<(*comm)->num2_nodes;r++) {
-    if(r==(*comm)->my2_node) continue;
-    int dest=((*comm)->first2_node+r*(*comm)->num_nodes)*(*comm)->nvsize+(*comm)->nvrank;
-    //printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
-    ep_params.address         = (ucp_address_t*) ((*comm)->ucxaddr+(*comm)->ucx_addr_len*dest);
+  // preconnect all tensor-allreduce rail partners
+  for (int r = 0; r < (*comm)->num2_nodes; r++) {
+    if (r == (*comm)->my2_node) continue;
+    int dest = ((*comm)->first2_node+r*(*comm)->num_nodes)*(*comm)->nvsize+(*comm)->nvrank;
+    // printf("[%d] adjust %d piperank %d\n",(*comm)->myrank,r,pipe_rank(*comm,r));fflush(NULL);
+    ep_params.address = reinterpret_cast<ucp_address_t*>
+                        ((*comm)->ucxaddr+(*comm)->ucx_addr_len*dest);
     UCXCHECK(ucp_ep_create((*comm)->ucp_worker, &ep_params, &(*comm)->ucxep[dest]));
   }
 #endif
@@ -459,7 +476,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   unsigned int flag = 1;
   // cuPointerSetAttribute(&flag, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS, (CUdeviceptr)(*comm)->flags);
   CUDACHECK(cudaMemset((*comm)->flags, 0, 2 * GPU_PAGE_SIZE));
-  (*comm)->flags = (int *)(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
+  (*comm)->flags =
+      reinterpret_cast<int *>(((CUdeviceptr)(*comm)->flags + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
 
   using namespace std;
   (*comm)->g = gdr_open();
@@ -473,7 +491,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     fprintf(stderr, "gdr_pin_buffer failed\n");
     return -1;
   }
-  ret = gdr_map((*comm)->g, mh, (void **)&((*comm)->map_flags), GPU_PAGE_SIZE);
+  ret = gdr_map((*comm)->g, mh, (void **)&((*comm)->map_flags), GPU_PAGE_SIZE);  // NOLINT(*)
 
   if (ret) {
     fprintf(stderr, "gdr_map failed\n");
@@ -484,7 +502,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   pthread_attr_init(&attr);
   pthread_attr_getschedparam(&attr, &param);
   param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-  ;
+
   pthread_attr_setschedparam(&attr, &param);
 
   // Disable proxy thread
@@ -524,16 +542,17 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   if (comm->free_region > MAX_REGIONS) return -1;
   int hndl = comm->free_region;
   // printf("%d register %d size %lld\n",comm->myrank,hndl,bytes);fflush(NULL);
-  comm->peer_ptr[hndl] = (void **)malloc(sizeof(void *) * (comm->nvsize));
+  comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
 
   if (alloc) {
 #ifdef MNNVL
     size_t aligned_size;
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
-    CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(nranks * sizeof(CUmemFabricHandle));
-    CUmemGenericAllocationHandle *remhndls =
-        (CUmemGenericAllocationHandle *)malloc(nranks * sizeof(CUmemGenericAllocationHandle));
-    void **remptrs = (void **)malloc(nranks * sizeof(void *));
+    CUmemFabricHandle *exphndl =
+        reinterpret_cast<CUmemFabricHandle *>(malloc(nranks * sizeof(CUmemFabricHandle)));
+    CUmemGenericAllocationHandle *remhndls = reinterpret_cast<CUmemGenericAllocationHandle *>(
+        malloc(nranks * sizeof(CUmemGenericAllocationHandle)));
+    void **remptrs = reinterpret_cast<void **>(malloc(nranks * sizeof(void *)));
 
     CUmemAllocationProp prop = {};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -579,8 +598,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
     if (hndl == 0) CUDACHECK(cudaMemset(comm->gpu_ptrs, 0, aligned_size));
-    CUDACHECK(cudaMemcpy(((char *)(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)), remptrs,
-                         nranks * sizeof(void *), cudaMemcpyHostToDevice));
+    CUDACHECK(
+        cudaMemcpy((reinterpret_cast<char *>(comm->gpu_ptrs)) + (hndl * nranks * sizeof(void *)),
+                   remptrs, nranks * sizeof(void *), cudaMemcpyHostToDevice));
     free(remhndls);
     free(exphndl);
     free(remptrs);
@@ -591,7 +611,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 #endif
     assert(comm->nvsize <= 8);
     cudaIpcMemHandle_t *memhndl =
-        (cudaIpcMemHandle_t *)malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize));
+        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize)));
 
     CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
 
@@ -600,14 +620,15 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     for (int i = 0; i < comm->nvsize; i++)
       if (i != comm->nvrank)
-        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]), memhndl[i],
+        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
+                                       memhndl[i],
                                        cudaIpcMemLazyEnablePeerAccess));
     comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
     CUDACHECK(cudaDeviceSynchronize());
 
-    CUDACHECK(cudaMemcpy((char *)(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
-                         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *),
-                         cudaMemcpyHostToDevice));
+    CUDACHECK(cudaMemcpy(
+        reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
+        comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     CUDACHECK(cudaDeviceSynchronize());
     free(memhndl);
@@ -626,7 +647,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   ucp_mem_h ucp_memh;
   ucp_mem_map_params_t ucp_memmap_params;
   ucp_memmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
-  ucp_memmap_params.address = (void *)*gpubuff;
+  ucp_memmap_params.address = reinterpret_cast<void *>(*gpubuff);
   ucp_memmap_params.length = bytes;
   UCXCHECK(ucp_mem_map(comm->ucp_context, &ucp_memmap_params, &ucp_memh));
   void *myrkey;
@@ -639,8 +660,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   MPI_Allgather(comm->rkeys_packed[hndl] + comm->myrank * comm->rkey_size[hndl],
                 comm->rkey_size[hndl], MPI_BYTE, comm->rkeys_packed[hndl], comm->rkey_size[hndl],
                 MPI_BYTE, MPI_COMM_WORLD);
-  comm->rkeys[hndl] = (ucp_rkey_h *)malloc(comm->nranks * sizeof(ucp_rkey_h));
-  comm->peeraddr[hndl] = (void **)malloc(comm->nranks * sizeof(void *));
+  comm->rkeys[hndl] = reinterpret_cast<ucp_rkey_h *>(malloc(comm->nranks * sizeof(ucp_rkey_h)));
+  comm->peeraddr[hndl] = reinterpret_cast<void **>(malloc(comm->nranks * sizeof(void *)));
   comm->peeraddr[hndl][comm->myrank] = *gpubuff;
   MPI_Allgather(&comm->peeraddr[hndl][comm->myrank], sizeof(void *), MPI_BYTE,
                 &comm->peeraddr[hndl][0], sizeof(void *), MPI_BYTE, MPI_COMM_WORLD);
@@ -691,7 +712,7 @@ void progress_sharp_allreduce(communicator *comm) {
     return;
   }
 
-  if (req->unconfirmed_ib_in_flight < req->nblock)  // any pending sharp in flight
+  if (req->unconfirmed_ib_in_flight < req->nblock) {  // any pending sharp in flight
     if (req->nblock == req->numblocks ||
         (req->nblock < req->numblocks &&
          (req->unconfirmed_ib_in_flight + comm->asyncblocks == req->nblock ||
@@ -709,6 +730,7 @@ void progress_sharp_allreduce(communicator *comm) {
       }
       return;
     }
+  }
 
   if (req->nblock < req->numblocks && hf[op] >= expecting) {
     struct sharp_coll_reduce_spec reduce_spec;
@@ -723,16 +745,18 @@ void progress_sharp_allreduce(communicator *comm) {
     reduce_spec.dtype = SHARP_DTYPE_FLOAT_SHORT;
     reduce_spec.op = SHARP_OP_SUM;
 
-    long peerblock = req->blocksize / comm->ar_nvsize;
-    long blockstart = req->nblock * req->blocksize;
-    long adder = req->offset * 2 + blockstart + peerblock * comm->ar_nvrank;
+    long peerblock = req->blocksize / comm->ar_nvsize;                        // NOLINT(*)
+    long blockstart = req->nblock * req->blocksize;                           // NOLINT(*)
+    long adder = req->offset * 2 + blockstart + peerblock * comm->ar_nvrank;  // NOLINT(*)
 
     if (blockstart + req->blocksize > req->elements * 2) {  // last block might be shorter
       peerblock = (req->elements * 2 - blockstart) / comm->ar_nvsize;
       adder = req->offset * 2 + blockstart + peerblock * comm->ar_nvrank;
     }
-    reduce_spec.sbuf_desc.buffer.ptr = (char *)(comm->mem_ptr[req->handler]) + adder;
-    reduce_spec.rbuf_desc.buffer.ptr = (char *)(comm->mem_ptr[req->handler]) + adder;
+    reduce_spec.sbuf_desc.buffer.ptr =
+        reinterpret_cast<char *>(comm->mem_ptr[req->handler]) + adder;
+    reduce_spec.rbuf_desc.buffer.ptr =
+        reinterpret_cast<char *>(comm->mem_ptr[req->handler]) + adder;
     reduce_spec.sbuf_desc.buffer.length = peerblock;
     reduce_spec.rbuf_desc.buffer.length = peerblock;
     reduce_spec.length = peerblock / 2;
@@ -800,7 +824,7 @@ void progress_ucp_allreduce(communicator *comm, int op) {
 
     size_t blockstart = req->nblock * req->blocksize;
     size_t useroffset =
-        req->offset * 2 + blockstart;  //+peerblock*comm->ar_nvrank+ibblock*comm->my_node;
+        req->offset * 2 + blockstart;  // +peerblock*comm->ar_nvrank+ibblock*comm->my_node;
     // printf("bytes %ld blocks: %dx%d(ibblock/peerblock %d/%d) nblock %d blockstart %ld useroffset
     // %ld\n",req->elements*2,req->numblocks,req->blocksize,ibblock,peerblock,req->nblock,blockstart,useroffset);fflush(NULL);
     size_t commoffset = sizeof(int) * (REG0_OFFSET(comm) + REG0_FLAGS) + commblock * peerblock;
@@ -886,7 +910,8 @@ void progress_ucp_send(communicator *comm) {
     if (comm->ucxep[dest] == NULL) {  // preconnect on first send
       ucp_ep_params_t ep_params;
       ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
-      ep_params.address = (ucp_address_t *)((comm)->ucxaddr + (comm)->ucx_addr_len * dest);
+      ep_params.address =
+          reinterpret_cast<ucp_address_t *>((comm)->ucxaddr + (comm)->ucx_addr_len * dest);
       UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest]));
       for (int hndl = 0; hndl < comm->free_region; hndl++)
         UCXCHECK(ucp_ep_rkey_unpack(comm->ucxep[dest],
@@ -912,8 +937,9 @@ void progress_ucp_send(communicator *comm) {
                               comm->rkeys[0][dest]));
     comm->active_nreqs--;
     req->active = -1;
-  } else
+  } else {
     ucp_worker_progress(comm->ucp_worker);
+  }
 }
 
 void progress_ucp_alltoall(communicator *comm) {
@@ -922,16 +948,17 @@ void progress_ucp_alltoall(communicator *comm) {
   volatile int *hf = (volatile int *)comm->hostflags;
   int expecting = 1 + req->basecounter;
 
-  if (req->active == -1) return;  // no active op
+  if (req->active == -1) return;                                  // no active op
 
-  if (req->active == 0) {         // first run, initialize
+  if (req->active == 0) {                                         // first run, initialize
     req->active = 1;
-    if (0)
+    if (0)                                                        // NOLINT(*)
       for (int dest = 0; dest < comm->nranks; dest++)
         if (dest != comm->myrank && comm->ucxep[dest] == NULL) {  // preconnect if needed
           ucp_ep_params_t ep_params;
           ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
-          ep_params.address = (ucp_address_t *)((comm)->ucxaddr + (comm)->ucx_addr_len * dest);
+          ep_params.address =
+              reinterpret_cast<ucp_address_t *>((comm)->ucxaddr + (comm)->ucx_addr_len * dest);
           UCXCHECK(ucp_ep_create((comm)->ucp_worker, &ep_params, &(comm)->ucxep[dest]));
           for (int hndl = 0; hndl < comm->free_region; hndl++)
             UCXCHECK(ucp_ep_rkey_unpack(comm->ucxep[dest],
@@ -958,8 +985,9 @@ void progress_ucp_alltoall(communicator *comm) {
     }
     comm->active_nreqs--;
     req->active = -1;
-  } else
+  } else {
     ucp_worker_progress(comm->ucp_worker);
+  }
 }
 
 #endif
@@ -1128,7 +1156,7 @@ void allgather_userbuff_inplace(const int handler, const int offset, const int e
 
 #ifdef MULTINODE
 void *proxythread(void *c) {
-  communicator *comm = (communicator *)c;
+  communicator *comm = reinterpret_cast<communicator *>(c);
 
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
@@ -1172,7 +1200,8 @@ void *proxythread(void *c) {
 
     if (comm->active_req[op].active == -1) {
       comm->active_nreqs++;
-      memcpy((void *)&comm->active_req[op], (void *)&comm->fifo[comm->tail], sizeof(ub_request));
+      memcpy((void *)&comm->active_req[op], (void *)&comm->fifo[comm->tail],  // NOLINT(*)
+             sizeof(ub_request));
       comm->active_req[op].active = 0;
       comm->tail = (comm->tail + 1) & (MAX_REQUESTS - 1);
     }
