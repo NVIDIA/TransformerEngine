@@ -7,15 +7,9 @@
 #include <cuda.h>
 #include <mpi.h>
 #include "cuda_runtime.h"
-
-#ifdef MULTINODE
-#ifndef NOSHARP
-#include <api/sharp.h>
-#endif
 #include <pthread.h>
 #include <chrono>
 #include "gdrapi.h"
-#endif
 
 #define MAX_REGIONS 16
 #define MAX_SMS 32
@@ -26,10 +20,6 @@
 #define LAUNCH_CPU 2
 #define MAX_NVLINK 8
 
-#ifdef UCP
-#include <ucp/api/ucp.h>
-#endif
-
 // region 0 flag offsets
 #define REG0_OPFLAGS 1024
 #define REG0_RECV (REG0_OPFLAGS * userbuffers_op_types)
@@ -37,9 +27,6 @@
 #define REG0_OFFSET(comm) ((2 * MAX_REGIONS) * MAX_NVLINK + REG0_SINGLENODE * 2 + MAX_PEERS)
 #define REG0_COMMBUFFER 0
 #define REG0_FLAGS (REG0_RECV + MAX_PEERS * MAX_REGIONS)
-
-#ifdef MULTINODE
-
 #define REG0_IBRS 32
 #define REG0_IBAG 512
 #undef REG0_COMMBUFFER
@@ -48,10 +35,8 @@
 // gpuflags map offsets
 #define GF_STATE 16000
 #define GF_IBSHARPDONE 0
-
 #define HF_NVRSDONE (userbuffers_op_types + 1)
 #define HF_NVREDUCEDONE (userbuffers_op_types + 3)
-
 #define MAX_SHARP 16
 typedef struct ub_request {
   int optype;
@@ -67,7 +52,6 @@ typedef struct ub_request {
   int active, maxcredit;
   int nblock, numblocks, unconfirmed_ib_in_flight;
 } ub_request;
-#endif
 
 enum req_type {
   userbuffers_allreduceop_sharp,
@@ -99,7 +83,6 @@ struct communicator {
   int ar2_nvsize, ar2_firstgpu, ar2_nvrank;  // with ar_nvsize as a step
   int pipe_id;  // which allreduce set of groups (pipeline rank in range of 0..pipeline_size)
   int sm_arch;
-#ifdef MULTINODE
   int num_nodes, my_node,
       first_node;  // comm_inter communicator, per-rail allreduce (might have subset of nodes)
   int num2_nodes, my2_node, first2_node;  // with num_nodes as a stride
@@ -114,7 +97,6 @@ struct communicator {
   struct sharp_coll_comm *sharp_coll_comm;
   void *mem_mr[MAX_REGIONS];
 
-  pthread_t proxythread;
   ub_request *fifo;
   volatile int activeproxy;
   int nblocks, alignblock, minblock, asyncblocks, active_nreqs;
@@ -124,34 +106,14 @@ struct communicator {
   int padding2[15];
   volatile int tail;
 
-#ifdef NOSHARP
   MPI_Request mpihndl[MAX_SHARP];
-#else
-  void *sharphndl[MAX_SHARP];
-#endif
-
-#endif
   MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
       comm_intra;       // full intranode (all ndev GPUS)
   int ibnvsize;  // can be used to fake smaller or larger nvlink domain to use ib instead of nvlink
                  // or force MNNVL
-#ifdef UCP
-
-  ucp_context_h ucp_context;
-  ucp_worker_h ucp_worker;
-  ucp_ep_h *ucxep;
-  void *ucxaddr;
-  size_t ucx_addr_len;
-  void *rkeys_packed[MAX_REGIONS];
-  ucp_rkey_h *rkeys[MAX_REGIONS];
-  size_t rkey_size[MAX_REGIONS];
-  void **peeraddr[MAX_REGIONS];
-#endif
   int *send_id, *recv_id;
   int mydev;
-#ifdef MNNVL
-  CUmemGenericAllocationHandle mhndl[MAX_REGIONS];
-#endif
+
 };
 typedef struct communicator communicator;
 
@@ -190,14 +152,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
 void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream = 0);
-#if defined(MULTINODE) && defined(NOSHARP)
 // for DP distributed optimizer, only nonSHARP multinode is implemented & calls must come in pairs
 // ordered
 void allgather_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream = 0);
 void reducescatter_userbuff_inplace(const int handler, const int offset, const int elements,
                                     communicator *comm, cudaStream_t stream = 0);
-#endif
 
 void allreduce2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, cudaStream_t stream = 0);
