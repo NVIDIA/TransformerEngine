@@ -34,8 +34,8 @@ def get_cuda_bare_metal_version(cuda_dir):
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    cuda_bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if cuda_bare_metal_version >= (11, 2):
+    cuda_major, cuda_minor = get_cuda_bare_metal_version(CUDA_HOME)
+    if cuda_major >= 11 and cuda_minor >= 2:
         return nvcc_extra_args + ["--threads", "4"]
     return nvcc_extra_args
 
