@@ -1906,6 +1906,8 @@ class _Linear(torch.autograd.Function):
                         ctx.activation_dtype,
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                     )
                 else:
                     dgrad, _, _ = gemm(
@@ -1915,6 +1917,8 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         layout="NN",
                         grad=True,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                     )
 
                 # Overlap dgrad-RS/AR with wgrad
