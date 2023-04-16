@@ -215,10 +215,8 @@ def initialize_ub(
                 set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
                 aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
             except ValueError:
-                print(
-                    "Incomplete UB configurations. The config should include "
-                    "`method`, `dtype`, `num_sm`, `num_splits`, "
-                    "`cga_size`, `num_splits`, `set_sm_margin`, and `aggregate`"
+                raise RuntimeError(
+                    "Overlap method should be provided under the key `method`."
                 )
             dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
             add_ub(
