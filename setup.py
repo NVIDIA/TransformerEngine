@@ -80,7 +80,6 @@ include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
     "/usr/local/mpi/include",
-    "/usr/local/ucx/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 

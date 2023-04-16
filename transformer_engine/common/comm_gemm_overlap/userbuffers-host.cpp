@@ -89,13 +89,11 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   CUDACHECK(cudaGetDeviceCount(&ndev));
   CUDACHECK(cudaGetDeviceProperties(&device_prop, cur_dev));
   (*comm)->sm_arch = device_prop.major;
-  (*comm)->use_rr_kernel = device_prop.major == 8;
-  if (getenv("OVERRIDERR")) (*comm)->use_rr_kernel = atoi(getenv("OVERRIDERR"));
-  (*comm)->push = device_prop.major != 8;
-  (*comm)->use_ce = getenv("USECE") ? 1 : 0;
-  (*comm)->cga_size = getenv("CGASIZE") ? atoi(getenv("CGASIZE"))
-                      : (device_prop.major == 9 && !(*comm)->use_rr_kernel) ? 4
-                                                                            : 1;
+  //(*comm)->use_rr_kernel = device_prop.major == 8;
+  (*comm)->use_rr_kernel = 0;
+  (*comm)->push = 1;
+  (*comm)->use_ce = 0;
+  (*comm)->cga_size = 2;
   for (int i = 0; i < userbuffers_op_types; i++) (*comm)->basecounter[i] = 0;
   (*comm)->head = 0;
   (*comm)->tail = 0;
@@ -145,13 +143,13 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   if (mylocal == 7) core = 90;
 
   CPU_SET(core, &cpuset);
-  if (!getenv("NODOUBLE")) {
+  if (!getenv("NVTE_NODOUBLE")) {
     if (core > 128)
       CPU_SET(core - 128, &cpuset);
     else
       CPU_SET(core + 128, &cpuset);
   }
-  if (getenv("DOPIN")) pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+  if (getenv("NVTE_DOPIN")) pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
   if (ndev == numlocal) {  // all visible devices
     if (cur_dev != mylocal)
@@ -197,28 +195,28 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->first2_node = mynode - (*comm)->my2_node * datanodes;
 
   char *ib_dev_list;
-  int ZIONROCE = getenv("ZIONROCE") ? atoi(getenv("ZIONROCE")) : 0;
-  int ROCE = getenv("ROCE") ? atoi(getenv("ROCE")) : 0;
+  int ZIONROCE = getenv("NVTE_ZIONROCE") ? atoi(getenv("NVTE_ZIONROCE")) : 0;
+  int ROCE = getenv("NVTE_ROCE") ? atoi(getenv("NVTE_ROCE")) : 0;
   if (ZIONROCE) ROCE = 1;
-  int PREOS = getenv("PREOS") ? atoi(getenv("PREOS")) : 0;
+  int DGX_H100 = device_prop.major == 9;
 
   switch (mylocal) {
 		case 0:ib_dev_list = "mlx5_0:1"; break;  // NOLINT(*)
-		case 1:ib_dev_list = (char*)(PREOS?"mlx5_3:1":"mlx5_1:1"); break;  // NOLINT(*)
-		case 2:ib_dev_list = (char*)(ZIONROCE?"mlx5_4:1":PREOS?"mlx5_4:1":"mlx5_2:1"); break;  // NOLINT(*)
-		case 3:ib_dev_list = (char*)(PREOS?"mlx5_5:1":"mlx5_3:1"); break;  // NOLINT(*)
-		case 4:ib_dev_list = (char*)(PREOS?"mlx5_6:1":"mlx5_6:1"); break;  // NOLINT(*)
-		case 5:ib_dev_list = (char*)(PREOS?"mlx5_9:1":"mlx5_7:1"); break;  // NOLINT(*)
-		case 6:ib_dev_list = (char*)(ZIONROCE?"mlx5_10:1":PREOS?"mlx5_10:1":"mlx5_8:1"); break;  // NOLINT(*)
-		case 7:ib_dev_list = (char*)(PREOS?"mlx5_11:1":"mlx5_9:1"); break;  // NOLINT(*)
+		case 1:ib_dev_list = (char*)(DGX_H100?"mlx5_3:1":"mlx5_1:1"); break;  // NOLINT(*)
+		case 2:ib_dev_list = (char*)(ZIONROCE?"mlx5_4:1":DGX_H100?"mlx5_4:1":"mlx5_2:1"); break;  // NOLINT(*)
+		case 3:ib_dev_list = (char*)(DGX_H100?"mlx5_5:1":"mlx5_3:1"); break;  // NOLINT(*)
+		case 4:ib_dev_list = (char*)(DGX_H100?"mlx5_6:1":"mlx5_6:1"); break;  // NOLINT(*)
+		case 5:ib_dev_list = (char*)(DGX_H100?"mlx5_9:1":"mlx5_7:1"); break;  // NOLINT(*)
+		case 6:ib_dev_list = (char*)(ZIONROCE?"mlx5_10:1":DGX_H100?"mlx5_10:1":"mlx5_8:1"); break;  // NOLINT(*)
+		case 7:ib_dev_list = (char*)(DGX_H100?"mlx5_11:1":"mlx5_9:1"); break;  // NOLINT(*)
                 default: break;
   }
 
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * MAX_REQUESTS));
-  (*comm)->nblocks = getenv("NBLOCKS") ? atoi(getenv("NBLOCKS")) : 8;
-  (*comm)->alignblock = 1024 * (getenv("ALIGNBLOCK") ? atoi(getenv("ALIGNBLOCK")) : 512);
-  (*comm)->minblock = 1024 * (getenv("MINBLOCK") ? atoi(getenv("MINBLOCK")) : 2 * 1024);
-  (*comm)->asyncblocks = getenv("ASYNCBLOCKS") ? atoi(getenv("ASYNCBLOCKS")) : 16;
+  (*comm)->nblocks = 8;
+  (*comm)->alignblock = 1024 * 512;
+  (*comm)->minblock = 1024 * 2 * 1024;
+  (*comm)->asyncblocks = 16;
 
   CUDACHECK(
       cudaMallocHost((void **)&(*comm)->hostflags, (MAX_SMS + 100) * sizeof(int)));  // NOLINT(*)
@@ -227,7 +225,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   sleep(1);
 
   // init_p2p_transport();
-  (*comm)->ibnvsize = getenv("IBNVSIZE") ? atoi(getenv("IBNVSIZE")) : (*comm)->nvsize;
+  (*comm)->ibnvsize = (*comm)->nvsize;
 
 #define NBUF 2
 #define LOCALSIZE 4 * (REG0_OFFSET(*comm) + REG0_FLAGS + REG0_COMMBUFFER * NBUF)
@@ -241,8 +239,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   CUDACHECK(cudaMalloc(&(*comm)->recv_id, MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->recv_id, 0, MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-  (*comm)->sms = getenv("MAXSMS") ? atoi(getenv("MAXSMS")) : 16;
-  (*comm)->threads = getenv("MAXTHREADS") ? atoi(getenv("MAXTHREADS")) : 1024;
+  (*comm)->sms = 16;
+  (*comm)->threads = 1024;
 
 #define GPU_PAGE_SHIFT 16
 #define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
@@ -281,7 +279,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
 
   pthread_attr_setschedparam(&attr, &param);
 
-  if (getenv("UBDEBUG"))
+  if (getenv("NVTE_UBDEBUG"))
     printf("%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP %dx%d PIPE_ID %d/%d\n",
            myrank, nranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
            (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
@@ -301,7 +299,7 @@ int create_communicator(communicator **comm) {
 
 void destroy_communicator(communicator *comm) {
   comm->activeproxy = 0;
-  if (!comm->myrank && getenv("UBDEBUG"))
+  if (!comm->myrank && getenv("NVTE_UBDEBUG"))
     printf("waiting for userbuffers proxy thread to exit()\n");
   gdr_close(comm->g);
 }

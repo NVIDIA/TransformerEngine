@@ -57,7 +57,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     // Initialize userbuf communicator
     create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
     _ub_comm->use_ce = 0;
-    _ub_comm->push = 1;
     _ub_comm->sms = num_comm_sm;
     _ub_comm->cga_size = comm_cga_size;
 
@@ -335,7 +334,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     // Initialize userbuf communicator
     create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
     _ub_comm->use_ce = 1;
-    _ub_comm->push = 1;
     _ub_comm->sms = 1;
     _ub_comm->cga_size = 1;
 
