@@ -82,7 +82,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->nranks = nranks;
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
-  (*comm)->launch_mode = LAUNCH_GPU | LAUNCH_CPU;
+  (*comm)->launch_mode = NVTE_LAUNCH_GPU | NVTE_LAUNCH_CPU;
 
   cudaDeviceProp device_prop;
   CUDACHECK(cudaGetDevice(&cur_dev));
@@ -212,15 +212,15 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
                 default: break;
   }
 
-  (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * MAX_REQUESTS));
+  (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
   (*comm)->nblocks = 8;
   (*comm)->alignblock = 1024 * 512;
   (*comm)->minblock = 1024 * 2 * 1024;
   (*comm)->asyncblocks = 16;
 
   CUDACHECK(
-      cudaMallocHost((void **)&(*comm)->hostflags, (MAX_SMS + 100) * sizeof(int)));  // NOLINT(*)
-  for (int i = 0; i < 100 + MAX_SMS; i++) (*comm)->hostflags[i] = 0;
+      cudaMallocHost((void **)&(*comm)->hostflags, (NVTE_MAX_SMS + 100) * sizeof(int)));  // NOLINT(*)
+  for (int i = 0; i < 100 + NVTE_MAX_SMS; i++) (*comm)->hostflags[i] = 0;
   _mm_mfence();
   sleep(1);
 
@@ -228,7 +228,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->ibnvsize = (*comm)->nvsize;
 
 #define NBUF 2
-#define LOCALSIZE 4 * (REG0_OFFSET(*comm) + REG0_FLAGS + REG0_COMMBUFFER * NBUF)
+#define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
 
   CUDACHECK(cudaMalloc(&(*comm)->gpu_ptrs, LOCALSIZE));  // flags and pointers, no block data yet
@@ -236,9 +236,9 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   CUDACHECK(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm);  // will use handler 0
   CUDACHECK(cudaMalloc(&(*comm)->send_id, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMalloc(&(*comm)->recv_id, MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  CUDACHECK(cudaMalloc(&(*comm)->recv_id, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   CUDACHECK(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
-  CUDACHECK(cudaMemset((*comm)->recv_id, 0, MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+  CUDACHECK(cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
 
@@ -305,7 +305,7 @@ void destroy_communicator(communicator *comm) {
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
-  if (comm->free_region > MAX_REGIONS) return -1;
+  if (comm->free_region > NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
   // printf("%d register %d size %lld\n",comm->myrank,hndl,bytes);fflush(NULL);
   comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
@@ -368,13 +368,13 @@ void allreduce_nonsharp_inplace(const int handler, const int offset, const int e
   maxcredit = (elements * 2 + blocksize - 1) / blocksize;
   // if(maxcredit>4) maxcredit=4;
   // if(maxcredit>4 && ar_nvsize==1) maxcredit=4;
-  size_t peerblock = sizeof(int) * REG0_COMMBUFFER / maxcredit;  // max size we can fit
+  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
   if (blocksize > peerblock * ar_nvsize) blocksize = peerblock * ar_nvsize;
   // blocksize=elements*2;
   int sms = allreduce2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize, comm,
                                             stream, op);
 
-  if (num_nodes > 1 && comm->launch_mode & LAUNCH_CPU) {
+  if (num_nodes > 1 && comm->launch_mode & NVTE_LAUNCH_CPU) {
     if (!sms) return;
     comm->fifo[comm->head].optype = op;
     comm->fifo[comm->head].basecounter = comm->basecounter[op];
@@ -384,7 +384,7 @@ void allreduce_nonsharp_inplace(const int handler, const int offset, const int e
     comm->fifo[comm->head].offset = offset;
     comm->fifo[comm->head].elements = elements;
 
-    int newhead = (comm->head + 1) & (MAX_REQUESTS - 1);
+    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
     while (newhead == comm->tail) {
     }
     comm->head = newhead;
@@ -417,7 +417,7 @@ void allreduce_userbuff_inplace(const int handler, const int offset, const int e
   // blocksize=elements*2;
   int sms = allreduce_userbuff_inplace_gpu(handler, offset, elements, blocksize, comm, stream);
 
-  if (comm->launch_mode & LAUNCH_CPU) {
+  if (comm->launch_mode & NVTE_LAUNCH_CPU) {
     if (!sms) return;
     comm->fifo[comm->head].optype = userbuffers_allreduceop_sharp;
     comm->fifo[comm->head].basecounter = comm->basecounter[userbuffers_allreduceop_sharp];
@@ -427,7 +427,7 @@ void allreduce_userbuff_inplace(const int handler, const int offset, const int e
     comm->fifo[comm->head].offset = offset;
     comm->fifo[comm->head].elements = elements;
 
-    int newhead = (comm->head + 1) & (MAX_REQUESTS - 1);
+    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
     while (newhead == comm->tail) {
     }
     comm->head = newhead;
@@ -453,13 +453,13 @@ void reducescatter_userbuff_inplace(const int handler, const int offset, const i
   if (blocksize < comm->minblock) blocksize = comm->minblock;
 
   maxcredit = (elements * 2 + blocksize - 1) / blocksize;
-  size_t peerblock = sizeof(int) * REG0_COMMBUFFER / maxcredit;  // max size we can fit
+  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
   if (blocksize > peerblock * ar_nvsize) blocksize = peerblock * ar_nvsize;
 
   int sms = reducescatter2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize,
                                                 comm, stream, op);
 
-  if (num_nodes > 1 && comm->launch_mode & LAUNCH_CPU) {
+  if (num_nodes > 1 && comm->launch_mode & NVTE_LAUNCH_CPU) {
     if (!sms) return;
     comm->fifo[comm->head].optype = op;
     comm->fifo[comm->head].basecounter = comm->basecounter[op];
@@ -469,7 +469,7 @@ void reducescatter_userbuff_inplace(const int handler, const int offset, const i
     comm->fifo[comm->head].offset = offset;
     comm->fifo[comm->head].elements = elements;
 
-    int newhead = (comm->head + 1) & (MAX_REQUESTS - 1);
+    int newhead = (comm->head + 1) & (NVTE_MAX_REQUESTS - 1);
     while (newhead == comm->tail) {
     }
     comm->head = newhead;
@@ -493,7 +493,7 @@ void allgather_userbuff_inplace(const int handler, const int offset, const int e
   if (blocksize < comm->minblock) blocksize = comm->minblock;
 
   maxcredit = (elements * 2 + blocksize - 1) / blocksize;
-  size_t peerblock = sizeof(int) * REG0_COMMBUFFER / maxcredit;  // max size we can fit
+  size_t peerblock = sizeof(int) * NVTE_REG0_COMMBUFFER / maxcredit;  // max size we can fit
   if (blocksize > peerblock * ar_nvsize) blocksize = peerblock * ar_nvsize;
 
   int sms = allgather2_userbuff_inplace_gpu(maxcredit, handler, offset, elements, blocksize, comm,

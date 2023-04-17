@@ -35,7 +35,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set_source_files_properties(comm_gemm_overlap/userbuffers.cu
                             comm_gemm_overlap/userbuffers-host.cpp
                             PROPERTIES
-                            #INCLUDE_DIRECTORIES "/usr/local/mpi/include;/usr/local/ucx/include;/opt/hpcx/sharp/include/sharp"
                             INCLUDE_DIRECTORIES "/usr/local/mpi/include"
                             COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=64>")
 

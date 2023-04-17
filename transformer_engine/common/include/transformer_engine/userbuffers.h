@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
+#define TRANSFORMER_ENGINE_USERBUFFERS_H_
+
 #include <cuda.h>
 #include <mpi.h>
 #include "cuda_runtime.h"
@@ -11,33 +14,34 @@
 #include <chrono>
 #include "gdrapi.h"
 
-#define MAX_REGIONS 16
-#define MAX_SMS 32
-#define MAX_OPS 32
-#define MAX_PEERS 8192
-#define MAX_REQUESTS 1024
-#define LAUNCH_GPU 1
-#define LAUNCH_CPU 2
-#define MAX_NVLINK 8
+#define NVTE_MAX_REGIONS 16
+#define NVTE_MAX_SMS 32
+#define NVTE_MAX_OPS 32
+#define NVTE_MAX_PEERS 8192
+#define NVTE_MAX_REQUESTS 1024
+#define NVTE_LAUNCH_GPU 1
+#define NVTE_LAUNCH_CPU 2
+#define NVTE_MAX_NVLINK 8
 
 // region 0 flag offsets
-#define REG0_OPFLAGS 1024
-#define REG0_RECV (REG0_OPFLAGS * userbuffers_op_types)
-#define REG0_SINGLENODE (2 * MAX_NVLINK * MAX_SMS + MAX_OPS)
-#define REG0_OFFSET(comm) ((2 * MAX_REGIONS) * MAX_NVLINK + REG0_SINGLENODE * 2 + MAX_PEERS)
-#define REG0_COMMBUFFER 0
-#define REG0_FLAGS (REG0_RECV + MAX_PEERS * MAX_REGIONS)
-#define REG0_IBRS 32
-#define REG0_IBAG 512
-#undef REG0_COMMBUFFER
-#define REG0_COMMBUFFER (1024 * 1024 * 16)
+#define NVTE_REG0_OPFLAGS 1024
+#define NVTE_REG0_RECV (NVTE_REG0_OPFLAGS * userbuffers_op_types)
+#define NVTE_REG0_SINGLENODE (2 * NVTE_MAX_NVLINK * NVTE_MAX_SMS + NVTE_MAX_OPS)
+#define NVTE_REG0_OFFSET(comm) ((2 * NVTE_MAX_REGIONS) * NVTE_MAX_NVLINK + NVTE_REG0_SINGLENODE * 2 + NVTE_MAX_PEERS)
+#define NVTE_REG0_COMMBUFFER 0
+#define NVTE_REG0_FLAGS (NVTE_REG0_RECV + NVTE_MAX_PEERS * NVTE_MAX_REGIONS)
+#define NVTE_REG0_IBRS 32
+#define NVTE_REG0_IBAG 512
+#undef NVTE_REG0_COMMBUFFER
+#define NVTE_REG0_COMMBUFFER (1024 * 1024 * 16)
 
 // gpuflags map offsets
-#define GF_STATE 16000
-#define GF_IBSHARPDONE 0
-#define HF_NVRSDONE (userbuffers_op_types + 1)
-#define HF_NVREDUCEDONE (userbuffers_op_types + 3)
-#define MAX_SHARP 16
+#define NVTE_GF_STATE 16000
+#define NVTE_GF_IBSHARPDONE 0
+#define NVTE_HF_NVRSDONE (userbuffers_op_types + 1)
+#define NVTE_HF_NVREDUCEDONE (userbuffers_op_types + 3)
+#define NVTE_MAX_SHARP 16
+
 typedef struct ub_request {
   int optype;
   int blocksize;
@@ -75,8 +79,8 @@ struct communicator {
   int cga_size;
   int push, use_ce;
 
-  void *mem_ptr[MAX_REGIONS];
-  void **peer_ptr[MAX_REGIONS];
+  void *mem_ptr[NVTE_MAX_REGIONS];
+  void **peer_ptr[NVTE_MAX_REGIONS];
   int ar_nvsize, ar_firstgpu,
       ar_nvrank;  // number of gpus(and first gpu in a group) of gpus per node in reduction subgroup
                   // (_splitar init used) would be equal to (nvsize,0) for regular comm_create
@@ -95,7 +99,7 @@ struct communicator {
 
   struct sharp_coll_context *sharp_coll_context;
   struct sharp_coll_comm *sharp_coll_comm;
-  void *mem_mr[MAX_REGIONS];
+  void *mem_mr[NVTE_MAX_REGIONS];
 
   ub_request *fifo;
   volatile int activeproxy;
@@ -106,7 +110,7 @@ struct communicator {
   int padding2[15];
   volatile int tail;
 
-  MPI_Request mpihndl[MAX_SHARP];
+  MPI_Request mpihndl[NVTE_MAX_SHARP];
   MPI_Comm comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
       comm_intra;       // full intranode (all ndev GPUS)
   int ibnvsize;  // can be used to fake smaller or larger nvlink domain to use ib instead of nvlink
@@ -217,3 +221,5 @@ void userbuffers_alltoall_recv(communicator *comm, cudaStream_t stream = 0);
 // void unregister_user_buffer(int handler);
 
 void destroy_communicator(communicator *comm);
+
+#endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_
