@@ -174,14 +174,13 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
-        dtype: torch.dtype,
-        tp_size: int,
         num_sm: int = 16,
         cga_size: int = 2,
         set_sm_margin: int = 0,
         num_splits: int = 4,
         aggregate: int = 0,
     ) -> None:
+        dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
         sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
@@ -206,24 +205,16 @@ def initialize_ub(
 
     for name in (methods["ring_exchange"]+methods["pipeline"]+methods["bulk"]):
         if ub_cfgs is not None and name in ub_cfgs:
-            try:
-                ub_cfg = ub_cfgs[name]
-                method = ub_cfg["method"]
-                num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
-                cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
-                num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
-                set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
-                aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
-            except ValueError:
-                raise RuntimeError(
-                    "Overlap method should be provided under the key `method`."
-                )
-            dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
+            ub_cfg = ub_cfgs[name]
+            method = ub_cfg["method"] if "method" in ub_cfg else get_method(name)
+            num_sm = ub_cfg["num_sm"] if "num_sm" in ub_cfg else 16
+            cga_size = ub_cfg["cga_size"] if "cga_size" in ub_cfg else 2
+            num_splits = ub_cfg["num_splits"] if "num_splits" in ub_cfg else 0
+            set_sm_margin = ub_cfg["set_sm_margin"] if "set_sm_margin" in ub_cfg else 0
+            aggregate = ub_cfg["aggregate"] if "aggregate" in ub_cfg else 0
             add_ub(
                 name,
                 method,
-                dtype,
-                tp_size,
                 num_sm,
                 cga_size,
                 set_sm_margin,
@@ -231,12 +222,11 @@ def initialize_ub(
                 aggregate
             )
         else:
-            dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
             method = get_method(name)
-            if method == "bulk":
-                add_ub(name, method, dtype, tp_size, num_splits=0)
+            if method == "pipeline":
+                add_ub(name, method)
             else:
-                add_ub(name, method, dtype, tp_size)
+                add_ub(name, method, num_splits=0)
 
 
 def get_ub(name: str):
