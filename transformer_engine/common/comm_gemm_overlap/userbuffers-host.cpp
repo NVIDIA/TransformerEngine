@@ -89,7 +89,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   CUDACHECK(cudaGetDeviceCount(&ndev));
   CUDACHECK(cudaGetDeviceProperties(&device_prop, cur_dev));
   (*comm)->sm_arch = device_prop.major;
-  //(*comm)->use_rr_kernel = device_prop.major == 8;
+  // (*comm)->use_rr_kernel = device_prop.major == 8;
   (*comm)->use_rr_kernel = 0;
   (*comm)->push = 1;
   (*comm)->use_ce = 0;
