@@ -158,7 +158,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
     @staticmethod
     def install_requires():
-        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
+        return ["flash-attn>=1.0.2",]
 
 class TensorFlowBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
