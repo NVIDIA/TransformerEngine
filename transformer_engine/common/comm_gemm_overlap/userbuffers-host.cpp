@@ -7,17 +7,17 @@
 #include <assert.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
+#include <immintrin.h>
+#include <math.h>
 #include <mpi.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <transformer_engine/userbuffers.h>
 #include <unistd.h>
+#include <x86intrin.h>
 #include <chrono>
 #include <iostream>
-#include <immintrin.h>
-#include <math.h>
-#include <sched.h>
-#include <x86intrin.h>
 
 static int oob_bcast(void *comm_context, void *buf, int size, int root) {
   MPI_Bcast(buf, size, MPI_BYTE, root,
@@ -201,15 +201,15 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   int DGX_H100 = device_prop.major == 9;
 
   switch (mylocal) {
-		case 0:ib_dev_list = "mlx5_0:1"; break;  // NOLINT(*)
-		case 1:ib_dev_list = (char*)(DGX_H100?"mlx5_3:1":"mlx5_1:1"); break;  // NOLINT(*)
-		case 2:ib_dev_list = (char*)(ZIONROCE?"mlx5_4:1":DGX_H100?"mlx5_4:1":"mlx5_2:1"); break;  // NOLINT(*)
-		case 3:ib_dev_list = (char*)(DGX_H100?"mlx5_5:1":"mlx5_3:1"); break;  // NOLINT(*)
-		case 4:ib_dev_list = (char*)(DGX_H100?"mlx5_6:1":"mlx5_6:1"); break;  // NOLINT(*)
-		case 5:ib_dev_list = (char*)(DGX_H100?"mlx5_9:1":"mlx5_7:1"); break;  // NOLINT(*)
-		case 6:ib_dev_list = (char*)(ZIONROCE?"mlx5_10:1":DGX_H100?"mlx5_10:1":"mlx5_8:1"); break;  // NOLINT(*)
-		case 7:ib_dev_list = (char*)(DGX_H100?"mlx5_11:1":"mlx5_9:1"); break;  // NOLINT(*)
-                default: break;
+    case 0:ib_dev_list = "mlx5_0:1"; break;  // NOLINT(*)
+    case 1:ib_dev_list = (char*)(DGX_H100?"mlx5_3:1":"mlx5_1:1"); break;  // NOLINT(*)
+    case 2:ib_dev_list = (char*)(ZIONROCE?"mlx5_4:1":DGX_H100?"mlx5_4:1":"mlx5_2:1"); break;  // NOLINT(*)
+    case 3:ib_dev_list = (char*)(DGX_H100?"mlx5_5:1":"mlx5_3:1"); break;  // NOLINT(*)
+    case 4:ib_dev_list = (char*)(DGX_H100?"mlx5_6:1":"mlx5_6:1"); break;  // NOLINT(*)
+    case 5:ib_dev_list = (char*)(DGX_H100?"mlx5_9:1":"mlx5_7:1"); break;  // NOLINT(*)
+    case 6:ib_dev_list = (char*)(ZIONROCE?"mlx5_10:1":DGX_H100?"mlx5_10:1":"mlx5_8:1"); break;  // NOLINT(*)
+    case 7:ib_dev_list = (char*)(DGX_H100?"mlx5_11:1":"mlx5_9:1"); break;  // NOLINT(*)
+    default: break;
   }
 
   (*comm)->fifo = reinterpret_cast<ub_request *>(malloc(sizeof(ub_request) * NVTE_MAX_REQUESTS));
@@ -218,8 +218,8 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
   (*comm)->minblock = 1024 * 2 * 1024;
   (*comm)->asyncblocks = 16;
 
-  CUDACHECK(
-      cudaMallocHost((void **)&(*comm)->hostflags, (NVTE_MAX_SMS + 100) * sizeof(int)));  // NOLINT(*)
+  CUDACHECK(cudaMallocHost((void **)&(*comm)->hostflags,  // NOLINT(*)
+                           (NVTE_MAX_SMS + 100) * sizeof(int)));
   for (int i = 0; i < 100 + NVTE_MAX_SMS; i++) (*comm)->hostflags[i] = 0;
   _mm_mfence();
   sleep(1);
@@ -313,29 +313,28 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   if (alloc) {
     CUDACHECK(cudaMalloc(gpubuff, bytes));
   }
-    assert(comm->nvsize <= 8);
-    cudaIpcMemHandle_t *memhndl =
-        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize)));
+  assert(comm->nvsize <= 8);
+  cudaIpcMemHandle_t *memhndl =
+      reinterpret_cast<cudaIpcMemHandle_t *>(malloc(sizeof(cudaIpcMemHandle_t) * (comm->nvsize)));
 
-    CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
+  CUDACHECK(cudaIpcGetMemHandle(&memhndl[comm->nvrank], *gpubuff));
 
-    MPI_Allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl,
-                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, comm->comm_intra);
+  MPI_Allgather(&memhndl[comm->nvrank], sizeof(cudaIpcMemHandle_t), MPI_BYTE, memhndl,
+                sizeof(cudaIpcMemHandle_t), MPI_BYTE, comm->comm_intra);
 
-    for (int i = 0; i < comm->nvsize; i++)
-      if (i != comm->nvrank)
-        CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
-                                       memhndl[i],
-                                       cudaIpcMemLazyEnablePeerAccess));
-    comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
-    CUDACHECK(cudaDeviceSynchronize());
+  for (int i = 0; i < comm->nvsize; i++)
+    if (i != comm->nvrank)
+      CUDACHECK(cudaIpcOpenMemHandle((void **)&(comm->peer_ptr[hndl][i]),  // NOLINT(*)
+                                     memhndl[i], cudaIpcMemLazyEnablePeerAccess));
+  comm->peer_ptr[hndl][comm->nvrank] = *gpubuff;
+  CUDACHECK(cudaDeviceSynchronize());
 
-    CUDACHECK(cudaMemcpy(
-        reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
-        comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
+  CUDACHECK(
+      cudaMemcpy(reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
+                 comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
-    CUDACHECK(cudaDeviceSynchronize());
-    free(memhndl);
+  CUDACHECK(cudaDeviceSynchronize());
+  free(memhndl);
 
   comm->mem_ptr[hndl] = *gpubuff;
   return comm->free_region++;
@@ -401,7 +400,7 @@ void allreduce2_userbuff_inplace(const int handler, const int offset, const int 
 void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream) {
   if (elements < 64) return;  // sorry guys no allreduce yet, maybe call MPI_Allreduce :)
-    // if(comm->myrank==0) fprintf(stderr,"AR1 user call launch_mode=%d\n",comm->launch_mode);
+  // if(comm->myrank==0) fprintf(stderr,"AR1 user call launch_mode=%d\n",comm->launch_mode);
   allreduce_nonsharp_inplace(handler, offset, elements, comm, stream,
                              userbuffers_allreduceop_nonsharp);
   return;
