@@ -113,7 +113,6 @@ struct communicator {
                  // or force MNNVL
   int *send_id, *recv_id;
   int mydev;
-
 };
 typedef struct communicator communicator;
 
