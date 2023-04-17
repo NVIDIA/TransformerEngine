@@ -6,6 +6,7 @@ import os
 import contextlib
 from typing import List, Optional
 import pytest
+import copy
 
 import torch
 import torch.nn as nn
@@ -677,7 +678,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
-def _test_sanity_e2e_cuda_graph(block, bs, dtype, config, graph):
+def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     reset_rng_states()
 
     # Initialize loss function and optimizer.
@@ -767,9 +768,10 @@ def test_gpt_cuda_graph(dtype, bs, model):
         .to(dtype=dtype)
         .cuda()
     )
+    graphed_block = copy.deepcopy(block)
 
-    out, _ = _test_sanity_e2e_cuda_graph(block, bs, dtype, config, False)
-    graph_out, _ = _test_sanity_e2e_cuda_graph(block, bs, dtype, config, True)
+    out, _ = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
+    graph_out, _ = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
 
     # Check output.
     assert_allclose(out, graph_out, 9e-1)
