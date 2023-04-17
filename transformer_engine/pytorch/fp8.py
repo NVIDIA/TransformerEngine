@@ -562,7 +562,7 @@ def global_amax_reduction(
 
     # Reduce AMAX in DP-domain at an interval.
     global _dp_amax_reduce_interval, _dp_amax_reduce_forward_idx, _dp_amax_reduce_backward_idx
-    if _dp_amax_reduce_interval == None:
+    if _dp_amax_reduce_interval is None:
         _dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
     reduce_group = tp_group
     if forward:
