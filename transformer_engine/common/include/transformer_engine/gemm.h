@@ -36,6 +36,7 @@ extern "C" {
  *  \param[out]    workspace             Workspace tensor.
  *  \param[in]     accumulate            Whether to accumulate the result into the D matrix.
  *  \param[in]     use_split_accumulator Whether to use split accumulator in the FP8 GEMM.
+ *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream used for the operation.
  */
 void nvte_cublas_gemm(const NVTETensor A,
