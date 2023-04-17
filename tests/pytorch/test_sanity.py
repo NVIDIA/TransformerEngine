@@ -100,6 +100,54 @@ def _disable_wgrads(block):
         p.requires_grad = False
 
 
+def _test_sanity_e2e_cuda_graph(block, bs, dtype, config, fp8_recipe, skip_wgrad):
+    # Initialize loss function and optimizer.
+    loss_fn = torch.nn.MSELoss()
+    optimizer = torch.optim.SGD(block.parameters(), lr=0.1)
+
+    # Placeholders used for capture.
+    static_input = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype, requires_grad=True)
+    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype)
+
+    real_input = torch.rand_like(static_input)
+    real_target = torch.rand_like(static_target)
+
+    use_fp8 = fp8_recipe is not None
+    if skip_wgrad:
+        _disable_wgrads(block)
+
+    # Pre graph capture warmup in a separate stream.
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=True)
+            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+                out = block(static_input)
+            loss = loss_fn(out, static_target)
+            loss.backward()
+            optimizer.step()
+    torch.cuda.current_stream().wait_stream(s)
+
+    # Capture.
+    g = torch.cuda.CUDAGraph()
+    optimizer.zero_grad(set_to_none=True)
+    with torch.cuda.graph(g):
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+            static_output = block(static_input)
+        static_loss = loss_fn(static_output, static_target)
+        static_loss.backward()
+        optimizer.step()
+
+    # Fills the graph's input memory with new data to compute on
+    with torch.no_grad():
+        static_input.copy_(real_input)
+        static_target.copy_(real_target)
+    g.replay()
+
+    torch.cuda.synchronize()
+
+
 def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=torch.float32, requires_grad=True
@@ -608,3 +656,42 @@ def test_sanity_gradient_accumulation_fusion(dtype, bs, fp8_recipe, model, skip_
     )
 
     _test_sanity_e2e_gradient_accumulation_fusion(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("skip_wgrad", all_boolean)
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    block = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            zero_centered_gamma=zero_centered_gamma,
+            fuse_qkv_params=True,
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+
+    _test_sanity_e2e_cuda_graph(block, bs, dtype, config, fp8_recipe, skip_wgrad)
