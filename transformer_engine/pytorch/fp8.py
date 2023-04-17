@@ -550,6 +550,7 @@ def reduce_tensor_across_group_op_max(
 def global_amax_reduction(
     fp8_meta: Dict[str, Any],
     tp_group: dist_group_type,
+    tp_size: int,
     forward: bool = True,
 ) -> None:
     """Concatenate, reduce, and split amaxes in the global buffer."""
@@ -564,19 +565,26 @@ def global_amax_reduction(
     global _dp_amax_reduce_interval, _dp_amax_reduce_forward_idx, _dp_amax_reduce_backward_idx
     if _dp_amax_reduce_interval is None:
         _dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
-    reduce_group = tp_group
+
+    tp_amax_reduce = False
     if forward:
         if _dp_amax_reduce_forward_idx == 0:
             reduce_group = fp8_meta["fp8_group"]
+        else:
+            tp_amax_reduce = True
         _dp_amax_reduce_forward_idx = (_dp_amax_reduce_forward_idx + 1) % _dp_amax_reduce_interval
     else:
         if _dp_amax_reduce_backward_idx == 0:
             reduce_group = fp8_meta["fp8_group"]
+        else:
+            tp_amax_reduce = True
         _dp_amax_reduce_backward_idx = (_dp_amax_reduce_backward_idx + 1) % _dp_amax_reduce_interval
 
-    # A case to reduce AMAX only in TP-domain and TP-group is not initialized.
-    if reduce_group is None:
-        return None
+    if tp_amax_reduce:
+        if tp_size > 1:
+            reduce_group = tp_group
+        else:
+            return None
 
     chunk_sizes = [x.numel() for x in _global_fp8_buffer[amax_buffer_key]]
     contiguous_amax = torch.cat(_global_fp8_buffer[amax_buffer_key])
