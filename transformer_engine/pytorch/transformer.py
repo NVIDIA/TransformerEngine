@@ -7,6 +7,7 @@ import os
 import math
 import warnings
 from importlib.metadata import version
+from distutils.version import LooseVersion
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
 
@@ -43,7 +44,8 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-_flash_attn_version = version("flash-attn")
+_flash_attn_version = LooseVersion(version("flash-attn"))
+_flash_attn_version_required = LooseVersion("1.0.2")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
@@ -215,20 +217,18 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if "dev" not in _flash_attn_version:
-            raise ImportError(
-                'Please install correct version of flash-attn with ' \
-                'pip install git+https://github.com/ksivaman/flash-attention.git@hopper. ' \
-                'If running on Hopper, ' \
-                'please install from source with compute capability 9.0.')
+        assert (
+            _flash_attn_version >= _flash_attn_version_required
+        ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
         assert (
             attn_mask_type == "causal"
-            ), 'FlashAttention currently only supports causal attention mask.'
+        ), 'FlashAttention currently only supports causal attention mask.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     def forward(
         self,
@@ -274,7 +274,8 @@ class FlashAttention(torch.nn.Module):
             output = flash_attn_unpadded_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask
+                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
+                deterministic=self.deterministic,
             )
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
