@@ -1021,6 +1021,17 @@ size_t get_cublasLt_version() {
 }
 
 
+bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
+#ifdef NVTE_MPI_FOUND
+    return true;
+#else
+    return false;
+#endif
+}
+
+void placeholder() {}  // TODO(ksivamani) clean this up
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
@@ -1060,6 +1071,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
+  m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
@@ -1087,6 +1099,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
+#else  // NVTE_MPI_FOUND
+  m.def("UbufOverlapAlgo", &placeholder, "Get cublasLt version");
+  m.def("UbufCommOverlap", &placeholder, "If userbuf backend is available");
+  m.def("UbufP2PCommOverlap", &placeholder, "If userbuf backend is available");
 #endif  // NVTE_MPI_FOUND
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
