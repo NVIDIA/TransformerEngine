@@ -426,7 +426,7 @@ class DenseGeneral(TransformerEngineBase):
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
-                                                   _canonicalize_tuple(self.features),
+                                                   features,
                                                    self.dtype,
                                                    axes=self.bias_axes)
         else:
@@ -654,7 +654,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
-                                                   _canonicalize_tuple(self.features),
+                                                   features,
                                                    self.dtype,
                                                    axes=self.bias_axes)
 
