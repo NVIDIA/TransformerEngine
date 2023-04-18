@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Top level package"""
+from . import common
 
 try:
     from . import pytorch
@@ -18,6 +19,3 @@ try:
     from . import tensorflow
 except ImportError as e:
     pass
-
-from . import common
-
