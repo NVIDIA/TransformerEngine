@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <chrono>
 #include "gdrapi.h"
+#include <stdexcept>
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
