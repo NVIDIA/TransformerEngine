@@ -1391,6 +1391,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
 
+        if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_ag:
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
+
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -2112,6 +2117,11 @@ class Linear(TransformerEngineBaseModule):
         self.parameters_split = parameters_split
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+
+        if ub_split_rs or ub_split_ag:
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -3166,6 +3176,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+
+        if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag:
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
 
         if tp_group is None:
             self.tp_size = tp_size

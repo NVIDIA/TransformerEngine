@@ -15,6 +15,7 @@ import torch
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
+import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
@@ -999,6 +1000,12 @@ class TransformerLayer(torch.nn.Module):
             category=DeprecationWarning,
         )
 
+        if ub_tp_comm_overlap:
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
+
+        ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
         ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
         ub_split_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_AG", "1")))
