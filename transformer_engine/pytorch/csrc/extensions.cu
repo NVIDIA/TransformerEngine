@@ -5,7 +5,9 @@
  ************************************************************************/
 
 #include "extensions.h"
+#ifdef NVTE_MPI_FOUND
 #include "comm_gemm_overlap.h"
+#endif  // NVTE_MPI_FOUND
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -1066,6 +1068,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
+#ifdef NVTE_MPI_FOUND
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
     .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
     .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
@@ -1084,6 +1087,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
+#endif  // NVTE_MPI_FOUND
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)

@@ -1,26 +1,32 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-add_library(transformer_engine SHARED
-                               transformer_engine.cpp
-                               transpose/cast_transpose.cu
-                               transpose/transpose.cu
-                               transpose/cast_transpose_fusion.cu
-                               transpose/transpose_fusion.cu
-                               transpose/multi_cast_transpose.cu
-                               activation/gelu.cu
-                               gemm/cublaslt_gemm.cu
-                               layer_norm/ln_api.cpp
-                               layer_norm/ln_bwd_semi_cuda_kernel.cu
-                               layer_norm/ln_fwd_cuda_kernel.cu
-                               rmsnorm/rmsnorm_api.cpp
-                               rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-                               rmsnorm/rmsnorm_fwd_cuda_kernel.cu
-                               util/cast.cu
-                               fused_softmax/scaled_masked_softmax.cu
-                               fused_softmax/scaled_upper_triang_masked_softmax.cu
-                               comm_gemm_overlap/userbuffers.cu
-                               comm_gemm_overlap/userbuffers-host.cpp)
+
+set(transformer_engine_SOURCES)
+list(APPEND transformer_engine_SOURCES transformer_engine.cpp
+                                       transpose/cast_transpose.cu
+                                       transpose/transpose.cu
+                                       transpose/cast_transpose_fusion.cu
+                                       transpose/transpose_fusion.cu
+                                       transpose/multi_cast_transpose.cu
+                                       activation/gelu.cu
+                                       gemm/cublaslt_gemm.cu
+                                       layer_norm/ln_api.cpp
+                                       layer_norm/ln_bwd_semi_cuda_kernel.cu
+                                       layer_norm/ln_fwd_cuda_kernel.cu
+                                       rmsnorm/rmsnorm_api.cpp
+                                       rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+                                       rmsnorm/rmsnorm_fwd_cuda_kernel.cu
+                                       util/cast.cu
+                                       fused_softmax/scaled_masked_softmax.cu
+                                       fused_softmax/scaled_upper_triang_masked_softmax.cu)
+
+if(NVTE_MPI_FOUND)
+    list(APPEND transformer_engine_SOURCES comm_gemm_overlap/userbuffers.cu
+                                           comm_gemm_overlap/userbuffers-host.cpp)
+endif()
+
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 
 target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -32,11 +38,14 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
-set_source_files_properties(comm_gemm_overlap/userbuffers.cu
-                            comm_gemm_overlap/userbuffers-host.cpp
-                            PROPERTIES
-                            INCLUDE_DIRECTORIES "/usr/local/mpi/include"
-                            COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=64>")
+
+if(NVTE_MPI_FOUND)
+    set_source_files_properties(comm_gemm_overlap/userbuffers.cu
+                                comm_gemm_overlap/userbuffers-host.cpp
+                                PROPERTIES
+                                INCLUDE_DIRECTORIES ${NVTE_MPI_INCLUDE}
+                                COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=64>")
+endif()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
