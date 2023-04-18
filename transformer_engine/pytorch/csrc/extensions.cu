@@ -1100,9 +1100,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
 #else  // NVTE_MPI_FOUND
-  m.def("UbufOverlapAlgo", &placeholder, "Get cublasLt version");
-  m.def("UbufCommOverlap", &placeholder, "If userbuf backend is available");
-  m.def("UbufP2PCommOverlap", &placeholder, "If userbuf backend is available");
+  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
 #endif  // NVTE_MPI_FOUND
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
