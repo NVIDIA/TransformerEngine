@@ -47,17 +47,6 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                                                       \
   } while (0)
 
-#define CUCHECK(cmd)                                                               \
-  do {                                                                             \
-    CUresult retval = cmd;                                                         \
-    if (retval != CUDA_SUCCESS) {                                                  \
-      const char *error_string;                                                    \
-      cuGetErrorString(retval, &error_string);                                     \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string); \
-      exit(EXIT_FAILURE);                                                          \
-    }                                                                              \
-  } while (0);
-
 int pipe_rank(communicator *comm, int step) {
   int mynode = comm->myrank / comm->nvsize;
   int mylocal = comm->nvrank;

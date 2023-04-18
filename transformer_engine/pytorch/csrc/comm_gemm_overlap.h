@@ -29,9 +29,9 @@
 
 namespace ubuf {
 
-enum COMM_TYPE { RS = 0, AG = 1 };
+enum class COMM_TYPE { RS = 0, AG = 1 };
 
-enum UBOverlapAlgo {
+enum class UBOverlapAlgo {
   BULK_OVERLAP_AG = 0,
   BULK_OVERLAP_RS = 1,
   SPLIT_PIPELINED_AG = 2,
