@@ -178,14 +178,11 @@ Install TE (optionally specifying the framework):
 
 .. code-block:: bash
 
-  git clone https://github.com/NVIDIA/TransformerEngine.git
-  cd TransformerEngine
-
   # Execute one of the following command
-  NVTE_FRAMEWORK=all pip install .        # Build TE for all supported frameworks.
-  NVTE_FRAMEWORK=pytorch pip install .    # Build TE for PyTorch only.
-  NVTE_FRAMEWORK=jax pip install .        # Build TE for JAX only.
-  NVTE_FRAMEWORK=tensorflow pip install . # Build TE for TensorFlow only.
+  NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
+  NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@main    # Build TE for PyTorch only.
+  NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for JAX only.
+  NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
 
 If the framework is not explicitly specified, TE will be built for PyTorch only.
 
