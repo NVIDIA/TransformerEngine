@@ -31,11 +31,11 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 list(APPEND transformer_engine_LINKER_LIBS CUDA::cublas CUDA::cudart CUDA::nvToolsExt)
-
 if(NVTE_MPI_FOUND)
-    target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS} gdrapi)
+    list(APPEND transformer_engine_LINKER_LIBS gdrapi)
 endif()
 
+target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 target_include_directories(transformer_engine PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
