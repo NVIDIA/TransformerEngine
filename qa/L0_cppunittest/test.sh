@@ -11,7 +11,7 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
 # Find MPI
 MPI_HOME=${MPI_HOME:-/usr/local/mpi}
-NVTE_MPI_INCLUDE="$MPI_HOME/include"
+NVTE_MPI_INCLUDE="$MPI_HOME/lib"
 
 cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild -DNVTE_MPI_INCLUDE=$NVTE_MPI_INCLUDE .
