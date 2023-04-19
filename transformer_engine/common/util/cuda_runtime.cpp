@@ -20,7 +20,7 @@ int num_devices() {
   static std::once_flag flag;
   auto init = [&] () {
     NVTE_CHECK_CUDA(cudaGetDeviceCount(&num_devices_));
-  }
+  };
   std::call_once(flag, init);
   return num_devices_;
 }
@@ -42,7 +42,7 @@ int sm_arch(int device_id) {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     cache[device_id] = 10*prop.major + prop.minor;
-  }
+  };
   std::call_once(flags[device_id], init);
   return cache[device_id];
 }
@@ -58,7 +58,7 @@ int sm_count(int device_id) {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     cache[device_id] = prop.multiProcessorCount;
-  }
+  };
   std::call_once(flags[device_id], init);
   return cache[device_id];
 }

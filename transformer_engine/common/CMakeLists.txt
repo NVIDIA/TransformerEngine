@@ -53,8 +53,8 @@ function(convert_file_to_string_header file_ string_name)
     file(READ "${file_}" STRING)
     set(STRING_NAME "${string_name}")
     configure_file(util/string_header.h.in
-                   "string_headers/${string_name}.h" @
-                   ONLY)
+                   "string_headers/${string_name}.h"
+                   @ONLY)
 endfunction()
 convert_file_to_string_header(utils.cuh
                               code_string_utils_cuh)

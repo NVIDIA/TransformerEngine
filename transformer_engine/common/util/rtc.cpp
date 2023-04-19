@@ -135,7 +135,7 @@ CUfunction Kernel::get_function(int device_id) {
 
     // Reset driver context
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
-  }
+  };
   std::call_once(init_flags_->at(device_id), load_on_device);
 
   // Return CUDA function
