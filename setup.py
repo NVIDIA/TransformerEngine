@@ -19,7 +19,11 @@ from distutils.file_util import copy_file
 path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
+
 CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
+NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
+NVTE_MPI_INCLUDE = os.path.join(MPI_HOME, "include")
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
@@ -30,28 +34,28 @@ def get_cuda_bare_metal_version(cuda_dir):
     release = output[release_idx].split(".")
     bare_metal_major = release[0]
     bare_metal_minor = release[1][0]
-    return raw_output, bare_metal_major, bare_metal_minor
+    return (int(bare_metal_major), int(bare_metal_minor))
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if int(bare_metal_major) >= 11 and int(bare_metal_minor) >= 2:
+    cuda_major, cuda_minor = get_cuda_bare_metal_version(CUDA_HOME)
+    if cuda_major >= 11 and cuda_minor >= 2:
         return nvcc_extra_args + ["--threads", "4"]
     return nvcc_extra_args
 
 
 def extra_gencodes(cc_flag):
-    _, bare_metal_major, bare_metal_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if int(bare_metal_major) >= 11:
+    cuda_bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+    if cuda_bare_metal_version >= (11, 0):
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_80,code=sm_80")
-        if int(bare_metal_minor) >= 8:
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
+    if cuda_bare_metal_version >= (11, 8):
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_90,code=sm_90")
 
 
 def extra_compiler_flags():
-    return [
+    extra_flags = [
         "-O3",
         "-gencode",
         "arch=compute_70,code=sm_70",
@@ -66,6 +70,9 @@ def extra_compiler_flags():
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if NVTE_MPI_FOUND:
+        extra_flags.append("-DNVTE_MPI_FOUND")
+    return extra_flags
 
 
 cc_flag = []
@@ -75,12 +82,6 @@ extra_gencodes(cc_flag)
 def make_abs_path(l):
     return [os.path.join(path, p) for p in l]
 
-
-include_dirs = [
-    "transformer_engine/common/include",
-    "transformer_engine/pytorch/csrc",
-]
-include_dirs = make_abs_path(include_dirs)
 
 pytorch_sources = [
     "transformer_engine/pytorch/csrc/extensions.cu",
@@ -99,6 +100,14 @@ supported_frameworks = {
 }
 
 framework = os.environ.get("NVTE_FRAMEWORK", "pytorch")
+
+include_dirs = [
+    "transformer_engine/common/include",
+    "transformer_engine/pytorch/csrc",
+]
+if (framework in ("all", "pytorch")) and NVTE_MPI_FOUND:
+    include_dirs.append(NVTE_MPI_INCLUDE)
+include_dirs = make_abs_path(include_dirs)
 
 args = sys.argv.copy()
 for s in args:
@@ -155,9 +164,15 @@ class PyTorchBuilder(FrameworkBuilderBase):
         print("Building pyTorch extensions!")
         self.pytorch_build_extensions.run()
 
+    def cmake_flags(self):
+        if not NVTE_MPI_FOUND:
+            return []
+        return ["-DNVTE_MPI_FOUND=1", f"-DNVTE_MPI_INCLUDE={NVTE_MPI_INCLUDE}"]
+
     @staticmethod
     def install_requires():
-        return ["flash-attn @ git+https://github.com/ksivaman/flash-attention.git@hopper",]
+        return ["flash-attn>=1.0.2",]
+
 
 class TensorFlowBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
@@ -166,6 +181,7 @@ class TensorFlowBuilder(FrameworkBuilderBase):
 
     def run(self, extensions):
         print("Building TensorFlow extensions!")
+
 
 class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):

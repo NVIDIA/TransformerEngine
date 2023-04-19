@@ -5,7 +5,6 @@
 """Top level Transformer Engine PyTorch modules"""
 from typing import Union, Callable
 from keras import backend, layers, initializers
-from keras.mixed_precision import autocast_variable
 
 import tensorflow as tf
 import transformer_engine_tensorflow as tex
@@ -56,8 +55,13 @@ def get_autocast_bias(dtype, bias_var, use_bias, use_fp8):
     """Get casted bias for fp8 gemm."""
     if not use_bias:
         return None
-    with autocast_variable.enable_auto_cast_variables(dtype):
-        bias = bias_var.value()
+
+    # We need to pass the EagerTensor instead of Variable when calling into the
+    # pybind functions. So, we use value() for the explicit convertion.
+    bias = bias_var.value()
+    if dtype == "float16":
+        bias = tf.cast(bias, dtype)
+
     if use_fp8 and bias.dtype == tf.float32:
         bias = tf.cast(bias, dtype=tf.bfloat16)
     return bias
@@ -527,11 +531,12 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
         """Prep fwd+bwd non-fp8 matmul."""
         @tf.custom_gradient
         def non_fp8_matmul_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             kernel_val = kernel_var.value()
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias,
-                use_fp8=False,
+                self.compute_dtype, bias_var, self.use_bias, use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -577,11 +582,12 @@ class Dense(TransformerEngineBaseModule, layers.Layer):
 
         @tf.custom_gradient
         def fp8_matmul_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             kernel_val = kernel_var.value()
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias,
-                use_fp8=True,
+                self.compute_dtype, bias_var, self.use_bias, use_fp8=True,
             )
 
             if not override_linear_precision.wgrad:
@@ -1017,7 +1023,9 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
         """Prep fwd+bwd non-fp8 layernorm followed by matmul."""
         @tf.custom_gradient
         def non_fp8_layernorm_matmul_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             kernel_val = kernel_var.value()
             gamma_val = gamma_var.value()
             beta_val = beta_var.value()
@@ -1027,8 +1035,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
             )
 
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias,
-                use_fp8=False,
+                self.compute_dtype, bias_var, self.use_bias, use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -1097,7 +1104,9 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
 
         @tf.custom_gradient
         def fp8_layernorm_matmul_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             kernel_val = kernel_var.value()
             gamma_val = gamma_var.value()
             beta_val = beta_var.value()
@@ -1127,8 +1136,7 @@ class LayerNormDense(TransformerEngineBaseModule, layers.Layer):
                 )
 
             bias = get_autocast_bias(
-                self._compute_dtype_object, bias_var, self.use_bias,
-                use_fp8=True,
+                self.compute_dtype, bias_var, self.use_bias, use_fp8=True,
             )
 
             weight_fp8, weight_t_fp8 = fp8_cast_transpose_fused_wrapper(
@@ -1524,7 +1532,9 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
         """Prep fwd+bwd non-fp8 layernorm followed by mlp."""
         @tf.custom_gradient
         def non_fp8_layernorm_mlp_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             fc1_kernel_val = fc1_kernel_var.value()
             fc2_kernel_val = fc2_kernel_var.value()
             gamma_val = gamma_var.value()
@@ -1535,12 +1545,10 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
             )
 
             fc1_bias = get_autocast_bias(
-                self._compute_dtype_object, fc1_bias_var, use_bias=True,
-                use_fp8=False,
+                self.compute_dtype, fc1_bias_var, use_bias=True, use_fp8=False,
             )
             fc2_bias = get_autocast_bias(
-                self._compute_dtype_object, fc2_bias_var, self.use_bias,
-                use_fp8=False,
+                self.compute_dtype, fc2_bias_var, self.use_bias, use_fp8=False,
             )
 
             output_dtype = self._compute_dtype_object
@@ -1652,7 +1660,9 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
 
         @tf.custom_gradient
         def fp8_layernorm_mlp_func(x):
-            # Use value() to convert from Variable to EagerTensor
+            # We need to pass the EagerTensor instead of Variable when calling
+            # into the pybind functions. So, we use value() for the explicit
+            # convertion.
             fc1_kernel_val = fc1_kernel_var.value()
             fc2_kernel_val = fc2_kernel_var.value()
             gamma_val = gamma_var.value()
@@ -1683,12 +1693,10 @@ class LayerNormMLP(TransformerEngineBaseModule, layers.Layer):
                 )
 
             fc1_bias = get_autocast_bias(
-                self._compute_dtype_object, fc1_bias_var, use_bias=True,
-                use_fp8=True,
+                self.compute_dtype, fc1_bias_var, use_bias=True, use_fp8=True,
             )
             fc2_bias = get_autocast_bias(
-                self._compute_dtype_object, fc2_bias_var, self.use_bias,
-                use_fp8=True,
+                self.compute_dtype, fc2_bias_var, self.use_bias, use_fp8=True,
             )
 
             fc1_weight_fp8, fc1_weight_t_fp8 = fp8_cast_transpose_fused_wrapper(

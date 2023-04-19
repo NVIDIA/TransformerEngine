@@ -37,4 +37,27 @@ def _load_library():
     return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
 
 
+def _load_mpi():
+    """Load MPI shared library"""
+
+    system = platform.system()
+    if system == "Linux":
+        extension = "so"
+    elif system == "Darwin":
+        extension = "dylib"
+    elif system == "Windows":
+        extension = "dll"
+    else:
+        raise RuntimeError(f"Unsupported operating system ({system})")
+    lib_name = "libmpi." + extension
+    MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
+    NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
+    dll_path = os.path.join(MPI_HOME, "lib", lib_name)
+
+    if NVTE_MPI_FOUND:
+        return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
+    return None
+
+
+_TE_LIB_CTYPES = _load_mpi()
 _TE_LIB_CTYPES = _load_library()

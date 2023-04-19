@@ -73,11 +73,12 @@ struct CustomCallNormDescriptor {
     size_t hidden;
     DType x_dtype;
     DType w_dtype;
+    bool zero_centered_gamma;
     float eps;
 };
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             float eps);
+                                             bool zero_centered_gamma, float eps);
 
 struct SoftmaxDescriptor {
     size_t batch;
