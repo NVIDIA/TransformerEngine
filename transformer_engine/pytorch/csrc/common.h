@@ -15,9 +15,15 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/softmax.h>
+#include <transformer_engine/fused_attn.h>
 #include <ATen/ATen.h>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/macros/Macros.h>
+#include <ATen/Dispatch.h>
+#include <ATen/native/DispatchStub.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <cuda.h>
@@ -101,6 +107,12 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
             return transformer_engine::DType::kBFloat16;
         case at::kBool:
             return transformer_engine::DType::kByte;
+        case torch::kByte:
+            return transformer_engine::DType::kByte;
+        case torch::kInt32:
+            return transformer_engine::DType::kInt32;
+        case torch::kInt64:
+            return transformer_engine::DType::kInt64;
         default:
             NVTE_ERROR("Invalid type");
     }
@@ -141,6 +153,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
 
 size_t product(const std::vector<size_t> &shape);
 
+at::Tensor allocateSpace(const std::vector<size_t>& shape,
+                         const transformer_engine::DType type,
+                         bool init_to_zeros);
 
 at::Tensor allocateSpace(const NVTEShape &shape,
                          const transformer_engine::DType type,

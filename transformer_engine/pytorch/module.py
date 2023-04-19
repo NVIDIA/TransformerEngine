@@ -100,7 +100,7 @@ def get_workspace() -> torch.Tensor:
     global _cublas_workspace
     if _cublas_workspace is None:
         _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.int8, device="cuda"
+            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
         )
     return _cublas_workspace
 
@@ -419,7 +419,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 torch.empty(
                     shape,
                     device=torch.cuda.current_device(),
-                    dtype=torch.int8,
+                    dtype=torch.uint8,
                 ),
             )
             setattr(
@@ -429,7 +429,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     shape[1],
                     shape[0],
                     device=torch.cuda.current_device(),
-                    dtype=torch.int8,
+                    dtype=torch.uint8,
                 ),
             )
 

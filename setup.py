@@ -79,6 +79,7 @@ def make_abs_path(l):
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
+    "3rdparty/cudnn-frontend/include",
 ]
 include_dirs = make_abs_path(include_dirs)
 
