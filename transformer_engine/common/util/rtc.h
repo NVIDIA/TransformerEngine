@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
 #include <mutex>  // NOLINT(*)
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -94,8 +95,8 @@ class Kernel {
   /*! CUDA function for each CUDA device */
   std::vector<CUfunction> functions_;
 
-  /*! \brief Mutex for thread-safe kernel initialization */
-  std::mutex lock_;
+  /*! Flags for thread-safe kernel initialization */
+  std::unique_ptr<std::vector<std::once_flag>> init_flags_;
 
   /*! \brief Uninitialized CUDA module */
   static constexpr CUmodule null_module = static_cast<CUmodule>(nullptr);
