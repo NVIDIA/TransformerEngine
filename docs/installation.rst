@@ -29,7 +29,7 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. `CMake <https://cmake.org/>`__ version 3.18 or later.
+1. `CMake <https://cmake.org/>`__ version 3.18 or later: `pip install cmake`.
 2. [For pyTorch support] `pyTorch <https://pytorch.org/>`__ with GPU support.
 3. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
 4. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
@@ -43,7 +43,11 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-   pip install --upgrade git+https://github.com/NVIDIA/TransformerEngine.git@stable
+  # Execute one of the following command
+  NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable    # Build TE for PyTorch only. The default.
+  NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable        # Build TE for JAX only.
+  NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable # Build TE for TensorFlow only.
+  NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable        # Build TE for all supported frameworks.
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -58,5 +62,9 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-   pip install --upgrade git+https://github.com/NVIDIA/TransformerEngine.git@main
+  # Execute one of the following command
+  NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@main    # Build TE for PyTorch only. The default.
+  NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for JAX only.
+  NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
+  NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
 
