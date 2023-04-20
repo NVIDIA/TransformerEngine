@@ -14,7 +14,7 @@
 #endif
 #include <assert.h>
 #include <stdio.h>
-#include <transformer_engine/userbuffers.h>
+#include "userbuffers.h"
 
 #define MAX_THREADS 1024
 #define TIMEOUT 200000000000ull

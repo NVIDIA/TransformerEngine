@@ -14,7 +14,7 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
-#include <transformer_engine/userbuffers.h>
+#include "userbuffer/userbuffers.h"
 
 #define HALF_BYTES 2
 

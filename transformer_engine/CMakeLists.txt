@@ -26,6 +26,7 @@ find_package(Python COMPONENTS Interpreter Development REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_subdirectory(common)
+add_subdirectory(pytorch/csrc/userbuffer)
 
 option(ENABLE_JAX "Enable JAX in the building workflow." OFF)
 if(ENABLE_JAX)

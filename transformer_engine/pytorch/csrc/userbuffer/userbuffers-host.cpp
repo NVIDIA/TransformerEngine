@@ -13,12 +13,11 @@
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
-#include <transformer_engine/userbuffers.h>
-#include <transformer_engine/logging.h>
 #include <unistd.h>
 #include <x86intrin.h>
 #include <chrono>
 #include <iostream>
+#include "userbuffers.h"
 
 static int oob_bcast(void *comm_context, void *buf, int size, int root) {
   MPI_Bcast(buf, size, MPI_BYTE, root,
@@ -47,6 +46,12 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
       exit(EXIT_FAILURE);                                                                   \
     }                                                                                       \
   } while (0)
+
+#define NVTE_UB_ERROR(x) \
+    do { \
+        throw std::runtime_error(std::string(__FILE__ ":") + std::to_string(__LINE__) +            \
+                                 " in function " + __func__ + ": " + x);                           \
+    } while (false)
 
 int pipe_rank(communicator *comm, int step) {
   int mynode = comm->myrank / comm->nvsize;
@@ -347,7 +352,7 @@ int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
 
 void allreduce_nonsharp_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream, int op) {
-  if (elements < 64) NVTE_ERROR("Userbuffer comm for given config not implemented.");
+  if (elements < 64) NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
   // if(comm->myrank==0) fprintf(stderr,"AR2(%d) user call launch_mode=%d\n",op,comm->launch_mode);
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
   int blocksize = elements * 2;
@@ -394,7 +399,7 @@ void allreduce2_userbuff_inplace(const int handler, const int offset, const int 
 
 void allreduce_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream) {
-  if (elements < 64) NVTE_ERROR("Userbuffer comm for given config not implemented.");
+  if (elements < 64) NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
   allreduce_nonsharp_inplace(handler, offset, elements, comm, stream,
                              userbuffers_allreduceop_nonsharp);
   return;
@@ -402,7 +407,7 @@ void allreduce_userbuff_inplace(const int handler, const int offset, const int e
 
 void reducescatter_userbuff_inplace(const int handler, const int offset, const int elements,
                                     communicator *comm, cudaStream_t stream) {
-  if (elements < 64) NVTE_ERROR("Userbuffer comm for given config not implemented.");
+  if (elements < 64) NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
 
   int op = userbuffers_allreduceop_nonsharp;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
@@ -443,7 +448,7 @@ void reducescatter_userbuff_inplace(const int handler, const int offset, const i
 
 void allgather_userbuff_inplace(const int handler, const int offset, const int elements,
                                 communicator *comm, cudaStream_t stream) {
-  if (elements < 64) NVTE_ERROR("Userbuffer comm for given config not implemented.");
+  if (elements < 64) NVTE_UB_ERROR("Userbuffer comm for given config not implemented.");
   int op = userbuffers_allreduceop_nonsharp;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
   int blocksize = elements * 2;
