@@ -6,7 +6,6 @@ Helper module for fp8 meta management
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import get_args
 from typing import Dict, List, Optional, Tuple, Union
 
 import jax
@@ -200,8 +199,8 @@ class FP8Helper:
         """
         Update the collections
         """
-        assert isinstance(original, get_args(Collection))
-        assert isinstance(new, get_args(Collection))
+        assert isinstance(original, (dict, FrozenDict))
+        assert isinstance(new, (dict, FrozenDict))
         frozen_original = FrozenDict(original) if not isinstance(original, FrozenDict) else original
         for key in new:
             if key in frozen_original:
@@ -216,7 +215,7 @@ class FP8Helper:
         """
         Update the FP8 metas
         """
-        assert isinstance(state, get_args(Collection))
+        assert isinstance(state, (dict, FrozenDict))
         if FP8Helper.FP8_COLLECTION_NAME in state:
             frozen_state = FrozenDict(state) if not isinstance(state, FrozenDict) else state
             others, fp8_metas = frozen_state.pop(FP8Helper.FP8_COLLECTION_NAME)
