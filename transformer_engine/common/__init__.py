@@ -55,8 +55,7 @@ def _load_userbuffers():
 
     if os.path.exists(dll_path):
         return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
-    else:
-        return None
+    return None
 
 
 _TE_LIB_CTYPES = _load_library()
