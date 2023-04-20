@@ -283,10 +283,10 @@ static cudnn_frontend::Tensor createScaleWithOffset(
       for (int i = 0; i < 4; i++) {
           output_dim[i] = prevBlockOutputTensor.getDim()[i];
       }
-      generateMHAStrides(output_dim[0], output_dim[1], output_dim[2],
+      generateMatrixStrides(output_dim[0], output_dim[1], output_dim[2],
                       0  /*s_kv = 0 for placeholder*/,
                       output_dim[3], output_stride,
-                      NVTE_QKV_Layout::QKV_INTERLEAVED, MHA_Matrix::Q_Matrix);
+                      NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, NVTE_QKV_Matrix::NVTE_Q_Matrix);
   } else {
       // Otherwise output dim and stride should be the same as prev block dim and stride
       for (int i = 0; i < 4; i++) {
@@ -660,13 +660,13 @@ static cudnn_frontend::Tensor createQKBMM(
   // Creates the necessary tensor descriptors
   int64_t k_transpose_dim[4] = {b, h, d, s_kv};
   int64_t k_transpose_stride[4];
-  generateMHAStrides(
+  generateMatrixStrides(
                   b, h, s_q, s_kv, d,
-                  k_transpose_stride, layout, MHA_Matrix::K_Matrix_Transpose);
+                  k_transpose_stride, layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
   int64_t s_dim[4] = {b, h, s_q, s_kv};
   int64_t s_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, s_stride, layout, MHA_Matrix::S_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   auto kTransposeTensor = tensor_create_with_offset(
                   tensorType, tensor_name_to_uid["K_TRANSPOSE"],
@@ -722,11 +722,11 @@ static cudnn_frontend::Tensor createSVBMM(
 
   int64_t v_dim[4] =  {b, h, s_kv, d};
   int64_t v_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, v_stride, layout, MHA_Matrix::V_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
   int64_t o_dim[4] =  {b, h, s_q, d};
   int64_t o_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, o_stride, layout, MHA_Matrix::O_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
   auto vTensor = tensor_create_with_offset(
                   tensorType, tensor_name_to_uid["V"],
@@ -825,7 +825,7 @@ static cudnn_frontend::Tensor createdOVBMM(
   // Creates the necessary tensor descriptors
   int64_t v_dim[4] =  {b, h, s_kv, d};
   int64_t v_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, v_stride, layout, MHA_Matrix::V_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
   int64_t v_transpose_dim[4] = {b, h, d, s_kv};
   int64_t v_transpose_stride[4];
@@ -836,7 +836,7 @@ static cudnn_frontend::Tensor createdOVBMM(
 
   int64_t s_dim[4] = {b, h, s_q, s_kv};
   int64_t s_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, s_stride, layout, MHA_Matrix::S_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   auto vTensor = tensor_create_with_offset(
                   tensorType, tensor_name_to_uid["V"],
@@ -891,7 +891,7 @@ static cudnn_frontend::Tensor createdOAndORowReductionChain(
             const cudnn_frontend::Tensor &dropoutScale_dOVt_OdO_Tensor) {
   int64_t o_dim[4] = {b, h, s_q, d};
   int64_t o_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, o_stride, layout, MHA_Matrix::O_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
   int64_t o_dim_row_sum[4] = {b, h, s_q, 1};
   int64_t o_dim_row_sum_stride[4] = {s_q * h, s_q, 1, 1};
 
@@ -949,7 +949,7 @@ static cudnn_frontend::Tensor createBiasSubtractionSoftmaxMulChain(
             const cudnn_frontend::Tensor &attnScale) {
   int64_t o_dim[4] = {b, h, s_q, s_kv};
   int64_t o_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, o_stride, layout, MHA_Matrix::S_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
   auto dS_minus_O_dO = tensor_create(
                   CUDNN_DATA_FLOAT, tensor_name_to_uid["VIRTUAL"] + 800,
                   o_dim, o_stride, true, false);  // is virtual
@@ -1032,7 +1032,7 @@ static cudnn_frontend::Tensor createdSQBMM(
             const cudnn_frontend::Tensor &mnkOverride) {
   // Creates the necessary tensor descriptors
   int64_t dS_stride[4];
-  generateMHAStrides(b, h, s_q, s_kv, d, dS_stride, layout, MHA_Matrix::S_Matrix);
+  generateMatrixStrides(b, h, s_q, s_kv, d, dS_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   int64_t dS_transpose_dim[4] = {b, h, s_kv, s_q};
   int64_t dS_transpose_stride[4];
@@ -1158,11 +1158,13 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
           // Create Q and K tensors that are used in different places
           int64_t q_dim[4] = {b, h, s_q, d};
           int64_t q_stride[4];
-          generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
+          generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout,
+                          NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
           int64_t k_dim[4] =  {b, h, s_kv, d};
           int64_t k_stride[4];
-          generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
+          generateMatrixStrides(b, h, s_q, s_kv, d, k_stride, layout,
+                          NVTE_QKV_Matrix::NVTE_K_Matrix);
 
           auto qTensor = tensor_create_with_offset(
                           tensorType, tensor_name_to_uid["Q"],
@@ -1460,11 +1462,13 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
           // Create Q and K tensors that are used in different places
           int64_t q_dim[4] = {b, h, s_q, d};
           int64_t q_stride[4];
-          generateMHAStrides(b, h, s_q, s_kv, d, q_stride, layout, MHA_Matrix::Q_Matrix);
+          generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout,
+                          NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
           int64_t k_dim[4] =  {b, h, s_kv, d};
           int64_t k_stride[4];
-          generateMHAStrides(b, h, s_q, s_kv, d, k_stride, layout, MHA_Matrix::K_Matrix);
+          generateMatrixStrides(b, h, s_q, s_kv, d, k_stride, layout,
+                          NVTE_QKV_Matrix::NVTE_K_Matrix);
 
           auto qTensor = tensor_create_with_offset(
                           tensorType, tensor_name_to_uid["Q"],
@@ -1504,7 +1508,8 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
           int64_t O_dim[4] =  {b, h, s_q, d};
           int64_t O_stride[4];
-          generateMHAStrides(b, h, s_q, s_kv, d, O_stride, layout, MHA_Matrix::O_Matrix);
+          generateMatrixStrides(b, h, s_q, s_kv, d, O_stride, layout,
+                          NVTE_QKV_Matrix::NVTE_O_Matrix);
           // Create O and loss tensor
           auto OTensor = tensor_create_with_offset(
                           tensorType, tensor_name_to_uid["O"],

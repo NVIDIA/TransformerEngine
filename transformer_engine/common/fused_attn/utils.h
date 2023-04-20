@@ -15,21 +15,21 @@ namespace fused_attn {
 
 using namespace transformer_engine;
 
-enum MHA_Matrix {
-    Q_Matrix            = 0,  // queries
-    K_Matrix            = 1,  // keys
-    K_Matrix_Transpose  = 2,  // keys transposed
-    V_Matrix            = 3,  // values
-    V_Matrix_Transpose  = 4,  // value matrix transposed
-    S_Matrix            = 5,  // output of GEMM1
-    O_Matrix            = 6,  // final output
+enum NVTE_QKV_Matrix {
+    NVTE_Q_Matrix            = 0,  // queries
+    NVTE_K_Matrix            = 1,  // keys
+    NVTE_K_Matrix_Transpose  = 2,  // keys transposed
+    NVTE_V_Matrix            = 3,  // values
+    NVTE_V_Matrix_Transpose  = 4,  // value matrix transposed
+    NVTE_S_Matrix            = 5,  // output of GEMM1
+    NVTE_O_Matrix            = 6,  // final output
 };
 
-void generateMHAStrides(
+void generateMatrixStrides(
             int64_t b, int64_t h,
             int64_t s_q, int64_t s_kv,
             int64_t d, int64_t* strideA,
-            NVTE_QKV_Layout layout, MHA_Matrix matrix);
+            NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
 struct FADescriptor {
   std::int64_t b;

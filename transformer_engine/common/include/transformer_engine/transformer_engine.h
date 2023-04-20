@@ -131,23 +131,23 @@ float *nvte_tensor_scale(const NVTETensor tensor);
 float *nvte_tensor_scale_inv(const NVTETensor tensor);
 
 enum NVTE_QKV_Layout {
-    NOT_INTERLEAVED = 0,  /*!< separate Q, K, V matrices */
-    QKV_INTERLEAVED = 1,  /*!< packed QKV: [total_seqs, 3, num_heads, head_dim] */
-    KV_INTERLEAVED = 2  /*!< Q, packed KV; */
+    NVTE_NOT_INTERLEAVED = 0,  /*!< separate Q, K, V matrices */
+    NVTE_QKV_INTERLEAVED = 1,  /*!< packed QKV: [total_seqs, 3, num_heads, head_dim] */
+    NVTE_KV_INTERLEAVED = 2  /*!< Q, packed KV; */
                         /*!< Q: [total_seqs_q, num_heads, head_dim] */
                         /*!< KV: [total_seqs_kv, 2, num_heads, head_dim] */
 };
 
 enum NVTE_Bias_Type {
-    NO_BIAS = 0,  /*!< no bias */
-    PRE_SCALE_BIAS = 1,  /*!< bias before scale */
-    POST_SCALE_BIAS = 2  /*!< bias after scale */
+    NVTE_NO_BIAS = 0,  /*!< no bias */
+    NVTE_PRE_SCALE_BIAS = 1,  /*!< bias before scale */
+    NVTE_POST_SCALE_BIAS = 2  /*!< bias after scale */
 };
 
 enum NVTE_Mask_Type {
-    PADDING = 0,  /*!< padding attention mask */
-    CAUSAL = 1,  /*!< causal attention mask */
-    NO_MASK = 2  /*!< no masking */
+    NVTE_PADDING_MASK = 0,  /*!< padding attention mask */
+    NVTE_CAUSAL_MASK = 1,  /*!< causal attention mask */
+    NVTE_NO_MASK = 2  /*!< no masking */
 };
 
 struct NVTETensorPack {

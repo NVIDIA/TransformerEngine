@@ -14,11 +14,11 @@ namespace fused_attn {
 using namespace transformer_engine;
 
 // get matrix strides based on matrix type
-void generateMHAStrides(
+void generateMatrixStrides(
             int64_t b, int64_t h,
             int64_t s_q, int64_t s_kv,
             int64_t d, int64_t* strideA,
-            NVTE_QKV_Layout layout, MHA_Matrix matrix) {
+            NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix) {
     constexpr int batch_dim_idx   = 0;
     constexpr int head_dim_idx    = 1;
     constexpr int seqlen_dim_idx  = 2;
@@ -31,8 +31,8 @@ void generateMHAStrides(
     constexpr int seqlen_kv_dim_idx = 3;
 
     switch (matrix) {
-        case MHA_Matrix::Q_Matrix:
-            if (layout == NVTE_QKV_Layout::QKV_INTERLEAVED) {
+        case NVTE_QKV_Matrix::NVTE_Q_Matrix:
+            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
                 strideA[hidden_dim_idx] = 1;
                 strideA[seqlen_dim_idx] = 3 * h * d;
                 strideA[head_dim_idx] = d;
@@ -44,13 +44,13 @@ void generateMHAStrides(
                 strideA[batch_dim_idx] = s_q * h * d;
             }
             break;
-        case MHA_Matrix::K_Matrix:
-            if (layout == NVTE_QKV_Layout::QKV_INTERLEAVED) {
+        case NVTE_QKV_Matrix::NVTE_K_Matrix:
+            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
                 strideA[seqlen_dim_idx] = 3 * h * d;
                 strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::KV_INTERLEAVED) {
+            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
                 strideA[seqlen_transpose_dim_idx] = 2 * h * d;
                 strideA[hidden_transpose_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
@@ -62,13 +62,13 @@ void generateMHAStrides(
                 strideA[batch_dim_idx] = s_kv * h * d;
             }
             break;
-        case MHA_Matrix::K_Matrix_Transpose:
-            if (layout == NVTE_QKV_Layout::QKV_INTERLEAVED) {
+        case NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose:
+            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
                 strideA[seqlen_transpose_dim_idx] = 3 * h * d;
                 strideA[hidden_transpose_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::KV_INTERLEAVED) {
+            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
                 strideA[seqlen_transpose_dim_idx] = 2 * h * d;
                 strideA[hidden_transpose_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
@@ -80,13 +80,13 @@ void generateMHAStrides(
                 strideA[batch_dim_idx] = s_kv * h * d;
             }
             break;
-        case MHA_Matrix::V_Matrix:
-            if (layout == NVTE_QKV_Layout::QKV_INTERLEAVED) {
+        case NVTE_QKV_Matrix::NVTE_V_Matrix:
+            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
                 strideA[hidden_dim_idx] = 1;
                 strideA[seqlen_dim_idx] = 3 * h * d;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 3 * h * d;
-            } else if (layout == NVTE_QKV_Layout::KV_INTERLEAVED) {
+            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
                 strideA[hidden_dim_idx] = 1;
                 strideA[seqlen_dim_idx] = 2* h * d;
                 strideA[head_dim_idx] = d;
@@ -98,13 +98,13 @@ void generateMHAStrides(
                 strideA[batch_dim_idx] = s_kv * h * d;
             }
             break;
-        case MHA_Matrix::V_Matrix_Transpose:
-            if (layout == NVTE_QKV_Layout::QKV_INTERLEAVED) {
+        case NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose:
+            if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
                     strideA[hidden_transpose_dim_idx] = 1;
                     strideA[seqlen_transpose_dim_idx] = 3 * h * d;
                     strideA[head_dim_idx] = d;
                     strideA[batch_dim_idx] = s_kv * 3 * h * d;
-                } else if (layout == NVTE_QKV_Layout::KV_INTERLEAVED) {
+                } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
                     strideA[hidden_transpose_dim_idx] = 1;
                     strideA[seqlen_transpose_dim_idx] = 2* h * d;
                     strideA[head_dim_idx] = d;
@@ -116,13 +116,13 @@ void generateMHAStrides(
                     strideA[batch_dim_idx] = s_kv * h * d;
                 }
             break;
-        case MHA_Matrix::S_Matrix:
+        case NVTE_QKV_Matrix::NVTE_S_Matrix:
             strideA[seqlen_kv_dim_idx] = 1;
             strideA[seqlen_q_dim_idx] = s_kv;
             strideA[head_dim_idx] = s_q * s_kv;
             strideA[batch_dim_idx] = h * s_q * s_kv;
             break;
-        case MHA_Matrix::O_Matrix:
+        case NVTE_QKV_Matrix::NVTE_O_Matrix:
             strideA[seqlen_kv_dim_idx] = 1;
             strideA[seqlen_q_dim_idx] = h * d;
             strideA[head_dim_idx] = d;
