@@ -29,7 +29,11 @@ RUN [[ "${FRAMEWORK}" =~ jax|tensorflow|all ]] \
 
 
 # Install Transformer Engine
-RUN NVTE_FRAMEWORK=${FRAMEWORK} pip install . \
+RUN \
+ NVTE_FRAMEWORK=${FRAMEWORK} \
+ NVTE_WITH_USERBUFFERS=1 \
+ MPI_HOME=/usr/local/mpi \
+ pip install . \
  && rm -rf transformer_engine.egg-info dist build
 
 WORKDIR /workspace/
