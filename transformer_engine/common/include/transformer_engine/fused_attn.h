@@ -42,8 +42,13 @@ enum NVTE_Mask_Type {
  *  - O = D * V.T
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
- *                                       [total_seqs, 3, head, head_dim].
- *  \param[in]     Bias                  The B tensor.
+ *                                       [total_seqs, 3, num_heads, head_dim], e.g.
+ *                                       | Q   Q   Q        ...       Q K K K ... K V V V ... V 
+ *                                       | \___________  _____________/
+ *                     total_seqs times <|             \/ 
+ *                                       |   num_heads * head_dim times 
+ *
+ *  \param[in]     Bias                  The Bias tensor.
  *  \param[in,out] S                     The S tensor.
  *  \param[out]    O                     The output O tensor.
  *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
@@ -78,8 +83,13 @@ void nvte_fused_attn_fwd_qkvpacked(
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
- *                                       [total_seqs, 3, head, head_dim].
- *  \param[in]     dBias                 The gradient of the B tensor.
+ *                                       [total_seqs, 3, num_heads, head_dim], e.g.
+ *                                       | Q   Q   Q        ...       Q K K K ... K V V V ... V 
+ *                                       | \___________  _____________/
+ *                     total_seqs times <|             \/ 
+ *                                       |   num_heads * head_dim times 
+ *
+ *  \param[in]     dBias                 The gradient of the Bias tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor.
@@ -123,9 +133,15 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  - D = Dropout(S)
  *  - O = D * V.T
  *
- *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_head, head_dim].
- *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_head, head_dim].
- *  \param[in]     Bias                  The B tensor.
+ *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
+ *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim],
+ *                                       e.g.
+ *                                       | K   K   K        ...       K V V V ... V 
+ *                                       | \___________  _____________/
+ *                  total_seqs_kv times <|             \/ 
+ *                                       |   num_heads * head_dim times 
+ *
+ *  \param[in]     Bias                  The Bias tensor.
  *  \param[in,out] S                     The S tensor.
  *  \param[out]    O                     The output O tensor.
  *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
@@ -164,9 +180,15 @@ void nvte_fused_attn_fwd_kvpacked(
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
- *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_head, head_dim].
- *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_head, head_dim].
- *  \param[in]     dBias                 The gradient of the B tensor.
+ *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
+ *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim],
+ *                                       e.g.
+ *                                       | K   K   K        ...       K V V V ... V 
+ *                                       | \___________  _____________/
+ *                  total_seqs_kv times <|             \/ 
+ *                                       |   num_heads * head_dim times 
+ *
+ *  \param[in]     dBias                 The gradient of the Bias tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor.
