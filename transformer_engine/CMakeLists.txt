@@ -25,8 +25,8 @@ find_package(Python COMPONENTS Interpreter Development REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_subdirectory(common)
-if(NVTE_MPI_FOUND)
-    add_subdirectory(pytorch/csrc/userbuffer)
+if(NVTE_WITH_USERBUFFERS)
+    add_subdirectory(pytorch/csrc/userbuffers)
 endif()
 
 option(ENABLE_JAX "Enable JAX in the building workflow." OFF)

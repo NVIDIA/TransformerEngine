@@ -14,7 +14,7 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
-#include "userbuffer/userbuffers.h"
+#include "userbuffers/userbuffers.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
