@@ -4,6 +4,6 @@
     See LICENSE for license information.
 
 fused_attn.h
-=========
+============
 
 .. doxygenfile:: fused_attn.h
