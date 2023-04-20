@@ -117,7 +117,11 @@ void nvte_fused_attn_bwd_qkvpacked(
 
 /*! \brief Compute dot product attention with packed KV input.
  *
- * Computes: BMM1 -> ScaleMaskSoftmax -> Dropout -> BMM2
+ * Computes:
+ *  - P = Q * K.T + B
+ *  - S = ScaleMaskSoftmax(P)
+ *  - D = Dropout(S)
+ *  - O = D * V.T
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_head, head_dim].
  *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_head, head_dim].
