@@ -57,8 +57,10 @@ def _load_mpi_and_ubuf():
     ubuf_lib_name = "libtransformer_engine_ubuf." + extension
     te_path = get_te_path()
     ubuf_dll_path = os.path.join(te_path, ubuf_lib_name)
+    mpi_lib_exists = os.path.exists(mpi_dll_path)
+    ubuf_lib_exists = os.path.exists(ubuf_dll_path)
 
-    if NVTE_MPI_FOUND:
+    if mpi_lib_exists and ubuf_lib_exists:
         return (
             ctypes.CDLL(mpi_dll_path, mode=ctypes.RTLD_GLOBAL),
             ctypes.CDLL(ubuf_dll_path, mode=ctypes.RTLD_GLOBAL),
