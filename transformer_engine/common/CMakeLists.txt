@@ -10,6 +10,7 @@ add_library(transformer_engine SHARED
                                transpose/multi_cast_transpose.cu
                                activation/gelu.cu
 			       fused_attn/fused_attn_fp8.cu
+			       fused_attn/fused_attn.cpp
 			       fused_attn/utils.cu
                                gemm/cublaslt_gemm.cu
                                layer_norm/ln_api.cpp

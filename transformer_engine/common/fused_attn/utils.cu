@@ -8,21 +8,6 @@
 #include "../common.h"
 #include "utils.h"
 
-// create NVTETensorPack
-void nvte_tensor_pack_create(NVTETensorPack* pack) {
-  for (int i = 0; i < pack->MAX_SIZE; i++) {
-     pack->tensors[i] = reinterpret_cast<NVTETensor>(new transformer_engine::Tensor);
-  }
-}
-
-// destroy NVTETensorPack
-void nvte_tensor_pack_destroy(NVTETensorPack* pack) {
-  for (int i = 0; i < pack->MAX_SIZE; i++) {
-     auto *t = reinterpret_cast<transformer_engine::Tensor*>(pack->tensors[i]);
-     delete t;
-  }
-}
-
 namespace transformer_engine {
 namespace fused_attn {
 

@@ -130,6 +130,39 @@ float *nvte_tensor_scale(const NVTETensor tensor);
  */
 float *nvte_tensor_scale_inv(const NVTETensor tensor);
 
+enum NVTE_QKV_Layout {
+    NOT_INTERLEAVED = 0,  /*!< separate Q, K, V matrices */
+    QKV_INTERLEAVED = 1,  /*!< packed QKV: [total_seqs, 3, num_heads, head_dim] */
+    KV_INTERLEAVED = 2  /*!< Q, packed KV; */
+                        /*!< Q: [total_seqs_q, num_heads, head_dim] */
+                        /*!< KV: [total_seqs_kv, 2, num_heads, head_dim] */
+};
+
+enum NVTE_Bias_Type {
+    NO_BIAS = 0,  /*!< no bias */
+    PRE_SCALE_BIAS = 1,  /*!< bias before scale */
+    POST_SCALE_BIAS = 2  /*!< bias after scale */
+};
+
+enum NVTE_Mask_Type {
+    PADDING = 0,  /*!< padding attention mask */
+    CAUSAL = 1,  /*!< causal attention mask */
+    NO_MASK = 2  /*!< no masking */
+};
+
+struct NVTETensorPack {
+  static const int MAX_SIZE = 10;  /*!< we expect <10 matrices in auxiliary outputs */
+  NVTETensor tensors[MAX_SIZE];  /*!< wrappers to tensors, do not hold memory */
+  size_t size = 0;  /*!< actual size of the tensor pack, 0 <= size <= MAX_SIZE */
+};
+
+/*! \brief Create NVTETensors in NVTETensorPack.
+ */
+void nvte_tensor_pack_create(NVTETensorPack* pack);
+
+/*! \brief Destroy NVTETensors in NVTETensorPack.
+ */
+void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 
 #ifdef __cplusplus
 }  // extern "C"
