@@ -6,6 +6,7 @@ import os
 import contextlib
 from typing import List, Optional
 import pytest
+import copy
 
 import torch
 import torch.nn as nn
@@ -675,3 +676,101 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+
+
+def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
+    reset_rng_states()
+
+    # Initialize loss function and optimizer.
+    loss_fn = torch.nn.MSELoss()
+    optimizer = torch.optim.SGD(block.parameters(), lr=0.1)
+
+    # Placeholders used for graph capture.
+    static_input = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype, requires_grad=True)
+    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device='cuda', dtype=dtype)
+
+    real_input = torch.rand_like(static_input)
+    real_target = torch.rand_like(static_target)
+
+    # Basic training loop.
+    def train_step():
+        optimizer.zero_grad(set_to_none=False)
+        out = block(static_input)
+        loss = loss_fn(out, static_target)
+        loss.backward()
+        optimizer.step()
+        return out
+
+    # Warmup steps in a separate stream.
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            train_step()
+    torch.cuda.current_stream().wait_stream(s)
+
+    # Capture graph.
+    g = None
+    static_output = None
+    if graph:
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            static_output = train_step()
+
+    # Run with new data.
+    with torch.no_grad():
+        static_input.copy_(real_input)
+        static_target.copy_(real_target)
+    if graph:
+        g.replay()
+    else:
+        static_output = train_step()
+
+    grads = [static_input.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            grads.append(p.grad)
+
+    with torch.no_grad():
+        output = static_output.clone()
+    return output, grads
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_cuda_graph(dtype, bs, model):
+    config = model_configs[model]
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    block = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+        )
+        .to(dtype=dtype)
+        .cuda()
+    )
+    graphed_block = copy.deepcopy(block)
+
+    out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
+    graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    params = list(block.parameters())
+    graphed_params = list(graphed_block.parameters())
+
+    # Check that results match
+    assert_allclose(out, graphed_out, 1e-3)
+    assert_allclose(params, graphed_params, 1e-3)
+    assert_allclose(grads, graphed_grads, 1e-3)

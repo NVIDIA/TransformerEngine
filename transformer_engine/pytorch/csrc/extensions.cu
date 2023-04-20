@@ -5,7 +5,9 @@
  ************************************************************************/
 
 #include "extensions.h"
-
+#ifdef NVTE_MPI_FOUND
+#include "comm_gemm_overlap.h"
+#endif  // NVTE_MPI_FOUND
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
@@ -26,7 +28,8 @@ void te_gemm(at::Tensor A,
              at::Tensor workspace,
              size_t workspaceSize,
              bool accumulate,
-             bool use_split_accumulator
+             bool use_split_accumulator,
+             int math_sm_count
 ) {
   using namespace transformer_engine;
   auto te_A = makeTransformerEngineTensor(A.data_ptr(),
@@ -70,6 +73,7 @@ void te_gemm(at::Tensor A,
                    te_workspace.data(),
                    accumulate,
                    use_split_accumulator,
+                   math_sm_count,
                    at::cuda::getCurrentCUDAStream());
 }
 
@@ -536,6 +540,67 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
 }
 
 
+std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
+                                                  const at::Tensor &weight,
+                                                  const at::Tensor &bias,
+                                                  float eps,
+                                                  at::Tensor scale,
+                                                  at::Tensor ln_out,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  const int sm_margin,
+                                                  const bool zero_centered_gamma
+) {
+    using namespace transformer_engine;
+
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    DType itype = GetTransformerEngineDType(input.scalar_type());
+
+    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto gamma_cu     = makeTransformerEngineTensor(weight);
+    auto beta_cu      = makeTransformerEngineTensor(bias);
+    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
+    auto mu_cu        = makeTransformerEngineTensor(mu);
+    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
+    transformer_engine::TensorWrapper workspace, barrier;
+
+    // This call populates workspace and barrier tensors with the required config
+    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    // Fill workspace and barrier
+    auto workspace_data = allocateSpace(workspace.shape(),
+                                        workspace.dtype());
+    auto barrier_data = allocateSpace(barrier.shape(),
+                                      barrier.dtype(),
+                                      true);
+    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
+                                            workspace.shape(),
+                                            workspace.dtype());
+    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
+                                            barrier.shape(),
+                                            barrier.dtype());
+
+    // Actual call to fwd kernel
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    return {ln_out, mu, rsigma};
+}
+
+
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  const at::Tensor &weight,
                                  const at::Tensor &bias,
@@ -569,6 +634,61 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
     DType itype = GetTransformerEngineDType(input.scalar_type());
 
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
+    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto gamma_cu     = makeTransformerEngineTensor(weight);
+    auto beta_cu      = makeTransformerEngineTensor(bias);
+    auto z_cu         = makeTransformerEngineTensor(ln_out);
+    auto mu_cu        = makeTransformerEngineTensor(mu);
+    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
+    transformer_engine::TensorWrapper workspace, barrier;
+
+    // This call populates workspace and barrier tensors with the required config
+    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    // Fill workspace and barrier
+    auto workspace_data = allocateSpace(workspace.shape(),
+                                        workspace.dtype());
+    auto barrier_data = allocateSpace(barrier.shape(),
+                                      barrier.dtype(),
+                                      true);
+    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
+                                            workspace.shape(),
+                                            workspace.dtype());
+    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
+                                            barrier.shape(),
+                                            barrier.dtype());
+
+    // Actual call to fwd kernel
+    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+         workspace.data(), barrier.data());
+
+    return {ln_out, mu, rsigma};
+}
+
+
+std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input,
+                                              const at::Tensor &weight,
+                                              const at::Tensor &bias,
+                                              at::Tensor ln_out,
+                                              float eps,
+                                              const int sm_margin,
+                                              const bool zero_centered_gamma
+) {
+    using namespace transformer_engine;
+
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    DType itype = GetTransformerEngineDType(input.scalar_type());
+
     auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
@@ -643,6 +763,29 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
                       at::cuda::getCurrentCUDAStream());
 
     return output;
+}
+
+
+void cast_to_fp8_noalloc(const at::Tensor &input,
+                               const at::Tensor &scale,
+                               at::Tensor output,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               transformer_engine::DType otype
+) {
+    using namespace transformer_engine;
+    size_t N = static_cast<size_t>(input.size(0));
+    size_t H = static_cast<size_t>(input.size(1));
+
+    auto input_cu     = makeTransformerEngineTensor(input);
+    auto output_cu    = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
+
+    nvte_fp8_quantize(input_cu.data(), output_cu.data(),
+                      at::cuda::getCurrentCUDAStream());
+
+    return;
 }
 
 
@@ -878,6 +1021,17 @@ size_t get_cublasLt_version() {
 }
 
 
+bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
+#ifdef NVTE_MPI_FOUND
+    return true;
+#else
+    return false;
+#endif
+}
+
+void placeholder() {}  // TODO(ksivamani) clean this up
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
@@ -895,8 +1049,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
+  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
+  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
   m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
                                               "Fused Cast + Transpose + BGRAD");
@@ -907,6 +1063,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
                                               "Fused Multi-tensor Cast + Transpose");
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
+  m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
@@ -914,6 +1071,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
+  m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
@@ -921,6 +1079,31 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+
+#ifdef NVTE_MPI_FOUND
+  py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
+    .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
+    .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
+    .value("SPLIT_PIPELINED_RS", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS)
+    .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG);
+
+  py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
+    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int>())
+    .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
+    .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
+    .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
+    .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
+
+  py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
+    .def(py::init<torch::Tensor&, int, int, bool, int>())
+    .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
+    .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
+    .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
+#else  // NVTE_MPI_FOUND
+  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
+  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
+#endif  // NVTE_MPI_FOUND
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)

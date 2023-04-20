@@ -121,7 +121,8 @@ at::Tensor te_gemm_ts(at::Tensor A,
           workspace,
           workspaceSize_arg,
           accumulate_arg,
-          use_split_accumulator_arg);
+          use_split_accumulator_arg,
+          0);
   return D;
 }
 
