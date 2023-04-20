@@ -51,7 +51,6 @@ def _load_mpi_and_ubuf():
         raise RuntimeError(f"Unsupported operating system ({system})")
 
     MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
-    NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
     mpi_lib_name = "libmpi." + extension
     mpi_dll_path = os.path.join(MPI_HOME, "lib", mpi_lib_name)
     ubuf_lib_name = "libtransformer_engine_ubuf." + extension
