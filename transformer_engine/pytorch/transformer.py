@@ -15,6 +15,7 @@ import torch
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
+import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, LayerNormMLP, LayerNorm
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
@@ -495,6 +496,10 @@ class MultiHeadAttention(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
+        ub_bulk_wgrad: bool = False,
+        ub_bulk_dgrad: bool = False,
+        ub_split_rs: bool = False,
+        ub_split_ag: bool = False,
         bias: bool = True,
     ) -> None:
         super().__init__()
@@ -547,6 +552,9 @@ class MultiHeadAttention(torch.nn.Module):
                     return_layernorm_output=return_layernorm_output,
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     zero_centered_gamma=zero_centered_gamma,
+                    ub_bulk_wgrad=ub_bulk_wgrad,
+                    ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_split_ag=ub_split_ag,
                     **common_gemm_kwargs,
                 )
             else:
@@ -572,6 +580,9 @@ class MultiHeadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
+                    ub_bulk_wgrad=ub_bulk_wgrad,
+                    ub_bulk_dgrad=ub_bulk_dgrad,
+                    ub_split_ag=ub_split_ag,
                     **common_gemm_kwargs,
                 )
             else:
@@ -616,6 +627,8 @@ class MultiHeadAttention(torch.nn.Module):
             bias=bias,
             return_bias=True,
             parallel_mode="row" if set_parallel_mode else None,
+            ub_split_rs=ub_split_rs,
+            ub_split_ag=ub_split_ag,
             **common_gemm_kwargs,
         )
 
@@ -911,6 +924,12 @@ class TransformerLayer(torch.nn.Module):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
+    ub_bulk_wgrad: bool, default = False
+             Bulk overlap UserBuffer ReduceScatter | WGRAD GEMM
+    ub_bulk_dgrad: bool, default = False
+             Bulk overlap UserBuffer AllGather | DGRAD GEMM
+    ub_split_ag: bool, default = False
+             Split pipelined overlap UserBuffer AllGather -> GEMM
 
     Optimization parameters
     -----------------------
@@ -970,6 +989,7 @@ class TransformerLayer(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
+        ub_tp_comm_overlap: bool = False,
         bias: bool = True,
     ) -> None:
         super().__init__()
@@ -980,6 +1000,16 @@ class TransformerLayer(torch.nn.Module):
             category=DeprecationWarning,
         )
 
+        if ub_tp_comm_overlap:
+            assert (
+                tex.userbuf_comm_available()
+            ), "Userbuffer communication backend not available."
+
+        ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
+        ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
+        ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
+        ub_split_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_AG", "1")))
+        ub_split_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_RS", "1")))
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
@@ -1037,6 +1067,10 @@ class TransformerLayer(torch.nn.Module):
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
             "qkv_weight_interleaved" : qkv_weight_interleaved,
+            "ub_bulk_wgrad" : ub_bulk_wgrad,
+            "ub_bulk_dgrad" : ub_bulk_dgrad,
+            "ub_split_ag" : ub_split_ag,
+            "ub_split_rs" : ub_split_rs,
         }
 
         self.self_attention = MultiHeadAttention(
@@ -1080,6 +1114,10 @@ class TransformerLayer(torch.nn.Module):
             micro_batch_size=micro_batch_size,
             set_parallel_mode=set_parallel_mode,
             zero_centered_gamma=zero_centered_gamma,
+            ub_bulk_wgrad=ub_bulk_wgrad,
+            ub_bulk_dgrad=ub_bulk_dgrad,
+            ub_split_rs=ub_split_rs,
+            ub_split_ag=ub_split_ag,
         )
 
         self.hidden_dropout = hidden_dropout

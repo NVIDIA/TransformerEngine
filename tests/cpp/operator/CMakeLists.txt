@@ -17,7 +17,13 @@ add_executable(test_operator
                test_multi_cast_transpose.cu
                ../test_common.cu)
 
-target_link_libraries(test_operator PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB})
+list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB})
+
+if(EXISTS ${NVTE_MPI_INCLUDE})
+    list(APPEND test_operator_LINKER_LIBS ${MPI_LIB})
+endif()
+
+target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS})
 target_compile_options(test_operator PRIVATE -O2)
 
 include(GoogleTest)

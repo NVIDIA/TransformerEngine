@@ -19,7 +19,11 @@ from distutils.file_util import copy_file
 path = os.path.dirname(os.path.realpath(__file__))
 with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
+
 CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
+NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
+NVTE_MPI_INCLUDE = os.path.join(MPI_HOME, "include")
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
@@ -51,7 +55,7 @@ def extra_gencodes(cc_flag):
 
 
 def extra_compiler_flags():
-    return [
+    extra_flags = [
         "-O3",
         "-gencode",
         "arch=compute_70,code=sm_70",
@@ -66,6 +70,9 @@ def extra_compiler_flags():
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if NVTE_MPI_FOUND:
+        extra_flags.append("-DNVTE_MPI_FOUND")
+    return extra_flags
 
 
 cc_flag = []
@@ -75,13 +82,6 @@ extra_gencodes(cc_flag)
 def make_abs_path(l):
     return [os.path.join(path, p) for p in l]
 
-
-include_dirs = [
-    "transformer_engine/common/include",
-    "transformer_engine/pytorch/csrc",
-    "3rdparty/cudnn-frontend/include",
-]
-include_dirs = make_abs_path(include_dirs)
 
 pytorch_sources = [
     "transformer_engine/pytorch/csrc/extensions.cu",
@@ -100,6 +100,15 @@ supported_frameworks = {
 }
 
 framework = os.environ.get("NVTE_FRAMEWORK", "pytorch")
+
+include_dirs = [
+    "transformer_engine/common/include",
+    "transformer_engine/pytorch/csrc",
+    "3rdparty/cudnn-frontend/include",
+]
+if (framework in ("all", "pytorch")) and NVTE_MPI_FOUND:
+    include_dirs.append(NVTE_MPI_INCLUDE)
+include_dirs = make_abs_path(include_dirs)
 
 args = sys.argv.copy()
 for s in args:
@@ -156,9 +165,15 @@ class PyTorchBuilder(FrameworkBuilderBase):
         print("Building pyTorch extensions!")
         self.pytorch_build_extensions.run()
 
+    def cmake_flags(self):
+        if not NVTE_MPI_FOUND:
+            return []
+        return ["-DNVTE_MPI_FOUND=1", f"-DNVTE_MPI_INCLUDE={NVTE_MPI_INCLUDE}"]
+
     @staticmethod
     def install_requires():
         return ["flash-attn>=1.0.2",]
+
 
 class TensorFlowBuilder(FrameworkBuilderBase):
     def cmake_flags(self):
@@ -167,6 +182,7 @@ class TensorFlowBuilder(FrameworkBuilderBase):
 
     def run(self, extensions):
         print("Building TensorFlow extensions!")
+
 
 class JaxBuilder(FrameworkBuilderBase):
     def cmake_flags(self):

@@ -743,6 +743,9 @@ def fp8_gemm(
     use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
+    ub_algo: tex.UbufOverlapAlgo = None,
+    ub: Union[tex.UbufCommOverlap, tex.UbufP2PCommOverlap] = None,
+    extra_output_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
@@ -769,7 +772,7 @@ def fp8_gemm(
 
     out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
 
-    _ = torch.ops.tex_ts.te_gemm_ts(
+    args = (
         A,
         A_scale_inv,
         A_fp8_tensor,
@@ -791,8 +794,29 @@ def fp8_gemm(
         workspace,
         workspace.shape[0],
         accumulate,
-        use_split_accumulator,
-    )
+        use_split_accumulator)
+    fn = torch.ops.tex_ts.te_gemm_ts
+    if ub_algo is not None:
+        assert ub is not None, 'ub object is None!'
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+            fn = ub.bulk_overlap
+            args = tuple(args + (1,))
+        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+            fn = ub.bulk_overlap
+            args = tuple(args + (0,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
+            fn = ub.split_overlap_ag
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+            fn = ub.split_overlap_rs
+            assert (
+                extra_output_tensor is not None
+            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
+            args = tuple(args + (True, extra_output_tensor,))
+    _ = fn(*args)
 
     if return_output:
         if gelu:
@@ -816,6 +840,9 @@ def gemm(
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
+    ub_algo: tex.UbufOverlapAlgo = None,
+    ub: tex.UbufCommOverlap = None,
+    extra_output_tensor: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
 
@@ -856,7 +883,7 @@ def gemm(
     else:
         bias_dtype = output_dtype
 
-    _ = torch.ops.tex_ts.te_gemm_ts(
+    args = (
         A,
         empty_tensor,
         fp8_index,
@@ -880,6 +907,28 @@ def gemm(
         accumulate,
         False,  # use_split_accumulator
     )
+    fn = torch.ops.tex_ts.te_gemm_ts
+    if ub_algo is not None:
+        assert ub is not None, 'ub object is None!'
+        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+            fn = ub.bulk_overlap
+            args = tuple(args + (1,))
+        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+            fn = ub.bulk_overlap
+            args = tuple(args + (0,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
+            fn = ub.split_overlap_ag
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+            fn = ub.split_overlap_rs
+            assert (
+                extra_output_tensor is not None
+            ), 'SPLIT_PIPELINED_RS requires extra output tensor'
+            args = tuple(args + (False, extra_output_tensor,))
+    _ = fn(*args)
 
     if return_output:
         return out, grad_bias, gelu_input
@@ -997,9 +1046,25 @@ def layernorm_fwd_fp8(
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
     sm_margin: int,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    ln_out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """LayerNorm with FP8 output"""
+    if ln_out is not None:
+        return tex.layernorm_fwd_fp8_noalloc(
+            inp,
+            weight,
+            bias,
+            eps,
+            fp8_meta_tensor.scale[fp8_tensor],
+            ln_out,
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype,
+            sm_margin,
+            zero_centered_gamma
+        )
+
     return tex.layernorm_fwd_fp8(
         inp,
         weight,
@@ -1065,8 +1130,20 @@ def cast_to_fp8(
     fp8_meta_tensor: tex.FP8TensorMeta,
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
-) -> torch.Tensor:
+    out: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
     """Cast input to FP8"""
+
+    if out is not None:
+        tex.cast_to_fp8_noalloc(
+            inp,
+            fp8_meta_tensor.scale[fp8_tensor],
+            out,
+            fp8_meta_tensor.amax_history[0][fp8_tensor],
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            otype
+        )
+        return None
     return torch.ops.tex_ts.cast_to_fp8_ts(
         inp,
         fp8_meta_tensor.scale,

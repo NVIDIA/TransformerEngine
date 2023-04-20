@@ -199,24 +199,32 @@ class FP8Helper:
         """
         Update the collections
         """
-        if not isinstance(original, FrozenDict):
-            original = FrozenDict(original)
+        assert isinstance(original, (dict, FrozenDict))
+        assert isinstance(new, (dict, FrozenDict))
+        frozen_original = FrozenDict(original) if not isinstance(original, FrozenDict) else original
         for key in new:
-            if key in original:
-                original, _ = original.pop(key)
-        return FrozenDict({**new, **original})
+            if key in frozen_original:
+                frozen_original, _ = frozen_original.pop(key)
+        new_coll = FrozenDict({**new, **frozen_original})
+        if not isinstance(original, FrozenDict):
+            new_coll = new_coll.unfreeze()
+        return new_coll
 
     @staticmethod
     def update_fp8_metas(state: Collection) -> Collection:
         """
         Update the FP8 metas
         """
+        assert isinstance(state, (dict, FrozenDict))
         if FP8Helper.FP8_COLLECTION_NAME in state:
-            if not isinstance(state, FrozenDict):
-                state = FrozenDict(state)
-            others, fp8_metas = state.pop(FP8Helper.FP8_COLLECTION_NAME)
+            frozen_state = FrozenDict(state) if not isinstance(state, FrozenDict) else state
+            others, fp8_metas = frozen_state.pop(FP8Helper.FP8_COLLECTION_NAME)
             fp8_metas = FP8Helper._update_fp8_metas_impl(fp8_metas)
-            return FrozenDict({**others, FP8Helper.FP8_COLLECTION_NAME: fp8_metas})
+            new_state = FrozenDict({**others, FP8Helper.FP8_COLLECTION_NAME: fp8_metas})
+
+            if not isinstance(state, FrozenDict):
+                new_state = new_state.unfreeze()
+            return new_state
         return state
 
     @staticmethod

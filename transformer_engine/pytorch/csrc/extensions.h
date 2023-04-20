@@ -114,7 +114,8 @@ void te_gemm(at::Tensor A,
              at::Tensor workspace,
              size_t workspaceSize,
              bool accumulate,
-             bool use_split_accumulator
+             bool use_split_accumulator,
+             int math_sm_count
 );
 
 
@@ -199,6 +200,19 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           const bool zero_centered_gamma
 );
 
+std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
+                                                  const at::Tensor &weight,
+                                                  const at::Tensor &bias,
+                                                  float eps,
+                                                  at::Tensor scale,
+                                                  at::Tensor ln_out,
+                                                  at::Tensor amax,
+                                                  at::Tensor scale_inv,
+                                                  transformer_engine::DType otype,
+                                                  const int sm_margin,
+                                                  const bool zero_centered_gamma
+);
+
 at::Tensor layernorm_fwd_fp8_inf(const at::Tensor &input,
                                  const at::Tensor &weight,
                                  const at::Tensor &bias,
@@ -218,6 +232,15 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const bool zero_centered_gamma
 );
 
+std::vector<at::Tensor> layernorm_fwd_noalloc(const at::Tensor &input,
+                                      const at::Tensor &weight,
+                                      const at::Tensor &bias,
+                                      at::Tensor ln_out,
+                                      float eps,
+                                      const int sm_margin,
+                                      const bool zero_centered_gamma
+);
+
 at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const at::Tensor &weight,
                              const at::Tensor &bias,
@@ -230,6 +253,15 @@ at::Tensor cast_to_fp8(const at::Tensor &input,
                        at::Tensor amax,
                        at::Tensor scale_inv,
                        transformer_engine::DType otype
+);
+
+
+void cast_to_fp8_noalloc(const at::Tensor &input,
+                         const at::Tensor &scale,
+                         at::Tensor output,
+                         at::Tensor amax,
+                         at::Tensor scale_inv,
+                         transformer_engine::DType otype
 );
 
 
