@@ -36,7 +36,7 @@ enum NVTE_Mask_Type {
 /*! \brief Compute dot product attention with packed QKV input.
  *
  * Computes:
- *  - P = Q * K.T + B
+ *  - P = Q * K.T + Bias
  *  - S = ScaleMaskSoftmax(P)
  *  - D = Dropout(S)
  *  - O = D * V.T
@@ -44,7 +44,7 @@ enum NVTE_Mask_Type {
  *  \param[in]     QKV                   The QKV tensor in packed format,
  *                                       [total_seqs, 3, head, head_dim].
  *  \param[in]     Bias                  The B tensor.
- *  \param[in,out] S                     The S tensor, S = Softmax(P), P = Q * K.T.
+ *  \param[in,out] S                     The S tensor.
  *  \param[out]    O                     The output O tensor.
  *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
@@ -82,8 +82,8 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     dBias                 The gradient of the B tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
- *  \param[in]     S                     The S tensor, S = Softmax(P).
- *  \param[in,out] dP                    The gradient of the P tensor, P = Q * K.T.
+ *  \param[in]     S                     The S tensor.
+ *  \param[in,out] dP                    The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQKV                  The gradient of the QKV tensor.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
@@ -118,7 +118,7 @@ void nvte_fused_attn_bwd_qkvpacked(
 /*! \brief Compute dot product attention with packed KV input.
  *
  * Computes:
- *  - P = Q * K.T + B
+ *  - P = Q * K.T + Bias
  *  - S = ScaleMaskSoftmax(P)
  *  - D = Dropout(S)
  *  - O = D * V.T
@@ -126,7 +126,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_head, head_dim].
  *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_head, head_dim].
  *  \param[in]     Bias                  The B tensor.
- *  \param[in,out] S                     The S tensor, S = Softmax(Q * K.T).
+ *  \param[in,out] S                     The S tensor.
  *  \param[out]    O                     The output O tensor.
  *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
@@ -169,8 +169,8 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     dBias                 The gradient of the B tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
- *  \param[in]     S                     The S tensor, S = Softmax(P).
- *  \param[in,out] dP                    The gradient of the P tensor, P = Q * K.T.
+ *  \param[in]     S                     The S tensor.
+ *  \param[in,out] dP                    The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQ                    The gradient of the Q tensor.
  *  \param[out]    dKV                   The gradient of the KV tensor.
