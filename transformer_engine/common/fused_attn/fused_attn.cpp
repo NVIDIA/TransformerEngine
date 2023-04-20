@@ -19,7 +19,7 @@ void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor cu_seqlens,
             const NVTETensor rng_state,
             size_t max_seqlen,
-            bool is_training, float attn_scale, float p_dropout,
+            bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -47,14 +47,14 @@ void nvte_fused_attn_fwd_qkvpacked(
     // FP8 API doesn't use input_Bias, bias_type or attn_mask_type
     fused_attn_fwd_fp8_qkvpacked(
             b, max_seqlen, h, d,
-            is_training, attn_scale, p_dropout, qkv_layout,
+            is_training, attn_scale, dropout, qkv_layout,
             input_QKV, input_output_S, output_O,
             Aux_Output_Tensors,
             input_cu_seqlens,
             input_rng_state,
             wkspace, stream, handle);
 #else
-    printf("Error: To run FP8 fused attention, CUDNN_VERSION must be >= 8900! \n");
+    NVTE_ERROR("cuDNN 8.9 is required to run FP8 fused attention. \n");
 #endif
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen <= 512)) {
@@ -77,7 +77,7 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTETensor dQKV,
             const NVTETensor cu_seqlens,
             size_t max_seqlen,
-            float attn_scale, float p_dropout,
+            float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -111,7 +111,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     // FP8 API doesn't use input_dBias, bias_type or attn_mask_type
     fused_attn_bwd_fp8_qkvpacked(
                     b, max_seqlen, h, d,
-                    attn_scale, p_dropout, qkv_layout,
+                    attn_scale, dropout, qkv_layout,
                     input_QKV, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,
@@ -120,7 +120,7 @@ void nvte_fused_attn_bwd_qkvpacked(
                     input_rng_state,
                     wkspace, stream, handle);
 #else
-    printf("Error: To run FP8 fused attention, CUDNN_VERSION must be >= 8900! \n");
+    NVTE_ERROR("cuDNN 8.9 is required to run FP8 fused attention. \n");
 #endif
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen <= 512)) {
@@ -143,7 +143,7 @@ void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor cu_seqlens_kv,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
-            bool is_training, float attn_scale, float p_dropout,
+            bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -193,7 +193,7 @@ void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             size_t max_seqlen_q, size_t max_seqlen_kv,
-            float attn_scale, float p_dropout,
+            float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,

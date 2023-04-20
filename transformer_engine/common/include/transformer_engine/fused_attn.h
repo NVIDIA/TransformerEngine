@@ -13,16 +13,40 @@
 extern "C" {
 #endif
 
+enum NVTE_QKV_Layout {
+    NVTE_NOT_INTERLEAVED = 0,  /*!< separate Q, K, V matrices */
+    NVTE_QKV_INTERLEAVED = 1,  /*!< packed QKV: [total_seqs, 3, num_heads, head_dim] */
+    NVTE_KV_INTERLEAVED = 2  /*!< Q, packed KV; */
+                        /*!< Q: [total_seqs_q, num_heads, head_dim] */
+                        /*!< KV: [total_seqs_kv, 2, num_heads, head_dim] */
+};
+
+enum NVTE_Bias_Type {
+    NVTE_NO_BIAS = 0,  /*!< no bias */
+    NVTE_PRE_SCALE_BIAS = 1,  /*!< bias before scale */
+    NVTE_POST_SCALE_BIAS = 2  /*!< bias after scale */
+};
+
+enum NVTE_Mask_Type {
+    NVTE_PADDING_MASK = 0,  /*!< padding attention mask */
+    NVTE_CAUSAL_MASK = 1,  /*!< causal attention mask */
+    NVTE_NO_MASK = 2  /*!< no masking */
+};
+
 /*! \brief Compute dot product attention with packed QKV input.
  *
- * Computes: BMM1 -> ScaleMaskSoftmax -> Dropout -> BMM2
+ * Computes:
+ *  - P = Q * K.T + B
+ *  - S = ScaleMaskSoftmax(P)
+ *  - D = Dropout(S)
+ *  - O = D * V.T
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
  *                                       [total_seqs, 3, head, head_dim].
  *  \param[in]     Bias                  The B tensor.
  *  \param[in,out] S                     The S tensor, S = Softmax(P), P = Q * K.T.
  *  \param[out]    O                     The output O tensor.
- *  \param[out]    Aux_Output_tensors    Auxiliary output tensors when training, e.g. M, ZInv.
+ *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen            Max sequence length used for computing,
@@ -45,7 +69,7 @@ void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor cu_seqlens,
             const NVTETensor rng_state,
             size_t max_seqlen,
-            bool is_training, float attn_scale, float p_dropout,
+            bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -60,7 +84,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor, S = Softmax(P).
  *  \param[in,out] dP                    The gradient of the P tensor, P = Q * K.T.
- *  \param[in]     Aux_CTX_tensors       Auxiliary tensors from forward when in training mode.
+ *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQKV                  The gradient of the QKV tensor.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
@@ -85,7 +109,7 @@ void nvte_fused_attn_bwd_qkvpacked(
             NVTETensor dQKV,
             const NVTETensor cu_seqlens,
             size_t max_seqlen,
-            float attn_scale, float p_dropout,
+            float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -100,7 +124,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     Bias                  The B tensor.
  *  \param[in,out] S                     The S tensor, S = Softmax(Q * K.T).
  *  \param[out]    O                     The output O tensor.
- *  \param[out]    Aux_Output_tensors    Auxiliary output tensors when training, e.g. M, ZInv.
+ *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
@@ -128,7 +152,7 @@ void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor cu_seqlens_kv,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
-            bool is_training, float attn_scale, float p_dropout,
+            bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
@@ -143,7 +167,7 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor, S = Softmax(P).
  *  \param[in,out] dP                    The gradient of the P tensor, P = Q * K.T.
- *  \param[in]     Aux_CTX_tensors       Auxiliary tensors from forward when in training mode.
+ *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQ                    The gradient of the Q tensor.
  *  \param[out]    dKV                   The gradient of the KV tensor.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
@@ -175,7 +199,7 @@ void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             size_t max_seqlen_q, size_t max_seqlen_kv,
-            float attn_scale, float p_dropout,
+            float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
