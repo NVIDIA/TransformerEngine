@@ -43,7 +43,7 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-  # Execute one of the following command
+  # Execute one of the following commands
   NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable    # Build TE for PyTorch only. The default.
   NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable        # Build TE for JAX only.
   NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable # Build TE for TensorFlow only.
@@ -62,9 +62,8 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-  # Execute one of the following command
+  # Execute one of the following commands
   NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@main    # Build TE for PyTorch only. The default.
   NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for JAX only.
   NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
   NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
-
