@@ -204,12 +204,12 @@ def fused_attn_fwd_qkvpacked(
     # BF16/FP16 fused attention API from fmha_v2
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) and (max_seqlen > 512):
         # add BF/FP16 support for >512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for >512 sequence length is coming!"
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) and (max_seqlen <= 512):
         # add BF/FP16 support for <=512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for <=512 sequence length is coming!"
 
     else:
         assert False, "No support for this dtype and max_seqlen combination."
@@ -371,12 +371,12 @@ def fused_attn_bwd_qkvpacked(
     # BF16/FP16 fused attention API from fmha_v2
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) and (max_seqlen > 512):
         # add BF/FP16 support for >512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for >512 sequence length is coming!"
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) and (max_seqlen <= 512):
         # add BF/FP16 support for <=512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for <=512 sequence length is coming!"
 
     else:
         assert False, "No support for this dtype and max_seqlen combination."
@@ -526,13 +526,13 @@ def fused_attn_fwd_kvpacked(
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) \
             and (max_seqlen_q > 512) and (max_seqlen_kv > 512):
         # add BF/FP16 support for >512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for >512 sequence length is coming!"
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) \
             and (max_seqlen_q <= 512) and (max_seqlen_kv <= 512):
         # add BF/FP16 support for <=512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for <=512 sequence length is coming!"
 
     else:
         assert False, "No support for this dtype and max_seqlen combination."
@@ -696,13 +696,13 @@ def fused_attn_bwd_kvpacked(
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) \
             and (max_seqlen_q > 512) and (max_seqlen_kv > 512):
         # add BF/FP16 support for >512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for >512 sequence length is coming!"
 
     ############### BF16/FP16 fused attention API from fmha_v1 apex ################
     elif (qkv_type is torch.bfloat16 or qkv_type is torch.float16) \
             and (max_seqlen_q <= 512) and (max_seqlen_kv <= 512):
         # add BF/FP16 support for <=512 sequence length
-        pass
+        assert False, "The BF16/FP16 support for <=512 sequence length is coming!"
 
     else:
         assert False, "No support for this dtype and max_seqlen combination."
