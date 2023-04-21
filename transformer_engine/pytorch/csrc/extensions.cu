@@ -1767,6 +1767,174 @@ bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
 
 void placeholder() {}  // TODO(ksivamani) clean this up
 
+namespace flash_attention {
+
+constexpr int warp_size = 32;
+constexpr int type_size = 2;  // FP16 or BF16
+constexpr int nvec = sizeof(uint64_t) / type_size;
+constexpr int load_size = warp_size * nvec;
+constexpr int block_size = 512;
+
+template <typename T>
+__launch_bounds__(block_size)
+__global__ void prepare_kernel(const T *qkvi,
+                               T *qkv,
+                               const size_t B,
+                               const size_t S,
+                               const size_t Z,
+                               const size_t W) {
+    const int warpid = (blockDim.x * blockIdx.x + threadIdx.x) / warp_size;
+    const int id_in_warp = threadIdx.x % warp_size;
+    const size_t offset_input = blockIdx.y * W + warpid * 3 * W * Z + id_in_warp * nvec;
+    const T *my_input = qkvi + offset_input;
+
+    const size_t s = warpid / B;
+    if (s >= S) return;
+
+    const size_t b = warpid % B;
+
+    const size_t offset_output = blockIdx.y * B * S * Z * W +
+                                 (s + b * S) * W * Z +
+                                 id_in_warp * nvec;
+
+    T *my_output = qkv + offset_output;
+
+    for (int i = 0; i < Z; ++i) {
+        uint64_t *out = reinterpret_cast<uint64_t*>(my_output + i * load_size);
+        *out = *reinterpret_cast<const uint64_t*>(my_input + i * load_size * 3);
+    }
+}
+
+template <typename T>
+__launch_bounds__(block_size)
+__global__ void prepare_kernel_bwd(const T *q, const T *k, const T *v,
+                                   T *qkv, const size_t B, const size_t S,
+                                   const size_t Z, const size_t W) {
+    const T *input = blockIdx.y == 0 ? q : (blockIdx.y == 1 ? k : v);
+
+    const int warpid = (blockDim.x * blockIdx.x + threadIdx.x) / warp_size;
+    const int id_in_warp = threadIdx.x % warp_size;
+    const size_t offset_input = warpid * W * Z + id_in_warp * nvec;
+    const T *my_input = input + offset_input;
+
+    const size_t b = warpid / S;
+    if (b >= B) return;
+
+    const size_t s = warpid % S;
+
+    const size_t offset_output = (b + s * B) * 3 * W * Z +
+                                 id_in_warp * nvec + blockIdx.y * W;
+
+    T *my_output = qkv + offset_output;
+
+    for (int i = 0; i < Z; ++i) {
+        uint64_t *out = reinterpret_cast<uint64_t*>(my_output + i * load_size * 3);
+        *out = *reinterpret_cast<const uint64_t*>(my_input + i * load_size);
+    }
+}
+
+}  // namespace flash_attention
+
+at::Tensor fa_prepare(at::Tensor qkvi) {
+    NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
+    NVTE_CHECK(qkvi.scalar_type() == at::ScalarType::Half ||
+               qkvi.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(qkvi.size(3) % flash_attention::load_size == 0);
+    NVTE_CHECK(qkvi.size(3) == flash_attention::load_size);
+
+    // [s, b, n, h * 3] -> [3, b, s, n, h]
+
+    std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3)};
+    at::Tensor qkv = at::empty(shape, at::CUDA(qkvi.scalar_type()));
+
+    size_t warps = qkvi.size(0) * qkvi.size(1);
+    size_t warps_per_block = flash_attention::block_size / flash_attention::warp_size;
+    size_t blocks = (warps + warps_per_block - 1) / warps_per_block;
+    dim3 grid(blocks, 3);
+    int threads = flash_attention::block_size;
+    if (qkvi.scalar_type() == at::ScalarType::Half) {
+        using dtype = at::Half;
+        flash_attention::prepare_kernel<dtype><<<grid, threads, 0,
+                                                 at::cuda::getCurrentCUDAStream()>>>(
+            qkvi.data_ptr<dtype>(),
+            qkv.data_ptr<dtype>(),
+            shape[1],
+            shape[2],
+            shape[3],
+            shape[4]);
+    } else {
+        using dtype = at::BFloat16;
+        flash_attention::prepare_kernel<dtype><<<grid, threads, 0,
+                                                 at::cuda::getCurrentCUDAStream()>>>(
+            qkvi.data_ptr<dtype>(),
+            qkv.data_ptr<dtype>(),
+            shape[1],
+            shape[2],
+            shape[3],
+            shape[4]);
+    }
+
+    return qkv;
+}
+
+at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
+    NVTE_CHECK(q.is_contiguous());
+    NVTE_CHECK(k.is_contiguous());
+    NVTE_CHECK(v.is_contiguous());
+    NVTE_CHECK(q.dim() == 4, "Expected 4-dim tensor.");
+    NVTE_CHECK(k.dim() == 4, "Expected 4-dim tensor.");
+    NVTE_CHECK(v.dim() == 4, "Expected 4-dim tensor.");
+    NVTE_CHECK(q.scalar_type() == at::ScalarType::Half ||
+               q.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(k.scalar_type() == at::ScalarType::Half ||
+               k.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(v.scalar_type() == at::ScalarType::Half ||
+               v.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(q.size(3) % flash_attention::load_size == 0);
+    NVTE_CHECK(q.size(3) == flash_attention::load_size);
+    NVTE_CHECK(k.size(3) % flash_attention::load_size == 0);
+    NVTE_CHECK(k.size(3) == flash_attention::load_size);
+    NVTE_CHECK(v.size(3) % flash_attention::load_size == 0);
+    NVTE_CHECK(v.size(3) == flash_attention::load_size);
+
+    // 3 x [s, b, n, h] -> [b, s, n, 3 * h]
+
+    std::vector<int64_t> shape = {q.size(1), q.size(0), q.size(2), 3 * q.size(3)};
+    at::Tensor qkv = at::empty(shape, at::CUDA(q.scalar_type()));
+
+    size_t warps = q.size(0) * q.size(1);
+    size_t warps_per_block = flash_attention::block_size / flash_attention::warp_size;
+    size_t blocks = (warps + warps_per_block - 1) / warps_per_block;
+    dim3 grid(blocks, 3);
+    int threads = flash_attention::block_size;
+    if (q.scalar_type() == at::ScalarType::Half) {
+        using dtype = at::Half;
+        flash_attention::prepare_kernel_bwd<dtype><<<grid, threads, 0,
+                                                 at::cuda::getCurrentCUDAStream()>>>(
+            q.data_ptr<dtype>(),
+            k.data_ptr<dtype>(),
+            v.data_ptr<dtype>(),
+            qkv.data_ptr<dtype>(),
+            q.size(0),
+            q.size(1),
+            q.size(2),
+            q.size(3));
+    } else {
+        using dtype = at::BFloat16;
+        flash_attention::prepare_kernel_bwd<dtype><<<grid, threads, 0,
+                                                 at::cuda::getCurrentCUDAStream()>>>(
+            q.data_ptr<dtype>(),
+            k.data_ptr<dtype>(),
+            v.data_ptr<dtype>(),
+            qkv.data_ptr<dtype>(),
+            q.size(0),
+            q.size(1),
+            q.size(2),
+            q.size(3));
+    }
+
+    return qkv;
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Softmax functions
@@ -1812,6 +1980,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
+  m.def("fa_prepare", &fa_prepare, "Prepare QKV for Flash Attention");
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");

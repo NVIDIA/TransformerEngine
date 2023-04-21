@@ -77,6 +77,48 @@ class DropPath(torch.nn.Module):
         output = hidden_state.div(keep_prob) * random_tensor
         return output
 
+class _SplitLastDim(torch.autograd.Function):
+    """"""
+
+    @staticmethod
+    def forward(ctx,
+                mixed_x_layer: torch.Tensor,
+                num_parts: int
+    ) -> Tuple[torch.Tensor, ...]:
+        return split_tensor_along_dim(mixed_x_layer, -1, num_parts)
+
+    @staticmethod
+    def backward(ctx,
+                 *args):
+        assert len(args) > 0
+
+        noop_ok = True
+        strides = args[0].stride()
+        data_ptr = args[0].untyped_storage().data_ptr()
+        shape = args[0].shape
+        last_dim_size = args[0].shape[-1]
+        for i, tensor in enumerate(args):
+            if (tensor.stride() != strides or
+                tensor.shape != shape or
+                tensor.untyped_storage().data_ptr() != data_ptr or
+                tensor.storage_offset() != i * last_dim_size):
+                noop_ok = False
+                break
+
+        if noop_ok:
+            ret = torch.Tensor().to(args[0].dtype)
+            if args[0].is_cuda:
+                ret = ret.cuda()
+            new_shape = list(shape)
+            new_shape[-1] = new_shape[-1] * len(args)
+            ret.set_(args[0].untyped_storage(),
+                     args[0].storage_offset(),
+                     new_shape,
+                     args[0].stride()
+            )
+            return ret, None
+        else:
+            return torch.cat(args, dim = -1), None
 
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
@@ -204,6 +246,32 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         return context_layer
 
+class _PrepareQKVForFA(torch.autograd.Function):
+    """This class converts QKV from interleaved (s, b, ...) layout
+       to separate contiguous q, k, v tensors in (b, s, ...) layout."""
+
+    @staticmethod
+    def forward(ctx,
+                query_layer: torch.Tensor,
+                key_layer: torch.Tensor,
+                value_layer: torch.Tensor
+    ) -> torch.Tensor:
+        qkv = tex.fa_prepare(query_layer)
+        q, k, v = split_tensor_along_dim(qkv, 0, 3)
+        query_layer = torch.squeeze(q, 0)
+        key_layer = torch.squeeze(k, 0)
+        value_layer = torch.squeeze(v, 0)
+        return query_layer, key_layer, value_layer
+
+    @staticmethod
+    def backward(ctx,
+                 dq: torch.Tensor,
+                 dk: torch.Tensor,
+                 dv: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        dqkv = tex.fa_prepare_bwd(dq, dk, dv)
+        dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
+        return dq, dk, dv
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention implementation by using the flash-attn package.
@@ -231,6 +299,27 @@ class FlashAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
+    def _check_if_interleaved(self, q, k, v):
+        data_ptr = q.untyped_storage().data_ptr()
+        check_ptrs = all([x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v]])
+        if not check_ptrs:
+            return False
+
+        stride = q.stride()
+        check_strides = all([stride == x.stride() for x in [q, k, v]])
+        if not check_strides:
+            return False
+
+        shape = q.shape
+        check_shapes = all([shape == x.shape for x in [q, k, v]])
+        if not check_shapes:
+            return False
+
+        last_dim_size = shape[-1]
+        check_offsets = all([i * last_dim_size == x.storage_offset()
+                             for i, x in enumerate([q, k, v])])
+        return check_offsets
+
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -252,8 +341,17 @@ class FlashAttention(torch.nn.Module):
             attention_mask is None
         ), 'FlashAttention currently does not support external attention mask.'
 
-        query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-                       for x in (query_layer, key_layer, value_layer)]
+        # For now just 128, will make it more general in the future
+
+        if (query_layer.shape[-1] == 128 and
+            query_layer.shape[0] * query_layer.shape[1] >= 512 and
+            self._check_if_interleaved(query_layer, key_layer, value_layer)):
+            query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
+                                                                         key_layer,
+                                                                         value_layer)
+        else:
+            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+                           for x in (query_layer, key_layer, value_layer)]
 
         batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
 
@@ -731,9 +829,12 @@ class MultiHeadAttention(torch.nn.Module):
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
             # mixed_x_layer --> 3 [sq, b, np, hn]
-            query_layer, key_layer, value_layer = split_tensor_along_dim(
-                mixed_x_layer, split_dim, 3
-            )
+            if split_dim == -1:
+                query_layer, key_layer, value_layer = _SplitLastDim.apply(mixed_x_layer, 3)
+            else:
+                query_layer, key_layer, value_layer = split_tensor_along_dim(
+                    mixed_x_layer, split_dim, 3
+                )
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -761,7 +862,10 @@ class MultiHeadAttention(torch.nn.Module):
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
             # mixed_kv_layer --> 2 [sk, b, np, hn]
-            key_layer, value_layer = split_tensor_along_dim(mixed_kv_layer, split_dim, 2)
+            if split_dim == -1:
+                key_layer, value_layer = _SplitLastDim.apply(mixed_kv_layer, 2)
+            else:
+                key_layer, value_layer = split_tensor_along_dim(mixed_kv_layer, split_dim, 2)
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
