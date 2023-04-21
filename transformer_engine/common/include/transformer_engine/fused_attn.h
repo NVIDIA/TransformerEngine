@@ -78,7 +78,7 @@ enum NVTE_Mask_Type {
  *  - O = D * V.T
  *
  * Support Matrix:
- *  | precesion |    qkv layout   |  bias   |  mask   | sequence length |  head_dim  |
+ *  | precision |    qkv layout   |  bias   |  mask   | sequence length |  head_dim  |
  *  |    FP8    | QKV_INTERLEAVED | NO_BIAS | PADDING |   <= 512        |      64    |
  *
  *
@@ -119,7 +119,7 @@ void nvte_fused_attn_fwd_qkvpacked(
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
  * Support Matrix:
- *  | precesion |    qkv layout   |  bias   |  mask   | sequence length |  head_dim  |
+ *  | precision |    qkv layout   |  bias   |  mask   | sequence length |  head_dim  |
  *  |    FP8    | QKV_INTERLEAVED | NO_BIAS | PADDING |   <= 512        |      64    |
  *
  *
