@@ -190,6 +190,11 @@ def fused_attn_fwd_qkvpacked(
 
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen <= 512) and (d == 64):
+        assert (qkv_layout == "qkv_interleaved"
+                and bias_type == "no_bias"
+                and attn_mask_type == "padding"
+                ), """The FP8 fused attention API currently only supports qkv_interleaved layout,
+                no_bias type, and padding attention mask type."""
         assert (d_scale_qkv is not None), "d_scale_qkv is required for the FP8 API."
         assert (q_scale_s is not None), "q_scale_s is required for the FP8 API."
         assert (q_scale_o is not None), "q_scale_o is required for the FP8 API."
@@ -344,6 +349,11 @@ def fused_attn_bwd_qkvpacked(
 
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen <= 512) and d == 64:
+        assert (qkv_layout == "qkv_interleaved"
+                and bias_type == "no_bias"
+                and attn_mask_type == "padding"
+                ), """The FP8 fused attention API currently only supports qkv_interleaved layout,
+                no_bias type, and padding attention mask type."""
         assert (d_scale_qkv is not None), "d_scale_qkv is required for the FP8 API."
         assert (d_scale_s is not None), "d_scale_s is required for the FP8 API."
         assert (d_scale_o is not None), "d_scale_o is required for the FP8 API."
