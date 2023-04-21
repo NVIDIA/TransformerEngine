@@ -924,12 +924,6 @@ class TransformerLayer(torch.nn.Module):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    ub_bulk_wgrad: bool, default = False
-             Bulk overlap UserBuffer ReduceScatter | WGRAD GEMM
-    ub_bulk_dgrad: bool, default = False
-             Bulk overlap UserBuffer AllGather | DGRAD GEMM
-    ub_split_ag: bool, default = False
-             Split pipelined overlap UserBuffer AllGather -> GEMM
 
     Optimization parameters
     -----------------------
