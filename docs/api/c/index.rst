@@ -17,6 +17,7 @@ directly from C/C++, without Python.
    activation.h <activation>
    cast.h <cast>
    gemm.h <gemm>
+   fused_attn.h <fused_attn>
    layer_norm.h <layer_norm>
    softmax.h <softmax>
    transformer_engine.h <transformer_engine>

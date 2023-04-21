@@ -12,6 +12,9 @@ list(APPEND transformer_engine_SOURCES
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cpp
+     fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -30,9 +33,11 @@ target_include_directories(transformer_engine PUBLIC
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
-                      CUDA::nvToolsExt)
+                      CUDA::nvToolsExt
+		      CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
 
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
