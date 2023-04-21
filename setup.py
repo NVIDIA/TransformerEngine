@@ -21,9 +21,10 @@ with open(path + "/VERSION", "r") as f:
     te_version = f.readline()
 
 CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
-MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
-NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
-NVTE_MPI_INCLUDE = os.path.join(MPI_HOME, "include")
+NVTE_WITH_USERBUFFERS = int(os.environ.get("NVTE_WITH_USERBUFFERS", "0"))
+if NVTE_WITH_USERBUFFERS:
+    MPI_HOME = os.environ.get("MPI_HOME", "")
+    assert MPI_HOME, "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
 
 def get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output(
@@ -70,8 +71,8 @@ def extra_compiler_flags():
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
-    if NVTE_MPI_FOUND:
-        extra_flags.append("-DNVTE_MPI_FOUND")
+    if NVTE_WITH_USERBUFFERS:
+        extra_flags.append("-DNVTE_WITH_USERBUFFERS")
     return extra_flags
 
 
@@ -106,8 +107,9 @@ include_dirs = [
     "transformer_engine/pytorch/csrc",
     "3rdparty/cudnn-frontend/include",
 ]
-if (framework in ("all", "pytorch")) and NVTE_MPI_FOUND:
-    include_dirs.append(NVTE_MPI_INCLUDE)
+if NVTE_WITH_USERBUFFERS:
+    if MPI_HOME:
+        include_dirs.append(os.path.join(MPI_HOME, "include"))
 include_dirs = make_abs_path(include_dirs)
 
 args = sys.argv.copy()
@@ -166,9 +168,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
         self.pytorch_build_extensions.run()
 
     def cmake_flags(self):
-        if not NVTE_MPI_FOUND:
-            return []
-        return ["-DNVTE_MPI_FOUND=1", f"-DNVTE_MPI_INCLUDE={NVTE_MPI_INCLUDE}"]
+        return []
 
     @staticmethod
     def install_requires():
@@ -339,6 +339,8 @@ class TEBuildExtension(build_ext, object):
             self.dlfw_builder.append(functor(*args, **kwargs))
 
         flags = []
+        if NVTE_WITH_USERBUFFERS:
+            flags.append('-DNVTE_WITH_USERBUFFERS=ON')
         for builder in self.dlfw_builder:
             flags = flags + builder.cmake_flags()
 

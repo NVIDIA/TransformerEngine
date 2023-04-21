@@ -5,9 +5,9 @@
  ************************************************************************/
 
 #include "extensions.h"
-#ifdef NVTE_MPI_FOUND
+#ifdef NVTE_WITH_USERBUFFERS
 #include "comm_gemm_overlap.h"
-#endif  // NVTE_MPI_FOUND
+#endif  // NVTE_WITH_USERBUFFERS
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -1758,7 +1758,7 @@ size_t get_cublasLt_version() {
 
 
 bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
-#ifdef NVTE_MPI_FOUND
+#ifdef NVTE_WITH_USERBUFFERS
     return true;
 #else
     return false;
@@ -1824,7 +1824,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
     .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-#ifdef NVTE_MPI_FOUND
+#ifdef NVTE_WITH_USERBUFFERS
   py::enum_<ubuf::UBOverlapAlgo>(m, "UbufOverlapAlgo")
     .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
     .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
@@ -1843,11 +1843,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
-#else  // NVTE_MPI_FOUND
+#else  // NVTE_WITH_USERBUFFERS
   m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
   m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
   m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
-#endif  // NVTE_MPI_FOUND
+#endif  // NVTE_WITH_USERBUFFERS
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
     .value("kByte", transformer_engine::DType::kByte)
