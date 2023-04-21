@@ -133,3 +133,16 @@ float *nvte_tensor_scale_inv(const NVTETensor tensor) {
              "Tensor's inverse of scale must have Float32 type!");
   return reinterpret_cast<float*>(t.scale_inv.dptr);
 }
+
+void nvte_tensor_pack_create(NVTETensorPack* pack) {
+  for (int i = 0; i < pack->MAX_SIZE; i++) {
+     pack->tensors[i] = reinterpret_cast<NVTETensor>(new transformer_engine::Tensor);
+  }
+}
+
+void nvte_tensor_pack_destroy(NVTETensorPack* pack) {
+  for (int i = 0; i < pack->MAX_SIZE; i++) {
+     auto *t = reinterpret_cast<transformer_engine::Tensor*>(pack->tensors[i]);
+     delete t;
+  }
+}

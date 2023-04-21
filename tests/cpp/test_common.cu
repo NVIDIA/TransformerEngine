@@ -42,6 +42,7 @@ const std::string &typeName(DType type) {
   static const std::unordered_map<DType, std::string> name_map = {
     {DType::kByte, "byte"},
     {DType::kInt32, "int32"},
+    {DType::kInt64, "int64"},
     {DType::kFloat32, "float32"},
     {DType::kFloat16, "float16"},
     {DType::kBFloat16, "bfloat16"},
