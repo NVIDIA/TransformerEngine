@@ -28,11 +28,6 @@ endif()
 
 find_library(TE_LIB NAMES transformer_engine PATHS ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
 
-if(EXISTS ${NVTE_MPI_INCLUDE})
-    find_library(MPI_LIB NAMES mpi PATHS ${NVTE_MPI_INCLUDE} REQUIRED)
-    message(STATUS "Found MPI library: ${MPI_LIB}")
-endif()
-
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)

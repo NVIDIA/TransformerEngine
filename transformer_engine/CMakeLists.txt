@@ -8,7 +8,6 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
 endif()
 
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -26,6 +25,9 @@ find_package(Python COMPONENTS Interpreter Development REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_subdirectory(common)
+if(NVTE_WITH_USERBUFFERS)
+    add_subdirectory(pytorch/csrc/userbuffers)
+endif()
 
 option(ENABLE_JAX "Enable JAX in the building workflow." OFF)
 if(ENABLE_JAX)

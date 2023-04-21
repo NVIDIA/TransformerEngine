@@ -425,7 +425,8 @@ class DenseGeneral(TransformerEngineBase):
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
-                                                   self.bias_init, (self.features,),
+                                                   self.bias_init,
+                                                   features,
                                                    self.dtype,
                                                    axes=self.bias_axes)
         else:
@@ -446,7 +447,8 @@ class DenseGeneral(TransformerEngineBase):
             y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
         if bias is not None:
-            y += jnp.reshape(bias, (1,) * (y.ndim - 1) + (-1,))
+            bais_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
+            y += jnp.reshape(bias, bais_shape)
         return y
 
 
@@ -651,12 +653,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         bias = None
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
-                                                   self.bias_init, (self.features,),
+                                                   self.bias_init,
+                                                   features,
                                                    self.dtype,
                                                    axes=self.bias_axes)
 
         if bias is not None:
-            z += jnp.reshape(bias, (1,) * (z.ndim - 1) + (-1,))
+            bais_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
+            z += jnp.reshape(bias, bais_shape)
 
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
