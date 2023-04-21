@@ -19,10 +19,6 @@ add_executable(test_operator
 
 list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB})
 
-if(EXISTS ${NVTE_MPI_INCLUDE})
-    list(APPEND test_operator_LINKER_LIBS ${MPI_LIB})
-endif()
-
 target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS})
 target_compile_options(test_operator PRIVATE -O2)
 
