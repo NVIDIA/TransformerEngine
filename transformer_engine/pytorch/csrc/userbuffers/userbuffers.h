@@ -8,7 +8,7 @@
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
 #include <cuda.h>
-#include <mpi.h>
+#include <mpi.h>  // TODO (tym): Removing will remove PyT extension dependence on MPI
 #include "cuda_runtime.h"
 #include <pthread.h>
 #include <chrono>
