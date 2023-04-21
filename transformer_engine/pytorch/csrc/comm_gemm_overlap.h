@@ -14,9 +14,10 @@
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
-#include <transformer_engine/userbuffers.h>
+#include "userbuffers/userbuffers.h"
 
 #define HALF_BYTES 2
+#define UB_MAX_SM 32
 
 #define CHECK_CUDA(call)                                                                     \
   do {                                                                                       \
@@ -174,6 +175,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
     int ubuf_offset = 0;
+    int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -232,7 +234,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
           cudaEventRecord(_start_comm, (cudaStream_t)_stream_compute[last_compute_stream_id]));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
-      // Communication chunk
+      // Last communication chunk with max SM
+      _ub_comm->sms = UB_MAX_SM;
       reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
                                             (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
                                             _ub_comm, (cudaStream_t)_stream_comm);
@@ -255,7 +258,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
                                    (cudaStream_t)_stream_compute[i % _stream_compute.size()]));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
-        // Communication chunk
+        // Communication chunk. Uses MAX_SM at the last chunk
+        if (i == _num_splits-1) {
+          _ub_comm->sms = UB_MAX_SM;
+        }
         reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
                                               m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
 
@@ -264,6 +270,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
       }
     }
+    _ub_comm->sms = ori_sms;
     int last_compute_stream_id =
         (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
     CHECK_CUDA(

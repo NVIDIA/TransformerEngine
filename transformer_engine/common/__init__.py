@@ -37,8 +37,8 @@ def _load_library():
     return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
 
 
-def _load_mpi():
-    """Load MPI shared library"""
+def _load_userbuffers():
+    """Load shared library with userbuffers"""
 
     system = platform.system()
     if system == "Linux":
@@ -49,15 +49,14 @@ def _load_mpi():
         extension = "dll"
     else:
         raise RuntimeError(f"Unsupported operating system ({system})")
-    lib_name = "libmpi." + extension
-    MPI_HOME = os.environ.get("MPI_HOME", "/usr/local/mpi")
-    NVTE_MPI_FOUND = os.path.exists(MPI_HOME)
-    dll_path = os.path.join(MPI_HOME, "lib", lib_name)
+    lib_name = "libtransformer_engine_userbuffers." + extension
+    dll_path = get_te_path()
+    dll_path = os.path.join(dll_path, lib_name)
 
-    if NVTE_MPI_FOUND:
+    if os.path.exists(dll_path):
         return ctypes.CDLL(dll_path, mode=ctypes.RTLD_GLOBAL)
     return None
 
 
-_TE_LIB_CTYPES = _load_mpi()
 _TE_LIB_CTYPES = _load_library()
+_UB_LIB_CTYPES = _load_userbuffers()
