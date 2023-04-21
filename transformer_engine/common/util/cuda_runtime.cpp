@@ -16,12 +16,12 @@ namespace transformer_engine {
 namespace cuda {
 
 int num_devices() {
-  static int num_devices_ = -1;
-  static std::once_flag flag;
-  auto init = [&] () {
-    NVTE_CHECK_CUDA(cudaGetDeviceCount(&num_devices_));
+  auto query_num_devices = [] () -> int {
+    int count;
+    NVTE_CHECK_CUDA(cudaGetDeviceCount(&count));
+    return count;
   };
-  std::call_once(flag, init);
+  static int num_devices_ = query_num_devices();
   return num_devices_;
 }
 
