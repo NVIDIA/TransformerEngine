@@ -273,7 +273,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 
-def _check_if_interleaved(self, q, k, v):
+def _check_if_interleaved(q, k, v):
     data_ptr = q.untyped_storage().data_ptr()
     check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
     if not check_ptrs:
