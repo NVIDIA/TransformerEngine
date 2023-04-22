@@ -51,7 +51,7 @@ def quantize(g, inputs, scale_inv, fp8_tensor):
 
     # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
     # custom ops, so cast the input if needed.
-    if inputs.type().scalarType() == "Half":
+    if inputs.type().scalarType() == "Half" or inputs.type().scalarType() == "BFloat16":
         inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
     scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
@@ -73,6 +73,8 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
     # custom ops, so cast the output if needed.
     if otype == int(tex.DType.kFloat16):
         out = g.op("Cast", out, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
+    elif otype == int(tex.DType.kBFloat16):
+        out = g.op("Cast", out, to_i=_C_onnx.TensorProtoDataType.BFLOAT16)
     return out
 
 
