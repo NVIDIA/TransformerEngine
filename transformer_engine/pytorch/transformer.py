@@ -117,8 +117,8 @@ class _SplitLastDim(torch.autograd.Function):
                      args[0].stride()
             )
             return ret, None
-        else:
-            return torch.cat(args, dim = -1), None
+
+        return torch.cat(args, dim = -1), None
 
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
@@ -273,6 +273,27 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 
+def _check_if_interleaved(self, q, k, v):
+    data_ptr = q.untyped_storage().data_ptr()
+    check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+    if not check_ptrs:
+        return False
+
+    stride = q.stride()
+    check_strides = all(stride == x.stride() for x in [q, k, v])
+    if not check_strides:
+        return False
+
+    shape = q.shape
+    check_shapes = all(shape == x.shape for x in [q, k, v])
+    if not check_shapes:
+        return False
+
+    last_dim_size = shape[-1]
+    check_offsets = all(i * last_dim_size == x.storage_offset()
+                        for i, x in enumerate([q, k, v]))
+    return check_offsets
+
 class FlashAttention(torch.nn.Module):
     """Dot product attention implementation by using the flash-attn package.
     """
@@ -299,27 +320,6 @@ class FlashAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
-    def _check_if_interleaved(self, q, k, v):
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs = all([x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v]])
-        if not check_ptrs:
-            return False
-
-        stride = q.stride()
-        check_strides = all([stride == x.stride() for x in [q, k, v]])
-        if not check_strides:
-            return False
-
-        shape = q.shape
-        check_shapes = all([shape == x.shape for x in [q, k, v]])
-        if not check_shapes:
-            return False
-
-        last_dim_size = shape[-1]
-        check_offsets = all([i * last_dim_size == x.storage_offset()
-                             for i, x in enumerate([q, k, v])])
-        return check_offsets
-
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -345,7 +345,7 @@ class FlashAttention(torch.nn.Module):
 
         if (query_layer.shape[-1] == 128 and
             query_layer.shape[0] * query_layer.shape[1] >= 512 and
-            self._check_if_interleaved(query_layer, key_layer, value_layer)):
+            _check_if_interleaved(query_layer, key_layer, value_layer)):
             query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
                                                                          key_layer,
                                                                          value_layer)
@@ -829,7 +829,7 @@ class MultiHeadAttention(torch.nn.Module):
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
             # mixed_x_layer --> 3 [sq, b, np, hn]
-            if split_dim == -1:
+            if split_dim == -1 and not is_in_onnx_export_mode():
                 query_layer, key_layer, value_layer = _SplitLastDim.apply(mixed_x_layer, 3)
             else:
                 query_layer, key_layer, value_layer = split_tensor_along_dim(
@@ -862,7 +862,7 @@ class MultiHeadAttention(torch.nn.Module):
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
             # mixed_kv_layer --> 2 [sk, b, np, hn]
-            if split_dim == -1:
+            if split_dim == -1 and not is_in_onnx_export_mode():
                 key_layer, value_layer = _SplitLastDim.apply(mixed_kv_layer, 2)
             else:
                 key_layer, value_layer = split_tensor_along_dim(mixed_kv_layer, split_dim, 2)
