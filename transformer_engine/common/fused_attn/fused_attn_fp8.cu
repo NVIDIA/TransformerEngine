@@ -148,23 +148,6 @@ static cudnn_frontend::Operation binary_pw_op_create(
   return pw_op_created;
 }
 
-static cudnn_frontend::Operation ternary_pw_op_create(
-                cudnn_frontend::Tensor const &xDesc,
-                cudnn_frontend::Tensor const &bDesc,
-                cudnn_frontend::Tensor const &tDesc,
-                cudnn_frontend::Tensor const &yDesc,
-                cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created = cudnn_frontend::OperationBuilder(
-                  CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-                  .setxDesc(xDesc)
-                  .setbDesc(bDesc)
-                  .settDesc(tDesc)
-                  .setyDesc(yDesc)
-                  .setpwDesc(pwDesc)
-                  .build();
-  return pw_op_created;
-}
-
 static cudnn_frontend::Tensor createAmax(
             const std::string& amax_tensor_name,
             const cudnn_frontend::Tensor& prevBlockOutputTensor,
