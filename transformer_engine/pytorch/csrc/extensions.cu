@@ -1843,7 +1843,7 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
     NVTE_CHECK(qkvi.size(3) == flash_attention::load_size);
 
     // [s, b, n, h * 3] -> [3, b, s, n, h]
-    std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3) / 3};
+    std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3)};
     at::Tensor qkv = at::empty(shape, at::CUDA(qkvi.scalar_type()));
 
     size_t warps = qkvi.size(0) * qkvi.size(1);
