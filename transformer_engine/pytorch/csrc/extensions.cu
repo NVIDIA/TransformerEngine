@@ -1843,8 +1843,7 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
     NVTE_CHECK(qkvi.size(3) == flash_attention::load_size);
 
     // [s, b, n, h * 3] -> [3, b, s, n, h]
-
-    std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3)};
+    std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3) / 3};
     at::Tensor qkv = at::empty(shape, at::CUDA(qkvi.scalar_type()));
 
     size_t warps = qkvi.size(0) * qkvi.size(1);
@@ -1886,10 +1885,8 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
     NVTE_CHECK(v.dim() == 4, "Expected 4-dim tensor.");
     NVTE_CHECK(q.scalar_type() == at::ScalarType::Half ||
                q.scalar_type() == at::ScalarType::BFloat16);
-    NVTE_CHECK(k.scalar_type() == at::ScalarType::Half ||
-               k.scalar_type() == at::ScalarType::BFloat16);
-    NVTE_CHECK(v.scalar_type() == at::ScalarType::Half ||
-               v.scalar_type() == at::ScalarType::BFloat16);
+    NVTE_CHECK(k.scalar_type() == q.scalar_type());
+    NVTE_CHECK(v.scalar_type() == q.scalar_type());
     NVTE_CHECK(q.size(3) % flash_attention::load_size == 0);
     NVTE_CHECK(q.size(3) == flash_attention::load_size);
     NVTE_CHECK(k.size(3) % flash_attention::load_size == 0);
