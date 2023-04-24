@@ -12,6 +12,9 @@ list(APPEND transformer_engine_SOURCES
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cpp
+     fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
@@ -38,9 +41,11 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cuda_driver
                       CUDA::cudart
                       CUDA::nvrtc
-                      CUDA::nvToolsExt)
+                      CUDA::nvToolsExt
+                      CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
 
 # Convert files to C++ strings
 function(convert_file_to_string_header file_ string_name)

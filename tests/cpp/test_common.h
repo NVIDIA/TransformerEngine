@@ -44,6 +44,7 @@ struct BytesToType<8> {
 
 using byte = uint8_t;
 using int32 = int32_t;
+using int64 = int64_t;
 using fp32 = float;
 using fp16 = half;
 using bf16 = nv_bfloat16;
@@ -54,6 +55,7 @@ template <typename T>
 struct TypeInfo{
     using types = std::tuple<byte,
                              int32,
+                             int64,
                              fp32,
                              fp16,
                              bf16,
@@ -208,6 +210,12 @@ bool isFp8Type(DType type);
         case DType::kInt32: \
             { \
                 using type = int32; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        case DType::kInt64: \
+            { \
+                using type = int64; \
                 {__VA_ARGS__} \
             } \
         break; \

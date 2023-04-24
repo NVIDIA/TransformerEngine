@@ -9,6 +9,7 @@
 
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
+#include <cudnn.h>
 #include <nvrtc.h>
 #include <string>
 #include <stdexcept>
@@ -40,6 +41,12 @@ inline void check_cublas_(cublasStatus_t status) {
     }
 }
 
+inline void check_cudnn_(cudnnStatus_t status) {
+    if ( status != CUDNN_STATUS_SUCCESS ) {
+        NVTE_ERROR("CUDNN Error: " + std::string(cudnnGetErrorString(status)));
+    }
+}
+
 inline void check_nvrtc_(nvrtcResult status) {
     if ( status != NVRTC_SUCCESS ) {
         NVTE_ERROR("NVRTC Error: " + std::string(nvrtcGetErrorString(status)));
@@ -51,6 +58,8 @@ inline void check_nvrtc_(nvrtcResult status) {
 #define NVTE_CHECK_CUDA(ans) { check_cuda_(ans); }
 
 #define NVTE_CHECK_CUBLAS(ans) { check_cublas_(ans); }
+
+#define NVTE_CHECK_CUDNN(ans) { check_cudnn_(ans); }
 
 #define NVTE_CHECK_NVRTC(ans) { check_nvrtc_(ans); }
 

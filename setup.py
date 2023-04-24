@@ -105,6 +105,7 @@ framework = os.environ.get("NVTE_FRAMEWORK", "pytorch")
 include_dirs = [
     "transformer_engine/common/include",
     "transformer_engine/pytorch/csrc",
+    "3rdparty/cudnn-frontend/include",
 ]
 if NVTE_WITH_USERBUFFERS:
     if MPI_HOME:

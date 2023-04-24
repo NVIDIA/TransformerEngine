@@ -14,7 +14,7 @@ extension. Has one to one mapping
 with enum in transformer_engine.h
 """
 TE_DType = {
-    torch.int8: tex.DType.kByte,
+    torch.uint8: tex.DType.kByte,
     torch.int32: tex.DType.kInt32,
     torch.float32: tex.DType.kFloat32,
     torch.half: tex.DType.kFloat16,
