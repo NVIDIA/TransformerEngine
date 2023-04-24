@@ -90,7 +90,7 @@ class _SplitLastDim(torch.autograd.Function):
     @staticmethod
     def backward(ctx,
                  *grad_outputs):
-        assert len(grad_outputs) > 0
+        assert len(grad_outputs) > 0, "No gradients received for backprop!"
 
         noop_ok = True
         strides = grad_outputs[0].stride()
