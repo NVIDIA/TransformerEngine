@@ -107,8 +107,8 @@ class _SplitLastDim(torch.autograd.Function):
 
         if noop_ok:
             ret = torch.Tensor().to(grad_outputs[0].dtype)
-            if grad_outputs[0].is_cuda:
-                ret = ret.cuda()
+            ret = torch.Tensor().to(device=grad_outputs[0].device,
+                                    dtype=grad_outputs[0].dtype)
             new_shape = list(shape)
             new_shape[-1] = new_shape[-1] * len(grad_outputs)
             ret.set_(grad_outputs[0].untyped_storage(),
