@@ -256,6 +256,9 @@ class _PrepareQKVForFA(torch.autograd.Function):
                 key_layer: torch.Tensor,
                 value_layer: torch.Tensor
     ) -> torch.Tensor:
+        # All inputs received are non-contiguous tensors.
+        # The `query_layer` tensor is used to access the
+        # full memory region of the QKV tensor.
         qkv = tex.fa_prepare_fwd(query_layer)
         q, k, v = split_tensor_along_dim(qkv, 0, 3)
         query_layer = torch.squeeze(q, 0)

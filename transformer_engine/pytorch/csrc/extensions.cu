@@ -1841,6 +1841,10 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
                qkvi.scalar_type() == at::ScalarType::BFloat16);
     NVTE_CHECK(qkvi.size(3) % flash_attention::load_size == 0);
     NVTE_CHECK(qkvi.size(3) == flash_attention::load_size);
+    NVTE_CHECK(qkvi.stride(3) == 1, "Wrong stride.");
+    NVTE_CHECK(qkvi.stride(2) == 3 * qkvi.size(3), "Wrong stride.");
+    NVTE_CHECK(qkvi.stride(1) == 3 * qkvi.size(3) * qkvi.size(2), "Wrong stride.");
+    NVTE_CHECK(qkvi.stride(0) == 3 * qkvi.size(3) * qkvi.size(2) * qkvi.size(1), "Wrong stride.");
 
     // [s, b, n, h * 3] -> [3, b, s, n, h]
     std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3)};
