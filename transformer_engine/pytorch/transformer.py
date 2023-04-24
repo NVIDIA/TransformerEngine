@@ -89,15 +89,15 @@ class _SplitLastDim(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx,
-                 *args):
-        assert len(args) > 0
+                 *grad_outputs):
+        assert len(grad_outputs) > 0
 
         noop_ok = True
-        strides = args[0].stride()
-        data_ptr = args[0].untyped_storage().data_ptr()
-        shape = args[0].shape
-        last_dim_size = args[0].shape[-1]
-        for i, tensor in enumerate(args):
+        strides = grad_outputs[0].stride()
+        data_ptr = grad_outputs[0].untyped_storage().data_ptr()
+        shape = grad_outputs[0].shape
+        last_dim_size = grad_outputs[0].shape[-1]
+        for i, tensor in enumerate(grad_outputs):
             if (tensor.stride() != strides or
                 tensor.shape != shape or
                 tensor.untyped_storage().data_ptr() != data_ptr or
@@ -106,19 +106,19 @@ class _SplitLastDim(torch.autograd.Function):
                 break
 
         if noop_ok:
-            ret = torch.Tensor().to(args[0].dtype)
-            if args[0].is_cuda:
+            ret = torch.Tensor().to(grad_outputs[0].dtype)
+            if grad_outputs[0].is_cuda:
                 ret = ret.cuda()
             new_shape = list(shape)
-            new_shape[-1] = new_shape[-1] * len(args)
-            ret.set_(args[0].untyped_storage(),
-                     args[0].storage_offset(),
+            new_shape[-1] = new_shape[-1] * len(grad_outputs)
+            ret.set_(grad_outputs[0].untyped_storage(),
+                     grad_outputs[0].storage_offset(),
                      new_shape,
-                     args[0].stride()
+                     grad_outputs[0].stride()
             )
             return ret, None
 
-        return torch.cat(args, dim = -1), None
+        return torch.cat(grad_outputs, dim = -1), None
 
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
@@ -256,7 +256,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
                 key_layer: torch.Tensor,
                 value_layer: torch.Tensor
     ) -> torch.Tensor:
-        qkv = tex.fa_prepare(query_layer)
+        qkv = tex.fa_prepare_fwd(query_layer)
         q, k, v = split_tensor_along_dim(qkv, 0, 3)
         query_layer = torch.squeeze(q, 0)
         key_layer = torch.squeeze(k, 0)

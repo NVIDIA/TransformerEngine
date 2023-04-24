@@ -1777,12 +1777,12 @@ constexpr int block_size = 512;
 
 template <typename T>
 __launch_bounds__(block_size)
-__global__ void prepare_kernel(const T *qkvi,
-                               T *qkv,
-                               const size_t B,
-                               const size_t S,
-                               const size_t Z,
-                               const size_t W) {
+__global__ void prepare_kernel_fwd(const T *qkvi,
+                                   T *qkv,
+                                   const size_t B,
+                                   const size_t S,
+                                   const size_t Z,
+                                   const size_t W) {
     const int warpid = (blockDim.x * blockIdx.x + threadIdx.x) / warp_size;
     const int id_in_warp = threadIdx.x % warp_size;
     const size_t offset_input = blockIdx.y * W + warpid * 3 * W * Z + id_in_warp * nvec;
@@ -1835,7 +1835,7 @@ __global__ void prepare_kernel_bwd(const T *q, const T *k, const T *v,
 
 }  // namespace flash_attention
 
-at::Tensor fa_prepare(at::Tensor qkvi) {
+at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
     NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
     NVTE_CHECK(qkvi.scalar_type() == at::ScalarType::Half ||
                qkvi.scalar_type() == at::ScalarType::BFloat16);
@@ -1854,8 +1854,8 @@ at::Tensor fa_prepare(at::Tensor qkvi) {
     int threads = flash_attention::block_size;
     if (qkvi.scalar_type() == at::ScalarType::Half) {
         using dtype = at::Half;
-        flash_attention::prepare_kernel<dtype><<<grid, threads, 0,
-                                                 at::cuda::getCurrentCUDAStream()>>>(
+        flash_attention::prepare_kernel_fwd<dtype><<<grid, threads, 0,
+                                                     at::cuda::getCurrentCUDAStream()>>>(
             qkvi.data_ptr<dtype>(),
             qkv.data_ptr<dtype>(),
             shape[1],
@@ -1864,8 +1864,8 @@ at::Tensor fa_prepare(at::Tensor qkvi) {
             shape[4]);
     } else {
         using dtype = at::BFloat16;
-        flash_attention::prepare_kernel<dtype><<<grid, threads, 0,
-                                                 at::cuda::getCurrentCUDAStream()>>>(
+        flash_attention::prepare_kernel_fwd<dtype><<<grid, threads, 0,
+                                                     at::cuda::getCurrentCUDAStream()>>>(
             qkvi.data_ptr<dtype>(),
             qkv.data_ptr<dtype>(),
             shape[1],
@@ -1980,7 +1980,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
-  m.def("fa_prepare", &fa_prepare, "Prepare QKV for Flash Attention");
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
 
   // Misc
