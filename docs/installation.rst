@@ -77,7 +77,7 @@ Execute the following commands to install Transformer Engine from source:
 
 .. code-block:: bash
 
-  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork along and checkout all submodules recursively.
+  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork and checkout all submodules recursively.
   cd TransformerEngine                                                     # Enter TE directory.
   git checkout stable                                                      # Checkout the correct branch.
   export NVTE_FRAMEWORK=pytorch                                            # Optionally set the framework.
