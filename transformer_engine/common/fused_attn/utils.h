@@ -9,7 +9,7 @@
 
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
-// #include <cudnn_frontend.h>
+#include <cudnn_frontend.h>
 #include <mutex>
 #include <cstdint>
 #include <cudnn.h>
@@ -34,6 +34,36 @@ void generateMatrixStrides(
             int64_t s_q, int64_t s_kv,
             int64_t d, int64_t* strideA,
             NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
+
+bool allowAllConfig(cudnnBackendDescriptor_t engine_config);
+
+cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id,
+                                            int64_t const *dim,
+                                            int64_t const *stride,
+                                            bool is_virtual, bool is_value);
+
+cudnn_frontend::Tensor tensor_create_with_offset(
+                cudnnDataType_t type, int64_t id,
+                int64_t const * dim, int64_t const * stride,
+                bool is_virtual, bool is_value,
+                std::shared_ptr<cudnn_frontend::Tensor> raggedOffset);
+
+cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type,
+                                                    cudnnPointwiseMode_t mode);
+
+cudnn_frontend::Operation unary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
+
+cudnn_frontend::Operation binary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
+    cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
+
+cudnn_frontend::Operation ternary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
+    cudnn_frontend::Tensor const &tDesc, cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
 
 struct FADescriptor {
   std::int64_t b;
@@ -64,6 +94,12 @@ struct FADescriptor {
 __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d,
                 int32_t *cu_seqlens_q, int32_t *actual_seqlens_q,
                 int32_t *qkv_ragged_offset, int32_t *o_ragged_offset);
+
+__global__ void cu_seqlens_to_actual_seqlens(
+  size_t b,
+  int32_t const * const q_cu_seqlens,
+  int32_t const * const kv_cu_seqlens,
+  int32_t *q_seqlens, int32_t *kv_seqlens);
 
 }  // namespace fused_attn
 
