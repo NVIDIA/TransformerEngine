@@ -69,3 +69,17 @@ Execute the following command to install the latest development build of Transfo
   NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for JAX only.
   NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
   NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
+  
+  Installation (from source)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Execute the following commands to install Transformer Engine from source:
+
+.. code-block:: bash
+
+  git clone https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork.
+  cd TransformerEngine                                         # Enter TE directory.
+  git checkout stable                                          # Checkout the correct branch.
+  git submodule init; git submodule update                     # Checkout the submodules.
+  export NVTE_FRAMEWORK=pytorch                                # Optionally set the framework.
+  pip install .                                                # Build and install.
