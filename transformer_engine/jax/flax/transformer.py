@@ -41,6 +41,11 @@ def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[
 
 def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     """
+    .. warning::
+        This function is moved into submodule `flax`. Please import this from
+        `transformer_engine.jax.flax` and current importing path will be deprecated
+        in near feature.
+
     Extend the given Flax logical axis rules with the predefined TransformerLayer's
     logical axis rules.
 
@@ -187,6 +192,11 @@ class AttentionType(Enum):
 
 class MultiHeadAttention(nn.Module):
     r"""
+    .. warning::
+        This function is moved into submodule `flax`. Please import this from
+        `transformer_engine.jax.flax` and current importing path will be deprecated
+        in near feature.
+
     Multi-head Attention (MHA), including Query,
     Key, Value and Output projection.
 
@@ -550,6 +560,11 @@ class MultiHeadAttention(nn.Module):
 
 class RelativePositionBiases(nn.Module):
     """
+    .. warning::
+        This function is moved into submodule `flax`. Please import this from
+        `transformer_engine.jax.flax` and current importing path will be deprecated
+        in near feature.
+
     T5-style relative positional embeddings to the attention logits.
 
     Parameters
@@ -642,6 +657,11 @@ class RelativePositionBiases(nn.Module):
 
 class TransformerLayerType(Enum):
     r"""
+    .. warning::
+        This function is moved into submodule `flax`. Please import this from
+        `transformer_engine.jax.flax` and current importing path will be deprecated
+        in near feature.
+
     TransformerLayerType is an Enum class to specify a type of TransformerLayer
 
     Values
@@ -657,6 +677,11 @@ class TransformerLayerType(Enum):
 
 class TransformerLayer(nn.Module):
     r"""
+    .. warning::
+        This function is moved into submodule `flax`. Please import this from
+        `transformer_engine.jax.flax` and current importing path will be deprecated
+        in near feature.
+
     TransformerLayer is made up of a relative embedding,
     an attention block and a feedforward network (MLP).
     This standard layer is based on the paper “Attention Is All You Need”.
