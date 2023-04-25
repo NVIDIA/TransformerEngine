@@ -70,7 +70,7 @@ Execute the following command to install the latest development build of Transfo
   NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
   NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
   
-  Installation (from source)
+Installation (from source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Execute the following commands to install Transformer Engine from source:
