@@ -1090,7 +1090,8 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
-              attnScale, isTraining, dropoutProbability, layout, tensorType};
+              attnScale, isTraining, dropoutProbability, NVTE_Mask_Type::NVTE_NO_MASK,
+              layout, NVTE_Bias_Type::NVTE_NO_BIAS, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static CacheType fa_fprop_cache;
@@ -1405,7 +1406,8 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
-              attnScale, false, dropoutProbability, layout, tensorType};
+              attnScale, false, dropoutProbability, NVTE_Mask_Type::NVTE_NO_MASK,
+              layout, NVTE_Bias_Type::NVTE_NO_BIAS, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static CacheType fa_bprop_cache;

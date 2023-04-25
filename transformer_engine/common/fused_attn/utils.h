@@ -44,16 +44,20 @@ struct FADescriptor {
   float attnScale;
   bool isTraining;
   float dropoutProbability;
+  NVTE_Mask_Type mask_type;
   NVTE_QKV_Layout layout;
+  NVTE_Bias_Type bias_type;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FADescriptor &rhs) const {
     return std::tie(b, h, s_q, s_kv, d,
                     attnScale, isTraining, dropoutProbability,
-                    layout, tensor_type) < std::tie(
-                            rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
-                            rhs.attnScale, rhs.isTraining,
-                            rhs.dropoutProbability, rhs.layout, rhs.tensor_type);
+                    mask_type, layout, bias_type, tensor_type)
+                    < std::tie(
+                      rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
+                      rhs.attnScale, rhs.isTraining,
+                      rhs.dropoutProbability, rhs.mask_type,
+                      rhs.layout, rhs.bias_type, rhs.tensor_type);
   }
 };
 

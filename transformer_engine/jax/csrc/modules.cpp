@@ -731,6 +731,14 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         desc.scale_factor, stream);
 }
 
+inline NVTE_Mask_Type ToMaskType(bool is_causal_masking) {
+    // TODO(rewang): NOMASK
+    if (is_causal_masking) {
+        return NVTE_Mask_Type::NVTE_CAUSAL_MASK;
+    }
+    return NVTE_Mask_Type::NVTE_PADDING_MASK;
+}
+
 void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
                                    size_t opaque_len) {
     const CustomCallFMHADescriptor &descriptor =
@@ -765,9 +773,10 @@ void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const ch
     nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
                   NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
                   descriptor.dropout_probability, NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
-                  descriptor.is_causal_masking, qkv, static_cast<char *>(qkv) + qkv_stride,
-                  static_cast<char *>(qkv) + 2 * qkv_stride, softmax_aux, output, bias, q_seqlen,
-                  kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
+                  ToMaskType(descriptor.is_causal_masking), qkv,
+                  static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
+                  softmax_aux, output, bias, q_seqlen, kv_seqlen, workspace,
+                  get_cudnn_dtype(descriptor.dtype), stream, handle);
 }
 
 void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -805,7 +814,7 @@ void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const c
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
                   NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, descriptor.is_causal_masking, qkv,
+                  descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), qkv,
                   static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
                   softmax_aux, dqkv, static_cast<char *>(dqkv) + qkv_stride,
                   static_cast<char *>(dqkv) + 2 * qkv_stride, doutput, dp, dbias, q_seqlen,
@@ -844,7 +853,7 @@ void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const c
     nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
                   NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
                   descriptor.dropout_probability, NVTE_Bias_Type::NVTE_NO_BIAS,
-                  descriptor.is_causal_masking, q, static_cast<char *>(kv),
+                  ToMaskType(descriptor.is_causal_masking), q, static_cast<char *>(kv),
                   static_cast<char *>(kv) + kv_stride, softmax_aux, output, nullptr, q_seqlen,
                   kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
 }
@@ -883,7 +892,7 @@ void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const 
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
                   NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, descriptor.is_causal_masking, q,
+                  descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), q,
                   static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
                   static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp,
                   nullptr, q_seqlen, kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype),

@@ -253,7 +253,7 @@ static cudnn_frontend::Tensor createBias(
 
 static cudnn_frontend::Tensor createMask(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    NVTE_QKV_Layout layout, bool is_causal_masking, cudnnDataType_t tensorType,
+    NVTE_QKV_Layout layout, NVTE_Mask_Type mask_type, cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor,
@@ -410,8 +410,9 @@ static cudnn_frontend::Tensor createMask(
 
   /////////////////// Apply the mask //////////////////////////
 
-  auto maskTensor = (is_causal_masking) ? std::move(causalMaskTensor)
-                                        : std::move(paddingMaskTensor);
+  auto maskTensor = (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+    ? std::move(causalMaskTensor)
+    : std::move(paddingMaskTensor);
 
   // Define the binary select to perform masking descriptor
   auto maskDesc =
@@ -426,8 +427,10 @@ static cudnn_frontend::Tensor createMask(
   ops.push_back(std::move(lessThanRow_op));
   ops.push_back(std::move(lessThanCol_op));
   ops.push_back(std::move(paddingMaskAnd_op));
-  if (is_causal_masking) ops.push_back(std::move(rowGreaterCol_op));
-  if (is_causal_masking) ops.push_back(std::move(causalMaskAnd_op));
+  if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    ops.push_back(std::move(rowGreaterCol_op));
+    ops.push_back(std::move(causalMaskAnd_op));
+  }
   ops.push_back(std::move(mask_op));
 
   return maskOutputTensor;
@@ -771,30 +774,6 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
   return dxTensor;
 }
 
-struct FMHADescriptor {
-  std::int64_t b;
-  std::int64_t h;
-  std::int64_t s_q;
-  std::int64_t s_kv;
-  std::int64_t d;
-  std::int64_t seed;
-  float scaling_factor;
-  float dropout_probability;
-  bool is_causal_masking;
-  NVTE_QKV_Layout layout;
-  NVTE_Bias_Type bias_type;
-  cudnnDataType_t tensor_type;
-
-  bool operator<(const FMHADescriptor &rhs) const {
-    return std::tie(b, h, s_q, s_kv, d, seed, scaling_factor,
-                    dropout_probability, is_causal_masking, layout, bias_type,
-                    tensor_type) < std::tie(rhs.b, rhs.h, rhs.s_q, rhs.s_kv,
-                                            rhs.d, rhs.seed, rhs.scaling_factor,
-                                            rhs.dropout_probability,
-                                            rhs.is_causal_masking, rhs.layout,
-                                            rhs.bias_type, rhs.tensor_type);
-  }
-};
 }  // namespace fmha
 }  // namespace transformer_engine
 
@@ -816,7 +795,7 @@ __global__ void cu_seqlens_to_actual_seqlens(
 void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                    int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
                    double dropout_probability, NVTE_Bias_Type bias_type,
-                   bool is_causal_masking, void *devPtrQ, void *devPtrK,
+                   NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
                    void *devPtrV, void *devPtrS, void *devPtrO,
                    void *devPtrBias, void *devCuSeqlenQ,
                    void *devCuSeqlenK, void *workspace, cudnnDataType_t tensorType,
@@ -835,26 +814,26 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
   try {
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    FMHADescriptor descriptor{b,
-                              h,
-                              s_q,
-                              s_kv,
-                              d,
-                              seed,
-                              scaling_factor,
-                              static_cast<float>(dropout_probability),
-                              is_causal_masking,
-                              layout,
-                              bias_type,
-                              tensorType};
+    FADescriptor descriptor{b,
+                            h,
+                            s_q,
+                            s_kv,
+                            d,
+                            scaling_factor,
+                            true,
+                            static_cast<float>(dropout_probability),
+                            mask_type,
+                            layout,
+                            bias_type,
+                            tensorType};
 
-    using CacheType = std::map<FMHADescriptor, cudnn_frontend::ExecutionPlan>;
+    using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
     static CacheType fmha_fprop_cache;
 
     bool enable_dropout = (dropout_probability != 0.0f);
 
     // Get plan from cache if cache is available, otherwise create one
-    auto get_plan = [&](CacheType &cache, const FMHADescriptor &descriptor) {
+    auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
       // if hit, return
       auto it = cache.find(descriptor);
       if (it != cache.end()) {
@@ -876,7 +855,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
       }
 
       auto mask_output =
-          createMask(b, h, s_q, s_kv, d, layout, is_causal_masking, tensorType,
+          createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType,
                      ops, bmm1_output, false);
 
       cudnn_frontend::throw_if(dropout_probability == 1.0f,
@@ -1012,7 +991,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
 void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                    NVTE_QKV_Layout layout, float scaling_factor,
-                   float dropout_probability, bool is_causal_masking,
+                   float dropout_probability, NVTE_Mask_Type mask_type,
                    void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
                    void *devPtrdQ, void *devPtrdK, void *devPtrdV,
                    void *devPtrdO, void *devPtrdS, void *devPtrdBias,
@@ -1034,23 +1013,23 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     // Create cudnn handle
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    FMHADescriptor descriptor{b,
-                              h,
-                              s_q,
-                              s_kv,
-                              d,
-                              0,
-                              scaling_factor,
-                              static_cast<float>(dropout_probability),
-                              is_causal_masking,
-                              layout,
-                              NVTE_Bias_Type::NVTE_NO_BIAS,
-                              tensorType};
+    FADescriptor descriptor{b,
+                            h,
+                            s_q,
+                            s_kv,
+                            d,
+                            scaling_factor,
+                            true, // TODO(rewang): add is_training
+                            static_cast<float>(dropout_probability),
+                            mask_type,
+                            layout,
+                            NVTE_Bias_Type::NVTE_NO_BIAS,
+                            tensorType};
 
-    using CacheType = std::map<FMHADescriptor, cudnn_frontend::ExecutionPlan>;
+    using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
     static CacheType fmha_bprop_cache;
 
-    auto get_plan = [&](CacheType &cache, const FMHADescriptor &descriptor) {
+    auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
       auto it = cache.find(descriptor);
       if (it != cache.end()) {
         return it->second;
@@ -1269,7 +1248,7 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
       // mask
       auto dsAfterMaskTensor =
-          createMask(b, h, s_q, s_kv, d, layout, is_causal_masking, tensorType,
+          createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType,
                      ops, dsTensor, true);
 
 #if (CUDNN_VERSION >= 8901)
