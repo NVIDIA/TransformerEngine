@@ -19,9 +19,7 @@
 #define CUDNN_FRONTEND_UNUSED(X) ((void)X)
 
 namespace transformer_engine {
-namespace fmha {
-
-using namespace transformer_engine::fused_attn;
+namespace fused_attn {
 
 #define Q_ID 1
 #define K_ID 2
@@ -694,10 +692,9 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
   return dxTensor;
 }
 
-}  // namespace fmha
+}  // namespace fused_attn
 }  // namespace transformer_engine
 
-using namespace transformer_engine::fmha;
 using namespace transformer_engine::fused_attn;
 
 void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
