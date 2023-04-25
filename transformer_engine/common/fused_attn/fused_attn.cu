@@ -21,86 +21,7 @@
 namespace transformer_engine {
 namespace fmha {
 
-// // Used for MHA
-void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
-                        int64_t d, int64_t *strideA, MHA_Layout layout,
-                        MHA_Matrix matrix) {
-  CUDNN_FRONTEND_UNUSED(b);
-  constexpr int batch_dim_idx = 0;
-  constexpr int head_dim_idx = 1;
-  constexpr int seqlen_dim_idx = 2;
-  constexpr int hidden_dim_idx = 3;
-
-  constexpr int seqlen_transpose_dim_idx = 3;
-  constexpr int hidden_transpose_dim_idx = 2;
-
-  constexpr int seqlen_q_dim_idx = 2;
-  constexpr int seqlen_kv_dim_idx = 3;
-
-  switch (matrix) {
-    case MHA_Matrix::Q_Matrix:
-      if (layout == MHA_Layout::QKV_INTERLEAVED) {
-        strideA[hidden_dim_idx] = 1;
-        strideA[seqlen_dim_idx] = 3 * h * d;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_q * 3 * h * d;
-      } else {
-        strideA[hidden_dim_idx] = 1;
-        strideA[seqlen_dim_idx] = h * d;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_q * h * d;
-      }
-      break;
-    case MHA_Matrix::K_Matrix:
-      if (layout == MHA_Layout::QKV_INTERLEAVED) {
-        strideA[seqlen_transpose_dim_idx] = 3 * h * d;
-        strideA[hidden_transpose_dim_idx] = 1;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * 3 * h * d;
-      } else if (layout == MHA_Layout::KV_INTERLEAVED) {
-        strideA[seqlen_transpose_dim_idx] = 2 * h * d;
-        strideA[hidden_transpose_dim_idx] = 1;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * 2 * h * d;
-      } else {
-        strideA[seqlen_transpose_dim_idx] = h * d;
-        strideA[hidden_transpose_dim_idx] = 1;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * h * d;
-      }
-      break;
-    case MHA_Matrix::V_Matrix:
-      if (layout == MHA_Layout::QKV_INTERLEAVED) {
-        strideA[hidden_dim_idx] = 1;
-        strideA[seqlen_dim_idx] = 3 * h * d;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * 3 * h * d;
-      } else if (layout == MHA_Layout::KV_INTERLEAVED) {
-        strideA[hidden_dim_idx] = 1;
-        strideA[seqlen_dim_idx] = 2 * h * d;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * 2 * h * d;
-      } else {
-        strideA[hidden_dim_idx] = 1;
-        strideA[seqlen_dim_idx] = h * d;
-        strideA[head_dim_idx] = d;
-        strideA[batch_dim_idx] = s_kv * h * d;
-      }
-      break;
-    case MHA_Matrix::S_Matrix:
-      strideA[seqlen_kv_dim_idx] = 1;
-      strideA[seqlen_q_dim_idx] = s_kv;
-      strideA[head_dim_idx] = s_q * s_kv;
-      strideA[batch_dim_idx] = h * s_q * s_kv;
-      break;
-    case MHA_Matrix::O_Matrix:
-      strideA[seqlen_kv_dim_idx] = 1;
-      strideA[seqlen_q_dim_idx] = h * d;
-      strideA[head_dim_idx] = d;
-      strideA[batch_dim_idx] = s_q * h * d;
-      break;
-  }
-}
+using namespace transformer_engine::fused_attn;
 
 #define Q_ID 1
 #define K_ID 2
@@ -205,7 +126,7 @@ static cudnn_frontend::Operation ternary_pw_op_create(
 #if (CUDNN_VERSION >= 8700)
 
 static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
-                        int64_t d, MHA_Layout layout,
+                        int64_t d, NVTE_QKV_Layout layout,
                         cudnnDataType_t tensorType,
                         // NOLINTNEXTLINE(runtime/references)
                         std::vector<cudnn_frontend::Operation> &ops) {
@@ -216,7 +137,7 @@ static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
   int64_t k_dim[4] = {b, h, d, s_kv};
   int64_t k_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, k_stride, layout,
-                     MHA_Matrix::K_Matrix);
+                     NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
   auto scaleTensor = tensor_create(tensorType, S_CONST_ID, scale_dim,
                                    scale_stride, false, true);  // is by value
@@ -236,24 +157,24 @@ static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 
 static cudnn_frontend::Tensor createBMM1(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    MHA_Layout layout, cudnnDataType_t tensorType,
+    NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops) {
   // Creates the necessary tensor descriptors
   int64_t q_dim[4] = {b, h, s_q, d};
   int64_t q_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout,
-                     MHA_Matrix::Q_Matrix);
+                     NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
   int64_t k_dim[4] = {b, h, d, s_kv};
   int64_t k_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, k_stride, layout,
-                     MHA_Matrix::K_Matrix);
+                     NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
   int64_t p_dim[4] = {b, h, s_q, s_kv};
   int64_t p_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, p_stride, layout,
-                     MHA_Matrix::S_Matrix);
+                     NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   int64_t seqlen_dim[4] = {b, 1, 1, 1};
   int64_t seqlen_stride[4] = {1, 1, 1, 1};
@@ -295,7 +216,7 @@ static cudnn_frontend::Tensor createBMM1(
 
 static cudnn_frontend::Tensor createBias(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    MHA_Layout layout, cudnnDataType_t tensorType,
+    NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor) {
@@ -309,7 +230,7 @@ static cudnn_frontend::Tensor createBias(
   int64_t afterBias_dim[4] = {b, h, s_q, s_kv};
   int64_t afterBias_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, afterBias_stride, layout,
-                     MHA_Matrix::S_Matrix);
+                     NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   // bias
   auto bTensor = tensor_create(tensorType, B_ID, b_dim, b_stride, false, false);
@@ -332,7 +253,7 @@ static cudnn_frontend::Tensor createBias(
 
 static cudnn_frontend::Tensor createMask(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    MHA_Layout layout, bool is_causal_masking, cudnnDataType_t tensorType,
+    NVTE_QKV_Layout layout, bool is_causal_masking, cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor,
@@ -514,7 +435,7 @@ static cudnn_frontend::Tensor createMask(
 
 static cudnn_frontend::Tensor createSoftmaxForward(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    MHA_Layout layout, bool enable_dropout, bool softmax_output_virtual,
+    NVTE_QKV_Layout layout, bool enable_dropout, bool softmax_output_virtual,
     cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
@@ -712,7 +633,7 @@ static cudnn_frontend::Tensor createDropout(
 }
 
 static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
-                       int64_t d, MHA_Layout layout, cudnnDataType_t tensorType,
+                       int64_t d, NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
                        // NOLINTNEXTLINE(runtime/references)
                        std::vector<cudnn_frontend::Operation> &ops,
                        cudnn_frontend::Tensor const &prevBlockOutputTensor) {
@@ -726,12 +647,12 @@ static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
   int64_t v_dim[4] = {b, h, s_kv, d};
   int64_t v_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout,
-                     MHA_Matrix::V_Matrix);
+                     NVTE_QKV_Matrix::NVTE_V_Matrix);
 
   int64_t o_dim[4] = {b, h, s_q, d};
   int64_t o_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout,
-                     MHA_Matrix::O_Matrix);
+                     NVTE_QKV_Matrix::NVTE_O_Matrix);
 
   auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim,
                                      seqlen_stride, false, false);
@@ -764,7 +685,7 @@ static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
 
 static cudnn_frontend::Tensor createSoftmaxBackward(
     int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-    MHA_Layout layout, cudnnDataType_t tensorType,
+    NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &yTensor,
@@ -779,7 +700,7 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
   int64_t p_dim[4] = {b, h, s_q, s_kv};
   int64_t p_stride[4];
   generateMatrixStrides(b, h, s_q, s_kv, d, p_stride, layout,
-                     MHA_Matrix::S_Matrix);
+                     NVTE_QKV_Matrix::NVTE_S_Matrix);
 
   int64_t p_reduction_dim[4] = {b, h, s_q, 1};
   int64_t p_reduction_stride[4];
@@ -860,8 +781,8 @@ struct FMHADescriptor {
   float scaling_factor;
   float dropout_probability;
   bool is_causal_masking;
-  MHA_Layout layout;
-  MHA_Bias_Type bias_type;
+  NVTE_QKV_Layout layout;
+  NVTE_Bias_Type bias_type;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FMHADescriptor &rhs) const {
@@ -878,6 +799,7 @@ struct FMHADescriptor {
 }  // namespace transformer_engine
 
 using namespace transformer_engine::fmha;
+using namespace transformer_engine::fused_attn;
 
 __global__ void cu_seqlens_to_actual_seqlens(
   size_t b,
@@ -892,8 +814,8 @@ __global__ void cu_seqlens_to_actual_seqlens(
 }
 
 void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                   int64_t seed, MHA_Layout layout, float scaling_factor,
-                   double dropout_probability, MHA_Bias_Type bias_type,
+                   int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
+                   double dropout_probability, NVTE_Bias_Type bias_type,
                    bool is_causal_masking, void *devPtrQ, void *devPtrK,
                    void *devPtrV, void *devPtrS, void *devPtrO,
                    void *devPtrBias, void *devCuSeqlenQ,
@@ -910,10 +832,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     static_cast<int32_t*>(devActualSeqlenQ),
     static_cast<int32_t*>(devActualSeqlenK));
                     
-  // cudnnHandle_t handle_;
   try {
-    // Create cudnn handle
-    // checkCudnnErr(cudnnCreate(&handle_));
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
     FMHADescriptor descriptor{b,
@@ -952,7 +871,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
       auto bmm1_output =
           createBMM1(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
-      if (bias_type != MHA_Bias_Type::NO_BIAS) {
+      if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
         createBias(b, h, s_q, s_kv, d, layout, tensorType, ops, bmm1_output);
       }
 
@@ -1047,7 +966,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
     data_ptrs.insert(std::pair<uint64_t, void *>(O_ID, devPtrO));
 
-    if (bias_type != MHA_Bias_Type::NO_BIAS) {
+    if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
       data_ptrs.insert(std::pair<uint64_t, void *>(B_ID, devPtrBias));
     }
 
@@ -1092,7 +1011,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 }
 
 void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                   MHA_Layout layout, float scaling_factor,
+                   NVTE_QKV_Layout layout, float scaling_factor,
                    float dropout_probability, bool is_causal_masking,
                    void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
                    void *devPtrdQ, void *devPtrdK, void *devPtrdV,
@@ -1125,7 +1044,7 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                               static_cast<float>(dropout_probability),
                               is_causal_masking,
                               layout,
-                              MHA_Bias_Type::NO_BIAS,
+                              NVTE_Bias_Type::NVTE_NO_BIAS,
                               tensorType};
 
     using CacheType = std::map<FMHADescriptor, cudnn_frontend::ExecutionPlan>;
@@ -1144,24 +1063,24 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
       int64_t q_dim[4] = {b, h, s_q, d};
       int64_t q_stride[4];
       generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout,
-                         MHA_Matrix::Q_Matrix);
+                         NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
       int64_t k_dim[4] = {b, h, s_kv, d};
       int64_t k_stride[4];
       generateMatrixStrides(
           b, h, s_q, s_kv, d, k_stride, layout,
-          MHA_Matrix::V_Matrix);  // type is correct as K is not transposed
+          NVTE_QKV_Matrix::NVTE_K_Matrix);  // type is correct as K is not transposed
 
       int64_t v_dim[4] = {b, h, d, s_kv};
       int64_t v_stride[4];
       generateMatrixStrides(
           b, h, s_q, s_kv, d, v_stride, layout,
-          MHA_Matrix::K_Matrix);  // type is correct as V is transposed
+          NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose);  // type is correct as V is transposed
 
       int64_t p_dim[4] = {b, h, s_q, s_kv};
       int64_t p_stride[4];
       generateMatrixStrides(b, h, s_q, s_kv, d, p_stride, layout,
-                         MHA_Matrix::S_Matrix);
+                         NVTE_QKV_Matrix::NVTE_S_Matrix);
 
       int64_t p_transpose_dim[4] = {b, h, s_kv, s_q};
       int64_t p_transpose_stride[4];
@@ -1173,7 +1092,7 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
       int64_t o_dim[4] = {b, h, s_q, d};
       int64_t o_stride[4];
       generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout,
-                         MHA_Matrix::O_Matrix);
+                         NVTE_QKV_Matrix::NVTE_O_Matrix);
 
       int64_t seqlen_dim[4] = {b, 1, 1, 1};
       int64_t seqlen_stride[4] = {1, 1, 1, 1};

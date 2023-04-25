@@ -17,10 +17,11 @@
 #include <vector>
 
 #include "common/common.h"
-#include "common/fused_attn/fused_attn.h"
+#include "common/fused_attn/fused_attn.h"  // TODO(rewang): remove this
 #include "common/fused_attn/utils.h"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/gemm.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
@@ -762,8 +763,8 @@ void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const ch
     auto workspace_size = 2 * batch * sizeof(int32_t);
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
-                  MHA_Layout::QKV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, MHA_Bias_Type::POST_SCALE_BIAS,
+                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
+                  descriptor.dropout_probability, NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
                   descriptor.is_causal_masking, qkv, static_cast<char *>(qkv) + qkv_stride,
                   static_cast<char *>(qkv) + 2 * qkv_stride, softmax_aux, output, bias, q_seqlen,
                   kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
@@ -803,7 +804,7 @@ void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const c
     auto workspace_size = 2 * batch * sizeof(int32_t);
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
-                  MHA_Layout::QKV_INTERLEAVED, descriptor.scaling_factor,
+                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
                   descriptor.dropout_probability, descriptor.is_causal_masking, qkv,
                   static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
                   softmax_aux, dqkv, static_cast<char *>(dqkv) + qkv_stride,
@@ -841,8 +842,8 @@ void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const c
     auto workspace_size = 2 * batch * sizeof(int32_t);
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
-                  MHA_Layout::KV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, MHA_Bias_Type::NO_BIAS,
+                  NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
+                  descriptor.dropout_probability, NVTE_Bias_Type::NVTE_NO_BIAS,
                   descriptor.is_causal_masking, q, static_cast<char *>(kv),
                   static_cast<char *>(kv) + kv_stride, softmax_aux, output, nullptr, q_seqlen,
                   kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
@@ -880,12 +881,13 @@ void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const 
 
     auto workspace_size = 2 * batch * sizeof(int32_t);
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    nvte_fmha_bwd(
-        batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, MHA_Layout::KV_INTERLEAVED,
-        descriptor.scaling_factor, descriptor.dropout_probability, descriptor.is_causal_masking, q,
-        static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
-        static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp, nullptr,
-        q_seqlen, kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
+    nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
+                  NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
+                  descriptor.dropout_probability, descriptor.is_causal_masking, q,
+                  static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
+                  static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp,
+                  nullptr, q_seqlen, kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype),
+                  stream, handle);
 }
 
 }  // namespace jax

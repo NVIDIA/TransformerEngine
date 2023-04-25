@@ -51,13 +51,13 @@ void generateMatrixStrides(
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 3 * h * d;
             } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[seqlen_transpose_dim_idx] = 2 * h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_dim_idx] = 2 * h * d;
+                strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 2 * h * d;
             } else {
-                strideA[seqlen_transpose_dim_idx] = h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_dim_idx] = h * d;
+                strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * h * d;
             }
