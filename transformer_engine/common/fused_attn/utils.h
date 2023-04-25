@@ -7,8 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
-#include <cudnn_frontend.h>
+// #include <cudnn_frontend.h>
+#include <mutex>
+#include <cstdint>
+#include <cudnn.h>
 
 namespace transformer_engine {
 namespace fused_attn {

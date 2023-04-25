@@ -13,6 +13,7 @@ list(APPEND transformer_engine_SOURCES
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
      fused_attn/fused_attn_fp8.cu
+     fused_attn/fused_attn.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu

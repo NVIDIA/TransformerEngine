@@ -6,16 +6,19 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
 from enum import Enum
+from math import sqrt
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from jax import dtypes
 from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 
+from .fmha import self_fmha, cross_fmha
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from .softmax import SoftmaxType
@@ -129,6 +132,7 @@ def combine_biases(*masks: Optional[Array]):
 def core_attention(query: Array,
                    key: Array,
                    value: Array,
+                   scale_factor: float,
                    transpose_batch_sequence: bool,
                    softmax_type: SoftmaxType = SoftmaxType.SCALED,
                    softmax_sharding_type: ShardingType = ShardingType.SINGLE,
@@ -159,6 +163,7 @@ def core_attention(query: Array,
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
     attn_weights = Softmax(softmax_type=softmax_type,
+                           scale_factor=scale_factor,
                            sharding_type=softmax_sharding_type)(attn_weights, mask, bias)
 
     if not deterministic and dropout_rate > 0.:
@@ -205,14 +210,6 @@ class MultiHeadAttention(nn.Module):
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    zero_centered_gamma : bool, default = False
-        If set to `True`, the LayerNorm formula changes to
-
-        .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
-            (1 + \gamma) + \beta
-
-        This parameter is only applicable for 'layernorm'.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         Used for initializing the QKV and Output projection weights.
@@ -258,7 +255,6 @@ class MultiHeadAttention(nn.Module):
     dropout_rng_name: str = 'dropout'
     layernorm_type: str = "layernorm"
     layernorm_epsilon: float = 1e-6
-    zero_centered_gamma: bool = False
     kernel_init: Initializer = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -312,9 +308,8 @@ class MultiHeadAttention(nn.Module):
             Output tensors.
         """
 
-        depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-
         def query_init(*args):
+            depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
             return self.kernel_init(*args) / (depth_scaling if self.scaled_query_init else 1.0)
 
         def qkv_init(key, shape, dtype):
@@ -349,13 +344,45 @@ class MultiHeadAttention(nn.Module):
 
         first_sharding_type, second_sharding_type = infer_sharding_type()
 
+        canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
+        q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
+        kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
+        fmha_supported_seqlen = [128, 256, 384, 512]
+        use_fmha = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
+            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
+            q_seqlen in fmha_supported_seqlen and kv_seqlen in fmha_supported_seqlen
+
+        if not use_fmha:
+            reason = ""
+            if decode:
+                reason += f"required decode=False but got {decode}, "
+            if self.transpose_batch_sequence:
+                reason += f"required transpose_batch_sequence=False " \
+                          f"but got {self.transpose_batch_sequence}, "
+            if not self.fuse_qkv:
+                reason += f"required fuse_qkv=True but got {self.fuse_qkv}, "
+            if self.dropout_rate != 0:
+                # TODO(rewang): add dropout support
+                reason += f"required no dropout but got dropout_rate={self.dropout_rate}, "
+            if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
+                reason += f"required dtype equal to bfloat16 or float16 " \
+                          f"but got dtype={canonicalize_dtype}, "
+            if q_seqlen not in fmha_supported_seqlen:
+                reason += f"required q_seqlen in {fmha_supported_seqlen} but got {q_seqlen=}, "
+            if kv_seqlen not in fmha_supported_seqlen:
+                reason += f"required kv_seqlen in {fmha_supported_seqlen} but got {kv_seqlen=}, "
+            print(
+                f"Fused multi-head attention is not enabled, " \
+                f"{reason} fall back to unfused multi-head attention",
+                flush=True
+            )
+
         residual = inputs_q
         if self.fuse_qkv:
             if inputs_q is inputs_kv:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
-                    zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=(3, self.num_heads * self.head_dim),
@@ -369,24 +396,18 @@ class MultiHeadAttention(nn.Module):
                     bias_init=self.bias_init,
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
-                query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
-                query = jnp.reshape(query, (*query.shape[:-2], -1))
-                key = jnp.reshape(key, (*key.shape[:-2], -1))
-                value = jnp.reshape(value, (*value.shape[:-2], -1))
-                if self.scale_attn_logits:
-                    query = query / depth_scaling
+                if not use_fmha:
+                    query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
-                    zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=self.num_heads * self.head_dim,
                     sharding_type=first_sharding_type,
                     transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.apply_residual_connection_post_layernorm,
-                    depth_scaling=depth_scaling if self.scale_attn_logits else None,
                     scale_axes=('embed',),
                     kernel_axes=('embed', 'joined_kv'),
                     use_bias=self.use_bias,
@@ -404,11 +425,8 @@ class MultiHeadAttention(nn.Module):
                                        bias_init=self.bias_init,
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
-                key, value = jnp.split(kv_proj, [
-                    1,
-                ], axis=-2)
-                key = jnp.reshape(key, (*key.shape[:-2], -1))
-                value = jnp.reshape(value, (*value.shape[:-2], -1))
+                if not use_fmha:
+                    key, value = jnp.split(kv_proj, [1], axis=-2)
         else:
             kv_projection = functools.partial(
                 DenseGeneral,
@@ -423,14 +441,12 @@ class MultiHeadAttention(nn.Module):
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=not self.output_layernorm,
                 layernorm_type=self.layernorm_type,
-                zero_centered_gamma=self.zero_centered_gamma,
                 epsilon=self.layernorm_epsilon,
                 axis=-1,
                 features=self.num_heads * self.head_dim,
                 sharding_type=first_sharding_type,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
-                depth_scaling=depth_scaling if self.scale_attn_logits else None,
                 scale_axes=('embed',),
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
@@ -446,21 +462,21 @@ class MultiHeadAttention(nn.Module):
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-        query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
-        key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
-        value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
-
         if self.apply_residual_connection_post_layernorm:
             assert ln_out is not None
             residual = ln_out
 
-        qkv_sharding_constraint = \
-            ('length', 'batch', 'heads','kv') \
-            if self.transpose_batch_sequence \
-            else ('batch', 'length', 'heads', 'kv')
-        query = nn_partitioning.with_sharding_constraint(query, qkv_sharding_constraint)
-        key = nn_partitioning.with_sharding_constraint(key, qkv_sharding_constraint)
-        value = nn_partitioning.with_sharding_constraint(value, qkv_sharding_constraint)
+        if not use_fmha:
+            query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
+            key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
+            value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
+            qkv_sharding_constraint = \
+                ('length', 'batch', 'heads','kv') \
+                if self.transpose_batch_sequence \
+                else ('batch', 'length', 'heads', 'kv')
+            query = nn_partitioning.with_sharding_constraint(query, qkv_sharding_constraint)
+            key = nn_partitioning.with_sharding_constraint(key, qkv_sharding_constraint)
+            value = nn_partitioning.with_sharding_constraint(value, qkv_sharding_constraint)
 
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
@@ -502,30 +518,68 @@ class MultiHeadAttention(nn.Module):
                     bias = dynamic_vector_slice_in_dim(jnp.squeeze(bias, axis=0),
                                                        jnp.reshape(cur_index, (-1)), 1, -2)
 
-        dropout_rng = None
-        if not deterministic and self.dropout_rate > 0.:
-            dropout_rng = self.make_rng(self.dropout_rng_name)
+        scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
+        if use_fmha:
+            assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
+            assert not self.transpose_batch_sequence
+            is_causal_masking = (self.attn_type == AttentionType.CAUSAL)
 
-        softmax_type = SoftmaxType.SCALED
-        if self.attn_type is AttentionType.PADDING:
-            if mask is not None:
-                softmax_type = SoftmaxType.SCALED_MASKED
+            if inputs_q is inputs_kv:
+                qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
+                qkv_sharding_constraint = ('batch', 'length', 'qkv_dim', 'heads', 'kv')
+                qkv_proj = nn_partitioning.with_sharding_constraint(qkv_proj,
+                                                                    qkv_sharding_constraint)
+                x = self_fmha(qkv_proj,
+                              bias,
+                              mask,
+                              seed=0,
+                              scaling_factor=scale_factor,
+                              dropout_probability=self.dropout_rate,
+                              is_causal_masking=is_causal_masking,
+                              sharding_type=first_sharding_type)
+            else:
+                assert bias is None
+                query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
+                kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_heads, self.head_dim))
+                q_sharding_constraint = ('batch', 'length', 'heads', 'kv')
+                kv_sharding_constraint = ('batch', 'length', 'kv_dim', 'heads', 'kv')
+                query = nn_partitioning.with_sharding_constraint(query, q_sharding_constraint)
+                kv_proj = nn_partitioning.with_sharding_constraint(kv_proj, kv_sharding_constraint)
+
+                x = cross_fmha(query,
+                               kv_proj,
+                               mask,
+                               seed=0,
+                               scaling_factor=scale_factor,
+                               dropout_probability=self.dropout_rate,
+                               is_causal_masking=is_causal_masking,
+                               sharding_type=first_sharding_type)
         else:
-            softmax_type = SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+            dropout_rng = None
+            if not deterministic and self.dropout_rate > 0.:
+                dropout_rng = self.make_rng(self.dropout_rng_name)
 
-        x = core_attention(query,
-                           key,
-                           value,
-                           transpose_batch_sequence=self.transpose_batch_sequence,
-                           softmax_type=softmax_type,
-                           softmax_sharding_type=first_sharding_type,
-                           mask=mask,
-                           bias=bias,
-                           dropout_rng=dropout_rng,
-                           dropout_rate=self.dropout_rate,
-                           deterministic=deterministic,
-                           dtype=self.dtype,
-                           float32_logits=self.float32_logits)
+            softmax_type = SoftmaxType.SCALED
+            if self.attn_type is AttentionType.PADDING:
+                if mask is not None:
+                    softmax_type = SoftmaxType.SCALED_MASKED
+            else:
+                softmax_type = SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+
+            x = core_attention(query,
+                               key,
+                               value,
+                               scale_factor=scale_factor,
+                               transpose_batch_sequence=self.transpose_batch_sequence,
+                               softmax_type=softmax_type,
+                               softmax_sharding_type=first_sharding_type,
+                               mask=mask,
+                               bias=bias,
+                               dropout_rng=dropout_rng,
+                               dropout_rate=self.dropout_rate,
+                               deterministic=deterministic,
+                               dtype=self.dtype,
+                               float32_logits=self.float32_logits)
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -673,14 +727,6 @@ class TransformerLayer(nn.Module):
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
-    zero_centered_gamma : bool, default = False
-        If set to `True`, the LayerNorm formula changes to
-
-        .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
-            (1 + \gamma) + \beta
-
-        This parameter is only applicable for 'layernorm'.
     hidden_dropout: float, default = 0.1
         Dropout probability for the dropout op after FC2 layer.
     hidden_dropout_dims: Sequence[int], default = ()
@@ -760,7 +806,6 @@ class TransformerLayer(nn.Module):
     num_attention_heads: int = 8
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
-    zero_centered_gamma: bool = False
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
@@ -895,7 +940,6 @@ class TransformerLayer(nn.Module):
             scaled_query_init=self.scaled_query_init,
             layernorm_type=self.layernorm_type,
             layernorm_epsilon=self.layernorm_epsilon,
-            zero_centered_gamma=self.zero_centered_gamma,
             apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
             output_layernorm=self.output_layernorm,
             attn_type=self_attn_type,
@@ -941,7 +985,6 @@ class TransformerLayer(nn.Module):
                 dropout_rng_name=self.dropout_rng_name,
                 layernorm_type=self.layernorm_type,
                 layernorm_epsilon=self.layernorm_epsilon,
-                zero_centered_gamma=self.zero_centered_gamma,
                 apply_residual_connection_post_layernorm=self.
                 apply_residual_connection_post_layernorm,
                 output_layernorm=False,    # Must do LayerNorm before MHA.
@@ -964,7 +1007,6 @@ class TransformerLayer(nn.Module):
         residual = mlp_input
         z, ln_out = LayerNormMLP(
             layernorm_type=self.layernorm_type,
-            zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.layernorm_epsilon,
             major_sharding_type=infer_major_sharding_type(),
             transpose_batch_sequence=self.transpose_batch_sequence,
@@ -997,12 +1039,11 @@ class TransformerLayer(nn.Module):
         if self.output_layernorm:
             ln_sharding_type, _ = infer_sharding_type()
             z = LayerNorm(layernorm_type=self.layernorm_type,
-                          zero_centered_gamma=self.zero_centered_gamma,
-                          epsilon=self.layernorm_epsilon,
                           scale_axes=('embed',),
                           bias_axes=('embed',),
                           transpose_batch_sequence=self.transpose_batch_sequence,
                           dtype=self.dtype,
+                          epsilon=self.layernorm_epsilon,
                           sharding_type=ln_sharding_type,
                           name="output_layer_norm")(z)
 

@@ -94,6 +94,24 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 size_t q_seqlen, size_t k_seqlen, DType dtype,
                                                 float scale_factor);
 
+struct CustomCallFMHADescriptor {
+    size_t batch;
+    size_t num_head;
+    size_t max_q_seqlen;
+    size_t max_kv_seqlen;
+    size_t head_dim;
+    size_t seed;
+    float scaling_factor;
+    float dropout_probability;
+    bool is_causal_masking;
+    DType dtype;
+};
+
+pybind11::bytes PackCustomCallFMHADescriptor(size_t batch, size_t num_head, size_t max_q_seqlen,
+                                             size_t max_kv_seqlen, size_t head_dim, size_t seed,
+                                             float scaling_factor, float dropout_probability,
+                                             bool is_causal_masking, DType dtype);
+
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
@@ -143,6 +161,18 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
+
+void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
+                                   size_t opaque_len);
+
+void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                                    size_t opaque_len);
+
+void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
+                                    size_t opaque_len);
+
+void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                                     size_t opaque_len);
 
 }  // namespace jax
 }  // namespace transformer_engine

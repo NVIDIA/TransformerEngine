@@ -26,6 +26,9 @@ void nvte_fused_attn_fwd_qkvpacked(
             cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
+
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
@@ -34,16 +37,17 @@ void nvte_fused_attn_fwd_qkvpacked(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // QKV shape is [total_seqs, 3, h, d]
-  size_t b = input_cu_seqlens->data.shape[0] - 1;
-  size_t h = input_QKV->data.shape[2];
-  size_t d = input_QKV->data.shape[3];
   const DType QKV_type = input_QKV->data.dtype;
 
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2))
                   && (max_seqlen <= 512)) {
+
+    // QKV shape is [total_seqs, 3, h, d]
+    size_t b = input_cu_seqlens->data.shape[0] - 1;
+    size_t h = input_QKV->data.shape[2];
+    size_t d = input_QKV->data.shape[3];
+
 #if (CUDNN_VERSION >= 8900)
-    auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
     // FP8 API doesn't use input_Bias, bias_type or attn_mask_type
     fused_attn_fwd_fp8_qkvpacked(
             b, max_seqlen, h, d,

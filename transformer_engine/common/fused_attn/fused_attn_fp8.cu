@@ -8,6 +8,7 @@
 #include "../common.h"
 #include "utils.h"
 #include "fused_attn_fp8.h"
+#include "cudnn_frontend.h"
 
 namespace transformer_engine {
 namespace fused_attn {
