@@ -45,13 +45,37 @@ def make_op_name(op_name: str) -> str:
     return "trt::" + op_name
 
 
+def get_TensorProtoDataType(t):
+    """Return the _C_onnx.TensorProtoDataType of the input tensor"""
+    try:
+        return {
+            "Float": _C_onnx.TensorProtoDataType.FLOAT,
+            "Half": _C_onnx.TensorProtoDataType.FLOAT16,
+            "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
+        }[t.type().scalarType()]
+    except KeyError as e:
+        raise TypeError(f"Onnx export for dtype {t.type().scalarType()} not supported.") from e
+
+
+def is_dtype_fp32(t):
+    return t.type().scalarType() == "Float"
+
+
+def is_dtype_fp16(t):
+    return t.type().scalarType() == "Half"
+
+
+def is_dtype_bf16(t):
+    return t.type().scalarType() == "BFloat16"
+
+
 def quantize(g, inputs, scale_inv, fp8_tensor):
     """Helper Function for Quantization"""
     output_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
 
     # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
     # custom ops, so cast the input if needed.
-    if inputs.type().scalarType() == "Half" or inputs.type().scalarType() == "BFloat16":
+    if not is_dtype_fp32(inputs):
         inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
     scale = g.op("Constant", value_t=torch.tensor(scale_inv[fp8_tensor]))
@@ -84,15 +108,7 @@ def compute_in_fp32(g, inp, subgraph, cast_outp):
     If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`.
     Then, if `cast_output` is true, cast subgraphs's output back to `inp` data type.
     """
-    try:
-        inp_dtype = {
-            "Float": _C_onnx.TensorProtoDataType.FLOAT,
-            "Half": _C_onnx.TensorProtoDataType.FLOAT16,
-            "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
-        }[inp.type().scalarType()]
-    except KeyError as e:
-        raise TypeError(f"Onnx export for dtype {inp.type().scalarType()} not supported.") from e
-
+    inp_dtype = get_TensorProtoDataType(inp)
     is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
     if not is_fp32:
         inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
@@ -158,7 +174,7 @@ def onnx_te_gemm(
     use_split_accumulator):
     """ONNX graph for te_gemm"""
     # pylint: disable=unused-argument
-    is_fp16 = bias.type().scalarType() == "Half"
+    is_fp16 = is_dtype_fp16(inputs)
     if input_type == int(tex.DType.kFloat8E4M3):
         inputs = dequantize(g, inputs, input_scale_inverse, input_fp8_tensor, UNSPECIFIED_TYPE)
 
@@ -189,9 +205,16 @@ def onnx_te_gemm(
 
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "b")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
-                           scale_inv, fp8_tensor, otype, zero_centered_gamma):
+                            scale_inv, fp8_tensor, otype, zero_centered_gamma):
     """ONNX graph for layernorm_fwd_fp8"""
     # pylint: disable=unused-argument
+    inp_dtype = get_TensorProtoDataType(inputs)
+
+    if inp_dtype != get_TensorProtoDataType(weight):
+        weight = g.op("Cast", weight, to_i=inp_dtype)
+    if inp_dtype != get_TensorProtoDataType(bias):
+        bias = g.op("Cast", bias, to_i=inp_dtype)
+
     ln = onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma)
     fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
     return fp8_ln
@@ -210,7 +233,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     normalized_shape = normalized_shape[1:]
 
     if zero_centered_gamma:
-        inputs_dtype= inputs.type().dtype()
+        inputs_dtype = inputs.type().dtype()
         one = g.op("Constant", value_t=torch.tensor([1.], dtype=inputs_dtype, device="cuda"))
         weight = g.op("Add", weight, one)
 
