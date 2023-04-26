@@ -18,7 +18,7 @@ from datetime import date
 te_path = os.path.dirname(os.path.realpath(__file__))
 
 with open(te_path + "/../VERSION", "r") as f:
-    te_version = f.readline()
+    te_version = f.readline().strip()
 
 release_year = 2022
 
@@ -67,7 +67,8 @@ extensions = [
         'sphinx.ext.ifconfig',
         'nbsphinx',
         'breathe',
-        'autoapi.extension']
+        'autoapi.extension',
+]
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
@@ -85,7 +86,11 @@ pygments_style = 'sphinx'
 
 html_theme = 'sphinx_rtd_theme'
 html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
-html_static_path = []
+html_static_path = ['_static']
+
+html_css_files = [
+        'css/nvidia_font.css',
+]
 
 html_theme_options = {
         'display_version': True,
