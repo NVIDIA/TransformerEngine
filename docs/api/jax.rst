@@ -9,9 +9,12 @@ Jax
 .. autoapiclass:: transformer_engine.jax.MajorShardingType
 .. autoapiclass:: transformer_engine.jax.ShardingType
 .. autoapiclass:: transformer_engine.jax.TransformerLayerType
-
-
 .. autoapiclass:: transformer_engine.jax.ShardingResource(dp_resource=None, tp_resource=None)
+
+
+.. autoapifunction:: transformer_engine.jax.fp8_autocast
+.. autoapifunction:: transformer_engine.jax.update_collections
+.. autoapifunction:: transformer_engine.jax.update_fp8_metas
 
 
 .. autoapiclass:: transformer_engine.jax.flax.LayerNorm(epsilon=1e-6, layernorm_type='layernorm', **kwargs)
@@ -35,8 +38,4 @@ Jax
 .. autoapiclass:: transformer_engine.jax.flax.TransformerLayer(hidden_size=512, mlp_hidden_size=2048, num_attention_heads=8, **kwargs)
   :members: __call__
 
-
-.. autoapifunction:: transformer_engine.jax.extend_logical_axis_rules
-.. autoapifunction:: transformer_engine.jax.fp8_autocast
-.. autoapifunction:: transformer_engine.jax.update_collections
-.. autoapifunction:: transformer_engine.jax.update_fp8_metas
+.. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
