@@ -18,9 +18,6 @@
 
 #define CUDNN_FRONTEND_UNUSED(X) ((void)X)
 
-namespace transformer_engine {
-namespace fused_attn {
-
 #define Q_ID 1
 #define K_ID 2
 #define V_ID 3
@@ -41,8 +38,10 @@ namespace fused_attn {
 
 #define VIRTUAL_ID 20
 
-#if (CUDNN_VERSION >= 8700)
+namespace transformer_engine {
+namespace fused_attn {
 
+#if (CUDNN_VERSION >= 8700)
 static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
                         int64_t d, NVTE_QKV_Layout layout,
                         cudnnDataType_t tensorType,
@@ -697,27 +696,18 @@ static cudnn_frontend::Tensor createSoftmaxBackward(
 
 using namespace transformer_engine::fused_attn;
 
-void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                   int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
-                   double dropout_probability, NVTE_Bias_Type bias_type,
-                   NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
-                   void *devPtrV, void *devPtrS, void *devPtrO,
-                   void *devPtrBias, void *devCuSeqlenQ,
-                   void *devCuSeqlenK, void *workspace, cudnnDataType_t tensorType,
-                   cudaStream_t stream, cudnnHandle_t handle_) {
-
-  constexpr size_t nthreads_per_block = 128;
-  const size_t grid = (b + nthreads_per_block - 1)/nthreads_per_block;
-  void* devActualSeqlenQ = workspace;
-  void* devActualSeqlenK = workspace + b * sizeof(int32_t);
-  cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(b,
-    static_cast<const int32_t*>(devCuSeqlenQ),
-    static_cast<const int32_t*>(devCuSeqlenK),
-    static_cast<int32_t*>(devActualSeqlenQ),
-    static_cast<int32_t*>(devActualSeqlenK));
+void fused_attn_max_512_fwd_impl(
+  int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+  int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
+  float dropout_probability, NVTE_Bias_Type bias_type,
+  NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
+  void *devPtrV, void *devPtrS, void *devPtrO,
+  void *devPtrBias, void *devCuSeqlenQ,
+  void *devCuSeqlenK, void *workspace, size_t *workspace_size,
+  cudnnDataType_t tensorType, cudaStream_t stream, cudnnHandle_t handle) {
                     
   try {
-    NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
     FADescriptor descriptor{b,
                             h,
@@ -767,7 +757,8 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                "Dropout probability cannot be 1.0",
                                CUDNN_STATUS_BAD_PARAM);
 
-      bool softmax_output_virtual = enable_dropout || devPtrS == nullptr;
+      // TODO(rewang): check whether devPtrS can be removed
+      bool softmax_output_virtual = enable_dropout; // || devPtrS == nullptr;
       auto softmax_output = createSoftmaxForward(
           b, h, s_q, s_kv, d, layout, enable_dropout, softmax_output_virtual,
           tensorType, ops, mask_output);
@@ -787,7 +778,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
       // Create an Operation Graph
       auto opGraph = cudnn_frontend::OperationGraphBuilder()
-                         .setHandle(handle_)
+                         .setHandle(handle)
                          .setOperationGraph(all_ops.size(), all_ops.data())
                          .build();
 
@@ -802,7 +793,7 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             "run_mha_fprop: No config returned by the heuristics");
       }
       auto plan = cudnn_frontend::ExecutionPlanBuilder()
-                      .setHandle(handle_)
+                      .setHandle(handle)
                       .setEngineConfig(filtered_configs[0], opGraph.getTag())
                       .build();
       cache.insert({descriptor, plan});
@@ -811,14 +802,28 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
     auto plan = get_plan(fmha_fprop_cache, descriptor);
 
-    auto workspace_size = plan.getWorkspaceSize();
+    auto plan_workspace_size = plan.getWorkspaceSize();
 
-    void *workspace_ptr = nullptr;
-    if (workspace_size > 0) {
-      NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+    // Exit to request upper level API to allocate memory if needed
+    if (workspace == nullptr) {
+      size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+      return;
     }
 
     std::set<std::pair<uint64_t, void *>> data_ptrs;
+
+    // Prepare actual seqlen
+    constexpr size_t nthreads_per_block = 128;
+    const size_t grid = (b + nthreads_per_block - 1)/nthreads_per_block;
+    void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
+    void* devActualSeqlenK = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+    cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(b,
+      static_cast<const int32_t*>(devCuSeqlenQ),
+      static_cast<const int32_t*>(devCuSeqlenK),
+      static_cast<int32_t*>(devActualSeqlenQ),
+      static_cast<int32_t*>(devActualSeqlenK));
+
     // change this if you have access to float_min
     float negInfinity = -1.0E+10;
     float scale_dropout = 1 / (1 - dropout_probability);
@@ -863,14 +868,11 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     }
 
     auto variantPack = cudnn_frontend::VariantPackBuilder()
-                           .setWorkspacePointer(workspace_ptr)
+                           .setWorkspacePointer(workspace)
                            .setDataPointers(data_ptrs)
                            .build();
-    cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(),
+    cudnnStatus_t status = cudnnBackendExecute(handle, plan.get_raw_desc(),
                                                variantPack.get_raw_desc());
-    if (workspace_size > 0) {
-      NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-    }
 
     cudnn_frontend::throw_if(
         [status]() { return (status != CUDNN_STATUS_SUCCESS); },
@@ -894,29 +896,21 @@ void nvte_fmha_fwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
   }
 }
 
-void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                   NVTE_QKV_Layout layout, float scaling_factor,
-                   float dropout_probability, NVTE_Mask_Type mask_type,
-                   void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
-                   void *devPtrdQ, void *devPtrdK, void *devPtrdV,
-                   void *devPtrdO, void *devPtrdS, void *devPtrdBias,
-                   void *devCuSeqlenQ, void *devCuSeqlenK,
-                   void *workspace, cudnnDataType_t tensorType,
-                   cudaStream_t stream, cudnnHandle_t handle_) {
-
-  constexpr size_t nthreads_per_block = 128;
-  const size_t grid = (b + nthreads_per_block - 1)/nthreads_per_block;
-  void* devActualSeqlenQ = workspace;
-  void* devActualSeqlenK = workspace + b * sizeof(int32_t);
-  cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(b,
-    static_cast<const int32_t*>(devCuSeqlenQ),
-    static_cast<const int32_t*>(devCuSeqlenK),
-    static_cast<int32_t*>(devActualSeqlenQ),
-    static_cast<int32_t*>(devActualSeqlenK));
+// TODO(rewang): check the VER
+void fused_attn_max_512_bwd_impl(
+  int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
+  NVTE_QKV_Layout layout, float scaling_factor,
+  float dropout_probability, NVTE_Mask_Type mask_type,
+  void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
+  void *devPtrdQ, void *devPtrdK, void *devPtrdV,
+  void *devPtrdO, void *devPtrdS, void *devPtrdBias,
+  void *devCuSeqlenQ, void *devCuSeqlenK,
+  void *workspace, size_t *workspace_size, cudnnDataType_t tensorType,
+  cudaStream_t stream, cudnnHandle_t handle) {
 
   try {
     // Create cudnn handle
-    NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
+    NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
     FADescriptor descriptor{b,
                             h,
@@ -1254,7 +1248,7 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
       // Create an Operation Graph
       auto opGraph = cudnn_frontend::OperationGraphBuilder()
-                         .setHandle(handle_)
+                         .setHandle(handle)
                          .setOperationGraph(all_ops.size(), all_ops.data())
                          .build();
 
@@ -1270,7 +1264,7 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
       }
 
       auto plan = cudnn_frontend::ExecutionPlanBuilder()
-                      .setHandle(handle_)
+                      .setHandle(handle)
                       .setEngineConfig(filtered_configs[0], opGraph.getTag())
                       .build();
       cache.insert({descriptor, plan});
@@ -1279,12 +1273,24 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
     auto plan = get_plan(fmha_bprop_cache, descriptor);
 
-    auto workspace_size = plan.getWorkspaceSize();
+    auto plan_workspace_size = plan.getWorkspaceSize();
 
-    void *workspace_ptr = nullptr;
-    if (workspace_size > 0) {
-      NVTE_CHECK_CUDA(cudaMalloc(&workspace_ptr, workspace_size));
+    // Exit to request upper level API to allocate memory if needed
+    if (workspace == nullptr) {
+      size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+      return;
     }
+
+    constexpr size_t nthreads_per_block = 128;
+    const size_t grid = (b + nthreads_per_block - 1)/nthreads_per_block;
+    void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
+    void* devActualSeqlenK = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+    cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(b,
+      static_cast<const int32_t*>(devCuSeqlenQ),
+      static_cast<const int32_t*>(devCuSeqlenK),
+      static_cast<int32_t*>(devActualSeqlenQ),
+      static_cast<int32_t*>(devActualSeqlenK));
 
     std::set<std::pair<uint64_t, void *>> data_ptrs;
     // add all the data pointers to be used in the variant pack
@@ -1319,15 +1325,13 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     data_ptrs.insert(std::pair<uint64_t, void *>(MASK_VAL_ID, &zeroVal));
 
     auto variantPack = cudnn_frontend::VariantPackBuilder()
-                           .setWorkspacePointer(workspace_ptr)
+                           .setWorkspacePointer(workspace)
                            .setDataPointers(data_ptrs)
                            .build();
 
-    cudnnStatus_t status = cudnnBackendExecute(handle_, plan.get_raw_desc(),
+    cudnnStatus_t status = cudnnBackendExecute(handle, plan.get_raw_desc(),
                                                variantPack.get_raw_desc());
-    if (workspace_size > 0) {
-      NVTE_CHECK_CUDA(cudaFree(workspace_ptr));
-    }
+
 
     cudnn_frontend::throw_if(
         [status]() { return (status != CUDNN_STATUS_SUCCESS); },
@@ -1350,4 +1354,195 @@ void nvte_fmha_bwd(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     }
   }
 }
-#endif
+#endif // CUDNN_VERSION >= 8700
+
+namespace transformer_engine {
+void fused_attn_max_512_fwd_qkvpacked(
+    size_t batch,
+    size_t max_seqlen,
+    size_t num_head,
+    size_t head_dim,
+    bool is_training,
+    float attn_scale,
+    float p_dropout,
+    NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type,
+    const Tensor *input_QKV,
+    const Tensor *input_Bias,
+    Tensor *output_O,
+    NVTETensorPack* Aux_Output_Tensors,
+    const Tensor *cu_seqlens,
+    const Tensor *rng_state,
+    Tensor *workspace,
+    cudaStream_t stream,
+    cudnnHandle_t handle) {
+  using namespace transformer_engine;
+
+  // Only is_training is verified
+  NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
+  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
+    "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED");
+
+  // QKV shape is [b, s, 3, h, d]
+  void* devPtrQKV = input_QKV->data.dptr;
+  const auto stride = num_head * head_dim;
+
+  void* devPtrQ = static_cast<void *>(devPtrQKV);
+  void* devPtrK = static_cast<void *>(static_cast<int8_t*>(devPtrQKV) + stride);
+  void* devPtrV = static_cast<void *>(static_cast<int8_t*>(devPtrQKV) + 2 * stride);
+
+  void* devPtrBias = static_cast<void *>(input_Bias->data.dptr);
+
+  void* devPtrO = output_O->data.dptr;
+
+  void* devPtrS = nullptr;
+
+  if (Aux_Output_Tensors->size == 0) {
+    Aux_Output_Tensors->size = 1;
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
+    output_S->data.dptr = nullptr;
+    output_S->data.shape = {batch, num_head, max_seqlen, max_seqlen};
+    output_S->data.dtype = input_QKV->data.dtype;
+  } else if (Aux_Output_Tensors->size == 1) {
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+  }
+
+  void* devCuSeqlen = cu_seqlens->data.dptr;
+
+  // TODO(rewang): dropout seed
+  // void* devPtrDropoutSeed = reinterpret_cast<void *>(
+  //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+  // void* devPtrDropoutOffset = reinterpret_cast<void *>(
+  //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+  const DType QKV_type = input_QKV->data.dtype;
+  size_t workspace_size = 0;
+
+  // TODO(rewang): replace CPU seed
+  fused_attn_max_512_fwd_impl(
+    batch, num_head, max_seqlen, max_seqlen, head_dim,
+    0, qkv_layout, attn_scale,
+    p_dropout, bias_type,
+    mask_type, devPtrQ, devPtrK,
+    devPtrV, devPtrS, devPtrO,
+    devPtrBias, devCuSeqlen,
+    devCuSeqlen,
+    workspace->data.dptr,
+    &workspace_size,
+    get_cudnn_dtype(QKV_type),
+    stream, handle);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+}
+
+void fused_attn_max_512_fwd_kvpacked(
+    size_t batch,
+    size_t q_max_seqlen,
+    size_t kv_max_seqlen,
+    size_t num_head,
+    size_t head_dim,
+    bool is_training,
+    float attn_scale,
+    float p_dropout,
+    NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type,
+    const Tensor *input_Q,
+    const Tensor *input_KV,
+    const Tensor *input_Bias,
+    Tensor *output_O,
+    NVTETensorPack* Aux_Output_Tensors,
+    const Tensor *q_cu_seqlens,
+    const Tensor *kv_cu_seqlens,
+    const Tensor *rng_state,
+    Tensor *workspace,
+    cudaStream_t stream,
+    cudnnHandle_t handle) {
+  using namespace transformer_engine;
+
+  // Only is_training is verified
+  NVTE_CHECK(is_training,
+    "is_training=False is not implemented in fused_attn_max_512.");
+  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
+    "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED");
+
+  // Q shape is [b, s, h, d]
+  void* devPtrQ = input_Q->data.dptr;
+
+  // KV shape is [b, s, 2, h, d]
+  const auto stride = num_head * head_dim;
+  void* devPtrK = input_KV->data.dptr;
+  void* devPtrV = static_cast<void *>(static_cast<int8_t*>(devPtrK) + stride);
+
+  void* devPtrBias = static_cast<void *>(input_Bias->data.dptr);
+
+  void* devPtrO = output_O->data.dptr;
+
+  void* devPtrS = nullptr;
+
+  const DType q_type = input_Q->data.dtype;
+  const DType kv_type = input_KV->data.dtype;
+  NVTE_CHECK(q_type == kv_type,
+    "data type of Q must be equal to data type of KV.");
+
+  if (Aux_Output_Tensors->size == 0) {
+    Aux_Output_Tensors->size = 1;
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
+    output_S->data.dptr = nullptr;
+    output_S->data.shape = {batch, num_head, q_max_seqlen, kv_max_seqlen};
+    output_S->data.dtype = q_type;
+  } else if (Aux_Output_Tensors->size == 1) {
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+  }
+
+  void* devQCuSeqlen = q_cu_seqlens->data.dptr;
+  void* devKVCuSeqlen = kv_cu_seqlens->data.dptr;
+
+  // TODO(rewang): dropout seed
+  // void* devPtrDropoutSeed = reinterpret_cast<void *>(
+  //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+  // void* devPtrDropoutOffset = reinterpret_cast<void *>(
+  //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+  size_t workspace_size = 0;
+
+  // TODO(rewang): replace CPU seed
+  fused_attn_max_512_fwd_impl(
+    batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+    0, qkv_layout, attn_scale,
+    p_dropout, bias_type,
+    mask_type, devPtrQ, devPtrK,
+    devPtrV, devPtrS, devPtrO,
+    devPtrBias, devQCuSeqlen,
+    devKVCuSeqlen,
+    workspace->data.dptr,
+    &workspace_size,
+    get_cudnn_dtype(q_type),
+    stream, handle);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+}
+}

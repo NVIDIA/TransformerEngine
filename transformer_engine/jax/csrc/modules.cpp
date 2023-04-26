@@ -747,8 +747,8 @@ void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const ch
     // input
     void *qkv = buffers[0];
     void *bias = buffers[1];
-    void *q_seqlen = buffers[2];
-    void *kv_seqlen = buffers[3];
+    void *cu_seqlens = buffers[2];
+    // void *kv_cu_seqlens = buffers[3];
 
     // output
     void *output = buffers[4];
@@ -760,23 +760,57 @@ void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const ch
     auto max_kv_seqlen = descriptor.max_kv_seqlen;
     auto head_dim = descriptor.head_dim;
 
-    assert(max_q_seqlen == max_kv_seqlen);
+    NVTE_CHECK(max_q_seqlen == max_kv_seqlen,
+               "max_q_seqlen should be equal to max_kv_seqlen in the self attention.");
 
-    auto dtype_size = typeToSize(descriptor.dtype);
-    assert(dtype_size == 2 && "FMHA only supports BF16/FP16 currently");
-    auto qkv_stride = num_head * head_dim * dtype_size;
+    auto dtype = descriptor.dtype;
+    auto qkv_shape = std::vector<size_t>{batch, max_q_seqlen, 3, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, max_q_seqlen, max_kv_seqlen};
 
-    auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+    auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
+    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
 
-    auto workspace_size = 2 * batch * sizeof(int32_t);
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+    auto o_tensor =
+        TensorWrapper(output, std::vector<size_t>{batch, max_q_seqlen, num_head, head_dim}, dtype);
+
+    auto cu_seqlens_tensor = TensorWrapper(cu_seqlens, std::vector<size_t>{batch}, DType::kInt32);
+    // TODO(rewang): make rng state for JAX
+    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_fwd_qkvpacked(
+        qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, cu_seqlens_tensor.data(), rng_state.data(), max_q_seqlen, true,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
+        // TODO(rewang): enum
+        ToMaskType(descriptor.is_causal_masking), query_workspace_tensor.data(), stream);
+
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.dptr = softmax_aux;
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
-                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
-                  ToMaskType(descriptor.is_causal_masking), qkv,
-                  static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
-                  softmax_aux, output, bias, q_seqlen, kv_seqlen, workspace,
-                  get_cudnn_dtype(descriptor.dtype), stream, handle);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_fwd_qkvpacked(
+        qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, cu_seqlens_tensor.data(), rng_state.data(), max_q_seqlen, true,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
+        // TODO(rewang): enum
+        ToMaskType(descriptor.is_causal_masking), workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
 void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -810,15 +844,26 @@ void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const c
 
     auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
-    auto workspace_size = 2 * batch * sizeof(int32_t);
+    size_t workspace_size = 0;
+
+    fused_attn_max_512_bwd_impl(
+        batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
+        NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
+        descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), qkv,
+        static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
+        softmax_aux, dqkv, static_cast<char *>(dqkv) + qkv_stride,
+        static_cast<char *>(dqkv) + 2 * qkv_stride, doutput, dp, dbias, q_seqlen, kv_seqlen,
+        nullptr, &workspace_size, get_cudnn_dtype(descriptor.dtype), stream, handle);
+
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
-                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), qkv,
-                  static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
-                  softmax_aux, dqkv, static_cast<char *>(dqkv) + qkv_stride,
-                  static_cast<char *>(dqkv) + 2 * qkv_stride, doutput, dp, dbias, q_seqlen,
-                  kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
+    fused_attn_max_512_bwd_impl(
+        batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
+        NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.scaling_factor,
+        descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), qkv,
+        static_cast<char *>(qkv) + qkv_stride, static_cast<char *>(qkv) + 2 * qkv_stride,
+        softmax_aux, dqkv, static_cast<char *>(dqkv) + qkv_stride,
+        static_cast<char *>(dqkv) + 2 * qkv_stride, doutput, dp, dbias, q_seqlen, kv_seqlen,
+        workspace, &workspace_size, get_cudnn_dtype(descriptor.dtype), stream, handle);
 }
 
 void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -829,8 +874,8 @@ void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const c
     // input
     void *q = buffers[0];
     void *kv = buffers[1];
-    void *q_seqlen = buffers[2];
-    void *kv_seqlen = buffers[3];
+    void *q_cu_seqlens = buffers[2];
+    void *kv_cu_seqlens = buffers[3];
 
     // output
     void *output = buffers[4];
@@ -842,20 +887,63 @@ void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const c
     auto max_kv_seqlen = descriptor.max_kv_seqlen;
     auto head_dim = descriptor.head_dim;
 
-    auto dtype_size = typeToSize(descriptor.dtype);
-    assert(dtype_size == 2 && "FMHA only supports BF16/FP16 currently");
-    auto kv_stride = num_head * head_dim * dtype_size;
+    auto dtype = descriptor.dtype;
+    auto q_shape = std::vector<size_t>{batch, max_q_seqlen, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch, max_kv_seqlen, 2, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, max_q_seqlen, max_kv_seqlen};
 
-    auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+    auto q_tensor = TensorWrapper(q, q_shape, dtype);
+    auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
 
-    auto workspace_size = 2 * batch * sizeof(int32_t);
+    // TODO(rewang): add bias for cross attn?
+    auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+    auto o_tensor =
+        TensorWrapper(output, std::vector<size_t>{batch, max_q_seqlen, num_head, head_dim}, dtype);
+
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch}, DType::kInt32);
+    // TODO(rewang): make rng state for JAX
+    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_fwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+        rng_state.data(), max_q_seqlen, max_kv_seqlen, true, descriptor.scaling_factor,
+        descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
+        NVTE_Bias_Type::NVTE_NO_BIAS,
+        // TODO(rewang): enum
+        ToMaskType(descriptor.is_causal_masking), query_workspace_tensor.data(), stream);
+
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.dptr = softmax_aux;
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    nvte_fmha_fwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, descriptor.seed,
-                  NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, NVTE_Bias_Type::NVTE_NO_BIAS,
-                  ToMaskType(descriptor.is_causal_masking), q, static_cast<char *>(kv),
-                  static_cast<char *>(kv) + kv_stride, softmax_aux, output, nullptr, q_seqlen,
-                  kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype), stream, handle);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_fwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+        rng_state.data(), max_q_seqlen, max_kv_seqlen, true, descriptor.scaling_factor,
+        descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
+        NVTE_Bias_Type::NVTE_NO_BIAS,
+        // TODO(rewang): enum
+        ToMaskType(descriptor.is_causal_masking), workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
 void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -888,15 +976,26 @@ void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const 
 
     auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
 
-    auto workspace_size = 2 * batch * sizeof(int32_t);
+    size_t workspace_size = 0;
+
+    fused_attn_max_512_bwd_impl(
+        batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
+        descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), q,
+        static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
+        static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp, nullptr,
+        q_seqlen, kv_seqlen, nullptr, &workspace_size, get_cudnn_dtype(descriptor.dtype), stream,
+        handle);
+
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    nvte_fmha_bwd(batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
-                  NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
-                  descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), q,
-                  static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
-                  static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp,
-                  nullptr, q_seqlen, kv_seqlen, workspace, get_cudnn_dtype(descriptor.dtype),
-                  stream, handle);
+    fused_attn_max_512_bwd_impl(
+        batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.scaling_factor,
+        descriptor.dropout_probability, ToMaskType(descriptor.is_causal_masking), q,
+        static_cast<char *>(kv), static_cast<char *>(kv) + qkv_stride, softmax_aux, dq,
+        static_cast<char *>(dkv), static_cast<char *>(dkv) + qkv_stride, doutput, dp, nullptr,
+        q_seqlen, kv_seqlen, workspace, &workspace_size, get_cudnn_dtype(descriptor.dtype), stream,
+        handle);
 }
 
 }  // namespace jax
