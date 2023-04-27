@@ -156,9 +156,6 @@ before_script:
             --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
             --form "variables[CODE_VERSION]=${CODE_VERSION}" \
             --form "variables[githubData]=${githubData}" \
-            --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
-            --form "variables[BUILD_JAX]=${BUILD_JAX}" \
-            --form "variables[BUILD_TENSORFLOW]=${BUILD_TENSORFLOW}" \
             https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
           echo "\n" | cat ${tmp_file} -
           rm ${tmp_file}
@@ -177,6 +174,7 @@ create_branch:
     tags:
         - vm-builder
 
+
 .base_template:
     variables:
       GIT_STRATEGY: fetch
@@ -192,41 +190,45 @@ create_branch:
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
     - echo ${JOB_END_STRING}
+    except:
+    - tags
     tags:
     - builder
-    rules:
-      - if: $CI_PIPELINE_SOURCE != "pipeline"
-        when: never
-      - if: $BUILD_FRAMEWORK != "1"
-        when: manual
-      - when: on_success
+    only:
+    - pipelines
 
 pytorch-py3-base:
     stage: build base
     variables:
       FROM_IMAGE_NAME: $PYTORCH_IMAGE
       FRAMEWORK: pytorch
-      BUILD_FRAMEWORK: $BUILD_PYTORCH
     extends:
     - .base_template
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 jax-py3-base:
     stage: build base
     variables:
       FROM_IMAGE_NAME: $JAX_IMAGE
       FRAMEWORK: jax
-      BUILD_FRAMEWORK: $BUILD_JAX
     extends:
     - .base_template
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 tensorflow-py3-base:
     stage: build base
     variables:
       FROM_IMAGE_NAME: $TENSORFLOW_IMAGE
       FRAMEWORK: tensorflow
-      BUILD_FRAMEWORK: $BUILD_TENSORFLOW
     extends:
     - .base_template
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 .devel_template:
     variables:
