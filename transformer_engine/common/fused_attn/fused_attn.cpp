@@ -42,7 +42,6 @@ void nvte_fused_attn_fwd_qkvpacked(
 
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2))
                   && (max_seqlen <= 512)) {
-
     // QKV shape is [total_seqs, 3, h, d]
     size_t b = input_cu_seqlens->data.shape[0] - 1;
     size_t h = input_QKV->data.shape[2];
@@ -64,7 +63,6 @@ void nvte_fused_attn_fwd_qkvpacked(
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen <= 512)) {
     // TODO(rewang): version guard, especially for setPaddingValue
-
     auto ndim = input_QKV->data.shape.size();
 
     // QKV shape is [b, s, 3, h, d]
@@ -237,7 +235,6 @@ void nvte_fused_attn_fwd_kvpacked(
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
     // TODO(rewang): move this into the underly API
-
     auto ndim = input_Q->data.shape.size();
     // Q shape is [b, s_q, h, d]
     // KV shape is [b, s_kv, 2, h, d]
@@ -324,7 +321,6 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-
     auto ndim = input_Q->data.shape.size();
     // Q shape is [b, s_q, h, d]
     // KV shape is [b, s_kv, 2, h, d]
