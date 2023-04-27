@@ -146,7 +146,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  */
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
-            const NVTETensor dBias,
+            NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
@@ -238,7 +238,7 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
-            const NVTETensor dBias,
+            NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,

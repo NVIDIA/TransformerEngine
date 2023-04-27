@@ -1571,8 +1571,8 @@ void fused_attn_max_512_bwd_qkvpacked(
   cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-    "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED");
+  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
+    "qkv_layout must be NVTE_QKV_INTERLEAVED");
 
   // QKV shape is [b, s, 3, h, d]
   void* devPtrQKV = input_QKV->data.dptr;
@@ -1630,4 +1630,90 @@ void fused_attn_max_512_bwd_qkvpacked(
   }
 }
 
+void fused_attn_max_512_bwd_kvpacked(
+  size_t batch,
+  size_t q_max_seqlen,
+  size_t kv_max_seqlen,
+  size_t num_head,
+  size_t head_dim,
+  float attn_scale,
+  float p_dropout,
+  NVTE_QKV_Layout qkv_layout,
+  NVTE_Bias_Type bias_type,
+  NVTE_Mask_Type mask_type,
+  const Tensor *input_Q,
+  const Tensor *input_KV,
+  const Tensor *input_dO,
+  const NVTETensorPack* Aux_CTX_Tensors,
+  Tensor *output_dQ,
+  Tensor *output_dKV,
+  Tensor *output_dBias,
+  const Tensor *q_cu_seqlens,
+  const Tensor *kv_cu_seqlens,
+  Tensor *workspace,
+  cudaStream_t stream,
+  cudnnHandle_t handle) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
+    "qkv_layout must be NVTE_KV_INTERLEAVED");
+
+  // Q shape is [b, s, h, d]
+  // KV shape is [b, s, 2, h, d]
+  auto stride = num_head * head_dim;
+  void* devPtrQ = input_Q->data.dptr;
+  void* devPtrK = input_KV->data.dptr;
+  void* devPtrV = static_cast<void *>(static_cast<int8_t*>(devPtrK) + stride);
+
+  void* devPtrdO = input_dO->data.dptr;
+
+  // dQ shape is [b, s, h, d]
+  // dKV shape is [b, s, 2, h, d]
+  void* devPtrdQ = output_dQ->data.dptr;
+  void* devPtrdK = output_dKV->data.dptr;
+  void* devPtrdV = static_cast<void *>(static_cast<int8_t*>(devPtrdK) + stride);
+
+  void* devPtrdBias = output_dBias->data.dptr;
+
+  NVTE_CHECK(Aux_CTX_Tensors->size == 1);
+  void* devPtrS = nullptr;
+  if (Aux_CTX_Tensors->size == 1) {
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+  }
+  // devPtrdS reuses the memory of devPtrS
+  void* devPtrdS = devPtrS;
+
+  void* devPtrQCuSeqlens = q_cu_seqlens->data.dptr;
+  void* devPtrKVCuSeqlens = kv_cu_seqlens->data.dptr;
+
+  const auto q_type = input_Q->data.dtype;
+  const auto kv_type = input_KV->data.dtype;
+  NVTE_CHECK(q_type == kv_type,
+    "data type of Q must be equal to data type of KV.");
+  size_t workspace_size = 0;
+
+  fused_attn_max_512_bwd_impl(
+    batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+    qkv_layout, attn_scale, p_dropout, mask_type, bias_type,
+    devPtrQ, devPtrK, devPtrV, devPtrS,
+    devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+    devPtrdS, devPtrdBias,
+    devPtrQCuSeqlens, devPtrKVCuSeqlens,
+    workspace->data.dptr, &workspace_size,
+    get_cudnn_dtype(q_type),
+    stream, handle);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
 }
+} // namespace transformer_engine

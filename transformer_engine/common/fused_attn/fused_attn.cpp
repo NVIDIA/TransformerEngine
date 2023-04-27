@@ -280,7 +280,7 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
-            const NVTETensor dBias,
+            NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
@@ -302,13 +302,13 @@ void nvte_fused_attn_bwd_kvpacked(
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
-  const Tensor *input_dBias = reinterpret_cast<const Tensor*>(dBias);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
   const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
   Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dKV = reinterpret_cast<Tensor*>(dKV);
+  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   // Q shape is [total_seqs, h, d]
@@ -316,12 +316,47 @@ void nvte_fused_attn_bwd_kvpacked(
   size_t h = input_Q->data.shape[1];
   size_t d = input_Q->data.shape[2];
   const DType QKV_type = input_Q->data.dtype;
+
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+
   if (((QKV_type == DType::kFloat8E4M3) || (QKV_type == DType::kFloat8E5M2))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-    NVTE_ERROR("TBD: No support for BF16/FP16 fused attention currently. \n");
+
+    auto ndim = input_Q->data.shape.size();
+    // Q shape is [b, s_q, h, d]
+    // KV shape is [b, s_kv, 2, h, d]
+    size_t batch = input_Q->data.shape[0];
+    size_t q_max_seqlen = input_Q->data.shape[1];
+    size_t kv_max_seqlen = input_KV->data.shape[1];
+    size_t num_head = input_Q->data.shape[ndim - 2];
+    size_t head_dim = input_Q->data.shape[ndim - 1];
+
+    fused_attn_max_512_bwd_kvpacked(
+      batch,
+      q_max_seqlen,
+      kv_max_seqlen,
+      num_head,
+      head_dim,
+      attn_scale,
+      dropout,
+      qkv_layout,
+      bias_type,
+      attn_mask_type,
+      input_Q,
+      input_KV,
+      input_dO,
+      Aux_CTX_Tensors,
+      output_dQ,
+      output_dKV,
+      output_dBias,
+      input_cu_seqlens_q,
+      input_cu_seqlens_kv,
+      wkspace,
+      stream,
+      handle);
   } else if ((max_seqlen_q > 512) || (max_seqlen_kv > 512)) {
     NVTE_ERROR("TBD: No support for fused attention with >512 seqlence length currently. \n");
   } else {
