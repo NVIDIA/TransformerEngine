@@ -16,6 +16,9 @@ class DeprecatedEnum:    # pylint: disable=too-few-public-methods
         self.enum_cls = enum_cls
         self.msg = msg
 
+    def __iter__(self):
+        return iter(list(self.enum_cls.__members__.values()))
+
     def __getattr__(self, name):
         if name in self.enum_cls.__members__:
             warnings.warn(self.msg, DeprecationWarning)
