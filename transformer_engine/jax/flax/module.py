@@ -178,11 +178,6 @@ class Softmax(nn.Module):
 
 class LayerNorm(nn.Module):
     r"""
-    .. warning::
-        This function is moved into submodule `flax`. Please import this from
-        `transformer_engine.jax.flax` and current importing path will be deprecated
-        in near feature.
-
     Applies layer normalization over a mini-batch of inputs.
     There are two types of normalization supported by this module,
     regular and root mean square layer Normalization.
@@ -349,11 +344,6 @@ class TransformerEngineBase(nn.Module):
 
 class DenseGeneral(TransformerEngineBase):
     """
-    .. warning::
-        This function is moved into submodule `flax`. Please import this from
-        `transformer_engine.jax.flax` and current importing path will be deprecated
-        in near feature.
-
     Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
     Parameters
@@ -468,11 +458,6 @@ class DenseGeneral(TransformerEngineBase):
 
 class LayerNormDenseGeneral(TransformerEngineBase):
     r"""
-    .. warning::
-        This function is moved into submodule `flax`. Please import this from
-        `transformer_engine.jax.flax` and current importing path will be deprecated
-        in near feature.
-
     Applies layer normalization followed by linear transformation to the incoming data.
 
     Parameters
@@ -686,11 +671,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
 class LayerNormMLP(TransformerEngineBase):
     r"""
-    .. warning::
-        This function is moved into submodule `flax`. Please import this from
-        `transformer_engine.jax.flax` and current importing path will be deprecated
-        in near feature.
-
     Applies layer normalization on the input followed by the MLP module,
     consisting of 2 successive linear transformations, separated by given activations.
 
