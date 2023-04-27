@@ -244,8 +244,7 @@ __global__ void cu_seqlens_to_actual_seqlens(
   int32_t const * const q_cu_seqlens,
   int32_t const * const kv_cu_seqlens,
   int32_t *q_seqlens, int32_t *kv_seqlens) {
-
-  size_t tid = threadIdx.x;
+  size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < b) {
     q_seqlens[tid] = q_cu_seqlens[tid + 1] - q_cu_seqlens[tid];
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
