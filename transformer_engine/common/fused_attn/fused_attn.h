@@ -25,18 +25,18 @@ void fused_attn_max_512_fwd_impl(
   void *devPtrV, void *devPtrS, void *devPtrO,
   void *devPtrBias, void *devCuSeqlenQ, void *devCuSeqlenK,
   void* workspace, size_t *workspace_size, cudnnDataType_t tensorType,
-  cudaStream_t stream, cudnnHandle_t handle_);
+  cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_max_512_bwd_impl(
   int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
   NVTE_QKV_Layout layout, float scaling_factor,
-  float dropout_probability, NVTE_Mask_Type mask_type,
+  float dropout_probability, NVTE_Mask_Type mask_type, NVTE_Bias_Type bias_type,
   void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
   void *devPtrdQ, void *devPtrdK, void *devPtrdV,
   void *devPtrdO, void *devPtrdS, void *devPtrdBias,
   void *devCuSeqlenQ, void *devCuSeqlenK,
   void* workspace, size_t *workspace_size, cudnnDataType_t tensorType,
-  cudaStream_t stream, cudnnHandle_t handle_);
+  cudaStream_t stream, cudnnHandle_t handle);
 
 namespace transformer_engine {
 void fused_attn_max_512_fwd_qkvpacked(
@@ -83,6 +83,26 @@ void fused_attn_max_512_fwd_kvpacked(
     Tensor *workspace,
     cudaStream_t stream,
     cudnnHandle_t handle);
+
+void fused_attn_max_512_bwd_qkvpacked(
+  size_t batch,
+  size_t max_seqlen,
+  size_t num_head,
+  size_t head_dim,
+  float attn_scale,
+  float p_dropout,
+  NVTE_QKV_Layout qkv_layout,
+  NVTE_Bias_Type bias_type,
+  NVTE_Mask_Type mask_type,
+  const Tensor *input_QKV,
+  const Tensor *input_dO,
+  const NVTETensorPack* Aux_CTX_Tensors,
+  Tensor *output_dQKV,
+  Tensor *output_dBias,
+  const Tensor *cu_seqlens,
+  Tensor *workspace,
+  cudaStream_t stream,
+  cudnnHandle_t handle);
 }
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_H_

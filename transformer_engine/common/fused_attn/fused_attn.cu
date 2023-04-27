@@ -745,7 +745,7 @@ void fused_attn_max_512_fwd_impl(
       auto bmm1_output =
           createBMM1(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
-      if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
+      if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
         createBias(b, h, s_q, s_kv, d, layout, tensorType, ops, bmm1_output);
       }
 
@@ -901,6 +901,7 @@ void fused_attn_max_512_bwd_impl(
   int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
   NVTE_QKV_Layout layout, float scaling_factor,
   float dropout_probability, NVTE_Mask_Type mask_type,
+  NVTE_Bias_Type bias_type,
   void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrS,
   void *devPtrdQ, void *devPtrdK, void *devPtrdV,
   void *devPtrdO, void *devPtrdS, void *devPtrdBias,
@@ -922,7 +923,7 @@ void fused_attn_max_512_bwd_impl(
                             static_cast<float>(dropout_probability),
                             mask_type,
                             layout,
-                            NVTE_Bias_Type::NVTE_NO_BIAS,
+                            bias_type,
                             tensorType};
 
     using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
@@ -1156,7 +1157,7 @@ void fused_attn_max_512_bwd_impl(
       int64_t dbias_stride [4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
       auto dBiasTensor = tensor_create(tensorType, dBias_ID, dbias_dim, dbias_stride, false, false);
 
-      if (devPtrdBias) {
+      if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
           auto softmaxScaleTensor = tensor_create(CUDNN_DATA_FLOAT, S_CONST_ID, scale_dim, scale_stride, false, true);
           auto softmaxScaleReciprocalTensor = tensor_create(CUDNN_DATA_FLOAT, VIRTUAL_ID + 401, scale_dim, scale_stride, true, false);
           auto dbiasBeforeScaleTensor = tensor_create(CUDNN_DATA_FLOAT, VIRTUAL_ID + 402, dbias_dim, dbias_stride, true, false);
@@ -1310,7 +1311,7 @@ void fused_attn_max_512_bwd_impl(
         std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
 
 #if (CUDNN_VERSION >= 8901)
-    if (devPtrdBias) {
+    if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
         data_ptrs.insert(std::pair<uint64_t, void*>(dBias_ID, devPtrdBias));
     }
 #else
@@ -1474,9 +1475,12 @@ void fused_attn_max_512_fwd_kvpacked(
 
   // Only is_training is verified
   NVTE_CHECK(is_training,
-    "is_training=False is not implemented in fused_attn_max_512.");
+    "is_training=False is not implemented in fused_attn_max_512");
   NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
     "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED");
+  NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
+    || bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
+    "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512");
 
   // Q shape is [b, s, h, d]
   void* devPtrQ = input_Q->data.dptr;
@@ -1486,7 +1490,7 @@ void fused_attn_max_512_fwd_kvpacked(
   void* devPtrK = input_KV->data.dptr;
   void* devPtrV = static_cast<void *>(static_cast<int8_t*>(devPtrK) + stride);
 
-  void* devPtrBias = static_cast<void *>(input_Bias->data.dptr);
+  void* devPtrBias = input_Bias->data.dptr;
 
   void* devPtrO = output_O->data.dptr;
 
@@ -1545,4 +1549,85 @@ void fused_attn_max_512_fwd_kvpacked(
     return;
   }
 }
+
+void fused_attn_max_512_bwd_qkvpacked(
+  size_t batch,
+  size_t max_seqlen,
+  size_t num_head,
+  size_t head_dim,
+  float attn_scale,
+  float p_dropout,
+  NVTE_QKV_Layout qkv_layout,
+  NVTE_Bias_Type bias_type,
+  NVTE_Mask_Type mask_type,
+  const Tensor *input_QKV,
+  const Tensor *input_dO,
+  const NVTETensorPack* Aux_CTX_Tensors,
+  Tensor *output_dQKV,
+  Tensor *output_dBias,
+  const Tensor *cu_seqlens,
+  Tensor *workspace,
+  cudaStream_t stream,
+  cudnnHandle_t handle) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
+    "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED");
+
+  // QKV shape is [b, s, 3, h, d]
+  void* devPtrQKV = input_QKV->data.dptr;
+
+  auto stride = num_head * head_dim;
+  void* devPtrQ = devPtrQKV;
+  void* devPtrK = static_cast<void *>(static_cast<int8_t*>(devPtrQKV) + stride);
+  void* devPtrV = static_cast<void *>(static_cast<int8_t*>(devPtrQKV) + 2 * stride);
+
+  void* devPtrdO = input_dO->data.dptr;
+
+  // dQKV shape is [b, s, 3, h, d]
+  void* devPtrdQKV = output_dQKV->data.dptr;
+  void* devPtrdQ = devPtrdQKV;
+  void* devPtrdK = static_cast<void *>(static_cast<int8_t*>(devPtrdQKV) + stride);
+  void* devPtrdV = static_cast<void *>(static_cast<int8_t*>(devPtrdQKV) + 2 * stride);
+
+  void* devPtrdBias = output_dBias->data.dptr;
+
+  NVTE_CHECK(Aux_CTX_Tensors->size == 1);
+  void* devPtrS = nullptr;
+  if (Aux_CTX_Tensors->size == 1) {
+    Tensor *output_S = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    devPtrS = output_S->data.dptr;
+  }
+  // devPtrdS reuses the memory of devPtrS
+  void* devPtrdS = devPtrS;
+
+  void* devPtrCuSeqlens = cu_seqlens->data.dptr;
+
+  const auto qkv_type = input_QKV->data.dtype;
+  size_t workspace_size = 0;
+
+  fused_attn_max_512_bwd_impl(
+    batch, num_head, max_seqlen, max_seqlen, head_dim,
+    qkv_layout, attn_scale, p_dropout, mask_type, bias_type,
+    devPtrQ, devPtrK, devPtrV, devPtrS,
+    devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+    devPtrdS, devPtrdBias,
+    devPtrCuSeqlens, devPtrCuSeqlens,
+    workspace->data.dptr, &workspace_size,
+    get_cudnn_dtype(qkv_type),
+    stream, handle);
+
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = { workspace_size };
+      workspace->data.dtype = DType::kByte;
+      return;
+    }
+  } else if (workspace_size == 0) {
+    workspace->data.shape = { 1 };
+    workspace->data.dtype = DType::kByte;
+    return;
+  }
+}
+
 }

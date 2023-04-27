@@ -95,6 +95,8 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 float scale_factor);
 
 struct CustomCallFMHADescriptor {
+    // TODO(rewang): rename to q/kv_max_seqlen, deterministic
+    // is_causal_masking
     size_t batch;
     size_t num_head;
     size_t max_q_seqlen;
