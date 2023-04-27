@@ -133,7 +133,6 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQKV                  The gradient of the QKV tensor.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen            Max sequence length used for computing,
  *                                       it may be >= max(cu_seqlens). 
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
@@ -222,7 +221,6 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dKV                   The gradient of the KV tensor.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q          Max sequence length used for computing for Q.  
  *                                       it may be >= max(cu_seqlens_q). 
  *  \param[in]     max_seqlen_kv         Max sequence length used for computing for KV.  
