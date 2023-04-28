@@ -94,13 +94,13 @@ class _SplitLastDim(torch.autograd.Function):
 
         noop_ok = True
         strides = grad_outputs[0].stride()
-        data_ptr = grad_outputs[0].untyped_storage().data_ptr()
+        data_ptr = grad_outputs[0].storage().data_ptr()
         shape = grad_outputs[0].shape
         last_dim_size = grad_outputs[0].shape[-1]
         for i, tensor in enumerate(grad_outputs):
             if (tensor.stride() != strides or
                 tensor.shape != shape or
-                tensor.untyped_storage().data_ptr() != data_ptr or
+                tensor.storage().data_ptr() != data_ptr or
                 tensor.storage_offset() != i * last_dim_size):
                 noop_ok = False
                 break
@@ -111,7 +111,7 @@ class _SplitLastDim(torch.autograd.Function):
                                     dtype=grad_outputs[0].dtype)
             new_shape = list(shape)
             new_shape[-1] = new_shape[-1] * len(grad_outputs)
-            ret.set_(grad_outputs[0].untyped_storage(),
+            ret.set_(grad_outputs[0].storage(),
                      grad_outputs[0].storage_offset(),
                      new_shape,
                      grad_outputs[0].stride()
@@ -277,8 +277,8 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 def _check_if_interleaved(q, k, v):
-    data_ptr = q.untyped_storage().data_ptr()
-    check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+    data_ptr = q.storage().data_ptr()
+    check_ptrs = all(x.storage().data_ptr() == data_ptr for x in [q, k, v])
     if not check_ptrs:
         return False
 
