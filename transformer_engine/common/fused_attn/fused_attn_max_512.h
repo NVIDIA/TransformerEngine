@@ -17,25 +17,6 @@
 
 #include "common/common.h"
 
-void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
-                                 float dropout_probability, NVTE_Bias_Type bias_type,
-                                 NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
-                                 void *devPtrV, void *devPtrS, void *devPtrO, void *devPtrBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
-                                 size_t *workspace_size, cudnnDataType_t tensorType,
-                                 cudaStream_t stream, cudnnHandle_t handle);
-
-void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 NVTE_QKV_Layout layout, float scaling_factor,
-                                 float dropout_probability, NVTE_Mask_Type mask_type,
-                                 NVTE_Bias_Type bias_type, void *devPtrQ, void *devPtrK,
-                                 void *devPtrV, void *devPtrS, void *devPtrdQ, void *devPtrdK,
-                                 void *devPtrdV, void *devPtrdO, void *devPtrdS, void *devPtrdBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
-                                 size_t *workspace_size, cudnnDataType_t tensorType,
-                                 cudaStream_t stream, cudnnHandle_t handle);
-
 namespace transformer_engine {
 void fused_attn_max_512_fwd_qkvpacked(size_t batch, size_t max_seqlen, size_t num_head,
                                       size_t head_size, bool is_training, float attn_scale,
