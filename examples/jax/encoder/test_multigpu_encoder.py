@@ -56,7 +56,7 @@ class Net(nn.Module):
     def __call__(self, x, mask, disable_dropout=False):
         x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
-        te_Encoder = partial(te.TransformerLayer,
+        te_Encoder = partial(te.flax.TransformerLayer,
                              hidden_size=256,
                              mlp_hidden_size=1024,
                              num_attention_heads=8,
@@ -70,9 +70,11 @@ class Net(nn.Module):
 
         x = x.reshape(x.shape[0], -1)
 
-        x = te.DenseGeneral(features=256, sharding_type=te.ShardingType.DP, dtype=jnp.bfloat16)(x)
+        x = te.flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
+                                 dtype=jnp.bfloat16)(x)
 
-        x = te.DenseGeneral(features=256, sharding_type=te.ShardingType.DP, dtype=jnp.bfloat16)(x)
+        x = te.flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
+                                 dtype=jnp.bfloat16)(x)
 
         x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
         return x

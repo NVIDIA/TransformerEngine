@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import pytest
 
 from transformer_engine.common.recipe import Format
-from transformer_engine.jax import TransformerLayer, TransformerLayerType
+from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
 from transformer_engine.jax.fp8 import FP8Helper
 from utils import assert_allclose, is_fp8_supported
 from utils import DecoderLayer as RefDecoderLayer
