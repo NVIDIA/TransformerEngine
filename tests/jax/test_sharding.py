@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from jax.experimental import maps
 
-from transformer_engine.jax import extend_logical_axis_rules
+from transformer_engine.jax.flax import extend_logical_axis_rules
 from transformer_engine.jax.sharding import get_dot_sharding_meta
 from transformer_engine.jax.sharding import get_elementwise_sharding_meta
 from transformer_engine.jax.sharding import get_fp8_meta_sharding_meta

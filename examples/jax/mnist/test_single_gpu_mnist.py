@@ -47,7 +47,7 @@ class Net(nn.Module):
     @nn.compact
     def __call__(self, x, disable_dropout=False):
         if self.use_te:
-            nn_Dense = te.DenseGeneral
+            nn_Dense = te.flax.DenseGeneral
         else:
             nn_Dense = nn.Dense
 

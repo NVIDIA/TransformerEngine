@@ -16,15 +16,15 @@ from jax import lax
 from jax import nn as jax_nn
 from jax import random as jax_random
 
-from .dot import fp8_dot
-from .fp8 import FP8GemmPackage, FP8Helper
-from .layernorm import canonicalize_layernorm_type
-from .layernorm import layernorm, layernorm_fp8_dot
-from .mlp import fp8_ln_mlp, geglu
-from .sharding import infer_sharding_type
-from .softmax import is_softmax_kernel_available
-from .sharding import MajorShardingType, ShardingType
-from .softmax import softmax, SoftmaxType
+from ..dot import fp8_dot
+from ..fp8 import FP8GemmPackage, FP8Helper
+from ..layernorm import canonicalize_layernorm_type
+from ..layernorm import layernorm, layernorm_fp8_dot
+from ..mlp import fp8_ln_mlp, geglu
+from ..sharding import infer_sharding_type
+from ..softmax import is_softmax_kernel_available
+from ..sharding import MajorShardingType, ShardingType
+from ..softmax import softmax, SoftmaxType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -44,6 +44,13 @@ def _canonicalize_tuple(x):
     if isinstance(x, Iterable):
         return tuple(x)
     return (x,)
+
+
+def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_gamma):
+    if original_init is None:
+        if not zero_centered_gamma:
+            return nn.initializers.ones
+    return nn.initializers.zeros
 
 
 def _create_layernorm_parameters(layernorm_type, shape, scale_init, scale_axes, bias_init,
@@ -250,11 +257,8 @@ class LayerNorm(nn.Module):
     sharding_type: ShardingType = ShardingType.SINGLE
 
     def __post_init__(self):
-        if self.scale_init is None:
-            if not self.zero_centered_gamma:
-                self.scale_init = nn.initializers.ones
-            else:
-                self.scale_init = nn.initializers.zeros
+        self.scale_init = _obtain_default_layernorm_scale_init_if_need(
+            self.scale_init, self.zero_centered_gamma)
         super().__post_init__()
 
     @nn.compact
@@ -549,11 +553,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        if self.scale_init is None:
-            if not self.zero_centered_gamma:
-                self.scale_init = nn.initializers.ones
-            else:
-                self.scale_init = nn.initializers.zeros
+        self.scale_init = _obtain_default_layernorm_scale_init_if_need(
+            self.scale_init, self.zero_centered_gamma)
         super().__post_init__()
 
     @nn.compact
@@ -781,11 +782,8 @@ class LayerNormMLP(TransformerEngineBase):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        if self.scale_init is None:
-            if not self.zero_centered_gamma:
-                self.scale_init = nn.initializers.ones
-            else:
-                self.scale_init = nn.initializers.zeros
+        self.scale_init = _obtain_default_layernorm_scale_init_if_need(
+            self.scale_init, self.zero_centered_gamma)
         super().__post_init__()
 
     @nn.compact
