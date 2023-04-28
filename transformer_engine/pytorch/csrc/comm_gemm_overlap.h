@@ -445,9 +445,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                        (cudaStream_t)_stream_send);
       userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, peer_rank,
                        (cudaStream_t)_stream_recv);
-      CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
       CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _stop_send, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _stop_recv, 0));
 
       int local_rank_round2 = (_tp_id % 2 == 0) ? _tp_id : _tp_id - 1;
@@ -481,10 +480,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                            next_rank, (cudaStream_t)_stream_send);
           userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes * 2, _ub_comm,
                            prev_rank, (cudaStream_t)_stream_recv);
-          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
           CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-          CHECK_CUDA(cudaStreamWaitEvent(
-              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_send, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
           CHECK_CUDA(cudaStreamWaitEvent(
               (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
         } else if (B_copy.numel() > 0) {
@@ -533,10 +530,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                            _next_rank, (cudaStream_t)_stream_send);
           userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
                            _prev_rank, (cudaStream_t)_stream_recv);
-          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
           CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-          CHECK_CUDA(cudaStreamWaitEvent(
-              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_send, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
           CHECK_CUDA(cudaStreamWaitEvent(
               (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
         } else if (B_copy.numel() > 0) {
