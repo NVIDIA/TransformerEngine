@@ -21,7 +21,7 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fmha import self_fmha, cross_fmha
+from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
@@ -348,12 +348,12 @@ class MultiHeadAttention(nn.Module):
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
-        fmha_supported_seqlen = [128, 256, 384, 512]
-        use_fmha = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
+        fused_attn_supported_seqlen = [128, 256, 384, 512]
+        use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
-            q_seqlen in fmha_supported_seqlen and kv_seqlen in fmha_supported_seqlen
+            q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen
 
-        if not use_fmha:
+        if not use_fused_attn:
             reason = ""
             if decode:
                 reason += f"decode=False is required but got {decode}, "
@@ -368,10 +368,12 @@ class MultiHeadAttention(nn.Module):
             if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
                 reason += f"dtype in [BF16, FP16] is required " \
                           f"but got dtype={canonicalize_dtype}, "
-            if q_seqlen not in fmha_supported_seqlen:
-                reason += f"q_seqlen in {fmha_supported_seqlen} is required but got {q_seqlen=}, "
-            if kv_seqlen not in fmha_supported_seqlen:
-                reason += f"kv_seqlen in {fmha_supported_seqlen} is required but got {kv_seqlen=}, "
+            if q_seqlen not in fused_attn_supported_seqlen:
+                reason += f"q_seqlen in {fused_attn_supported_seqlen} is required " \
+                          f"but got {q_seqlen=}, "
+            if kv_seqlen not in fused_attn_supported_seqlen:
+                reason += f"kv_seqlen in {fused_attn_supported_seqlen} is required " \
+                          f"but got {kv_seqlen=}, "
             warnings.warn(
                 f"Fused attention is not enabled, " \
                 f"{reason}fall back to unfused attention")
@@ -395,7 +397,7 @@ class MultiHeadAttention(nn.Module):
                     bias_init=self.bias_init,
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
-                if not use_fmha:
+                if not use_fused_attn:
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
                 query, ln_out = LayerNormDenseGeneral(
@@ -424,7 +426,7 @@ class MultiHeadAttention(nn.Module):
                                        bias_init=self.bias_init,
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
-                if not use_fmha:
+                if not use_fused_attn:
                     key, value = jnp.split(kv_proj, [1], axis=-2)
         else:
             kv_projection = functools.partial(
@@ -465,7 +467,7 @@ class MultiHeadAttention(nn.Module):
             assert ln_out is not None
             residual = ln_out
 
-        if not use_fmha:
+        if not use_fused_attn:
             query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
             key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
             value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
@@ -518,7 +520,7 @@ class MultiHeadAttention(nn.Module):
                                                        jnp.reshape(cur_index, (-1)), 1, -2)
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
-        if use_fmha:
+        if use_fused_attn:
             assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
             assert not self.transpose_batch_sequence
             is_causal_masking = (self.attn_type == AttentionType.CAUSAL)
@@ -528,14 +530,14 @@ class MultiHeadAttention(nn.Module):
                 qkv_sharding_constraint = ('batch', 'length', 'qkv_dim', 'heads', 'kv')
                 qkv_proj = nn_partitioning.with_sharding_constraint(qkv_proj,
                                                                     qkv_sharding_constraint)
-                x = self_fmha(qkv_proj,
-                              bias,
-                              mask,
-                              seed=0,
-                              scaling_factor=scale_factor,
-                              dropout_probability=self.dropout_rate,
-                              is_causal_masking=is_causal_masking,
-                              sharding_type=first_sharding_type)
+                x = self_fused_attn(qkv_proj,
+                                    bias,
+                                    mask,
+                                    seed=0,
+                                    scaling_factor=scale_factor,
+                                    dropout_probability=self.dropout_rate,
+                                    is_causal_masking=is_causal_masking,
+                                    sharding_type=first_sharding_type)
             else:
                 assert bias is None
                 query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
@@ -545,14 +547,14 @@ class MultiHeadAttention(nn.Module):
                 query = nn_partitioning.with_sharding_constraint(query, q_sharding_constraint)
                 kv_proj = nn_partitioning.with_sharding_constraint(kv_proj, kv_sharding_constraint)
 
-                x = cross_fmha(query,
-                               kv_proj,
-                               mask,
-                               seed=0,
-                               scaling_factor=scale_factor,
-                               dropout_probability=self.dropout_rate,
-                               is_causal_masking=is_causal_masking,
-                               sharding_type=first_sharding_type)
+                x = cross_fused_attn(query,
+                                     kv_proj,
+                                     mask,
+                                     seed=0,
+                                     scaling_factor=scale_factor,
+                                     dropout_probability=self.dropout_rate,
+                                     is_causal_masking=is_causal_masking,
+                                     sharding_type=first_sharding_type)
         else:
             dropout_rng = None
             if not deterministic and self.dropout_rate > 0.:

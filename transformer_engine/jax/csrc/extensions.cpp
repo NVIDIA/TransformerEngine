@@ -43,10 +43,11 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    dict["te_self_fmha_forward"] = EncapsulateFunction(SelfMultiheadAttentionForward);
-    dict["te_self_fmha_backward"] = EncapsulateFunction(SelfMultiheadAttentionBackward);
-    dict["te_cross_fmha_forward"] = EncapsulateFunction(CrossMultiheadAttentionForward);
-    dict["te_cross_fmha_backward"] = EncapsulateFunction(CrossMultiheadAttentionBackward);
+    dict["te_self_fused_attn_max_512_forward"] = EncapsulateFunction(SelfFusedAttnMax512Forward);
+    dict["te_self_fused_attn_max_512_backward"] = EncapsulateFunction(SelfFusedAttnMax512Backward);
+    dict["te_cross_fused_attn_max_512_forward"] = EncapsulateFunction(CrossFusedAttnMax512Forward);
+    dict["te_cross_fused_attn_max_512_backward"] =
+        EncapsulateFunction(CrossFusedAttnMax512Backward);
     return dict;
 }
 
@@ -56,12 +57,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-    m.def("pack_fmha_descriptor", &PackCustomCallFMHADescriptor);
+    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
 
-    // TODO(rewang): add kINT64
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
         .value("kInt32", DType::kInt32)
+        .value("KInt64", DType::kInt64)
         .value("kFloat32", DType::kFloat32)
         .value("kFloat16", DType::kFloat16)
         .value("kBFloat16", DType::kBFloat16)

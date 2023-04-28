@@ -79,13 +79,14 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
         SoftmaxDescriptor{batch, pad_batch, heads, q_seqlen, k_seqlen, dtype, scale_factor});
 }
 
-pybind11::bytes PackCustomCallFMHADescriptor(size_t batch, size_t num_head, size_t max_q_seqlen,
-                                             size_t max_kv_seqlen, size_t head_dim, size_t seed,
-                                             float scaling_factor, float dropout_probability,
-                                             bool is_causal_masking, DType dtype) {
-    return PackOpaque(CustomCallFMHADescriptor{batch, num_head, max_q_seqlen, max_kv_seqlen,
-                                               head_dim, seed, scaling_factor, dropout_probability,
-                                               is_causal_masking, dtype});
+pybind11::bytes PackCustomCallFusedAttnDescriptor(size_t batch, size_t num_head,
+                                                  size_t max_q_seqlen, size_t max_kv_seqlen,
+                                                  size_t head_dim, size_t seed,
+                                                  float scaling_factor, float dropout_probability,
+                                                  bool is_causal_masking, DType dtype) {
+    return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, max_q_seqlen, max_kv_seqlen,
+                                                    head_dim, seed, scaling_factor,
+                                                    dropout_probability, is_causal_masking, dtype});
 }
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
@@ -737,10 +738,10 @@ inline NVTE_Mask_Type ToMaskType(bool is_causal_masking) {
     return NVTE_Mask_Type::NVTE_PADDING_MASK;
 }
 
-void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
-                                   size_t opaque_len) {
-    const CustomCallFMHADescriptor &descriptor =
-        *UnpackOpaque<CustomCallFMHADescriptor>(opaque, opaque_len);
+void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
     // input
     void *qkv = buffers[0];
@@ -812,10 +813,10 @@ void SelfMultiheadAttentionForward(cudaStream_t stream, void **buffers, const ch
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                                    size_t opaque_len) {
-    const CustomCallFMHADescriptor &descriptor =
-        *UnpackOpaque<CustomCallFMHADescriptor>(opaque, opaque_len);
+void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
     // input
     void *qkv = buffers[0];
@@ -900,10 +901,10 @@ void SelfMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const c
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const char *opaque,
-                                    size_t opaque_len) {
-    const CustomCallFMHADescriptor &descriptor =
-        *UnpackOpaque<CustomCallFMHADescriptor>(opaque, opaque_len);
+void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
     // input
     void *q = buffers[0];
@@ -980,10 +981,10 @@ void CrossMultiheadAttentionForward(cudaStream_t stream, void **buffers, const c
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void CrossMultiheadAttentionBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                                     size_t opaque_len) {
-    const CustomCallFMHADescriptor &descriptor =
-        *UnpackOpaque<CustomCallFMHADescriptor>(opaque, opaque_len);
+void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                  size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
     // input
     void *q = buffers[0];

@@ -16,13 +16,13 @@ from jax import nn as jax_nn
 from jax import lax
 from jax import value_and_grad, jit
 
-from transformer_engine.jax.fmha import self_fmha, cross_fmha
+from transformer_engine.jax.fused_attention import self_fused_attn, cross_fused_attn
 
 # Type annotations
 Array = jnp.ndarray
 
-CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
-CROSS_FMHA_CASES = [(32, 128, 512, 16, 64)]
+SELF_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
+CROSS_CASES = [(32, 128, 512, 16, 64)]
 DTYPES = [jnp.bfloat16, jnp.float16]
 
 
@@ -147,7 +147,7 @@ def core_attention(query,
     return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
 
-def jax_self_fmha(qkv, bias, q_token, kv_token, **kwargs):
+def jax_self_fused_attn(qkv, bias, q_token, kv_token, **kwargs):
     is_causal_masking = kwargs['is_causal_masking']
     if is_causal_masking:
         mask = make_decoder_mask(q_token)
@@ -171,7 +171,7 @@ def jax_self_fmha(qkv, bias, q_token, kv_token, **kwargs):
     return output
 
 
-def jax_cross_fmha(q, kv, q_token, kv_token, **kwargs):
+def jax_cross_fused_attn(q, kv, q_token, kv_token, **kwargs):
     is_causal_masking = kwargs['is_causal_masking']
     if is_causal_masking:
         raise NotImplementedError
@@ -195,7 +195,7 @@ def jax_cross_fmha(q, kv, q_token, kv_token, **kwargs):
     return output
 
 
-def customcall_self_fmha(qkv, bias, q_token, kv_token, **kwargs):
+def customcall_self_fused_attn(qkv, bias, q_token, kv_token, **kwargs):
     is_causal_masking = kwargs['is_causal_masking']
     if is_causal_masking:
         mask = make_decoder_mask(q_token)
@@ -205,10 +205,10 @@ def customcall_self_fmha(qkv, bias, q_token, kv_token, **kwargs):
     # mask invert
     mask = (mask == 0)
 
-    return self_fmha(qkv, bias, mask, **kwargs)
+    return self_fused_attn(qkv, bias, mask, **kwargs)
 
 
-def customcall_cross_fmha(q, kv, q_token, kv_token, **kwargs):
+def customcall_cross_fused_attn(q, kv, q_token, kv_token, **kwargs):
     is_causal_masking = kwargs['is_causal_masking']
     if is_causal_masking:
         raise NotImplementedError
@@ -217,10 +217,10 @@ def customcall_cross_fmha(q, kv, q_token, kv_token, **kwargs):
     # mask invert
     mask = (mask == 0)
 
-    return cross_fmha(q, kv, mask, **kwargs)
+    return cross_fused_attn(q, kv, mask, **kwargs)
 
 
-class TestSelfFMHA():
+class TestSelfFusedAttnMax512():
 
     def set_input(self, b, s, h, d, dtype, is_causal_masking, pad_len):
         key = jax.random.PRNGKey(0)
@@ -243,14 +243,14 @@ class TestSelfFMHA():
         self.dropout_probability = 0.
         self.is_causal_masking = is_causal_masking
 
-    @pytest.mark.parametrize('b, s, h, d', CASES)
+    @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False, True])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_forward(self, b, s, h, d, is_causal_masking, dtype):
 
         self.set_input(b, s, h, d, is_causal_masking=is_causal_masking, dtype=dtype, pad_len=117)
 
-        reference_out = jax_self_fmha(
+        reference_out = jax_self_fused_attn(
             self.qkv,
             self.bias,
             self.q_token,
@@ -260,14 +260,14 @@ class TestSelfFMHA():
             dropout_probability=self.dropout_probability,    # no used currently
             is_causal_masking=self.is_causal_masking)
 
-        primitive_out = customcall_self_fmha(self.qkv,
-                                             self.bias,
-                                             self.q_token,
-                                             self.kv_token,
-                                             seed=self.seed,
-                                             scaling_factor=self.scaling_factor,
-                                             dropout_probability=self.dropout_probability,
-                                             is_causal_masking=self.is_causal_masking)
+        primitive_out = customcall_self_fused_attn(self.qkv,
+                                                   self.bias,
+                                                   self.q_token,
+                                                   self.kv_token,
+                                                   seed=self.seed,
+                                                   scaling_factor=self.scaling_factor,
+                                                   dropout_probability=self.dropout_probability,
+                                                   is_causal_masking=self.is_causal_masking)
 
         ref_valid, _ = jnp.split(reference_out, (self.valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.valid_len,), axis=1)
@@ -280,7 +280,7 @@ class TestSelfFMHA():
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
 
-    @pytest.mark.parametrize('b, s, h, d', CASES)
+    @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False, True])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_forward_backward(self, b, s, h, d, is_causal_masking, dtype):
@@ -292,15 +292,18 @@ class TestSelfFMHA():
                        dtype=dtype,
                        pad_len=(161 if s > 128 else 19))
 
-        def grad_func(fmha_func, *args, **kwargs):
+        def grad_func(fused_attn_max_512_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 1000 if dtype == jnp.bfloat16 else 10000
             if self.is_causal_masking:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
-            # fmha output has shape (b, s, h, d)
-            valid_fmha_ret, _ = jnp.split(fmha_func(*args, **kwargs), (self.valid_len,), axis=1)
-            return (jnp.mean(valid_fmha_ret, dtype=jnp.float32) * gradient_multiplier).astype(dtype)
+            # fused_attn_max_512 output has shape (b, s, h, d)
+            valid_fused_attn_max_512_ret, _ = jnp.split(fused_attn_max_512_func(*args, **kwargs),
+                                                        (self.valid_len,),
+                                                        axis=1)
+            return (jnp.mean(valid_fused_attn_max_512_ret, dtype=jnp.float32) *
+                    gradient_multiplier).astype(dtype)
 
         kwargs = {
             'seed': self.seed,
@@ -309,16 +312,17 @@ class TestSelfFMHA():
             'is_causal_masking': self.is_causal_masking
         }
 
-        # Use FP16/BF16 to sum the FMHA results may cause overflow, use FP32 for the summation
+        # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
                 lambda qkv, bias, q_token, kv_token: grad_func(
-                    customcall_self_fmha, qkv, bias, q_token, kv_token, **kwargs), (0, 1)))
+                    customcall_self_fused_attn, qkv, bias, q_token, kv_token, **kwargs), (0, 1)))
 
         jitted_reference = jit(
             value_and_grad(
-                lambda qkv, bias, q_token, kv_token: grad_func(jax_self_fmha, qkv.astype(
-                    jnp.float32), bias.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
+                lambda qkv, bias, q_token,
+                kv_token: grad_func(jax_self_fused_attn, qkv.astype(jnp.float32),
+                                    bias.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
 
         primitive_out, (primitive_dqkv,
                         primitive_dbeta) = jitted_primitive(self.qkv, self.bias, self.q_token,
@@ -378,7 +382,7 @@ class TestSelfFMHA():
                             jnp.zeros_like(primitive_dbeta[:, :, self.valid_len:, self.valid_len:]))
 
 
-class TestCrossFMHA():
+class TestCrossFusedAttnMax512():
 
     def set_input(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_len):
         key = jax.random.PRNGKey(0)
@@ -403,7 +407,7 @@ class TestCrossFMHA():
         self.dropout_probability = 0.
         self.is_causal_masking = is_causal_masking
 
-    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_FMHA_CASES)
+    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_forward(self, b, s_q, s_kv, h, d, is_causal_masking, dtype):
@@ -417,7 +421,7 @@ class TestCrossFMHA():
                        dtype=dtype,
                        pad_len=63)
 
-        reference_out = jax_cross_fmha(
+        reference_out = jax_cross_fused_attn(
             self.q,
             self.kv,
             self.q_token,
@@ -427,14 +431,14 @@ class TestCrossFMHA():
             dropout_probability=self.dropout_probability,    # no used currently
             is_causal_masking=self.is_causal_masking)
 
-        primitive_out = customcall_cross_fmha(self.q,
-                                              self.kv,
-                                              self.q_token,
-                                              self.kv_token,
-                                              seed=self.seed,
-                                              scaling_factor=self.scaling_factor,
-                                              dropout_probability=self.dropout_probability,
-                                              is_causal_masking=self.is_causal_masking)
+        primitive_out = customcall_cross_fused_attn(self.q,
+                                                    self.kv,
+                                                    self.q_token,
+                                                    self.kv_token,
+                                                    seed=self.seed,
+                                                    scaling_factor=self.scaling_factor,
+                                                    dropout_probability=self.dropout_probability,
+                                                    is_causal_masking=self.is_causal_masking)
 
         ref_valid, _ = jnp.split(reference_out, (self.q_valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.q_valid_len,), axis=1)
@@ -447,7 +451,7 @@ class TestCrossFMHA():
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
 
-    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_FMHA_CASES)
+    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_forward_backward(self, b, s_q, s_kv, h, d, is_causal_masking, dtype):
@@ -460,15 +464,18 @@ class TestCrossFMHA():
                        dtype=dtype,
                        pad_len=19)
 
-        def grad_func(fmha_func, *args, **kwargs):
+        def grad_func(fused_attn_max_512_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 10000
             if self.is_causal_masking:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
-            # fmha output has shape (b, s_q, h, d)
-            valid_fmha_ret, _ = jnp.split(fmha_func(*args, **kwargs), (self.q_valid_len,), axis=1)
-            return (jnp.mean(valid_fmha_ret, dtype=jnp.float32) * gradient_multiplier).astype(dtype)
+            # fused_attn_max_512 output has shape (b, s_q, h, d)
+            valid_fused_attn_max_512_ret, _ = jnp.split(fused_attn_max_512_func(*args, **kwargs),
+                                                        (self.q_valid_len,),
+                                                        axis=1)
+            return (jnp.mean(valid_fused_attn_max_512_ret, dtype=jnp.float32) *
+                    gradient_multiplier).astype(dtype)
 
         kwargs = {
             'seed': self.seed,
@@ -477,16 +484,17 @@ class TestCrossFMHA():
             'is_causal_masking': self.is_causal_masking
         }
 
-        # Use FP16/BF16 to sum the FMHA results may cause overflow, use FP32 for the summation
+        # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda q, kv, q_token, kv_token: grad_func(customcall_cross_fmha, q, kv, q_token,
-                                                           kv_token, **kwargs), (0, 1)))
+                lambda q, kv, q_token, kv_token: grad_func(customcall_cross_fused_attn, q, kv,
+                                                           q_token, kv_token, **kwargs), (0, 1)))
 
         jitted_reference = jit(
             value_and_grad(
-                lambda q, kv, q_token, kv_token: grad_func(jax_cross_fmha, q.astype(
-                    jnp.float32), kv.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
+                lambda q, kv, q_token,
+                kv_token: grad_func(jax_cross_fused_attn, q.astype(jnp.float32),
+                                    kv.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
 
         primitive_out, (primitive_dq,
                         primitive_dkv) = jitted_primitive(self.q, self.kv, self.q_token,

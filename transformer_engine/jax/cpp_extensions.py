@@ -1975,11 +1975,11 @@ def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_ou
                                                           scale_factor=scale_factor)
 
 
-class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
+class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
     """
-    Self Multi-head Attention Forward Primitive
+    Self Fused Attention Forward Primitive
     """
-    name = "te_self_fmha_forward"
+    name = "te_self_fused_attn_max_512_forward"
     multiple_results = True
 
     @staticmethod
@@ -1995,7 +1995,7 @@ class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
             is_causal_masking    # pylint: disable=unused-argument
     ):
         """
-        Self multi-head attention fwd abstract
+        Self fused attention fwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
         batch, max_seqlen, nqkv, num_head, head_dim = qkv.shape
@@ -2010,7 +2010,7 @@ class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
         softmax_dtype = qkv_dtype
 
         return (
-            ShapedArray(output_shape, output_dtype, named_shape=qkv.named_shape),    # fmha_output
+            ShapedArray(output_shape, output_dtype, named_shape=qkv.named_shape),    # output
             ShapedArray(softmax_aux_shape, softmax_dtype,
                         named_shape=qkv.named_shape),    # softmax_aux
         )
@@ -2019,7 +2019,7 @@ class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, bias, q_seqlen, kv_seqlen, *, seed, scaling_factor, dropout_probability,
                  is_causal_masking):
         """
-        Self multi-head attention fwd lowering rules
+        Self fused attention fwd lowering rules
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
@@ -2049,13 +2049,11 @@ class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
         operand_shapes = [ir_qkv_shape, ir_bias_shape, ir_q_seqlen_shape, ir_kv_seqlen_shape]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        opaque = transformer_engine_jax.pack_fmha_descriptor(batch, num_head, max_seqlen,
-                                                             max_seqlen, head_dim, seed,
-                                                             scaling_factor, dropout_probability,
-                                                             is_causal_masking,
-                                                             jax_dtype_to_te_dtype(qkv_aval.dtype))
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, max_seqlen, max_seqlen, head_dim, seed, scaling_factor,
+            dropout_probability, is_causal_masking, jax_dtype_to_te_dtype(qkv_aval.dtype))
 
-        out = custom_caller(SelfMultiHeadAttentionFwdPrimitive.name,
+        out = custom_caller(SelfFusedAttnMax512FwdPrimitive.name,
                             args,
                             opaque,
                             has_side_effect=False)
@@ -2063,30 +2061,30 @@ class SelfMultiHeadAttentionFwdPrimitive(BasePrimitive):
         return out
 
 
-_self_fmha_fwd_p = register_primitive(SelfMultiHeadAttentionFwdPrimitive)
+_self_fused_attn_max_512_fwd_p = register_primitive(SelfFusedAttnMax512FwdPrimitive)
 
 
-def self_fmha_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, q_seqlen: jnp.ndarray,
-                  kv_seqlen: jnp.ndarray, seed: int, scaling_factor: float,
-                  dropout_probability: float, is_causal_masking: bool):
+def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, q_seqlen: jnp.ndarray,
+                                kv_seqlen: jnp.ndarray, seed: int, scaling_factor: float,
+                                dropout_probability: float, is_causal_masking: bool):
     """
-    Wrapper for TE self multi-head attention fwd
+    Wrapper for TE self fused attention fwd
     """
-    return _self_fmha_fwd_p.bind(qkv,
-                                 bias,
-                                 q_seqlen,
-                                 kv_seqlen,
-                                 seed=seed,
-                                 scaling_factor=scaling_factor,
-                                 dropout_probability=dropout_probability,
-                                 is_causal_masking=is_causal_masking)
+    return _self_fused_attn_max_512_fwd_p.bind(qkv,
+                                               bias,
+                                               q_seqlen,
+                                               kv_seqlen,
+                                               seed=seed,
+                                               scaling_factor=scaling_factor,
+                                               dropout_probability=dropout_probability,
+                                               is_causal_masking=is_causal_masking)
 
 
-class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
+class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     """
-    Self Multi-head Attention Backward Primitive
+    Self Fused Attention Backward Primitive
     """
-    name = "te_self_fmha_backward"
+    name = "te_self_fused_attn_max_512_backward"
     multiple_results = True
 
     @staticmethod
@@ -2102,7 +2100,7 @@ class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
             is_causal_masking    # pylint: disable=unused-argument
     ):
         """
-        Self multi-head attention bwd abstract
+        Self fused attention bwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
         softmax_aux_dtype = dtypes.canonicalize_dtype(softmax_aux.dtype)
@@ -2122,7 +2120,7 @@ class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, softmax_aux, doutput, q_seqlen, kv_seqlen, *, scaling_factor,
                  dropout_probability, is_causal_masking):
         """
-        Self multi-head attention bwd lowering rules
+        Self fused attention bwd lowering rules
         """
         qkv_aval, _, _, _, _ = ctx.avals_in
 
@@ -2156,7 +2154,7 @@ class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        opaque = transformer_engine_jax.pack_fmha_descriptor(
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch,
             num_head,
             max_seqlen,
@@ -2168,7 +2166,7 @@ class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
             is_causal_masking,
             jax_dtype_to_te_dtype(qkv_aval.dtype))
 
-        out = custom_caller(SelfMultiHeadAttentionBwdPrimitive.name,
+        out = custom_caller(SelfFusedAttnMax512BwdPrimitive.name,
                             args,
                             opaque,
                             has_side_effect=False,
@@ -2177,30 +2175,31 @@ class SelfMultiHeadAttentionBwdPrimitive(BasePrimitive):
         return out
 
 
-_self_fmha_bwd_p = register_primitive(SelfMultiHeadAttentionBwdPrimitive)
+_self_fused_attn_max_512_bwd_p = register_primitive(SelfFusedAttnMax512BwdPrimitive)
 
 
-def self_fmha_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, doutput: jnp.ndarray,
-                  q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray, scaling_factor: float,
-                  dropout_probability: float, is_causal_masking: bool):
+def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, doutput: jnp.ndarray,
+                                q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
+                                scaling_factor: float, dropout_probability: float,
+                                is_causal_masking: bool):
     """
-    Wrapper for TE self multi-head attention bwd
+    Wrapper for TE self fused attention bwd
     """
-    return _self_fmha_bwd_p.bind(qkv,
-                                 softmax_aux,
-                                 doutput,
-                                 q_seqlen,
-                                 kv_seqlen,
-                                 scaling_factor=scaling_factor,
-                                 dropout_probability=dropout_probability,
-                                 is_causal_masking=is_causal_masking)
+    return _self_fused_attn_max_512_bwd_p.bind(qkv,
+                                               softmax_aux,
+                                               doutput,
+                                               q_seqlen,
+                                               kv_seqlen,
+                                               scaling_factor=scaling_factor,
+                                               dropout_probability=dropout_probability,
+                                               is_causal_masking=is_causal_masking)
 
 
-class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
+class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
     """
-    Cross Multi-head Attention Forward Primitive
+    Cross Fused Attention Forward Primitive
     """
-    name = "te_cross_fmha_forward"
+    name = "te_cross_fused_attn_max_512_forward"
     multiple_results = True
 
     @staticmethod
@@ -2216,7 +2215,7 @@ class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
             is_causal_masking    # pylint: disable=unused-argument
     ):
         """
-        Cross multi-head attention fwd abstract
+        Cross fused attention fwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         batch_q, max_q_seqlen, num_head_q, head_dim_q = q.shape
@@ -2236,7 +2235,7 @@ class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
         softmax_aux_dtype = q_dtype
 
         return (
-            ShapedArray(output_shape, output_dtype, named_shape=q.named_shape),    # fmha_output
+            ShapedArray(output_shape, output_dtype, named_shape=q.named_shape),    # output
             ShapedArray(softmax_aux_shape, softmax_aux_dtype,
                         named_shape=q.named_shape),    # softmax_aux
         )
@@ -2245,7 +2244,7 @@ class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, q_seqlen, kv_seqlen, *, seed, scaling_factor, dropout_probability,
                  is_causal_masking):
         """
-        Cross multi-head attention fwd lowering rules
+        Cross fused attention fwd lowering rules
         """
         q_aval, kv_aval, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
@@ -2273,13 +2272,11 @@ class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
         operand_shapes = [ir_q_shape, ir_kv_shape, ir_q_seqlen_shape, ir_kv_seqlen_shape]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        opaque = transformer_engine_jax.pack_fmha_descriptor(batch, num_head, max_q_seqlen,
-                                                             max_kv_seqlen, head_dim, seed,
-                                                             scaling_factor, dropout_probability,
-                                                             is_causal_masking,
-                                                             jax_dtype_to_te_dtype(q_aval.dtype))
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, max_q_seqlen, max_kv_seqlen, head_dim, seed, scaling_factor,
+            dropout_probability, is_causal_masking, jax_dtype_to_te_dtype(q_aval.dtype))
 
-        out = custom_caller(CrossMultiHeadAttentionFwdPrimitive.name,
+        out = custom_caller(CrossFusedAttnMax512FwdPrimitive.name,
                             args,
                             opaque,
                             has_side_effect=False)
@@ -2287,30 +2284,30 @@ class CrossMultiHeadAttentionFwdPrimitive(BasePrimitive):
         return out
 
 
-_cross_fmha_fwd_p = register_primitive(CrossMultiHeadAttentionFwdPrimitive)
+_cross_fused_attn_max_512_fwd_p = register_primitive(CrossFusedAttnMax512FwdPrimitive)
 
 
-def cross_fmha_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
-                   seed: int, scaling_factor: float, dropout_probability: float,
-                   is_causal_masking: bool):
+def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_seqlen: jnp.ndarray,
+                                 kv_seqlen: jnp.ndarray, seed: int, scaling_factor: float,
+                                 dropout_probability: float, is_causal_masking: bool):
     """
-    Wrapper for TE cross multi-head attention fwd
+    Wrapper for TE cross fused attention fwd
     """
-    return _cross_fmha_fwd_p.bind(q,
-                                  kv,
-                                  q_seqlen,
-                                  kv_seqlen,
-                                  seed=seed,
-                                  scaling_factor=scaling_factor,
-                                  dropout_probability=dropout_probability,
-                                  is_causal_masking=is_causal_masking)
+    return _cross_fused_attn_max_512_fwd_p.bind(q,
+                                                kv,
+                                                q_seqlen,
+                                                kv_seqlen,
+                                                seed=seed,
+                                                scaling_factor=scaling_factor,
+                                                dropout_probability=dropout_probability,
+                                                is_causal_masking=is_causal_masking)
 
 
-class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
+class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
     """
-    Cross Multi-head Attention Backward Primitive
+    Cross Fused Attention Backward Primitive
     """
-    name = "te_cross_fmha_backward"
+    name = "te_cross_fused_attn_max_512_backward"
     multiple_results = True
 
     @staticmethod
@@ -2327,7 +2324,7 @@ class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
             is_causal_masking    # pylint: disable=unused-argument
     ):
         """
-        Cross multi-head attention bwd abstract
+        Cross fused attention bwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv.dtype)
@@ -2347,7 +2344,7 @@ class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, softmax_aux, doutput, q_seqlen, kv_seqlen, *, scaling_factor,
                  dropout_probability, is_causal_masking):
         """
-        Cross multi-head attention bwd lowering rules
+        Cross fused attention bwd lowering rules
         """
         q_aval, _, _, _, _, _ = ctx.avals_in
 
@@ -2379,7 +2376,7 @@ class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        opaque = transformer_engine_jax.pack_fmha_descriptor(
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch,
             num_head,
             max_q_seqlen,
@@ -2391,7 +2388,7 @@ class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
             is_causal_masking,
             jax_dtype_to_te_dtype(q_aval.dtype))
 
-        out = custom_caller(CrossMultiHeadAttentionBwdPrimitive.name,
+        out = custom_caller(CrossFusedAttnMax512BwdPrimitive.name,
                             args,
                             opaque,
                             has_side_effect=False,
@@ -2400,21 +2397,22 @@ class CrossMultiHeadAttentionBwdPrimitive(BasePrimitive):
         return out
 
 
-_cross_fmha_bwd_p = register_primitive(CrossMultiHeadAttentionBwdPrimitive)
+_cross_fused_attn_max_512_bwd_p = register_primitive(CrossFusedAttnMax512BwdPrimitive)
 
 
-def cross_fmha_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray, doutput: jnp.ndarray,
-                   q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray, scaling_factor: float,
-                   dropout_probability: float, is_causal_masking: bool):
+def cross_fused_attn_max_512_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
+                                 doutput: jnp.ndarray, q_seqlen: jnp.ndarray,
+                                 kv_seqlen: jnp.ndarray, scaling_factor: float,
+                                 dropout_probability: float, is_causal_masking: bool):
     """
-    Wrapper for TE cross multi-head attention bwd
+    Wrapper for TE cross fused attention bwd
     """
-    return _cross_fmha_bwd_p.bind(q,
-                                  kv,
-                                  softmax_aux,
-                                  doutput,
-                                  q_seqlen,
-                                  kv_seqlen,
-                                  scaling_factor=scaling_factor,
-                                  dropout_probability=dropout_probability,
-                                  is_causal_masking=is_causal_masking)
+    return _cross_fused_attn_max_512_bwd_p.bind(q,
+                                                kv,
+                                                softmax_aux,
+                                                doutput,
+                                                q_seqlen,
+                                                kv_seqlen,
+                                                scaling_factor=scaling_factor,
+                                                dropout_probability=dropout_probability,
+                                                is_causal_masking=is_causal_masking)
