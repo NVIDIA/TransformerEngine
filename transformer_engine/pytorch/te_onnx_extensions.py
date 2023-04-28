@@ -58,14 +58,17 @@ def get_TensorProtoDataType(t):
 
 
 def is_dtype_fp32(t):
+    """Check fp32 dtype"""
     return t.type().scalarType() == "Float"
 
 
 def is_dtype_fp16(t):
+    """Check fp16 dtype"""
     return t.type().scalarType() == "Half"
 
 
 def is_dtype_bf16(t):
+    """Check bf16 dtype"""
     return t.type().scalarType() == "BFloat16"
 
 
