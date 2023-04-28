@@ -18,9 +18,9 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from .softmax import SoftmaxType
-from .sharding import infer_major_sharding_type, infer_sharding_type
-from .sharding import global_shard_resource, ShardingType
+from ..softmax import SoftmaxType
+from ..sharding import infer_major_sharding_type, infer_sharding_type
+from ..sharding import global_shard_resource, ShardingType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
