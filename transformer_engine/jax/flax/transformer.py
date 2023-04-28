@@ -19,9 +19,9 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 
-from .fmha import self_fmha, cross_fmha
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
+from ..fmha import self_fmha, cross_fmha
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
