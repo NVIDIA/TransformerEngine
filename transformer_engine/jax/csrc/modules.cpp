@@ -17,8 +17,6 @@
 #include <vector>
 
 #include "common/common.h"
-#include "common/fused_attn/fused_attn.h"  // TODO(rewang): remove this
-#include "common/fused_attn/utils.h"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/fused_attn.h"

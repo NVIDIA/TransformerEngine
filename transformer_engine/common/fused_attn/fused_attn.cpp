@@ -8,7 +8,7 @@
 #include "../common.h"
 #include "utils.h"
 #include "fused_attn_fp8.h"
-#include "fused_attn.h"
+#include "fused_attn_max_512.h"
 
 // NVTE fused attention FWD FP8 with packed QKV
 void nvte_fused_attn_fwd_qkvpacked(

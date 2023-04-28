@@ -4,9 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../common.h"
-#include "fused_attn.h"
-#include "utils.h"
+#include "fused_attn_max_512.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -15,6 +13,9 @@
 #include <vector>
 
 #include "cudnn_frontend.h"
+
+#include "../common.h"
+#include "utils.h"
 
 #define CUDNN_FRONTEND_UNUSED(X) ((void)X)
 

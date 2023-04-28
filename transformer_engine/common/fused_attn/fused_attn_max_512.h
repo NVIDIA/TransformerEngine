@@ -4,18 +4,18 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file fused_attn.h
- *  \brief Functions for fused multi-head attention
+/*! \file fused_attn_max_512.h
+ *  \brief Functions for fused attention with seqlen <= 512
  */
 
-#ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_H_
-#define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_H_
+#ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_MAX_512_H_
+#define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_MAX_512_H_
 
 #include "transformer_engine/fused_attn.h"
 
-#include "common/common.h"
-
 #include <cudnn.h>
+
+#include "common/common.h"
 
 void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                  int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
@@ -76,4 +76,4 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_H_
+#endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_MAX_512_H_
