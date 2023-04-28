@@ -8,6 +8,7 @@ import functools
 from enum import Enum
 from math import sqrt
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
+import warnings
 
 import jax.numpy as jnp
 import numpy as np
@@ -355,27 +356,25 @@ class MultiHeadAttention(nn.Module):
         if not use_fmha:
             reason = ""
             if decode:
-                reason += f"required decode=False but got {decode}, "
+                reason += f"decode=False is required but got {decode}, "
             if self.transpose_batch_sequence:
-                reason += f"required transpose_batch_sequence=False " \
+                reason += f"transpose_batch_sequence=False is required " \
                           f"but got {self.transpose_batch_sequence}, "
             if not self.fuse_qkv:
-                reason += f"required fuse_qkv=True but got {self.fuse_qkv}, "
+                reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
             if self.dropout_rate != 0:
                 # TODO(rewang): add dropout support
-                reason += f"required no dropout but got dropout_rate={self.dropout_rate}, "
+                reason += f"no dropout is required but got dropout_rate={self.dropout_rate}, "
             if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
-                reason += f"required dtype equal to bfloat16 or float16 " \
+                reason += f"dtype in [BF16, FP16] is required " \
                           f"but got dtype={canonicalize_dtype}, "
             if q_seqlen not in fmha_supported_seqlen:
-                reason += f"required q_seqlen in {fmha_supported_seqlen} but got {q_seqlen=}, "
+                reason += f"q_seqlen in {fmha_supported_seqlen} is required but got {q_seqlen=}, "
             if kv_seqlen not in fmha_supported_seqlen:
-                reason += f"required kv_seqlen in {fmha_supported_seqlen} but got {kv_seqlen=}, "
-            print(
-                f"Fused multi-head attention is not enabled, " \
-                f"{reason} fall back to unfused multi-head attention",
-                flush=True
-            )
+                reason += f"kv_seqlen in {fmha_supported_seqlen} is required but got {kv_seqlen=}, "
+            warnings.warn(
+                f"Fused attention is not enabled, " \
+                f"{reason}fall back to unfused attention")
 
         residual = inputs_q
         if self.fuse_qkv:
