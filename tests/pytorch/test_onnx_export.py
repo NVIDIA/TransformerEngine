@@ -50,8 +50,8 @@ if SAVE_TEST_IO:
     from polygraphy.comparator import RunResults
 
 # The directory where generated ONNX test models are stored.
-TE_TEST_ARTIFACTS_DIR = os.environ.get('TE_TEST_ARTIFACTS_DIR')
-TE_TEST_ARTIFACTS_DIR = TE_TEST_ARTIFACTS_DIR or os.path.join(tempfile.gettempdir(), "./gen_onnx_models")
+NVTE_TEST_ARTIFACTS_DIR = os.environ.get('NVTE_TEST_ARTIFACTS_DIR')
+NVTE_TEST_ARTIFACTS_DIR = NVTE_TEST_ARTIFACTS_DIR or os.path.join(tempfile.gettempdir(), "./gen_onnx_models")
 
 
 # The directory where this file is stored.
@@ -93,8 +93,8 @@ def do_export(
         )
 
         model.cuda().eval()
-        os.makedirs(TE_TEST_ARTIFACTS_DIR, exist_ok=True)
-        fname = os.path.join(TE_TEST_ARTIFACTS_DIR, fname)
+        os.makedirs(NVTE_TEST_ARTIFACTS_DIR, exist_ok=True)
+        fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
         inps = inp if isinstance(inp, list) or isinstance(inp, tuple) else (inp,)
         with te.onnx_export(True):
             torch.onnx.export(
@@ -236,7 +236,7 @@ def validate_result(
                     raise ValueError(f"Output validation of {fname} failed with {nb_errors} errors")
 
     # Run ORT session and TE model.
-    fname = os.path.join(TE_TEST_ARTIFACTS_DIR, fname)
+    fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
     ort_s = create_ort_session(fname, is_fp8)
     input_feed = create_ort_input_dict(ort_s, inps)
     onnx_outputs = ort_s.run(None, input_feed=input_feed)
