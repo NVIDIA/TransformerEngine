@@ -50,7 +50,9 @@ if SAVE_TEST_IO:
     from polygraphy.comparator import RunResults
 
 # The directory where generated ONNX test models are stored.
-TEST_ARTIFACTS_DIR = os.path.join(tempfile.gettempdir(), "./gen_onnx_models")
+NVTE_TEST_ARTIFACTS_DIR = os.environ.get('NVTE_TEST_ARTIFACTS_DIR')
+NVTE_TEST_ARTIFACTS_DIR = NVTE_TEST_ARTIFACTS_DIR or os.path.join(tempfile.gettempdir(), "./gen_onnx_models")
+
 
 # The directory where this file is stored.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -91,8 +93,8 @@ def do_export(
         )
 
         model.cuda().eval()
-        os.makedirs(TEST_ARTIFACTS_DIR, exist_ok=True)
-        fname = os.path.join(TEST_ARTIFACTS_DIR, fname)
+        os.makedirs(NVTE_TEST_ARTIFACTS_DIR, exist_ok=True)
+        fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
         inps = inp if isinstance(inp, list) or isinstance(inp, tuple) else (inp,)
         with te.onnx_export(True):
             torch.onnx.export(
@@ -243,7 +245,7 @@ def validate_result(
                     raise ValueError(f"Output validation of {fname} failed with {nb_errors} errors")
 
     # Run ORT session and TE model.
-    fname = os.path.join(TEST_ARTIFACTS_DIR, fname)
+    fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
     te_outputs = te_infer(model, inps, is_fp8)
     if infer_ort:
         ort_s = create_ort_session(fname, is_fp8)
@@ -1031,6 +1033,128 @@ def test_export_transformer_layer(
     if not use_fp8:
         validate_result(fname, inp, model, atol=1e-3, input_names=input_names)
     validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8, input_names=input_names, infer_ort=infer_ort)
+
+
+@pytest.mark.parametrize("use_fp8", [True])
+@pytest.mark.parametrize("ln_scale_factor", [448*2])
+@pytest.mark.parametrize("gemm_scale_factors", [(224, 224,),])
+@pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+def test_export_gemm_layernorm(
+    use_fp8: bool,
+    ln_scale_factor: float,
+    gemm_scale_factors: Tuple[float, float],
+    precision: torch.dtype,
+    zero_centered_gamma: bool
+):
+    """This is a regression test for testing that all LN inputs have the same type.
+
+    The test sets up GEMM with FP32 output which feeds into an LN that is configured
+    with FP16 or BF16 weights and bias.
+    """
+
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    class TestFP8_GemmLayernorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            normalized_shape = torch.Size(inp.shape[1:])
+            self.weight = torch.randn(*normalized_shape, dtype=precision, device="cuda")
+            self.bias = torch.zeros(*normalized_shape, dtype=precision, device="cuda")
+            self.eps = 1e-6 # An arbitrary small value
+
+            self.fp8_tensor = tex.FP8FwdTensors.GEMM1_INPUT
+            self.meta = create_meta(ln_scale_factor)
+            self.fp8_type = tex.DType.kFloat8E4M3
+            self.gemm = TestFP8_GEMM(
+                precision, use_bias=False, gelu=False, scale_factors=gemm_scale_factors)
+
+        def forward(self, inp, weight):
+            x = self.gemm(inp, weight)
+            x = texcpp.layernorm_fwd_fp8_inf(
+                x,
+                self.weight,
+                self.bias,
+                self.eps,
+                self.meta,
+                self.fp8_tensor,
+                self.fp8_type,
+                zero_centered_gamma)
+
+            x = cast_from_fp8(
+                x,
+                self.meta,
+                self.fp8_tensor,
+                self.fp8_type,
+                tex.DType.kFloat32 if precision == torch.float32 else tex.DType.kFloat16)
+            return x
+
+    out_features = 128
+    hidden_size = 128
+    in_features = 128
+    class TestFP8_GEMM(nn.Module):
+        def __init__(self, precision, use_bias, gelu, scale_factors):
+            super().__init__()
+            self.use_bias = use_bias
+            self.gelu = gelu
+            self.precision = precision
+
+            self.fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
+            self.fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
+            nb_inp_scales, nb_weight_scales = 1, out_features
+            act_scale_factor, weight_scale_factor = scale_factors
+            self.meta_inp = create_meta(act_scale_factor, nb_inp_scales)
+            self.meta_weight = create_meta(weight_scale_factor, nb_weight_scales)
+
+            bias_size = nb_weight_scales
+            self.bias = torch.randn(bias_size, dtype=precision, device="cuda")
+            self.gelu_input = torch.randn(hidden_size, out_features, dtype=precision, device="cuda")
+
+            self.inp_type = tex.DType.kFloat8E4M3
+            self.weights_type = tex.DType.kFloat8E4M3
+            self.outp_type = precision
+
+        def forward(self, inp, weight):
+            inp_fp8 = cast_to_fp8(
+                inp,
+                self.meta_inp,
+                self.fp8_tensor_inp,
+                self.inp_type)
+
+            weight_fp8 = cast_to_fp8(
+                weight,
+                self.meta_weight,
+                self.fp8_tensor_weight,
+                self.weights_type)
+
+            ret = fp8_gemm(
+                weight_fp8,
+                self.meta_weight.scale_inv,
+                self.fp8_tensor_weight,
+                self.inp_type,
+                inp_fp8,
+                self.meta_inp.scale_inv,
+                self.fp8_tensor_inp,
+                self.weights_type,
+                self.outp_type,
+                get_workspace(),
+                bias=self.bias,
+                use_bias=self.use_bias,
+                use_split_accumulator=False)
+            return ret
+
+    inp = torch.randn(hidden_size, in_features, dtype=precision, device="cuda")
+    weight = torch.randn(out_features, in_features, dtype=precision, device="cuda")
+    model = TestFP8_GemmLayernorm()
+    high_prec_str = dtype2str(precision)
+    fp8_str = f"_fp8" if use_fp8 else ""
+    fname = f"te.gemm_layernorm{fp8_str}{high_prec_str}.onnx"
+    do_export(model, (inp, weight), fname, use_fp8=use_fp8)
+    if precision not in (torch.bfloat16, ):
+        validate_result(
+            fname, (inp, weight), model, atol=5e-2, is_fp8=use_fp8, allow_cnt_errors=2)
+
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_export_ctx_manager(enabled):
