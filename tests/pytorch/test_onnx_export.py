@@ -971,7 +971,8 @@ def test_export_multihead_attention(
     infer_ort = precision != torch.float16  # temporarily skipping onnxrt inference due to input type mismatch bug
     if not use_fp8:
         validate_result(fname, inp, model, atol=1e-3, input_names=input_names, output_names=output_names)
-    validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8, input_names=input_names, output_names=output_names, infer_ort=infer_ort)
+    else:
+        validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8, input_names=input_names, output_names=output_names, infer_ort=infer_ort)
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
@@ -1032,7 +1033,8 @@ def test_export_transformer_layer(
     infer_ort = precision != torch.float16  # temporarily skipping onnxrt inference due to input type mismatch bug
     if not use_fp8:
         validate_result(fname, inp, model, atol=1e-3, input_names=input_names)
-    validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8, input_names=input_names, infer_ort=infer_ort)
+    else:
+        validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8, input_names=input_names, infer_ort=infer_ort)
 
 
 @pytest.mark.parametrize("use_fp8", [True])
