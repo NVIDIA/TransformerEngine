@@ -125,8 +125,8 @@ def fused_attn_fwd_qkvpacked(
     qkv_dtype: tex.DType
                 data type of QKV; in tex.DType, not torch.dtype
     bias: torch.Tensor, default = None
-                input tensor Bias;
-                shape [total_seqs, num_heads, head_dim], where total_seqs = cu_seqlens[-1]
+                input tensor Bias when bias_type is "pre_scale_bias" or "post_scale_bias";
+                shape [1, num_heads, max_seqlen, max_seqlen], same data type as qkv
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     q_scale_s: torch.Tensor, default = None
@@ -188,6 +188,12 @@ def fused_attn_fwd_qkvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
+    if bias_type != "no_bias":
+        assert (bias is not None
+               and bias.shape == [1, h, max_seqlen, max_seqlen]
+               and bias.dtype == qkv.dtype
+               ), """bias tensor cannot be None when bias_type is not no_bias."""
+
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen <= 512) and (d == 64):
         assert (qkv_layout == "qkv_interleaved"
@@ -246,7 +252,6 @@ def fused_attn_bwd_qkvpacked(
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor] = None,
-    d_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -285,9 +290,6 @@ def fused_attn_bwd_qkvpacked(
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
-    d_bias: torch.Tensor, default = None
-                input tensor Bias;
-                shape [total_seqs, num_heads, head_dim], where total_seqs = cu_seqlens[-1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -326,6 +328,9 @@ def fused_attn_bwd_qkvpacked(
     ----------
     d_qkv: torch.Tensor
                 gradient tensor of QKV; same data type and shape as QKV
+    d_bias: torch.Tensor, optional
+                gradient tensor of Bias when bias_type is "pre_scale_bias" or "post_scale_bias";
+                same data type and shape as Bias
     """
 
     check_cu_seqlens(cu_seqlens)
@@ -402,10 +407,13 @@ def fused_attn_bwd_qkvpacked(
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
             q_scale_s, q_scale_dp, q_scale_dqkv,
             amax_dp, amax_dqkv,
-            d_bias,
     )
 
-    return output_tensors[0]
+    if bias_type == "no_bias":
+        # return d_qkv when bias_type is no_bias
+        return output_tensors[0]
+    # otherwise return (d_qkv, d_bias)
+    return output_tensors
 
 
 def fused_attn_fwd_kvpacked(
@@ -454,10 +462,10 @@ def fused_attn_fwd_kvpacked(
                 shape [total_seqs_kv, 2, num_heads, head_dim],
                 where total_seqs_kv = cu_seqlens_kv[-1]
     qkv_dtype: tex.DType
-                data type of QKV; in tex.DType, not torch.dtype
+                data type of Q and KV; in tex.DType, not torch.dtype
     bias: torch.Tensor, default = None
-                input tensor Bias;
-                shape [total_seqs_q, num_heads, head_dim], where total_seqs_q = cu_seqlens_q[-1]
+                input tensor Bias when bias_type is "pre_scale_bias" or "post_scale_bias";
+                shape [1, num_heads, max_seqlen_q, max_seqlen_kv], same data type as q and kv
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     q_scale_s: torch.Tensor, default = None
@@ -527,6 +535,12 @@ def fused_attn_fwd_kvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
+    if bias_type != "no_bias":
+        assert (bias is not None
+               and bias.shape == [1, h, max_seqlen_q, max_seqlen_kv]
+               and bias.dtype == q.dtype
+               ), """bias tensor cannot be None when bias_type is not no_bias."""
+
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen_q <= 512) and (max_seqlen_kv <= 512) \
             and (d == 64):
@@ -577,7 +591,6 @@ def fused_attn_bwd_kvpacked(
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor] = None,
-    d_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_s: torch.Tensor = None,
     d_scale_o: torch.Tensor = None,
@@ -624,9 +637,6 @@ def fused_attn_bwd_kvpacked(
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
-    bias: torch.Tensor, default = None
-                input tensor Bias;
-                shape [total_seqs_q, num_heads, head_dim], where total_seqs_q = cu_seqlens_q[-1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_s: torch.Tensor, default = None
@@ -668,6 +678,9 @@ def fused_attn_bwd_kvpacked(
                 gradient tensor of Q; same data type and shape as Q
     d_kv: torch.Tensor
                 gradient tensor of KV; same data type and shape as KV
+    d_bias: torch.Tensor, optional
+                gradient tensor of Bias when bias_type is "pre_scale_bias" or "post_scale_bias";
+                same data type and shape as Bias
     """
 
     check_cu_seqlens(cu_seqlens_q)
@@ -728,9 +741,9 @@ def fused_attn_bwd_kvpacked(
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
             q_scale_s, q_scale_dp, q_scale_dqkv,
             amax_dp, amax_dqkv,
-            d_bias,
     )
 
+    # returns (d_q, d_kv) when bias_type is no_bias; otherwise returns (d_q, d_kv, d_bias)
     return output_tensors
 
 def fp8_gemm(
