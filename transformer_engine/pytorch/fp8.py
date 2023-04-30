@@ -276,7 +276,12 @@ def fp8_autocast(
     global _IS_FIRST_FP8_MODULE, _FP8_AUTOCAST_COUNTER
     global _global_fp8_buffer, _buffer_delete_key_fwd
     global _amax_reduce_handle_fwd
-    fp8_state = (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP)
+    fp8_state = (
+        _FP8_ENABLED,
+        _FP8_CALIBRATION,
+        _FP8_RECIPE,
+        _FP8_DISTRIBUTED_GROUP,
+        _IS_FIRST_FP8_MODULE)
     try:
         _FP8_ENABLED = enabled
         _FP8_CALIBRATION = calibrating
@@ -293,8 +298,12 @@ def fp8_autocast(
             assert fp8_available, reason_for_no_fp8
         yield
     finally:
-        _FP8_ENABLED,_FP8_CALIBRATION, _FP8_RECIPE, _FP8_DISTRIBUTED_GROUP = fp8_state
-        _IS_FIRST_FP8_MODULE = False
+        (_FP8_ENABLED,
+         _FP8_CALIBRATION,
+         _FP8_RECIPE,
+         _FP8_DISTRIBUTED_GROUP,
+         _IS_FIRST_FP8_MODULE) = fp8_state
+
         _FP8_AUTOCAST_DEPTH -= 1
 
         if _FP8_AUTOCAST_DEPTH == 0:
