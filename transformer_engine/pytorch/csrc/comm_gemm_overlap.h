@@ -490,6 +490,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
           CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
                                      _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
                                      cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
       at::cuda::setCurrentCUDAStream(stream_main);
@@ -540,6 +542,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
           CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
                                      _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
                                      cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
       at::cuda::setCurrentCUDAStream(stream_main);
