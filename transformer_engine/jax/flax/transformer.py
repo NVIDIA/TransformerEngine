@@ -22,6 +22,7 @@ from jax import lax, vmap
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import self_fused_attn, cross_fused_attn
+from ..fused_attn import AttnBiasType, AttnMaskType
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
@@ -187,8 +188,8 @@ dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, N
 
 class AttentionType(Enum):
     """TransformerLayerType."""
-    PADDING = "padding_attention"
-    CAUSAL = "causal_attention"
+    PADDING = AttnMaskType.PADDING_MASK
+    CAUSAL = AttnMaskType.CAUSAL_MASK
 
 
 class MultiHeadAttention(nn.Module):
@@ -524,6 +525,8 @@ class MultiHeadAttention(nn.Module):
             assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
             assert not self.transpose_batch_sequence
             is_causal_masking = (self.attn_type == AttentionType.CAUSAL)
+            # TODO(rewang): make it configurable for pre_scale_bias
+            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
             if inputs_q is inputs_kv:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
@@ -534,6 +537,8 @@ class MultiHeadAttention(nn.Module):
                                     bias,
                                     mask,
                                     seed=0,
+                                    attn_bias_type=attn_bias_type,
+                                    attn_mask_type=self.attn_type.value,
                                     scaling_factor=scale_factor,
                                     dropout_probability=self.dropout_rate,
                                     is_causal_masking=is_causal_masking,
@@ -551,6 +556,8 @@ class MultiHeadAttention(nn.Module):
                                      kv_proj,
                                      mask,
                                      seed=0,
+                                     attn_bias_type=attn_bias_type,
+                                     attn_mask_type=self.attn_type.value,
                                      scaling_factor=scale_factor,
                                      dropout_probability=self.dropout_rate,
                                      is_causal_masking=is_causal_masking,

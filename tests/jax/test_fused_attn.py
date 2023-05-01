@@ -16,7 +16,8 @@ from jax import nn as jax_nn
 from jax import lax
 from jax import value_and_grad, jit
 
-from transformer_engine.jax.fused_attention import self_fused_attn, cross_fused_attn
+from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
+from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 
 # Type annotations
 Array = jnp.ndarray
@@ -242,6 +243,8 @@ class TestSelfFusedAttnMax512():
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
         self.is_causal_masking = is_causal_masking
+        self.attn_bias_type = AttnBiasType.POST_SCALE_BIAS
+        self.attn_mask_type = AttnMaskType.CAUSAL_MASK if self.is_causal_masking else AttnMaskType.PADDING_MASK
 
     @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False, True])
@@ -265,6 +268,8 @@ class TestSelfFusedAttnMax512():
                                                    self.q_token,
                                                    self.kv_token,
                                                    seed=self.seed,
+                                                   attn_bias_type=self.attn_bias_type,
+                                                   attn_mask_type=self.attn_mask_type,
                                                    scaling_factor=self.scaling_factor,
                                                    dropout_probability=self.dropout_probability,
                                                    is_causal_masking=self.is_causal_masking)
@@ -307,6 +312,8 @@ class TestSelfFusedAttnMax512():
 
         kwargs = {
             'seed': self.seed,
+            'attn_bias_type': self.attn_bias_type,
+            'attn_mask_type': self.attn_mask_type,
             'scaling_factor': self.scaling_factor,
             'dropout_probability': self.dropout_probability,
             'is_causal_masking': self.is_causal_masking
@@ -406,6 +413,8 @@ class TestCrossFusedAttnMax512():
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
         self.is_causal_masking = is_causal_masking
+        self.attn_bias_type = AttnBiasType.NO_BIAS
+        self.attn_mask_type = AttnMaskType.CAUSAL_MASK if self.is_causal_masking else AttnMaskType.PADDING_MASK
 
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
@@ -435,6 +444,8 @@ class TestCrossFusedAttnMax512():
                                                     self.kv,
                                                     self.q_token,
                                                     self.kv_token,
+                                                    attn_bias_type=self.attn_bias_type,
+                                                    attn_mask_type=self.attn_mask_type,
                                                     seed=self.seed,
                                                     scaling_factor=self.scaling_factor,
                                                     dropout_probability=self.dropout_probability,
@@ -479,6 +490,8 @@ class TestCrossFusedAttnMax512():
 
         kwargs = {
             'seed': self.seed,
+            'attn_bias_type': self.attn_bias_type,
+            'attn_mask_type': self.attn_mask_type,
             'scaling_factor': self.scaling_factor,
             'dropout_probability': self.dropout_probability,
             'is_causal_masking': self.is_causal_masking

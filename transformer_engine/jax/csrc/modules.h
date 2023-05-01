@@ -17,6 +17,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -95,25 +96,24 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 float scale_factor);
 
 struct CustomCallFusedAttnDescriptor {
-    // TODO(rewang): rename to q/kv_max_seqlen, deterministic
-    // is_causal_masking
     size_t batch;
     size_t num_head;
-    size_t max_q_seqlen;
-    size_t max_kv_seqlen;
+    size_t q_max_seqlen;
+    size_t kv_max_seqlen;
     size_t head_dim;
-    size_t seed;
     float scaling_factor;
     float dropout_probability;
-    bool is_causal_masking;
+    NVTE_Bias_Type bias_type;
+    NVTE_Mask_Type mask_type;
     DType dtype;
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(size_t batch, size_t num_head,
-                                                  size_t max_q_seqlen, size_t max_kv_seqlen,
-                                                  size_t head_dim, size_t seed,
-                                                  float scaling_factor, float dropout_probability,
-                                                  bool is_causal_masking, DType dtype);
+                                                  size_t q_max_seqlen, size_t kv_max_seqlen,
+                                                  size_t head_dim, float scaling_factor,
+                                                  float dropout_probability,
+                                                  NVTE_Bias_Type bias_type,
+                                                  NVTE_Mask_Type mask_type, DType dtype);
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 

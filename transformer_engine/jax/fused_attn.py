@@ -39,6 +39,8 @@ def self_fused_attn(qkv: jnp.ndarray,
                     bias: jnp.ndarray,
                     mask: jnp.ndarray,
                     seed: int,
+                    attn_bias_type: AttnBiasType,
+                    attn_mask_type: AttnMaskType,
                     scaling_factor: float,
                     dropout_probability: float,
                     is_causal_masking: bool,
@@ -54,6 +56,8 @@ def self_fused_attn(qkv: jnp.ndarray,
                                           bias,
                                           mask,
                                           seed=seed,
+                                          attn_bias_type=attn_bias_type,
+                                          attn_mask_type=attn_mask_type,
                                           scaling_factor=scaling_factor,
                                           dropout_probability=dropout_probability,
                                           is_causal_masking=is_causal_masking)
@@ -76,6 +80,8 @@ def self_fused_attn(qkv: jnp.ndarray,
 
         partial_self_fused_attn_max_512 = partial(_self_fused_attn_max_512,
                                                   seed=seed,
+                                                  attn_bias_type=attn_bias_type,
+                                                  attn_mask_type=attn_mask_type,
                                                   scaling_factor=scaling_factor,
                                                   dropout_probability=dropout_probability,
                                                   is_causal_masking=is_causal_masking)
@@ -88,17 +94,18 @@ def self_fused_attn(qkv: jnp.ndarray,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
 def _self_fused_attn_max_512(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: int,
+                             attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                              scaling_factor: float, dropout_probability: float,
                              is_causal_masking: bool):
-    output, _ = _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, scaling_factor,
-                                             dropout_probability, is_causal_masking)
+    output, _ = _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mask_type,
+                                             scaling_factor, dropout_probability, is_causal_masking)
     return output
 
 
-def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, scaling_factor, dropout_probability,
-                                 is_causal_masking):
+def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mask_type,
+                                 scaling_factor, dropout_probability, is_causal_masking):
 
     q_seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
     q_cu_seqlen = jnp.cumsum(q_seqlen)
@@ -107,6 +114,7 @@ def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, scaling_factor, dropout_
     kv_cu_seqlen = q_cu_seqlen
 
     output, softmax_aux = self_fused_attn_max_512_fwd(qkv, bias, q_cu_seqlen, kv_cu_seqlen, seed,
+                                                      attn_bias_type.value, attn_mask_type.value,
                                                       scaling_factor, dropout_probability,
                                                       is_causal_masking)
     return output, (softmax_aux, qkv, q_cu_seqlen, kv_cu_seqlen)
@@ -114,20 +122,24 @@ def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, scaling_factor, dropout_
 
 def _self_fused_attn_max_512_bwd(
         seed,    # pylint: disable=unused-argument
+        attn_bias_type,
+        attn_mask_type,
         scaling_factor,
         dropout_probability,
         is_causal_masking,
         ctx,
         grad):
-    softmax_aux, qkv, q_seqlen, kv_seqlen = ctx
+    softmax_aux, qkv, q_cu_seqlen, kv_cu_seqlen = ctx
 
     doutput = grad
 
     grad_qkv, _, grad_bias = self_fused_attn_max_512_bwd(qkv,
                                                          softmax_aux,
                                                          doutput,
-                                                         q_seqlen,
-                                                         kv_seqlen,
+                                                         q_cu_seqlen,
+                                                         kv_cu_seqlen,
+                                                         attn_bias_type=attn_bias_type.value,
+                                                         attn_mask_type=attn_mask_type.value,
                                                          scaling_factor=scaling_factor,
                                                          dropout_probability=dropout_probability,
                                                          is_causal_masking=is_causal_masking)
@@ -142,6 +154,8 @@ def cross_fused_attn(q: jnp.ndarray,
                      kv: jnp.ndarray,
                      mask: jnp.ndarray,
                      seed: int,
+                     attn_bias_type: AttnBiasType,
+                     attn_mask_type: AttnMaskType,
                      scaling_factor: float,
                      dropout_probability: float,
                      is_causal_masking: bool,
@@ -157,6 +171,8 @@ def cross_fused_attn(q: jnp.ndarray,
                                            kv,
                                            mask,
                                            seed=seed,
+                                           attn_bias_type=attn_bias_type,
+                                           attn_mask_type=attn_mask_type,
                                            scaling_factor=scaling_factor,
                                            dropout_probability=dropout_probability,
                                            is_causal_masking=is_causal_masking)
@@ -178,6 +194,8 @@ def cross_fused_attn(q: jnp.ndarray,
 
         partial_cross_fused_attn_max_512 = partial(_cross_fused_attn_max_512,
                                                    seed=seed,
+                                                   attn_bias_type=attn_bias_type,
+                                                   attn_mask_type=attn_mask_type,
                                                    scaling_factor=scaling_factor,
                                                    dropout_probability=dropout_probability,
                                                    is_causal_masking=is_causal_masking)
@@ -190,18 +208,20 @@ def cross_fused_attn(q: jnp.ndarray,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
 def _cross_fused_attn_max_512(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: int,
+                              attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                               scaling_factor: float, dropout_probability: float,
                               is_causal_masking: bool):
 
-    output, _ = _cross_fused_attn_max_512_fwd(q, kv, mask, seed, scaling_factor,
-                                              dropout_probability, is_causal_masking)
+    output, _ = _cross_fused_attn_max_512_fwd(q, kv, mask, seed, attn_bias_type, attn_mask_type,
+                                              scaling_factor, dropout_probability,
+                                              is_causal_masking)
     return output
 
 
-def _cross_fused_attn_max_512_fwd(q, kv, mask, seed, scaling_factor, dropout_probability,
-                                  is_causal_masking):
+def _cross_fused_attn_max_512_fwd(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
+                                  dropout_probability, is_causal_masking):
 
     q_seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
     q_cu_seqlen = jnp.cumsum(q_seqlen)
@@ -212,6 +232,7 @@ def _cross_fused_attn_max_512_fwd(q, kv, mask, seed, scaling_factor, dropout_pro
     kv_cu_seqlen = jnp.hstack((0, kv_cu_seqlen))
 
     output, softmax_aux = cross_fused_attn_max_512_fwd(q, kv, q_cu_seqlen, kv_cu_seqlen, seed,
+                                                       attn_bias_type.value, attn_mask_type.value,
                                                        scaling_factor, dropout_probability,
                                                        is_causal_masking)
     return output, (softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen)
@@ -219,12 +240,14 @@ def _cross_fused_attn_max_512_fwd(q, kv, mask, seed, scaling_factor, dropout_pro
 
 def _cross_fused_attn_max_512_bwd(
         seed,    # pylint: disable=unused-argument
+        attn_bias_type,
+        attn_mask_type,
         scaling_factor,
         dropout_probability,
         is_causal_masking,
         ctx,
         grad):
-    softmax_aux, q, kv, q_seqlen, kv_seqlen = ctx
+    softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen = ctx
 
     doutput = grad
 
@@ -233,8 +256,10 @@ def _cross_fused_attn_max_512_bwd(
                                                       kv,
                                                       softmax_aux,
                                                       doutput,
-                                                      q_seqlen,
-                                                      kv_seqlen,
+                                                      q_cu_seqlen,
+                                                      kv_cu_seqlen,
+                                                      attn_bias_type=attn_bias_type.value,
+                                                      attn_mask_type=attn_mask_type.value,
                                                       scaling_factor=scaling_factor,
                                                       dropout_probability=dropout_probability,
                                                       is_causal_masking=is_causal_masking)
