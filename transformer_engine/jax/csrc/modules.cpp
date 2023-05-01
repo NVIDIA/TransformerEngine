@@ -79,15 +79,13 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
         SoftmaxDescriptor{batch, pad_batch, heads, q_seqlen, k_seqlen, dtype, scale_factor});
 }
 
-pybind11::bytes PackCustomCallFusedAttnDescriptor(size_t batch, size_t num_head,
-                                                  size_t q_max_seqlen, size_t kv_max_seqlen,
-                                                  size_t head_dim, float scaling_factor,
-                                                  float dropout_probability,
-                                                  NVTE_Bias_Type bias_type,
-                                                  NVTE_Mask_Type mask_type, DType dtype) {
+pybind11::bytes PackCustomCallFusedAttnDescriptor(
+    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
     return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, q_max_seqlen, kv_max_seqlen,
                                                     head_dim, scaling_factor, dropout_probability,
-                                                    bias_type, mask_type, dtype});
+                                                    bias_type, mask_type, dtype, is_training});
 }
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
@@ -748,7 +746,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     void *qkv = buffers[0];
     void *bias = buffers[1];
     void *cu_seqlens = buffers[2];
-    // void *kv_cu_seqlens = buffers[3];
+    void *rng_state = buffers[3];
 
     // output
     void *output = buffers[4];
@@ -778,7 +776,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     // TODO(rewang): make rng state for JAX
-    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -787,8 +785,8 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
-                                  rng_state.data(), q_max_seqlen, true, descriptor.scaling_factor,
-                                  descriptor.dropout_probability,
+                                  rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
+                                  descriptor.scaling_factor, descriptor.dropout_probability,
                                   NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
                                   descriptor.mask_type, query_workspace_tensor.data(), stream);
 
@@ -804,8 +802,8 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
-                                  rng_state.data(), q_max_seqlen, true, descriptor.scaling_factor,
-                                  descriptor.dropout_probability,
+                                  rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
+                                  descriptor.scaling_factor, descriptor.dropout_probability,
                                   NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
                                   descriptor.mask_type, workspace_tensor.data(), stream);
 
@@ -822,14 +820,13 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
     void *softmax_aux = buffers[1];
     void *doutput = buffers[2];
     void *cu_seqlens = buffers[3];
-    // void *kv_cu_seqlens = buffers[4];
 
     // output
-    void *dqkv = buffers[5];
-    // void *dp = buffers[6];
+    void *dqkv = buffers[4];
+    // void *dp = buffers[5];
     // TODO(rewang): consider to remove this from python side
     void *dp = softmax_aux;
-    void *dbias = buffers[7];
+    void *dbias = buffers[6];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -910,10 +907,11 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     void *kv = buffers[1];
     void *q_cu_seqlens = buffers[2];
     void *kv_cu_seqlens = buffers[3];
+    void *rng_state = buffers[4];
 
     // output
-    void *output = buffers[4];
-    void *softmax_aux = buffers[5];
+    void *output = buffers[5];
+    void *softmax_aux = buffers[6];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -942,7 +940,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     // TODO(rewang): make rng state for JAX
-    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -952,9 +950,10 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-        rng_state.data(), q_max_seqlen, kv_max_seqlen, true, descriptor.scaling_factor,
-        descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type,
-        descriptor.mask_type, query_workspace_tensor.data(), stream);
+        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        query_workspace_tensor.data(), stream);
 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
@@ -969,9 +968,10 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-        rng_state.data(), q_max_seqlen, kv_max_seqlen, true, descriptor.scaling_factor,
-        descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type,
-        descriptor.mask_type, workspace_tensor.data(), stream);
+        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }

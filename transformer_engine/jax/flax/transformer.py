@@ -521,10 +521,11 @@ class MultiHeadAttention(nn.Module):
                                                        jnp.reshape(cur_index, (-1)), 1, -2)
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
+
         if use_fused_attn:
+            dropout_rng = self.make_rng(self.dropout_rng_name)
             assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
             assert not self.transpose_batch_sequence
-            is_causal_masking = (self.attn_type == AttentionType.CAUSAL)
             # TODO(rewang): make it configurable for pre_scale_bias
             attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
@@ -536,12 +537,12 @@ class MultiHeadAttention(nn.Module):
                 x = self_fused_attn(qkv_proj,
                                     bias,
                                     mask,
-                                    seed=0,
+                                    dropout_rng,
                                     attn_bias_type=attn_bias_type,
                                     attn_mask_type=self.attn_type.value,
                                     scaling_factor=scale_factor,
                                     dropout_probability=self.dropout_rate,
-                                    is_causal_masking=is_causal_masking,
+                                    is_training=not deterministic,
                                     sharding_type=first_sharding_type)
             else:
                 assert bias is None
@@ -555,12 +556,12 @@ class MultiHeadAttention(nn.Module):
                 x = cross_fused_attn(query,
                                      kv_proj,
                                      mask,
-                                     seed=0,
+                                     dropout_rng,
                                      attn_bias_type=attn_bias_type,
                                      attn_mask_type=self.attn_type.value,
                                      scaling_factor=scale_factor,
                                      dropout_probability=self.dropout_rate,
-                                     is_causal_masking=is_causal_masking,
+                                     is_training=not deterministic,
                                      sharding_type=first_sharding_type)
         else:
             dropout_rng = None

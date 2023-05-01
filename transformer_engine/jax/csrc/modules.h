@@ -106,14 +106,13 @@ struct CustomCallFusedAttnDescriptor {
     NVTE_Bias_Type bias_type;
     NVTE_Mask_Type mask_type;
     DType dtype;
+    bool is_training;
 };
 
-pybind11::bytes PackCustomCallFusedAttnDescriptor(size_t batch, size_t num_head,
-                                                  size_t q_max_seqlen, size_t kv_max_seqlen,
-                                                  size_t head_dim, float scaling_factor,
-                                                  float dropout_probability,
-                                                  NVTE_Bias_Type bias_type,
-                                                  NVTE_Mask_Type mask_type, DType dtype);
+pybind11::bytes PackCustomCallFusedAttnDescriptor(
+    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 

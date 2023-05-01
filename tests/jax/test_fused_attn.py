@@ -168,6 +168,7 @@ def jax_self_fused_attn(qkv, bias, q_token, kv_token, **kwargs):
                             value,
                             bias=bias,
                             dropout_rate=kwargs['dropout_probability'],
+                            dropout_rng=kwargs['dropout_rng'],
                             dtype=qkv.dtype)
     return output
 
@@ -192,13 +193,13 @@ def jax_cross_fused_attn(q, kv, q_token, kv_token, **kwargs):
                             value,
                             bias=bias,
                             dropout_rate=kwargs['dropout_probability'],
+                            dropout_rng=kwargs['dropout_rng'],
                             dtype=q.dtype)
     return output
 
 
-def customcall_self_fused_attn(qkv, bias, q_token, kv_token, **kwargs):
-    is_causal_masking = kwargs['is_causal_masking']
-    if is_causal_masking:
+def customcall_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
+    if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
         mask = make_decoder_mask(q_token)
     else:
         mask = make_attention_mask(q_token > 0, kv_token > 0)
@@ -206,19 +207,18 @@ def customcall_self_fused_attn(qkv, bias, q_token, kv_token, **kwargs):
     # mask invert
     mask = (mask == 0)
 
-    return self_fused_attn(qkv, bias, mask, **kwargs)
+    return self_fused_attn(qkv, bias, mask, dropout_rng, **kwargs)
 
 
-def customcall_cross_fused_attn(q, kv, q_token, kv_token, **kwargs):
-    is_causal_masking = kwargs['is_causal_masking']
-    if is_causal_masking:
+def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
+    if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
         raise NotImplementedError
     mask = make_attention_mask(q_token > 0, kv_token > 0)
 
     # mask invert
     mask = (mask == 0)
 
-    return cross_fused_attn(q, kv, mask, **kwargs)
+    return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
 
 
 class TestSelfFusedAttnMax512():
@@ -239,12 +239,14 @@ class TestSelfFusedAttnMax512():
                                        axis=-1)
         self.kv_token = self.q_token
 
-        self.seed = 0
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
+        self.dropout_rng = jax.random.PRNGKey(0)
         self.is_causal_masking = is_causal_masking
         self.attn_bias_type = AttnBiasType.POST_SCALE_BIAS
         self.attn_mask_type = AttnMaskType.CAUSAL_MASK if self.is_causal_masking else AttnMaskType.PADDING_MASK
+        # deterministic = not is_training
+        self.deterministic = False
 
     @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False, True])
@@ -258,21 +260,21 @@ class TestSelfFusedAttnMax512():
             self.bias,
             self.q_token,
             self.kv_token,
-            seed=self.seed,    # no used currently
             scaling_factor=self.scaling_factor,
             dropout_probability=self.dropout_probability,    # no used currently
+            dropout_rng=self.dropout_rng,
             is_causal_masking=self.is_causal_masking)
 
         primitive_out = customcall_self_fused_attn(self.qkv,
                                                    self.bias,
                                                    self.q_token,
                                                    self.kv_token,
-                                                   seed=self.seed,
+                                                   self.dropout_rng,
                                                    attn_bias_type=self.attn_bias_type,
                                                    attn_mask_type=self.attn_mask_type,
                                                    scaling_factor=self.scaling_factor,
                                                    dropout_probability=self.dropout_probability,
-                                                   is_causal_masking=self.is_causal_masking)
+                                                   is_training=not self.deterministic)
 
         ref_valid, _ = jnp.split(reference_out, (self.valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.valid_len,), axis=1)
@@ -311,29 +313,33 @@ class TestSelfFusedAttnMax512():
                     gradient_multiplier).astype(dtype)
 
         kwargs = {
-            'seed': self.seed,
             'attn_bias_type': self.attn_bias_type,
             'attn_mask_type': self.attn_mask_type,
             'scaling_factor': self.scaling_factor,
             'dropout_probability': self.dropout_probability,
-            'is_causal_masking': self.is_causal_masking
+            'is_training': not self.deterministic
         }
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda qkv, bias, q_token, kv_token: grad_func(
-                    customcall_self_fused_attn, qkv, bias, q_token, kv_token, **kwargs), (0, 1)))
+                lambda qkv, bias, q_token, kv_token, dropout_rng: grad_func(
+                    customcall_self_fused_attn, qkv, bias, q_token, kv_token, dropout_rng, **kwargs
+                ), (0, 1)))
+
+        reference_kwargs = kwargs.copy()
+        reference_kwargs['dropout_rng'] = self.dropout_rng
+        reference_kwargs['is_causal_masking'] = self.is_causal_masking
 
         jitted_reference = jit(
             value_and_grad(
-                lambda qkv, bias, q_token,
-                kv_token: grad_func(jax_self_fused_attn, qkv.astype(jnp.float32),
-                                    bias.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
+                lambda qkv, bias, q_token, kv_token:
+                grad_func(jax_self_fused_attn, qkv.astype(jnp.float32), bias.astype(jnp.float32),
+                          q_token, kv_token, **reference_kwargs), (0, 1)))
 
         primitive_out, (primitive_dqkv,
                         primitive_dbeta) = jitted_primitive(self.qkv, self.bias, self.q_token,
-                                                            self.kv_token)
+                                                            self.kv_token, self.dropout_rng)
 
         reference_out, (reference_dqkv,
                         reference_dbeta) = jitted_reference(self.qkv, self.bias, self.q_token,
@@ -409,12 +415,14 @@ class TestCrossFusedAttnMax512():
                                        axis=-1)
         self.kv_token = jnp.concatenate((jnp.ones((b, self.kv_valid_len)), jnp.zeros((b, pad_len))),
                                         axis=-1)
-        self.seed = 0
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
+        self.dropout_rng = jax.random.PRNGKey(0)
         self.is_causal_masking = is_causal_masking
         self.attn_bias_type = AttnBiasType.NO_BIAS
         self.attn_mask_type = AttnMaskType.CAUSAL_MASK if self.is_causal_masking else AttnMaskType.PADDING_MASK
+        # deterministic = not is_training
+        self.deterministic = False
 
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
@@ -435,21 +443,21 @@ class TestCrossFusedAttnMax512():
             self.kv,
             self.q_token,
             self.kv_token,
-            seed=self.seed,    # no used currently
             scaling_factor=self.scaling_factor,
             dropout_probability=self.dropout_probability,    # no used currently
+            dropout_rng=self.dropout_rng,
             is_causal_masking=self.is_causal_masking)
 
         primitive_out = customcall_cross_fused_attn(self.q,
                                                     self.kv,
                                                     self.q_token,
                                                     self.kv_token,
+                                                    self.dropout_rng,
                                                     attn_bias_type=self.attn_bias_type,
                                                     attn_mask_type=self.attn_mask_type,
-                                                    seed=self.seed,
                                                     scaling_factor=self.scaling_factor,
                                                     dropout_probability=self.dropout_probability,
-                                                    is_causal_masking=self.is_causal_masking)
+                                                    is_training=not self.deterministic)
 
         ref_valid, _ = jnp.split(reference_out, (self.q_valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.q_valid_len,), axis=1)
@@ -489,29 +497,33 @@ class TestCrossFusedAttnMax512():
                     gradient_multiplier).astype(dtype)
 
         kwargs = {
-            'seed': self.seed,
             'attn_bias_type': self.attn_bias_type,
             'attn_mask_type': self.attn_mask_type,
             'scaling_factor': self.scaling_factor,
             'dropout_probability': self.dropout_probability,
-            'is_causal_masking': self.is_causal_masking
+            'is_training': not self.deterministic
         }
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda q, kv, q_token, kv_token: grad_func(customcall_cross_fused_attn, q, kv,
-                                                           q_token, kv_token, **kwargs), (0, 1)))
+                lambda q, kv, q_token, kv_token, dropout_rng: grad_func(
+                    customcall_cross_fused_attn, q, kv, q_token, kv_token, dropout_rng, **kwargs),
+                (0, 1)))
+
+        reference_kwargs = kwargs.copy()
+        reference_kwargs['dropout_rng'] = self.dropout_rng
+        reference_kwargs['is_causal_masking'] = self.is_causal_masking
 
         jitted_reference = jit(
             value_and_grad(
-                lambda q, kv, q_token,
-                kv_token: grad_func(jax_cross_fused_attn, q.astype(jnp.float32),
-                                    kv.astype(jnp.float32), q_token, kv_token, **kwargs), (0, 1)))
+                lambda q, kv, q_token, kv_token:
+                grad_func(jax_cross_fused_attn, q.astype(jnp.float32), kv.astype(jnp.float32),
+                          q_token, kv_token, **reference_kwargs), (0, 1)))
 
         primitive_out, (primitive_dq,
                         primitive_dkv) = jitted_primitive(self.q, self.kv, self.q_token,
-                                                          self.kv_token)
+                                                          self.kv_token, self.dropout_rng)
 
         reference_out, (reference_dq,
                         reference_dkv) = jitted_reference(self.q, self.kv, self.q_token,
