@@ -3,9 +3,13 @@
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
 
+from enum import Enum
 from functools import partial
 import jax
 import jax.numpy as jnp
+
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
 
 from .cpp_extensions import cross_fused_attn_max_512_fwd, cross_fused_attn_max_512_bwd
 from .cpp_extensions import self_fused_attn_max_512_fwd, self_fused_attn_max_512_bwd
@@ -15,6 +19,20 @@ from .sharding import xmap_runner
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
+
+
+class AttnBiasType(Enum):
+    """Attention Bias Type."""
+    NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
+    PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
+    POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
+
+
+class AttnMaskType(Enum):
+    """Attention Mask Type."""
+    NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
+    PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
+    CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
 
 
 def self_fused_attn(qkv: jnp.ndarray,

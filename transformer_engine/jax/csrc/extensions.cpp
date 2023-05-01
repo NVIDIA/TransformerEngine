@@ -6,6 +6,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "common/include/transformer_engine/fused_attn.h"
 #include "common/include/transformer_engine/transformer_engine.h"
 #include "jax/csrc/modules.h"
 #include "jax/csrc/utils.h"
@@ -68,6 +69,16 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("kBFloat16", DType::kBFloat16)
         .value("kFloat8E4M3", DType::kFloat8E4M3)
         .value("kFloat8E5M2", DType::kFloat8E5M2);
+
+    pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
+        .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
+        .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
+        .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+
+    pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
+        .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
+        .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
+        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
 }
 
 }  // namespace jax
