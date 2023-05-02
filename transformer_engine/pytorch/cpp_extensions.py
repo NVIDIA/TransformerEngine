@@ -540,7 +540,7 @@ def fused_attn_fwd_kvpacked(
         assert bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
         assert (bias.shape == [1, h, max_seqlen_q, max_seqlen_kv]
                ), "bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
-        assert (bias.dtype == qkv.dtype
+        assert (bias.dtype == q.dtype
                ), "bias tensor must be in the same dtype as q and kv."
 
     # FP8 fused attention API
