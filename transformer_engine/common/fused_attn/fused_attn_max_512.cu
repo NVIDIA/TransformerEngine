@@ -1266,6 +1266,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
 }  // namespace fused_attn
 using namespace transformer_engine::fused_attn;
+#if (CUDNN_VERSION >= 8901)
 void fused_attn_max_512_fwd_qkvpacked(
     size_t batch, size_t max_seqlen, size_t num_head, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -1544,4 +1545,5 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         return;
     }
 }
+#endif  // CUDNN_VERSION >= 8901
 }  // namespace transformer_engine

@@ -62,7 +62,7 @@ void nvte_fused_attn_fwd_qkvpacked(
 #endif
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen <= 512)) {
-    // TODO(rewang): version guard, especially for setPaddingValue
+#if (CUDNN_VERSION >= 8901)
     auto ndim = input_QKV->data.shape.size();
 
     // QKV shape is [b, s, 3, h, d]
@@ -91,6 +91,10 @@ void nvte_fused_attn_fwd_qkvpacked(
       wkspace,
       stream,
       handle);
+#else
+    NVTE_ERROR(
+      "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
   } else if (max_seqlen > 512) {
     NVTE_ERROR("TBD: No support for fused attention with >512 seqlence length currently. \n");
   } else {
@@ -159,6 +163,7 @@ void nvte_fused_attn_bwd_qkvpacked(
 #endif
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen <= 512)) {
+#if (CUDNN_VERSION >= 8901)
     auto ndim = input_QKV->data.shape.size();
     // QKV shape is [b, s, 3, h, d]
     size_t batch = input_QKV->data.shape[0];
@@ -186,6 +191,10 @@ void nvte_fused_attn_bwd_qkvpacked(
       wkspace,
       stream,
       handle);
+#else
+    NVTE_ERROR(
+      "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
   } else if (max_seqlen > 512) {
     NVTE_ERROR("TBD: No support for fused attention with >512 seqlence length currently. \n");
   } else {
@@ -234,7 +243,7 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-    // TODO(rewang): move this into the underly API
+#if (CUDNN_VERSION >= 8901)
     auto ndim = input_Q->data.shape.size();
     // Q shape is [b, s_q, h, d]
     // KV shape is [b, s_kv, 2, h, d]
@@ -267,6 +276,10 @@ void nvte_fused_attn_fwd_kvpacked(
       wkspace,
       stream,
       handle);
+#else
+    NVTE_ERROR(
+      "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
   } else if ((max_seqlen_q > 512) || (max_seqlen_kv > 512)) {
     NVTE_ERROR("TBD: No support for fused attention with >512 seqlence length currently. \n");
   } else {
@@ -321,6 +334,7 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else if (((QKV_type == DType::kFloat16) || (QKV_type == DType::kBFloat16))
                   && (max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
+#if (CUDNN_VERSION >= 8901)
     auto ndim = input_Q->data.shape.size();
     // Q shape is [b, s_q, h, d]
     // KV shape is [b, s_kv, 2, h, d]
@@ -353,6 +367,10 @@ void nvte_fused_attn_bwd_kvpacked(
       wkspace,
       stream,
       handle);
+#else
+    NVTE_ERROR(
+      "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
   } else if ((max_seqlen_q > 512) || (max_seqlen_kv > 512)) {
     NVTE_ERROR("TBD: No support for fused attention with >512 seqlence length currently. \n");
   } else {
