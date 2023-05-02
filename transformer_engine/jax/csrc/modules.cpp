@@ -740,14 +740,6 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         desc.scale_factor, stream);
 }
 
-inline NVTE_Mask_Type ToMaskType(bool is_causal_masking) {
-    // TODO(rewang): NOMASK
-    if (is_causal_masking) {
-        return NVTE_Mask_Type::NVTE_CAUSAL_MASK;
-    }
-    return NVTE_Mask_Type::NVTE_PADDING_MASK;
-}
-
 void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
                                 size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -786,7 +778,6 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // TODO(rewang): make rng state for JAX
     auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;

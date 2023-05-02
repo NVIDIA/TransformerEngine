@@ -171,7 +171,6 @@ void nvte_fused_attn_bwd_qkvpacked(
     size_t num_head = input_QKV->data.shape[ndim - 2];
     size_t head_dim = input_QKV->data.shape[ndim - 1];
 
-    // NVTE_ERROR("TBD: No support for BF16/FP16 fused attention currently. \n");
     fused_attn_max_512_bwd_qkvpacked(
       batch,
       max_seqlen,

@@ -9,10 +9,12 @@
 
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
+
 #include <cudnn_frontend.h>
-#include <mutex>
+
 #include <cstdint>
 #include <cudnn.h>
+#include <mutex>
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -95,11 +97,10 @@ __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d,
                 int32_t *cu_seqlens_q, int32_t *actual_seqlens_q,
                 int32_t *qkv_ragged_offset, int32_t *o_ragged_offset);
 
-__global__ void cu_seqlens_to_actual_seqlens(
-  size_t b,
-  int32_t const * const q_cu_seqlens,
-  int32_t const * const kv_cu_seqlens,
-  int32_t *q_seqlens, int32_t *kv_seqlens);
+__global__ void cu_seqlens_to_actual_seqlens(size_t b,
+                int32_t const * const q_cu_seqlens,
+                int32_t const * const kv_cu_seqlens,
+                int32_t *q_seqlens, int32_t *kv_seqlens);
 
 }  // namespace fused_attn
 
