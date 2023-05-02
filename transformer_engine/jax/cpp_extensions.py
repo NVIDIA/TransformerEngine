@@ -2073,6 +2073,12 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
     """
     Wrapper for TE self fused attention fwd
     """
+    if rng_state is None:
+        rng_state = jnp.zeros(2, dtype=jnp.int32)
+    if bias is None:
+        assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+        # JAX can't bind None, create a dummy tensor for it
+        bias = jnp.zeros(0, dtype=qkv.dtype)
     return _self_fused_attn_max_512_fwd_p.bind(qkv,
                                                bias,
                                                cu_seqlen,
@@ -2293,6 +2299,8 @@ def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: j
     """
     Wrapper for TE cross fused attention fwd
     """
+    if rng_state is None:
+        rng_state = jnp.zeros(2, dtype=jnp.int32)
     return _cross_fused_attn_max_512_fwd_p.bind(q,
                                                 kv,
                                                 q_cu_seqlen,

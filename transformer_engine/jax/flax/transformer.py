@@ -522,8 +522,11 @@ class MultiHeadAttention(nn.Module):
 
         scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
 
-        if use_fused_attn:
+        dropout_rng = None
+        if not deterministic and self.dropout_rate > 0.:
             dropout_rng = self.make_rng(self.dropout_rng_name)
+
+        if use_fused_attn:
             assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
             assert not self.transpose_batch_sequence
             # TODO(rewang): make it configurable for pre_scale_bias
@@ -564,10 +567,6 @@ class MultiHeadAttention(nn.Module):
                                      is_training=not deterministic,
                                      sharding_type=first_sharding_type)
         else:
-            dropout_rng = None
-            if not deterministic and self.dropout_rate > 0.:
-                dropout_rng = self.make_rng(self.dropout_rng_name)
-
             softmax_type = SoftmaxType.SCALED
             if self.attn_type is AttentionType.PADDING:
                 if mask is not None:
