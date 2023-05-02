@@ -538,10 +538,10 @@ def fused_attn_fwd_kvpacked(
 
     if bias_type != "no_bias":
         assert bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
-        assert (bias.shape == [1, h, max_seqlen, max_seqlen]
-               ), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (bias.shape == [1, h, max_seqlen_q, max_seqlen_kv]
+               ), "bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
         assert (bias.dtype == qkv.dtype
-               ), "bias tensor must be in the same dtype as qkv."
+               ), "bias tensor must be in the same dtype as q and kv."
 
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen_q <= 512) and (max_seqlen_kv <= 512) \
