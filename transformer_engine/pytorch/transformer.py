@@ -9,7 +9,7 @@ import warnings
 from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
-from packaging.version import Version
+from pkg_resources import packaging
 
 import torch
 
@@ -45,8 +45,8 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-_flash_attn_version = Version(version("flash-attn"))
-_flash_attn_version_required = Version("1.0.2")
+_flash_attn_version = packaging.version.Version(version("flash-attn"))
+_flash_attn_version_required = packaging.version.Version("1.0.2")
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 
