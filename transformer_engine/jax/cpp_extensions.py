@@ -2108,7 +2108,6 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
         Self fused attention bwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
-        softmax_aux_dtype = dtypes.canonicalize_dtype(softmax_aux.dtype)
         assert qkv.dtype == softmax_aux.dtype == doutput.dtype
 
         _, seqlen, _, num_head, _ = qkv.shape
@@ -2118,8 +2117,6 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
 
         return (
             ShapedArray(qkv.shape, qkv_dtype, named_shape=qkv.named_shape),    # dqkv
-            ShapedArray(softmax_aux.shape, softmax_aux_dtype,
-                        named_shape=softmax_aux.named_shape),    # dsoftmax
             ShapedArray(bias_shape, bias_dtype, named_shape=qkv.named_shape))
 
     @staticmethod
@@ -2149,7 +2146,6 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
 
         out_types = [
             ir.RankedTensorType.get(ir_qkv_shape, ir_qkv_type.element_type),
-            ir.RankedTensorType.get(ir_softmax_aux_shape, ir_softmax_aux_type.element_type),
             ir.RankedTensorType.get(dbias_shape, dbias_dtype)
         ]
         operands = [qkv, softmax_aux, doutput, cu_seqlen]
@@ -2163,8 +2159,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
         out = custom_caller(SelfFusedAttnMax512BwdPrimitive.name,
                             args,
                             opaque,
-                            has_side_effect=False,
-                            operand_output_aliases={1: 1})
+                            has_side_effect=False)
 
         return out
 
@@ -2345,8 +2340,6 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
         return (
             ShapedArray(q.shape, q_dtype, named_shape=q.named_shape),    # dq
             ShapedArray(kv.shape, kv_dtype, named_shape=kv.named_shape),    # dkv
-            ShapedArray(softmax_aux.shape, softmax_aux_dtype,
-                        named_shape=softmax_aux.named_shape),    # dsoftmax
         )
 
     @staticmethod
@@ -2376,7 +2369,6 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
         out_types = [
             ir.RankedTensorType.get(ir_q_shape, ir_q_type.element_type),
             ir.RankedTensorType.get(ir_kv_shape, ir_kv_type.element_type),
-            ir.RankedTensorType.get(ir_softmax_aux_shape, ir_softmax_aux_type.element_type)
         ]
         operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
         operand_shapes = [
@@ -2393,8 +2385,7 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
         out = custom_caller(CrossFusedAttnMax512BwdPrimitive.name,
                             args,
                             opaque,
-                            has_side_effect=False,
-                            operand_output_aliases={2: 2})
+                            has_side_effect=False)
 
         return out
 

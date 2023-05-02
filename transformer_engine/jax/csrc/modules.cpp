@@ -776,7 +776,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     // TODO(rewang): make rng state for JAX
-    auto rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -823,10 +823,8 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
 
     // output
     void *dqkv = buffers[4];
-    // void *dp = buffers[5];
-    // TODO(rewang): consider to remove this from python side
     void *dp = softmax_aux;
-    void *dbias = buffers[6];
+    void *dbias = buffers[5];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -855,7 +853,7 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // TODO(rewang): make rng state for JAX
+    // Currently, no rng_state required for bwd
     auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     // TODO: needs to think about how to pass aux_output_tensors
@@ -939,8 +937,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // TODO(rewang): make rng state for JAX
-    auto rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -992,8 +989,6 @@ void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const cha
     // output
     void *dq = buffers[6];
     void *dkv = buffers[7];
-    // TODO(rewang): consider to remove this from python side
-    // void *dp = buffers[8];
     void *dp = softmax_aux;
 
     auto batch = descriptor.batch;
@@ -1026,10 +1021,10 @@ void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const cha
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // TODO(rewang): make rng state for JAX
+    // Currently, no rng_state required for bwd
     auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
-    // TODO: needs to think about how to pass aux_output_tensors
+    // TODO(rewang): need to think about how to pass aux_output_tensors
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
