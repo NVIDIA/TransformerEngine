@@ -21,9 +21,9 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..fused_attn import AttnBiasType, AttnMaskType
 from ..fused_attn import is_fused_attn_kernel_available
+from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
@@ -213,6 +213,12 @@ class MultiHeadAttention(nn.Module):
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
+    zero_centered_gamma : bool, default = False
+        If set to `True`, the LayerNorm formula changes to
+        .. math::
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            (1 + \gamma) + \beta
+        This parameter is only applicable for 'layernorm'.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
         Used for initializing the QKV and Output projection weights.
@@ -258,6 +264,7 @@ class MultiHeadAttention(nn.Module):
     dropout_rng_name: str = 'dropout'
     layernorm_type: str = "layernorm"
     layernorm_epsilon: float = 1e-6
+    zero_centered_gamma: bool = False
     kernel_init: Initializer = None
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
@@ -390,6 +397,7 @@ class MultiHeadAttention(nn.Module):
                 qkv_proj, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
+                    zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=(3, self.num_heads * self.head_dim),
@@ -409,6 +417,7 @@ class MultiHeadAttention(nn.Module):
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
+                    zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=self.num_heads * self.head_dim,
@@ -448,6 +457,7 @@ class MultiHeadAttention(nn.Module):
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=not self.output_layernorm,
                 layernorm_type=self.layernorm_type,
+                zero_centered_gamma=self.zero_centered_gamma,
                 epsilon=self.layernorm_epsilon,
                 axis=-1,
                 features=self.num_heads * self.head_dim,
@@ -740,6 +750,12 @@ class TransformerLayer(nn.Module):
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
+    zero_centered_gamma : bool, default = False
+        If set to `True`, the LayerNorm formula changes to
+        .. math::
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            (1 + \gamma) + \beta
+        This parameter is only applicable for 'layernorm'.
     hidden_dropout: float, default = 0.1
         Dropout probability for the dropout op after FC2 layer.
     hidden_dropout_dims: Sequence[int], default = ()
@@ -819,6 +835,7 @@ class TransformerLayer(nn.Module):
     num_attention_heads: int = 8
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
+    zero_centered_gamma: bool = False
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
@@ -953,6 +970,7 @@ class TransformerLayer(nn.Module):
             scaled_query_init=self.scaled_query_init,
             layernorm_type=self.layernorm_type,
             layernorm_epsilon=self.layernorm_epsilon,
+            zero_centered_gamma=self.zero_centered_gamma,
             apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
             output_layernorm=self.output_layernorm,
             attn_type=self_attn_type,
@@ -998,6 +1016,7 @@ class TransformerLayer(nn.Module):
                 dropout_rng_name=self.dropout_rng_name,
                 layernorm_type=self.layernorm_type,
                 layernorm_epsilon=self.layernorm_epsilon,
+                zero_centered_gamma=self.zero_centered_gamma,
                 apply_residual_connection_post_layernorm=self.
                 apply_residual_connection_post_layernorm,
                 output_layernorm=False,    # Must do LayerNorm before MHA.
@@ -1020,6 +1039,7 @@ class TransformerLayer(nn.Module):
         residual = mlp_input
         z, ln_out = LayerNormMLP(
             layernorm_type=self.layernorm_type,
+            zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.layernorm_epsilon,
             major_sharding_type=infer_major_sharding_type(),
             transpose_batch_sequence=self.transpose_batch_sequence,
@@ -1052,11 +1072,12 @@ class TransformerLayer(nn.Module):
         if self.output_layernorm:
             ln_sharding_type, _ = infer_sharding_type()
             z = LayerNorm(layernorm_type=self.layernorm_type,
+                          zero_centered_gamma=self.zero_centered_gamma,
+                          epsilon=self.layernorm_epsilon,
                           scale_axes=('embed',),
                           bias_axes=('embed',),
                           transpose_batch_sequence=self.transpose_batch_sequence,
                           dtype=self.dtype,
-                          epsilon=self.layernorm_epsilon,
                           sharding_type=ln_sharding_type,
                           name="output_layer_norm")(z)
 
