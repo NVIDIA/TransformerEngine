@@ -201,6 +201,7 @@ def validate_result(
     def serialize_inputs_outputs(fname, inputs, inputs_names, te_outputs, output_names):
         if not SAVE_TEST_IO:
             return
+        inputs = inputs if isinstance(inputs, list) or isinstance(inputs, tuple) else (inputs,)
         named_inputs = zip(inputs_names, inputs)
         input_data = [{k: to_numpy(v) for k, v in named_inputs if v is not None}]
         json_fname = fname[:-len(".onnx")] + "_inputs.json"
