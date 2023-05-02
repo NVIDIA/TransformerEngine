@@ -746,6 +746,8 @@ def fused_attn_bwd_kvpacked(
     )
 
     # returns (d_q, d_kv) when bias_type is no_bias; otherwise returns (d_q, d_kv, d_bias)
+    if bias_type == "no_bias":
+        return output_tensors[:2]
     return output_tensors
 
 def fp8_gemm(
