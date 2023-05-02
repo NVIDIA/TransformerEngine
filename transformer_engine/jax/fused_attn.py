@@ -8,6 +8,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+import transformer_engine_jax
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 
@@ -19,6 +20,13 @@ from .sharding import xmap_runner
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
+
+
+def is_fused_attn_kernel_available():
+    """
+    To check whether the fused attention kernel is available
+    """
+    return transformer_engine_jax.is_fused_attn_kernel_available()
 
 
 class AttnBiasType(Enum):

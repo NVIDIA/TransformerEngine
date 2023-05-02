@@ -23,6 +23,7 @@ from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..fused_attn import AttnBiasType, AttnMaskType
+from ..fused_attn import is_fused_attn_kernel_available
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
@@ -352,7 +353,8 @@ class MultiHeadAttention(nn.Module):
         fused_attn_supported_seqlen = [128, 256, 384, 512]
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
-            q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen
+            q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
+            and is_fused_attn_kernel_available()
 
         if not use_fused_attn:
             reason = ""
@@ -375,6 +377,9 @@ class MultiHeadAttention(nn.Module):
             if kv_seqlen not in fused_attn_supported_seqlen:
                 reason += f"kv_seqlen in {fused_attn_supported_seqlen} is required " \
                           f"but got {kv_seqlen=}, "
+            if not is_fused_attn_kernel_available():
+                reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
+
             warnings.warn(
                 f"Fused attention is not enabled, " \
                 f"{reason}fall back to unfused attention")

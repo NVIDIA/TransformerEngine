@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
+#include <cudnn.h>
 
 #include <functional>
 #include <numeric>
@@ -86,6 +87,16 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
     return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, q_max_seqlen, kv_max_seqlen,
                                                     head_dim, scaling_factor, dropout_probability,
                                                     bias_type, mask_type, dtype, is_training});
+}
+
+bool IsFusedAttnKernelAvailable() {
+#if (CUDNN_VERSION >= 8901)
+    auto major = cudaDevicePropertiesManager::Instance().GetMajor();
+    // Fused attention requires at least Ampere
+    return major >= 8;
+#else
+    return false;
+#endif
 }
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,

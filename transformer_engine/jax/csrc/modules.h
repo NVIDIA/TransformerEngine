@@ -114,6 +114,8 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
+bool IsFusedAttnKernelAvailable();
+
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);

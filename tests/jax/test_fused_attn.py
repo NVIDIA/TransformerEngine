@@ -18,6 +18,7 @@ from jax import value_and_grad, jit
 
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
+from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 
 # Type annotations
 Array = jnp.ndarray
@@ -221,6 +222,8 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
 
 
+@pytest.mark.skipif(not is_fused_attn_kernel_available(),
+                    reason="Fused attention kernel is not supported.")
 class TestSelfFusedAttnMax512():
 
     def set_input(self, b, s, h, d, dtype, is_causal_masking, pad_len):
@@ -395,6 +398,8 @@ class TestSelfFusedAttnMax512():
                             jnp.zeros_like(primitive_dbeta[:, :, self.valid_len:, self.valid_len:]))
 
 
+@pytest.mark.skipif(not is_fused_attn_kernel_available(),
+                    reason="Fused attention kernel is not supported.")
 class TestCrossFusedAttnMax512():
 
     def set_input(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_len):
