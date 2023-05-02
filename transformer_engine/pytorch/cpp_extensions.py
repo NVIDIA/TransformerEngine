@@ -189,10 +189,11 @@ def fused_attn_fwd_qkvpacked(
         attn_scale = 1.0 / math.sqrt(d)
 
     if bias_type != "no_bias":
-        assert (bias is not None
-               and bias.shape == [1, h, max_seqlen, max_seqlen]
-               and bias.dtype == qkv.dtype
-               ), """bias tensor cannot be None when bias_type is not no_bias."""
+        assert bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (bias.shape == [1, h, max_seqlen, max_seqlen]
+               ), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (bias.dtype == qkv.dtype
+               ), "bias tensor must be in the same dtype as qkv."
 
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen <= 512) and (d == 64):
@@ -536,10 +537,11 @@ def fused_attn_fwd_kvpacked(
         attn_scale = 1.0 / math.sqrt(d)
 
     if bias_type != "no_bias":
-        assert (bias is not None
-               and bias.shape == [1, h, max_seqlen_q, max_seqlen_kv]
-               and bias.dtype == q.dtype
-               ), """bias tensor cannot be None when bias_type is not no_bias."""
+        assert bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (bias.shape == [1, h, max_seqlen, max_seqlen]
+               ), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (bias.dtype == qkv.dtype
+               ), "bias tensor must be in the same dtype as qkv."
 
     # FP8 fused attention API
     if (qkv_type is torch.uint8) and (max_seqlen_q <= 512) and (max_seqlen_kv <= 512) \
