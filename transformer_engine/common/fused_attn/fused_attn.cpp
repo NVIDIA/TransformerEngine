@@ -68,13 +68,13 @@ void nvte_fused_attn_fwd_qkvpacked(
 // NVTE fused attention BWD FP8 with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
-            const NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
             NVTETensor dP,
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens,
             size_t max_seqlen,
             float attn_scale, float dropout,
@@ -86,12 +86,12 @@ void nvte_fused_attn_bwd_qkvpacked(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens = reinterpret_cast<const Tensor*>(cu_seqlens);
   const Tensor *input_QKV = reinterpret_cast<const Tensor*>(QKV);
-  const Tensor *input_dBias = reinterpret_cast<const Tensor*>(dBias);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
   const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
   Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQKV = reinterpret_cast<Tensor*>(dQKV);
+  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   // QKV shape is [total_seqs, 3, h, d]
@@ -182,7 +182,6 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
-            const NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
@@ -190,6 +189,7 @@ void nvte_fused_attn_bwd_kvpacked(
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQ,
             NVTETensor dKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -204,13 +204,13 @@ void nvte_fused_attn_bwd_kvpacked(
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_KV = reinterpret_cast<const Tensor*>(KV);
-  const Tensor *input_dBias = reinterpret_cast<const Tensor*>(dBias);
   const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
   const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
   const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
   Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
   Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
   Tensor *output_dKV = reinterpret_cast<Tensor*>(dKV);
+  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
   // Q shape is [total_seqs, h, d]
