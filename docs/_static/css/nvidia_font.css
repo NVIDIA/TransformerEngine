@@ -1,0 +1,53 @@
+@font-face {
+    font-family: NVIDIA;
+    font-style: normal;
+    font-weight: 300;
+    src: url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Lt.woff) format("woff"),url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Lt.woff2) format("woff2")
+}
+
+@font-face {
+    font-family: NVIDIA;
+    font-style: normal;
+    font-weight: 400;
+    src: url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Rg.woff) format("woff"),url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Rg.woff2) format("woff2")
+}
+
+@font-face {
+    font-family: NVIDIA;
+    font-style: normal;
+    font-weight: 500;
+    src: url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Md.woff) format("woff"),url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Md.woff2) format("woff2")
+}
+
+@font-face {
+    font-family: NVIDIA;
+    font-style: normal;
+    font-weight: 700;
+    src: url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Bd.woff) format("woff"),url(https://images.nvidia.com/etc/designs/nvidiaGDC/clientlibs_base/fonts/nvidia-sans/GLOBAL/NVIDIASans_W_Bd.woff2) format("woff2")
+}
+
+body {
+    font-family: NVIDIA,Lato,proxima-nova,Helvetica Neue,Arial,sans-serif;
+}
+
+.rst-content .toctree-wrapper>p.caption,h1,h2,h3,h4,h5,h6,legend {
+    margin-top: 0;
+    font-weight: 700;
+    font-family: NVIDIA,Roboto Slab,ff-tisa-web-pro,Georgia,Arial,sans-serif
+}
+
+input[type=color],input[type=date],input[type=datetime-local],input[type=datetime],input[type=email],input[type=month],input[type=number],input[type=password],input[type=search],input[type=tel],input[type=text],input[type=time],input[type=url],input[type=week] {
+    font-family: NVIDIA,Lato,proxima-nova,Helvetica Neue,Arial,sans-serif;
+}
+
+select {
+    font-family: NVIDIA,Lato,proxima-nova,Helvetica Neue,Arial,sans-serif;
+}
+
+.btn {
+    font-family: NVIDIA,Lato,proxima-nova,Helvetica Neue,Arial,sans-serif;
+}
+
+html.writer-html4 .rst-content dl:not(.docutils) .descclassname,html.writer-html4 .rst-content dl:not(.docutils) .descname,html.writer-html4 .rst-content dl:not(.docutils) .sig-name,html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple) .descclassname,html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple) .descname,html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple) .sig-name {
+    font-family: NVIDIA,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,Courier,monospace;
+}
