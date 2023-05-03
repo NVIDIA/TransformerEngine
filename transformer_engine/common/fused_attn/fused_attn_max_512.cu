@@ -643,27 +643,31 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
 }
 
 void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 int64_t seed, NVTE_QKV_Layout layout, float scaling_factor,
-                                 float dropout_probability, NVTE_Bias_Type bias_type,
+                                 bool is_training, float scaling_factor, float dropout_probability,
+                                 NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type,
                                  NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
                                  void *devPtrV, void *devPtrS, void *devPtrO, void *devPtrBias,
                                  void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
                                  size_t *workspace_size, cudnnDataType_t tensorType,
                                  cudaStream_t stream, cudnnHandle_t handle) {
     try {
+        constexpr int64_t seed = 0;  // TODO(rewang): replace this with device seed/offset
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
-        FADescriptor descriptor{b,         h,
-                                s_q,       s_kv,
-                                d,         scaling_factor,
-                                true,      static_cast<float>(dropout_probability),
-                                layout,    bias_type,
-                                mask_type, tensorType};
+        FADescriptor descriptor{b,           h,
+                                s_q,         s_kv,
+                                d,           scaling_factor,
+                                is_training, dropout_probability,
+                                layout,      bias_type,
+                                mask_type,   tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fmha_fprop_cache;
 
         bool enable_dropout = (dropout_probability != 0.0f);
+
+        NVTE_CHECK(!enable_dropout,
+                   "dropout probability > 0 in fused_attn_max_512 has not been implemented.");
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -681,6 +685,9 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, ops);
+
+            NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
+                       "NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS has not been implemented.");
 
             if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
                 createBias(b, h, s_q, s_kv, d, layout, tensorType, ops, bmm1_output);
@@ -744,8 +751,6 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             return;
         }
 
-        std::set<std::pair<uint64_t, void *>> data_ptrs;
-
         // Prepare actual seqlen
         constexpr size_t nthreads_per_block = 128;
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
@@ -760,6 +765,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         float negInfinity = -1.0E+10;
         float scale_dropout = 1 / (1 - dropout_probability);
 
+        std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
         data_ptrs.insert(std::pair<uint64_t, void *>(Q_ID, devPtrQ));
         data_ptrs.insert(std::pair<uint64_t, void *>(K_ID, devPtrK));
@@ -822,10 +828,9 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
     }
 }
 
-// TODO(rewang): check the VER
 void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 NVTE_QKV_Layout layout, float scaling_factor,
-                                 float dropout_probability, NVTE_Mask_Type mask_type,
+                                 float scaling_factor, float dropout_probability,
+                                 NVTE_QKV_Layout layout, NVTE_Mask_Type mask_type,
                                  NVTE_Bias_Type bias_type, void *devPtrQ, void *devPtrK,
                                  void *devPtrV, void *devPtrS, void *devPtrdQ, void *devPtrdK,
                                  void *devPtrdV, void *devPtrdO, void *devPtrdS, void *devPtrdBias,
@@ -836,18 +841,9 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         // Create cudnn handle
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
-        FADescriptor descriptor{b,
-                                h,
-                                s_q,
-                                s_kv,
-                                d,
-                                scaling_factor,
-                                true,  // TODO(rewang): add is_training
-                                static_cast<float>(dropout_probability),
-                                layout,
-                                bias_type,
-                                mask_type,
-                                tensorType};
+        FADescriptor descriptor{
+            b,      h,         s_q,       s_kv,      d, scaling_factor, true, dropout_probability,
+            layout, bias_type, mask_type, tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fmha_bprop_cache;
@@ -1227,6 +1223,9 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         NVTE_CHECK(devPtrdBias == nullptr, "devPtrdBias requires CUDNN_VERSION >= 8901");
 #endif
 
+        NVTE_CHECK(dropout_probability == 0.f,
+                   "dropout probability > 0 in fused_attn_max_512 has not been implemented.");
+
         float zeroVal = 0.0f;
         float dropoutScale = 1.0f / (1.0f - dropout_probability);
 
@@ -1258,7 +1257,6 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                       << std::endl;
         } else {
             std::cout << "[ERROR] Exception " << e.what() << std::endl;
-            // CHECK(false);
         }
     }
 }
@@ -1317,11 +1315,11 @@ void fused_attn_max_512_fwd_qkvpacked(
     size_t workspace_size = 0;
 
     // TODO(rewang): replace CPU seed
-    fused_attn_max_512_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, 0, qkv_layout,
-                                attn_scale, p_dropout, bias_type, mask_type, devPtrQ, devPtrK,
-                                devPtrV, devPtrS, devPtrO, devPtrBias, devCuSeqlen, devCuSeqlen,
-                                workspace->data.dptr, &workspace_size, get_cudnn_dtype(QKV_type),
-                                stream, handle);
+    fused_attn_max_512_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, is_training,
+                                attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ,
+                                devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias, devCuSeqlen,
+                                devCuSeqlen, workspace->data.dptr, &workspace_size,
+                                get_cudnn_dtype(QKV_type), stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1396,8 +1394,8 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     size_t workspace_size = 0;
 
     // TODO(rewang): replace CPU seed
-    fused_attn_max_512_fwd_impl(batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, 0,
-                                qkv_layout, attn_scale, p_dropout, bias_type, mask_type, devPtrQ,
+    fused_attn_max_512_fwd_impl(batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training,
+                                attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ,
                                 devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias, devQCuSeqlen,
                                 devKVCuSeqlen, workspace->data.dptr, &workspace_size,
                                 get_cudnn_dtype(q_type), stream, handle);
@@ -1460,8 +1458,8 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    fused_attn_max_512_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, qkv_layout,
-                                attn_scale, p_dropout, mask_type, bias_type, devPtrQ, devPtrK,
+    fused_attn_max_512_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, attn_scale,
+                                p_dropout, qkv_layout, mask_type, bias_type, devPtrQ, devPtrK,
                                 devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdS,
                                 devPtrdBias, devPtrCuSeqlens, devPtrCuSeqlens, workspace->data.dptr,
                                 &workspace_size, get_cudnn_dtype(qkv_type), stream, handle);
@@ -1528,7 +1526,7 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     size_t workspace_size = 0;
 
     fused_attn_max_512_bwd_impl(
-        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, qkv_layout, attn_scale, p_dropout,
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, attn_scale, p_dropout, qkv_layout,
         mask_type, bias_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
         devPtrdO, devPtrdS, devPtrdBias, devPtrQCuSeqlens, devPtrKVCuSeqlens, workspace->data.dptr,
         &workspace_size, get_cudnn_dtype(q_type), stream, handle);
