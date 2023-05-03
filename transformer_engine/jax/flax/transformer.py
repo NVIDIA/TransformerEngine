@@ -215,9 +215,11 @@ class MultiHeadAttention(nn.Module):
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma : bool, default = False
         If set to `True`, the LayerNorm formula changes to
+
         .. math::
             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
             (1 + \gamma) + \beta
+
         This parameter is only applicable for 'layernorm'.
     kernel_init: Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'normal')
@@ -752,9 +754,11 @@ class TransformerLayer(nn.Module):
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma : bool, default = False
         If set to `True`, the LayerNorm formula changes to
+
         .. math::
             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
             (1 + \gamma) + \beta
+
         This parameter is only applicable for 'layernorm'.
     hidden_dropout: float, default = 0.1
         Dropout probability for the dropout op after FC2 layer.
