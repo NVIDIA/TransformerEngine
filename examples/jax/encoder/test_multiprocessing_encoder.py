@@ -15,6 +15,7 @@ import tensorflow_datasets as tfds
 from cuda import cudart
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
+from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
@@ -66,7 +67,7 @@ class Net(nn.Module):
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te.TransformerLayerType.ENCODER,
+                             layer_type=te.flax.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
@@ -111,8 +112,8 @@ def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
     return state, loss, accuracy, var_collect
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn, dp_size,
-                mesh, inputs_pspec, masks_pspec, labels_pspec):
+def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn, dp_size, mesh,
+                inputs_pspec, masks_pspec, labels_pspec):
     """Train for a single epoch."""
     train_ds_size = len(train_ds['sentence'])
     steps_per_epoch = train_ds_size // batch_size
@@ -245,24 +246,13 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
 
 def get_datasets(max_seq_len):
     """Load GLUE train and test datasets into memory."""
-    #vocab = {}
-    #word_id = 0
-    #dataset = 'glue/cola'
-    #train_ds = tfds.as_numpy(tfds.load(dataset, split='train', batch_size=-1))
-    #train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
-    #test_ds = tfds.as_numpy(tfds.load(dataset, split='validation', batch_size=-1))
-    #test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
-    train_ds = {
-        'sentence': np.random.randint(0, 7, (4096, 32), np.int32),
-        'label': np.random.randint(0, 1, (4096,), np.int32),
-        'mask': np.random.randint(0, 1, (4096, 1, 32, 32), np.uint8)
-    }
-    test_ds = {
-        'sentence': np.random.randint(0, 7, (4096, 32), np.int32),
-        'label': np.random.randint(0, 1, (4096,), np.int32),
-        'mask': np.random.randint(0, 1, (4096, 1, 32, 32), np.uint8)
-    }
-    word_id = 8
+    vocab = {}
+    word_id = 0
+    dataset = 'glue/cola'
+    train_ds = tfds.as_numpy(tfds.load(dataset, split='train', batch_size=-1))
+    train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
+    test_ds = tfds.as_numpy(tfds.load(dataset, split='validation', batch_size=-1))
+    test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
 
 
@@ -285,7 +275,7 @@ def get_params_pspec(sharding_rules, abs_var_collect):
         return jax.sharding.PartitionSpec(*partitions)
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_pspec = jax.tree_map(to_device_axis, nn.partitioning.get_axis_names(params_axes))
+    params_axes_pspec = jax.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
     params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
     return params_pspec
@@ -347,7 +337,7 @@ def train_and_evaluate(args):
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
             customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
-            sharding_rules = te.extend_logical_axis_rules(tuple()) + customized_rules
+            sharding_rules = te.flax.extend_logical_axis_rules(tuple()) + customized_rules
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
@@ -388,7 +378,6 @@ def train_and_evaluate(args):
                 pjit_train_step(state, inputs, masks, labels, var_collect, rngs, args.use_fp8)
                 print("PASSED")
             else:
-                num_process = args.num_process
                 for epoch in range(1, args.epochs + 1):
                     rng, input_rng = jax.random.split(rng)
                     rng, dropout_rng = jax.random.split(rng)
@@ -463,17 +452,17 @@ def encoder_parser(args):
                         action="store_true",
                         default=False,
                         help="Use FP8 for inference and training without recalibration")
-    parser.add_argument("--coordinator_address",
+    parser.add_argument("--coordinator-address",
                         type=str,
                         default="127.0.0.1:1234",
                         help="the IP address of process 0 and a port on \
                              which that process should launch a coordinator service \
                              (default: 127.0.0.1:1234)")
-    parser.add_argument("--num_process",
+    parser.add_argument("--num-process",
                         type=int,
                         default=8,
                         help="number of processes (default: 8)")
-    parser.add_argument("--process_id",
+    parser.add_argument("--process-id",
                         type=int,
                         default=0,
                         help="the ID number of the current process (default: 0)")
@@ -487,7 +476,7 @@ class TestEncoder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3", "--num_process", "1"])
+        cls.args = encoder_parser(["--epochs", "3", "--num-process", "1"])
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
