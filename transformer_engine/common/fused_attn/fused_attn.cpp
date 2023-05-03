@@ -104,13 +104,13 @@ void nvte_fused_attn_fwd_qkvpacked(
 // NVTE fused attention BWD FP8 with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
-            NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
             NVTETensor dP,
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens,
             size_t max_seqlen,
             float attn_scale, float dropout,
@@ -289,7 +289,6 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
-            NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
@@ -297,6 +296,7 @@ void nvte_fused_attn_bwd_kvpacked(
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQ,
             NVTETensor dKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             size_t max_seqlen_q, size_t max_seqlen_kv,

@@ -10,7 +10,7 @@ import io
 import re
 import copy
 import tempfile
-from packaging.version import Version
+from pkg_resources import packaging
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from shutil import copyfile
@@ -172,7 +172,7 @@ class PyTorchBuilder(FrameworkBuilderBase):
 
     @staticmethod
     def install_requires():
-        return ["flash-attn>=1.0.2", "packaging"]
+        return ["flash-attn>=1.0.2"]
 
 
 class TensorFlowBuilder(FrameworkBuilderBase):
@@ -244,13 +244,13 @@ def get_cmake_bin():
     try:
         out = subprocess.check_output([cmake_bin, "--version"])
     except OSError:
-        cmake_installed_version = Version("0.0")
+        cmake_installed_version = packaging.version.Version("0.0")
     else:
-        cmake_installed_version = Version(
+        cmake_installed_version = packaging.version.Version(
             re.search(r"version\s*([\d.]+)", out.decode()).group(1)
         )
 
-    if cmake_installed_version < Version("3.18.0"):
+    if cmake_installed_version < packaging.version.Version("3.18.0"):
         print(
             "Could not find a recent CMake to build Transformer Engine. "
             "Attempting to install CMake 3.18 to a temporary location via pip.",
