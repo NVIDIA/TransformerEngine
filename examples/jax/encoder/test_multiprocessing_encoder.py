@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" Encoder training on multi-GPU with tesnor parallelism"""
+"""Encoder training with multi-GPU, multiprocessing and tesnor parallelism"""
 import argparse
 import unittest
 from functools import partial
