@@ -14,7 +14,7 @@ Prerequisites
 1. Linux x86_64
 2. `CUDA 11.8 <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 11.8 or later.
-4. `cuDNN 8 <https://developer.nvidia.com/cudnn>`__ or later.
+4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
 5. For FP8 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9 <https://developer.nvidia.com/cudnn>`__ or later.
 
 
@@ -77,9 +77,14 @@ Execute the following commands to install Transformer Engine from source:
 
 .. code-block:: bash
 
-  git clone https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork.
-  cd TransformerEngine                                         # Enter TE directory.
-  git checkout stable                                          # Checkout the correct branch.
-  git submodule init; git submodule update                     # Checkout the submodules.
-  export NVTE_FRAMEWORK=pytorch                                # Optionally set the framework.
-  pip install .                                                # Build and install.
+  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork and checkout all submodules recursively.
+  cd TransformerEngine                                                     # Enter TE directory.
+  git checkout stable                                                      # Checkout the correct branch.
+  export NVTE_FRAMEWORK=pytorch                                            # Optionally set the framework.
+  pip install .                                                            # Build and install
+
+For already cloned repos, run the following command in TE directory:
+
+.. code-block:: bash
+
+  git submodule update --init --recursive                                   # Checkout all submodules recursively.

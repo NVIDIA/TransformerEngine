@@ -125,15 +125,14 @@ void nvte_fused_attn_fwd_qkvpacked(
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
  *                                       [total_seqs, 3, num_heads, head_dim].
- *  \param[in]     dBias                 The gradient of the Bias tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor.
  *  \param[in,out] dP                    The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQKV                  The gradient of the QKV tensor.
+ *  \param[out]    dBias                 The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen            Max sequence length used for computing,
  *                                       it may be >= max(cu_seqlens). 
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
@@ -146,13 +145,13 @@ void nvte_fused_attn_fwd_qkvpacked(
  */
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
-            const NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
             NVTETensor dP,
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens,
             size_t max_seqlen,
             float attn_scale, float dropout,
@@ -212,7 +211,6 @@ void nvte_fused_attn_fwd_kvpacked(
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
  *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
- *  \param[in]     dBias                 The gradient of the Bias tensor.
  *  \param[in]     O                     The O tensor from forward.
  *  \param[in]     dO                    The gradient of the O tensor.
  *  \param[in]     S                     The S tensor.
@@ -220,9 +218,9 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
  *  \param[out]    dQ                    The gradient of the Q tensor.
  *  \param[out]    dKV                   The gradient of the KV tensor.
+ *  \param[out]    dBias                 The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q          Max sequence length used for computing for Q.  
  *                                       it may be >= max(cu_seqlens_q). 
  *  \param[in]     max_seqlen_kv         Max sequence length used for computing for KV.  
@@ -238,7 +236,6 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
-            const NVTETensor dBias,
             const NVTETensor O,
             const NVTETensor dO,
             const NVTETensor S,
@@ -246,6 +243,7 @@ void nvte_fused_attn_bwd_kvpacked(
             const NVTETensorPack* Aux_CTX_Tensors,
             NVTETensor dQ,
             NVTETensor dKV,
+            NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             size_t max_seqlen_q, size_t max_seqlen_kv,
