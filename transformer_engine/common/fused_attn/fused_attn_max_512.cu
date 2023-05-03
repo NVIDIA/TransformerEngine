@@ -657,8 +657,8 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                 s_q,       s_kv,
                                 d,         scaling_factor,
                                 true,      static_cast<float>(dropout_probability),
-                                mask_type, layout,
-                                bias_type, tensorType};
+                                layout,    bias_type,
+                                mask_type, tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static CacheType fmha_fprop_cache;
@@ -844,9 +844,9 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                 scaling_factor,
                                 true,  // TODO(rewang): add is_training
                                 static_cast<float>(dropout_probability),
-                                mask_type,
                                 layout,
                                 bias_type,
+                                mask_type,
                                 tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
