@@ -29,14 +29,12 @@ from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 import torch._C._onnx as _C_onnx
 import transformer_engine_extensions as tex
 
-
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
 
 
 # Custom ops spec version
 VER = 1
-
 UNSPECIFIED_TYPE = -1
 
 
@@ -139,10 +137,10 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
-    wrapped_gelu = lambda inputs: torch.onnx.symbolic_opset9.gelu(g, inputs, "tanh")
+    wrapped_gelu = lambda inps: torch.onnx.symbolic_opset9.gelu(g, inps, "tanh")
     # TE computes GELU using float32 precision so wrap the GELU subgraph with
     # conversion to/from float32.
-    gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=False)
+    gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=True)
     out = quantize(g, gelu, scale_inv, fp8_tensor)
     return out
 
@@ -179,27 +177,26 @@ def onnx_te_gemm(
     # pylint: disable=unused-argument
     is_fp16 = is_dtype_fp16(inputs)
     if input_type == int(tex.DType.kFloat8E4M3):
-        inputs = dequantize(g, inputs, input_scale_inverse, input_fp8_tensor, UNSPECIFIED_TYPE)
+        inputs = dequantize(g, inputs, input_scale_inverse, input_fp8_tensor, out_type)
 
     if weight_type == int(tex.DType.kFloat8E4M3):
-        weight = dequantize(g, weight, weight_scale_inverse, weight_fp8_tensor, UNSPECIFIED_TYPE)
-
-    output = g.op("Gemm", inputs, weight, transA_i=trans_input, transB_i=trans_weight)
+        weight = dequantize(g, weight, weight_scale_inverse, weight_fp8_tensor, out_type)
 
     empty_tensor_size = [0]
     bias_empty = torch.onnx.symbolic_helper._get_tensor_sizes(bias) == empty_tensor_size
     pre_gelu_out_empty = torch.onnx.symbolic_helper._get_tensor_sizes(pre_gelu_out) \
         == empty_tensor_size
+
     if not bias_empty:
-        if pre_gelu_out_empty:
-            if is_fp16:
-                output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
-            output = g.op('Add', output, bias)
-        else:
-            if is_fp16:
-                output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
-            output = g.op('Add', output, bias)
-            output = torch.onnx.symbolic_opset9.gelu(g, output)
+        output = g.op("Gemm", inputs, weight, bias, transA_i=trans_input, transB_i=trans_weight)
+    else:
+        output = g.op("Gemm", inputs, weight, transA_i=trans_input, transB_i=trans_weight)
+    if not bias_empty:
+        if not pre_gelu_out_empty:
+            wrapped_gelu = lambda inps: torch.onnx.symbolic_opset9.gelu(g, inps, "tanh")
+            # TE computes GELU using float32 precision so wrap the GELU subgraph with
+            # conversion to/from float32.
+            output = compute_in_fp32(g, output, wrapped_gelu, cast_outp=True)
     else:
         if is_fp16:
             output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
