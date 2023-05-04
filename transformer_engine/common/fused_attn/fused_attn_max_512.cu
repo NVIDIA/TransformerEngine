@@ -73,6 +73,7 @@ static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t
 
 static cudnn_frontend::Tensor createBMM1(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                          NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
+                                         bool zero_s,
                                          // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops) {
     // Creates the necessary tensor descriptors
@@ -106,10 +107,15 @@ static cudnn_frontend::Tensor createBMM1(int64_t b, int64_t h, int64_t s_q, int6
 
     // Define the matmul 1 desc
     // set padding value optionally to 0 for writing zeros to S tensor (if not set, old behaviour)
-    auto matmul_1_Desc = cudnn_frontend::MatMulDescBuilder()
-                             .setComputeType(CUDNN_DATA_FLOAT)
-                             .setPaddingValue(0.0f)
-                             .build();
+    auto matmul_1_Desc =
+        cudnn_frontend::MatMulDescBuilder().setComputeType(CUDNN_DATA_FLOAT).build();
+
+    if (zero_s) {
+        matmul_1_Desc = cudnn_frontend::MatMulDescBuilder()
+                            .setComputeType(CUDNN_DATA_FLOAT)
+                            .setPaddingValue(0.0f)
+                            .build();
+    }
 
     // Create a matmul 1 Node
     auto matmul_op1 = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -684,7 +690,9 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
-            auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, ops);
+            // if bias, we need to memset the S buffer to correctly computate dbias
+            auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS);
+            auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
                        "NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS has not been implemented.");
