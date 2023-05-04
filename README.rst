@@ -69,6 +69,9 @@ pyTorch
 JAX
 ^^^
 
+Flax
+~~~~
+
 .. code-block:: python
 
   import jax
@@ -90,7 +93,7 @@ JAX
 
   # Enable autocasting for the forward pass
   with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-      model = te.DenseGeneral(features=HIDDEN)
+      model = te.flax.DenseGeneral(features=HIDDEN)
 
       def loss_fn(params, other_vars, inp):
         out = model.apply({'params':params, **other_vars}, inp)
