@@ -88,7 +88,7 @@ python test_model_parallel_encoder.py --use-fp8
    GPU6    80-95,208-223   5
    GPU7    80-95,208-223   5
    ```
-4. `jax.distributed.initialize` must be called before any other JAX, Flax API. And `jax.distributed.shutdown` should be the last one. Otherwise, the `jax.local_devices` will be incorrect.
+4. `jax.distributed.initialize` must be called before any other JAX or Flax API, otherwise `jax.local_devices` will be incorrect. `jax.distributed.shutdown` should be the last API call.
 
 5. The input tensor has to be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect.
 
