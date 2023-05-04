@@ -1,5 +1,6 @@
 [MASTER]
-extension-pkg-whitelist=transformer_engine_jax
+extension-pkg-whitelist=transformer_engine_jax,
+                        cuda-python
 
 disable=too-many-locals,
         invalid-name,

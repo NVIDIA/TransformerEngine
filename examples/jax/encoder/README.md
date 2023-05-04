@@ -67,3 +67,52 @@ python test_multigpu_encoder.py --use-fp8
 python test_model_parallel_encoder.py
 python test_model_parallel_encoder.py --use-fp8
 ```
+
+
+## Multiple Processes with Model Parallelism ##
+
+1. This example inherits previous model parallelism example, but uses multiprocessing instead of single-program multiple-data (SPMD). It uses 1 GPU per process.
+
+2. The benefit of multiprocessing is to setup hardware affinity for GPUs, such as NUMA binding. It may help improve performance and stability. Please refer to [Best Practices When Benchmarking CUDA Applications](https://www.nvidia.com/en-us/on-demand/session/gtcsiliconvalley2019-s9956/) for more details.
+
+3. The quick way to check system topology is to use `nvidia-smi`, for example:
+   ```sh
+   $ nvidia-smi topo -mp
+           CPU Affinity    NUMA Affinity
+   GPU0    48-63,176-191   3
+   GPU1    48-63,176-191   3
+   GPU2    16-31,144-159   1
+   GPU3    16-31,144-159   1
+   GPU4    112-127,240-255 7
+   GPU5    112-127,240-255 7
+   GPU6    80-95,208-223   5
+   GPU7    80-95,208-223   5
+   ```
+4. `jax.distributed.initialize` must be called before any other JAX, Flax API. And `jax.distributed.shutdown` should be the last one. Otherwise, the `jax.local_devices` will be incorrect.
+
+5. The input tensor has to be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect.
+
+### Run ###
+
+If the system has 8 GPUs, the basic commands are:
+```sh
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+$ python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
+```
+The correct setting for hardware affinity is system dependent. Taking the above system topology as an example, the command can be:
+```sh
+$ numactl --cpunodebind=48  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+$ numactl --cpunodebind=49  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+$ numactl --cpunodebind=16  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+$ numactl --cpunodebind=17  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+$ numactl --cpunodebind=112 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+$ numactl --cpunodebind=113 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+$ numactl --cpunodebind=80  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+$ numactl --cpunodebind=81  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
+```

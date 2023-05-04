@@ -460,8 +460,8 @@ def encoder_parser(args):
                              (default: 127.0.0.1:1234)")
     parser.add_argument("--num-process",
                         type=int,
-                        default=8,
-                        help="number of processes (default: 8)")
+                        default=1,
+                        help="number of processes (default: 1)")
     parser.add_argument("--process-id",
                         type=int,
                         default=0,
