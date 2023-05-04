@@ -10,7 +10,7 @@ _CUDA_SUCCESS = cudart.cudaError_t.cudaSuccess
 
 
 def get_cublasLt_version():
-    """Return cuBLASLt"""
+    """Return cuBLASLt version"""
     libcuBLASLt = ctypes.CDLL("libcublasLt.so")
     cublasLtGetVersion = libcuBLASLt.cublasLtGetVersion
     cublasLtGetVersion.restype = ctypes.c_size_t
