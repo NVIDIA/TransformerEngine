@@ -26,6 +26,7 @@ Array = jnp.ndarray
 SELF_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_CASES = [(32, 128, 512, 16, 64)]
 DTYPES = [jnp.bfloat16, jnp.float16]
+PAD_RATIO = [0.3]
 
 
 def make_causal_mask(x: Array, extra_batch_dims: int = 0) -> Array:
@@ -226,12 +227,14 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
                     reason="Fused attention kernel is not supported.")
 class TestSelfFusedAttnMax512():
 
-    def set_input(self, b, s, h, d, dtype, is_causal_masking, pad_len):
+    def set_input(self, b, s, h, d, dtype, is_causal_masking, pad_ratio):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
         qkv_shape = (b, s, 3, h, d)
         bias_shape = (1, h, s, s)
+
+        pad_len = int(s * pad_ratio)
         self.valid_len = s - pad_len
 
         min_val, max_val = -1, 1
@@ -252,11 +255,18 @@ class TestSelfFusedAttnMax512():
         self.deterministic = False
 
     @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
-    @pytest.mark.parametrize('is_causal_masking', [False, True])
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward(self, b, s, h, d, is_causal_masking, dtype):
+    @pytest.mark.parametrize('is_causal_masking', [False, True])
+    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
+    def test_forward(self, b, s, h, d, dtype, is_causal_masking, pad_ratio):
 
-        self.set_input(b, s, h, d, is_causal_masking=is_causal_masking, dtype=dtype, pad_len=117)
+        self.set_input(b,
+                       s,
+                       h,
+                       d,
+                       dtype=dtype,
+                       is_causal_masking=is_causal_masking,
+                       pad_ratio=pad_ratio)
 
         reference_out = jax_self_fused_attn(
             self.qkv,
@@ -284,8 +294,8 @@ class TestSelfFusedAttnMax512():
 
         np.testing.assert_allclose(jnp.asarray(pri_valid, np.float32),
                                    jnp.asarray(ref_valid, np.float32),
-                                   rtol=1e-2,
-                                   atol=5e-4)
+                                   rtol=1e-4,
+                                   atol=2e-3)
 
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
@@ -293,14 +303,15 @@ class TestSelfFusedAttnMax512():
     @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False, True])
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward_backward(self, b, s, h, d, is_causal_masking, dtype):
+    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
+    def test_forward_backward(self, b, s, h, d, dtype, is_causal_masking, pad_ratio):
         self.set_input(b,
                        s,
                        h,
                        d,
-                       is_causal_masking=is_causal_masking,
                        dtype=dtype,
-                       pad_len=(161 if s > 128 else 19))
+                       is_causal_masking=is_causal_masking,
+                       pad_ratio=pad_ratio)
 
         def grad_func(fused_attn_max_512_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
@@ -386,8 +397,7 @@ class TestSelfFusedAttnMax512():
             jnp.asarray(primitive_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
             jnp.asarray(reference_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
             rtol=1e-4,
-        # dbeta has a little higher diff on FP16
-            atol=1.15e-5)
+            atol=2e-5)
 
         # dbeta padded part
         np.testing.assert_allclose(
@@ -402,23 +412,25 @@ class TestSelfFusedAttnMax512():
                     reason="Fused attention kernel is not supported.")
 class TestCrossFusedAttnMax512():
 
-    def set_input(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_len):
+    def set_input(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_ratio):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
         q_shape = (b, s_q, h, d)
         kv_shape = (b, s_kv, 2, h, d)
-        assert pad_len < min(s_q, s_kv)
-        self.q_valid_len = s_q - pad_len
-        self.kv_valid_len = s_kv - pad_len
+        q_pad_len = int(s_q * pad_ratio)
+        kv_pad_len = int(s_kv * pad_ratio)
+        self.q_valid_len = s_q - q_pad_len
+        self.kv_valid_len = s_kv - kv_pad_len
 
         min_val, max_val = -1, 1
         self.q = jax.random.uniform(subkeys[0], q_shape, dtype, min_val, max_val)
         self.kv = jax.random.uniform(subkeys[1], kv_shape, dtype, min_val, max_val)
 
-        self.q_token = jnp.concatenate((jnp.ones((b, self.q_valid_len)), jnp.zeros((b, pad_len))),
+        self.q_token = jnp.concatenate((jnp.ones((b, self.q_valid_len)), jnp.zeros((b, q_pad_len))),
                                        axis=-1)
-        self.kv_token = jnp.concatenate((jnp.ones((b, self.kv_valid_len)), jnp.zeros((b, pad_len))),
+        self.kv_token = jnp.concatenate((jnp.ones((b, self.kv_valid_len)), jnp.zeros(
+            (b, kv_pad_len))),
                                         axis=-1)
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
@@ -432,16 +444,17 @@ class TestCrossFusedAttnMax512():
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward(self, b, s_q, s_kv, h, d, is_causal_masking, dtype):
+    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
+    def test_forward(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_ratio):
 
         self.set_input(b,
                        s_q,
                        s_kv,
                        h,
                        d,
-                       is_causal_masking=is_causal_masking,
                        dtype=dtype,
-                       pad_len=63)
+                       is_causal_masking=is_causal_masking,
+                       pad_ratio=pad_ratio)
 
         reference_out = jax_cross_fused_attn(
             self.q,
@@ -469,8 +482,8 @@ class TestCrossFusedAttnMax512():
 
         np.testing.assert_allclose(jnp.asarray(pri_valid, np.float32),
                                    jnp.asarray(ref_valid, np.float32),
-                                   rtol=1e-2,
-                                   atol=5e-4)
+                                   rtol=1e-4,
+                                   atol=2e-3)
 
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
@@ -478,15 +491,16 @@ class TestCrossFusedAttnMax512():
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
     @pytest.mark.parametrize('is_causal_masking', [False])
     @pytest.mark.parametrize('dtype', DTYPES)
-    def test_forward_backward(self, b, s_q, s_kv, h, d, is_causal_masking, dtype):
+    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
+    def test_forward_backward(self, b, s_q, s_kv, h, d, dtype, is_causal_masking, pad_ratio):
         self.set_input(b,
                        s_q,
                        s_kv,
                        h,
                        d,
-                       is_causal_masking=is_causal_masking,
                        dtype=dtype,
-                       pad_len=19)
+                       is_causal_masking=is_causal_masking,
+                       pad_ratio=pad_ratio)
 
         def grad_func(fused_attn_max_512_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
