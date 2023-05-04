@@ -76,15 +76,16 @@ def self_fused_attn(qkv: jnp.ndarray,
         inputs = [qkv, bias, mask, rng_state]
         batch, seqlen, _, num_head, head_dim = qkv.shape
         output_shape = [batch, seqlen, num_head, head_dim]
-        sharding_meta = get_fused_attn_sharding_meta(sharding_type, [x.shape for x in inputs],
-                                                     [output_shape],
-                                                     dp_dims=([0, None, 0, None], [0]),
-                                                     tp_dims=([3, 1, None, None], [2]),
-                                                     dp_axis_name=dp_axis_name,
-                                                     tp_axis_name=tp_axis_name)
+        sharding_meta = get_fused_attn_sharding_meta(
+            sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
+            dp_dims=([0, None, 0, None], [0]),
+            tp_dims=([3, 1, None, None], [2]),
+            dp_axis_name=dp_axis_name,
+            tp_axis_name=tp_axis_name)
 
         inputs_ = tuple(
-            jnp.reshape(x, new_shape) for x, new_shape in zip(inputs, sharding_meta.input_shapes))
+            jnp.reshape(x, new_shape) if x is not None else None
+            for x, new_shape in zip(inputs, sharding_meta.input_shapes))
 
         partial_self_fused_attn_max_512 = partial(_self_fused_attn_max_512,
                                                   attn_bias_type=attn_bias_type,
@@ -191,15 +192,16 @@ def cross_fused_attn(q: jnp.ndarray,
 
         inputs = [q, kv, mask, rng_state]
         output_shape = q.shape
-        sharding_meta = get_fused_attn_sharding_meta(sharding_type, [x.shape for x in inputs],
-                                                     [output_shape],
-                                                     dp_dims=([0, 0, 0, None], [0]),
-                                                     tp_dims=([2, 3, None, None], [2]),
-                                                     dp_axis_name=dp_axis_name,
-                                                     tp_axis_name=tp_axis_name)
+        sharding_meta = get_fused_attn_sharding_meta(
+            sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
+            dp_dims=([0, 0, 0, None], [0]),
+            tp_dims=([2, 3, None, None], [2]),
+            dp_axis_name=dp_axis_name,
+            tp_axis_name=tp_axis_name)
 
         inputs_ = tuple(
-            jnp.reshape(x, new_shape) for x, new_shape in zip(inputs, sharding_meta.input_shapes))
+            jnp.reshape(x, new_shape) if x is not None else None
+            for x, new_shape in zip(inputs, sharding_meta.input_shapes))
 
         partial_cross_fused_attn_max_512 = partial(_cross_fused_attn_max_512,
                                                    attn_bias_type=attn_bias_type,
