@@ -162,7 +162,6 @@ def check_fp8(state, var_collect, input_shape, label_shape):
 
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     print(args)
 
     if args.use_fp8:
