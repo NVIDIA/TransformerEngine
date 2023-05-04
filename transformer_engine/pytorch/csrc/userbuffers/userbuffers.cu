@@ -1551,7 +1551,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     __threadfence_system();
     atomicAdd(flagptr, 1);  // otherwise need local SM sync before sending flag
   } else {                  // 0 bytes and 1 SM only
-    atomicAdd(flagptr, 1);
+    atomicAdd_system(flagptr, 1);
   }
 }
 
@@ -1561,7 +1561,7 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
   volatile int *flag = (volatile int *)flagptr;
   if (*flag >= signal_id) return;
   clock_t s = clock64();
-  while (*flag < signal_id) {
+  while (atomicAdd_system(flagptr, 0) < signal_id) {
     if (clock64() - s > TIMEOUT) {
       printf("%d from %d] pushrecv: expected %d, stuck with %d\n", myrank, peer, signal_id, *flag);
       return;
