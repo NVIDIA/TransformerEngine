@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" Encoder training on multi-GPU with data parallelism"""
+"""Encoder training on multi-GPU with data parallelism"""
 import argparse
 import unittest
 from functools import partial
@@ -15,6 +15,7 @@ import tensorflow_datasets as tfds
 from cuda import cudart
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
+from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
@@ -229,7 +230,7 @@ def get_params_pspec(sharding_rules, abs_var_collect):
         return jax.sharding.PartitionSpec(*partitions)
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_pspec = jax.tree_map(to_device_axis, nn.partitioning.get_axis_names(params_axes))
+    params_axes_pspec = jax.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
     params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
     return params_pspec

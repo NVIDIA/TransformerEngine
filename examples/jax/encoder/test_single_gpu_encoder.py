@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" Encoder training on single GPU"""
+"""Encoder training on single GPU"""
 import argparse
 import os
 import unittest
