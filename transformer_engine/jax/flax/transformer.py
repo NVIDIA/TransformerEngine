@@ -367,6 +367,10 @@ class MultiHeadAttention(nn.Module):
                     kernel_init=qkv_init,
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
+                    bias_axes=(
+                        'qkv_dim',
+                        'joined_kv',
+                    ),
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
                 query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
@@ -391,6 +395,7 @@ class MultiHeadAttention(nn.Module):
                     kernel_axes=('embed', 'joined_kv'),
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
+                    bias_axes=('joined_kv',),
                     dtype=self.dtype,
                     kernel_init=query_init,
                     name='query')(inputs_q)
@@ -402,6 +407,10 @@ class MultiHeadAttention(nn.Module):
                                        kernel_init=kv_init,
                                        use_bias=self.use_bias,
                                        bias_init=self.bias_init,
+                                       bias_axes=(
+                                           'kv_dim',
+                                           'joined_kv',
+                                       ),
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
                 key, value = jnp.split(kv_proj, [
@@ -419,6 +428,7 @@ class MultiHeadAttention(nn.Module):
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
+                bias_axes=('joined_kv',),
                 dtype=self.dtype)
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=not self.output_layernorm,
@@ -435,6 +445,7 @@ class MultiHeadAttention(nn.Module):
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
+                bias_axes=('joined_kv',),
                 dtype=self.dtype,
                 kernel_init=query_init,
                 name='query')(inputs_q)
@@ -543,6 +554,7 @@ class MultiHeadAttention(nn.Module):
                            kernel_axes=('joined_kv', 'embed'),
                            use_bias=self.use_bias,
                            bias_init=self.bias_init,
+                           bias_axes=('embed',),
                            dtype=self.dtype,
                            name='out')(x)
         return out, residual
@@ -980,6 +992,11 @@ class TransformerLayer(nn.Module):
             kernel_axes_2=('mlp', 'embed'),
             use_bias=self.use_bias,
             bias_init=self.bias_init,
+            bias_axes_1=(
+                'act',
+                'mlp',
+            ),
+            bias_axes_2=('embed',),
             name='mlp',
         )(mlp_input, deterministic=deterministic)
 
