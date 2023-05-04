@@ -64,7 +64,7 @@ class Net(nn.Module):
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te.TransformerLayerType.ENCODER,
+                             layer_type=te.flax.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
@@ -276,7 +276,7 @@ def train_and_evaluate(args):
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-            sharding_rules = te.extend_logical_axis_rules(tuple())
+            sharding_rules = te.flax.extend_logical_axis_rules(tuple())
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
