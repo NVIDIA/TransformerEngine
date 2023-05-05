@@ -89,7 +89,7 @@ python test_model_parallel_encoder.py --use-fp8
    GPU7    80-95,208-223   5
    ```
 
-4. It is recommended to set the environment variable `CUDA_DEVICE_ORDER` to `PCI_BUS_ID` before running the example with the affinity setting. Ensure device order alignment between CUDA runtime and `nvidia-smi`.  Please refer to [CUDA Environment Variables](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#cuda-environment-variables) for more details.
+4. It is recommended to set the environment variable `CUDA_DEVICE_ORDER` to `PCI_BUS_ID` before running the example with the affinity setting. To ensure that the device order is aligned between CUDA and `nvidia-smi`. Please refer to [CUDA Environment Variables](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#cuda-environment-variables) for more details.
 
 5. `jax.distributed.initialize` must be called before any other JAX or Flax API, otherwise `jax.local_devices` will be incorrect. `jax.distributed.shutdown` should be the last API call.
 
