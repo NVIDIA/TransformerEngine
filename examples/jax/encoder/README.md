@@ -95,15 +95,15 @@ python test_model_parallel_encoder.py --use-fp8
 ### Run ###
 
 If the system has 8 GPUs, the basic commands are:
-```sh
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
-$ python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
+```bash
+python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
 ```
 The correct setting for hardware affinity is system dependent. Taking the above system topology as an example, the command can be:
 ```sh
