@@ -78,9 +78,9 @@ enum NVTE_Mask_Type {
  *  - O = D * V.T
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | sequence length | head_dim |
- *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |     <= 512      |    64    |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |     <= 512      |    64    |
+ *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+ *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
+ *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
  *
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
@@ -120,9 +120,9 @@ void nvte_fused_attn_fwd_qkvpacked(
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | sequence length | head_dim |
- *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |     <= 512      |    64    |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |     <= 512      |    64    |
+ *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+ *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
+ *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
  *
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
@@ -171,8 +171,8 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  - O = D * V.T
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | sequence length | head_dim |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |     <= 512      |    64    |
+ *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+ *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
  *
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
@@ -217,8 +217,8 @@ void nvte_fused_attn_fwd_kvpacked(
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | sequence length | head_dim |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |     <= 512      |    64    |
+ *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+ *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
  *
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
