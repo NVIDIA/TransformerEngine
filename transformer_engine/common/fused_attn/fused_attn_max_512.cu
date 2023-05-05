@@ -17,6 +17,7 @@
 #include "../common.h"
 #include "utils.h"
 
+#if (CUDNN_VERSION >= 8901)
 #define CUDNN_FRONTEND_UNUSED(X) ((void)X)
 
 #define Q_ID 1
@@ -42,7 +43,6 @@
 namespace transformer_engine {
 namespace fused_attn {
 
-#if (CUDNN_VERSION >= 8700)
 static void createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                         NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
                         // NOLINTNEXTLINE(runtime/references)
@@ -1058,7 +1058,6 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             auto dsAfterMaskTensor =
                 createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType, ops, dsTensor, true);
 
-#if (CUDNN_VERSION >= 8901)
             // dbias tensor
             int64_t dbias_dim[4] = {1, h, s_q, s_kv};
             int64_t dbias_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -1102,9 +1101,6 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                         dBiasTensor, dBias_scale_desc);
                 ops.push_back(std::move(dBias_scale_op));
             }
-#else
-            NVTE_CHECK(devPtrdBias == nullptr, "devPtrdBias requires CUDNN_VERSION >= 8901");
-#endif
 
             // matmul to calculate dqTensor
             // set padding value optionally to 0 for writing zeros to dqTensor (if not set, old
@@ -1223,13 +1219,9 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         data_ptrs.insert(std::pair<uint64_t, void *>(Q_SEQLEN_ID, devActualSeqlenQ));
         data_ptrs.insert(std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
 
-#if (CUDNN_VERSION >= 8901)
         if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
             data_ptrs.insert(std::pair<uint64_t, void *>(dBias_ID, devPtrdBias));
         }
-#else
-        NVTE_CHECK(devPtrdBias == nullptr, "devPtrdBias requires CUDNN_VERSION >= 8901");
-#endif
 
         NVTE_CHECK(dropout_probability == 0.f,
                    "dropout probability > 0 in fused_attn_max_512 has not been implemented.");
@@ -1268,11 +1260,10 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         }
     }
 }
-#endif  // CUDNN_VERSION >= 8700
 
 }  // namespace fused_attn
+
 using namespace transformer_engine::fused_attn;
-#if (CUDNN_VERSION >= 8901)
 void fused_attn_max_512_fwd_qkvpacked(
     size_t batch, size_t max_seqlen, size_t num_head, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -1551,5 +1542,5 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         return;
     }
 }
-#endif  // CUDNN_VERSION >= 8901
 }  // namespace transformer_engine
+#endif  // CUDNN_VERSION >= 8901
