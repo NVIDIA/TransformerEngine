@@ -12,7 +12,6 @@ import nltk
 import numpy as np
 import optax
 import tensorflow_datasets as tfds
-from cuda import cudart
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import partitioning as nn_partitioning
@@ -37,19 +36,6 @@ def check_num_gpu(desired_num_gpu):
     actual_num_gpu = len(jax.local_devices())
     assert actual_num_gpu == desired_num_gpu, f"Number of GPUs is mismatch. " \
         f"{desired_num_gpu} GPUs are assigned, but the actual number of GPUs is {actual_num_gpu}"
-
-
-def gpu_has_fp8():
-    """Check if the GPU has FP8."""
-    cudaSuccess = cudart.cudaError_t.cudaSuccess
-    ret, gpu_id = cudart.cudaGetDevice()
-    assert ret == cudaSuccess
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMajor
-    _, major = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMinor
-    _, minor = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    sm_arch = major * 10 + minor
-    return sm_arch >= 89
 
 
 class Net(nn.Module):
@@ -260,9 +246,6 @@ def train_and_evaluate(args):
     print(args)
     check_num_gpu(args.num_gpu)
 
-    if args.use_fp8:
-        assert gpu_has_fp8(), "GPU needs to support FP8."
-
     num_gpu_tp = 2
     if args.num_gpu % num_gpu_tp == 0:
         num_gpu_dp = args.num_gpu // num_gpu_tp
@@ -417,6 +400,8 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
+    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
@@ -430,7 +415,7 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79
 
-    @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True

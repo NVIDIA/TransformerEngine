@@ -9,7 +9,6 @@ from typing import Any, Callable, Tuple, Sequence, Union, Iterable, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from cuda import cudart
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from jax import lax, vmap
@@ -23,20 +22,6 @@ Array = Any
 PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision,
                                                                        lax.Precision]]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
-
-
-def is_fp8_supported():
-    """
-    Thus JAX doesn't have API to query capability
-    Use cuda-python for get the compute capability
-    """
-    cudaSuccess = cudart.cudaError_t.cudaSuccess
-    ret, gpu_id = cudart.cudaGetDevice()
-    assert ret == cudaSuccess
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMajor
-    ret, sm_major = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    assert ret == cudaSuccess
-    return sm_major >= 9
 
 
 def is_devices_enough(required):

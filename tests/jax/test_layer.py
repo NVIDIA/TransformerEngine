@@ -11,10 +11,12 @@ import pytest
 
 from transformer_engine.common.recipe import Format
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
-from transformer_engine.jax.fp8 import FP8Helper
-from utils import assert_allclose, is_fp8_supported
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
+from utils import assert_allclose
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
+
+is_fp8_supported, reason = is_fp8_available()
 
 
 def loss_fn(diff_xs, no_diff_xs, params, others, model, rngs):
@@ -277,7 +279,7 @@ class TestEncoderLayer:
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
@@ -294,7 +296,7 @@ class TestEncoderLayer:
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
@@ -502,7 +504,7 @@ class TestDecoderLayer:
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.forward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
@@ -519,7 +521,7 @@ class TestDecoderLayer:
         FP8Helper.finalize()    # Ensure FP8 disabled.
         self.forward_backward_runner(data_shape, dtype, attrs, rtol=1e-05, atol=2e-04)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('fp8_format', FP8_FORMATS)
