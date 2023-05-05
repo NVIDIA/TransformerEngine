@@ -4,22 +4,23 @@
 
 from typing import Optional
 import math
-import pytest
-import numpy as np
+
 import jax
 import jax.numpy as jnp
-from jax import nn as jax_nn
-from jax import lax
-from jax import value_and_grad, jit
+import numpy as np
+import pytest
 
 from flax.linen import combine_masks
+from flax.linen import dot_product_attention
 from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
-from flax.linen import dot_product_attention
+from jax import lax
+from jax import nn as jax_nn
+from jax import value_and_grad, jit
 
-from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 
 # Type annotations
 Array = jnp.ndarray

@@ -8,11 +8,9 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cudnn_frontend.h>
 #include <map>
-#include <unordered_map>
 #include <vector>
-
-#include "cudnn_frontend.h"
 
 #include "../common.h"
 #include "utils.h"
