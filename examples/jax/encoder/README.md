@@ -107,12 +107,12 @@ python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
 ```
 The correct setting for hardware affinity is system dependent. Taking the above system topology as an example, the command can be:
 ```sh
-$ numactl --cpunodebind=48  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
-$ numactl --cpunodebind=49  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
-$ numactl --cpunodebind=16  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
-$ numactl --cpunodebind=17  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
-$ numactl --cpunodebind=112 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
-$ numactl --cpunodebind=113 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
-$ numactl --cpunodebind=80  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
-$ numactl --cpunodebind=81  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
+numactl --cpunodebind=48  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+numactl --cpunodebind=49  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+numactl --cpunodebind=16  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+numactl --cpunodebind=17  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+numactl --cpunodebind=112 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+numactl --cpunodebind=113 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+numactl --cpunodebind=80  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+numactl --cpunodebind=81  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
 ```
