@@ -38,7 +38,7 @@ target_link_libraries(transformer_engine PUBLIC
 		      CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-target_include_directories(transformer_engine PUBLIC "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
+target_include_directories(transformer_engine PRIVATE "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
 
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
