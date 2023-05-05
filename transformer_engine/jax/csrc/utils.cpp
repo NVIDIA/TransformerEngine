@@ -3,8 +3,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <cassert>
 #include <cuda_runtime_api.h>
+#include <cassert>
 
 #include "utils.h"
 
