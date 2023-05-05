@@ -36,7 +36,7 @@ void nvte_fused_attn_fwd_qkvpacked(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // QKV shape is either [total_seqs, 3, h, d] or [b, s, 3, h, d]
+  // QKV shape is either [total_seqs, 3, h, d]
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
   size_t h = input_QKV->data.shape[ndim - 2];
@@ -123,7 +123,7 @@ void nvte_fused_attn_bwd_qkvpacked(
   Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // QKV shape is either [total_seqs, 3, h, d] or [b, s, 3, h, d]
+  // QKV shape is either [total_seqs, 3, h, d]
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
   size_t h = input_QKV->data.shape[ndim - 2];
@@ -215,8 +215,8 @@ void nvte_fused_attn_fwd_kvpacked(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // Q shape is either [total_seqs, h, d] or [b, s_q, h, d]
-  // KV shape is either [total_seqs, h, d] or [b, s_kv, 2, h, d]
+  // Q shape is either [total_seqs, h, d]
+  // KV shape is either [total_seqs, h, d]
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h = input_Q->data.shape[ndim - 2];
@@ -299,8 +299,8 @@ void nvte_fused_attn_bwd_kvpacked(
   Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // Q shape is either [total_seqs, h, d] or [b, s_q, h, d]
-  // KV shape is either [total_seqs, h, d] or [b, s_kv, 2, h, d]
+  // Q shape is either [total_seqs, h, d]
+  // KV shape is either [total_seqs, h, d]
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h = input_Q->data.shape[ndim - 2];

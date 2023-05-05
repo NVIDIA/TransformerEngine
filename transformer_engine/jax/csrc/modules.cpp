@@ -765,7 +765,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
 
     auto dtype = descriptor.dtype;
-    auto qkv_shape = std::vector<size_t>{batch, q_max_seqlen, 3, num_head, head_dim};
+    auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
@@ -774,7 +774,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     // FP16/BF16 doesn't use this tensor
     auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
     auto o_tensor =
-        TensorWrapper(output, std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim}, dtype);
+        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
@@ -838,8 +838,8 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
 
     auto dtype = descriptor.dtype;
-    auto qkv_shape = std::vector<size_t>{batch, q_max_seqlen, 3, num_head, head_dim};
-    auto output_shape = std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim};
+    auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
+    auto output_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
@@ -920,8 +920,8 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto head_dim = descriptor.head_dim;
 
     auto dtype = descriptor.dtype;
-    auto q_shape = std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim};
-    auto kv_shape = std::vector<size_t>{batch, kv_max_seqlen, 2, num_head, head_dim};
+    auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
@@ -933,7 +933,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     // FP16/BF16 doesn't use this tensor
     auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
     auto o_tensor =
-        TensorWrapper(output, std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim}, dtype);
+        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
 
     auto q_cu_seqlens_tensor =
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
@@ -1000,9 +1000,9 @@ void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const cha
     auto head_dim = descriptor.head_dim;
 
     auto dtype = descriptor.dtype;
-    auto q_shape = std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim};
-    auto kv_shape = std::vector<size_t>{batch, kv_max_seqlen, 2, num_head, head_dim};
-    auto output_shape = std::vector<size_t>{batch, q_max_seqlen, num_head, head_dim};
+    auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
+    auto output_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
@@ -1032,7 +1032,7 @@ void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const cha
 
     aux_output_tensors.size = 1;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
-    output_s->data.shape = std::vector<size_t>{batch, num_head, q_max_seqlen, kv_max_seqlen};
+    output_s->data.shape = std::vector<size_t>{batch * num_head, q_max_seqlen, kv_max_seqlen};
     output_s->data.dptr = softmax_aux;
 
     TensorWrapper query_workspace_tensor;
