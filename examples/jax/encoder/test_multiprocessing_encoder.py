@@ -458,7 +458,7 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+    gpu_has_fp8, reason = te.fp8.is_fp8_available(0)
 
     @classmethod
     def setUpClass(cls):

@@ -38,8 +38,11 @@ def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     return True, ""
 
 
-def is_fp8_available() -> Tuple[bool, str]:
+def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if gpu_id is not None:
+        return _check_fp8_support(gpu_id)
+
     global _is_fp8_available, _reason_for_no_fp8
     if _is_fp8_available is None:
         _is_fp8_available = True
