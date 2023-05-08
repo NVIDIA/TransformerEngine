@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
-import tensorflow_datasets as tfds
+from datasets import load_dataset
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
@@ -146,7 +146,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
     mask_3d = np.empty((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
     for j, sentence in enumerate(dataset['sentence']):
-        tokens = nltk.word_tokenize(sentence.decode("utf-8"))
+        tokens = nltk.word_tokenize(sentence)
         tensor = output[j]
         mask_1d = np.zeros((1, max_seq_len), dtype=np.uint8)
 
@@ -167,20 +167,25 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
         np.dot(mask_1d.T, mask_1d, out=mask_2d)
         np.subtract(1, mask_2d, out=mask_2d)
 
-    dataset['sentence'] = output
-    dataset['label'] = dataset['label'].astype(np.float32)
-    dataset['mask'] = mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
-    return dataset, vocab, word_id
+    new_dataset = {
+        'sentence': output,
+        'label': dataset['label'].astype(np.float32),
+        'mask': mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
+    }
+    return new_dataset, vocab, word_id
 
 
 def get_datasets(max_seq_len):
     """Load GLUE train and test datasets into memory."""
     vocab = {}
     word_id = 0
-    dataset = 'glue/cola'
-    train_ds = tfds.as_numpy(tfds.load(dataset, split='train', batch_size=-1))
+
+    train_ds = load_dataset('glue', 'cola', split='train')
+    train_ds.set_format(type='np')
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
-    test_ds = tfds.as_numpy(tfds.load(dataset, split='validation', batch_size=-1))
+
+    test_ds = load_dataset('glue', 'cola', split='validation')
+    test_ds.set_format(type='np')
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
 
@@ -196,6 +201,7 @@ def check_fp8(state, var_collect, inputs, masks, labels):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
+    train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
     rng = jax.random.PRNGKey(args.seed)
     rng, params_rng = jax.random.split(rng)
@@ -207,7 +213,6 @@ def train_and_evaluate(args):
     label_shape = [args.batch_size]
 
     with te.fp8_autocast(enabled=args.use_fp8):
-        train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
         encoder = Net(num_embed)
         inputs = jnp.zeros(input_shape, dtype=jnp.int32)
         masks = jnp.zeros(mask_shape, dtype=jnp.uint8)

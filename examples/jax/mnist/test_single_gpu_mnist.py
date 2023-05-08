@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import tensorflow_datasets as tfds
+from datasets import load_dataset
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
@@ -129,13 +129,23 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 def get_datasets():
     """Load MNIST train and test datasets into memory."""
-    ds_builder = tfds.builder('mnist')
-    ds_builder.download_and_prepare()
-    train_ds = tfds.as_numpy(ds_builder.as_dataset(split='train', batch_size=-1))
-    test_ds = tfds.as_numpy(ds_builder.as_dataset(split='test', batch_size=-1))
-    train_ds['image'] = jnp.float32(train_ds['image']) / 255.
-    test_ds['image'] = jnp.float32(test_ds['image']) / 255.
-    return train_ds, test_ds
+    train_ds = load_dataset('mnist', split='train')
+    train_ds.set_format(type='np')
+    batch_size = train_ds['image'].shape[0]
+    shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
+    new_train_ds = {
+        'image': train_ds['image'].astype(np.float32).reshape(shape) / 255.,
+        'label': train_ds['label']
+    }
+    test_ds = load_dataset('mnist', split='test')
+    test_ds.set_format(type='np')
+    batch_size = test_ds['image'].shape[0]
+    shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
+    new_test_ds = {
+        'image': test_ds['image'].astype(np.float32).reshape(shape) / 255.,
+        'label': test_ds['label']
+    }
+    return new_train_ds, new_test_ds
 
 
 def check_fp8(state, var_collect, input_shape, label_shape):
