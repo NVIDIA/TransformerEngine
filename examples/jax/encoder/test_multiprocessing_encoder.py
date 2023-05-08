@@ -78,6 +78,38 @@ class Net(nn.Module):
         return x
 
 
+def valid_shard_size(total_size, batch_size, dp_size, tp_size):
+    """Get sharded input shape"""
+    global_batch_size = dp_size * batch_size
+    num_steps = total_size // global_batch_size
+    valid_size = num_steps * global_batch_size
+
+    gpu_id = jax.local_devices()[0].id
+    tp_group_id = gpu_id // tp_size
+    return valid_size, global_batch_size, num_steps, tp_group_id
+
+
+def shard_array_wrapper(dataset, batch_size, mesh, pspec, enable_partition=False):
+    """Generate needed args for jax.make_array_from_single_device_arrays"""
+    inputs = jnp.asarray(dataset)
+    total_input_size = len(inputs)
+
+    (dp_size, tp_size) = mesh.device_ids.shape
+    valid_input_size, global_batch_size, num_steps, tp_group_id = valid_shard_size(
+        total_input_size, batch_size, dp_size, tp_size)
+    inputs = inputs[:valid_input_size]    # skip incomplete batch
+
+    single_input_shape = inputs.shape[1:]
+    global_input_shape = (global_batch_size, *single_input_shape)
+
+    named_sharding = jax.sharding.NamedSharding(mesh, pspec)
+
+    if enable_partition:
+        inputs = inputs.reshape(dp_size, num_steps, batch_size, *single_input_shape)
+        inputs = inputs[tp_group_id]
+    return global_input_shape, named_sharding, inputs
+
+
 def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
     """Computes gradients, loss and accuracy for a single batch."""
 
@@ -100,37 +132,40 @@ def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
     return state, loss, accuracy, var_collect
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn, dp_size, mesh,
+def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn, mesh,
                 inputs_pspec, masks_pspec, labels_pspec):
     """Train for a single epoch."""
-    train_ds_size = len(train_ds['sentence'])
-    steps_per_epoch = train_ds_size // batch_size
-    perms = jax.random.permutation(rngs[INPUT_KEY], train_ds_size)
-    perms = perms[:steps_per_epoch * batch_size]    # skip incomplete batch
-    perms = perms.reshape((steps_per_epoch, batch_size))
+
+    total_batch_size = len(train_ds['sentence'])
+    (dp_size, tp_size) = mesh.device_ids.shape
+    valid_size, _, num_steps, tp_group_id = valid_shard_size(total_batch_size, batch_size, dp_size,
+                                                             tp_size)
+
+    perms = jax.random.permutation(rngs[INPUT_KEY], valid_size)
+    perms = perms.reshape(dp_size, num_steps, batch_size)
+    perms = perms[tp_group_id]
+
+    global_input_shape, input_named_sharding, sentence = shard_array_wrapper(
+        train_ds['sentence'], batch_size, mesh, inputs_pspec)
+    global_mask_shape, mask_named_sharding, mask = shard_array_wrapper(
+        train_ds['mask'], batch_size, mesh, masks_pspec)
+    global_label_shape, label_named_sharding, label = shard_array_wrapper(
+        train_ds['label'], batch_size, mesh, labels_pspec)
+
     epoch_loss = []
     epoch_accuracy = []
 
-    global_batch_size = dp_size * batch_size
-    input_shape = (global_batch_size, *train_ds['sentence'].shape[1:])
-    mask_shape = (global_batch_size, *train_ds['mask'].shape[1:])
-    label_shape = (global_batch_size, *train_ds['label'].shape[1:])
-
-    input_named_sharding = jax.sharding.NamedSharding(mesh, inputs_pspec)
-    mask_named_sharding = jax.sharding.NamedSharding(mesh, masks_pspec)
-    label_named_sharding = jax.sharding.NamedSharding(mesh, labels_pspec)
-
     for perm in perms:
-        batch_inputs = train_ds['sentence'][perm, ...]
-        batch_masks = train_ds['mask'][perm, ...]
-        batch_labels = train_ds['label'][perm, ...]
+        batch_input = sentence[perm, ...]
+        batch_mask = mask[perm, ...]
+        batch_label = label[perm, ...]
 
-        shard_input = jax.make_array_from_single_device_arrays(input_shape, input_named_sharding,
-                                                               [jnp.array(batch_inputs)])
-        shard_mask = jax.make_array_from_single_device_arrays(mask_shape, mask_named_sharding,
-                                                              [jnp.array(batch_masks)])
-        shard_label = jax.make_array_from_single_device_arrays(label_shape, label_named_sharding,
-                                                               [jnp.array(batch_labels)])
+        shard_input = jax.make_array_from_single_device_arrays(global_input_shape,
+                                                               input_named_sharding, [batch_input])
+        shard_mask = jax.make_array_from_single_device_arrays(global_mask_shape,
+                                                              mask_named_sharding, [batch_mask])
+        shard_label = jax.make_array_from_single_device_arrays(global_label_shape,
+                                                               label_named_sharding, [batch_label])
 
         state, loss, accuracy, var_collect = train_fn(state, shard_input, shard_mask, shard_label,
                                                       var_collect, rngs, use_fp8)
@@ -157,36 +192,36 @@ def eval_step(state, inputs, masks, labels, var_collect):
     return loss, accuracy
 
 
-def eval_model(state, test_ds, batch_size, var_collect, eval_fn, dp_size, mesh, inputs_pspec,
-               masks_pspec, labels_pspec):
+def eval_model(state, test_ds, batch_size, var_collect, eval_fn, mesh, inputs_pspec, masks_pspec,
+               labels_pspec):
     """Evaluation loop."""
-    test_ds_size = len(test_ds['sentence'])
-    num_steps = test_ds_size // batch_size
-    valid_size = num_steps * batch_size
+    global_input_shape, input_named_sharding, sentence = shard_array_wrapper(test_ds['sentence'],
+                                                                             batch_size,
+                                                                             mesh,
+                                                                             inputs_pspec,
+                                                                             enable_partition=True)
+    global_mask_shape, mask_named_sharding, mask = shard_array_wrapper(test_ds['mask'],
+                                                                       batch_size,
+                                                                       mesh,
+                                                                       masks_pspec,
+                                                                       enable_partition=True)
+    global_label_shape, label_named_sharding, label = shard_array_wrapper(test_ds['label'],
+                                                                          batch_size,
+                                                                          mesh,
+                                                                          labels_pspec,
+                                                                          enable_partition=True)
+
     all_loss = []
     all_accuracy = []
 
-    global_batch_size = dp_size * batch_size
-    input_shape = (global_batch_size, *test_ds['sentence'].shape[1:])
-    mask_shape = (global_batch_size, *test_ds['mask'].shape[1:])
-    label_shape = (global_batch_size, *test_ds['label'].shape[1:])
+    for batch_input, batch_mask, batch_label in zip(sentence, mask, label):
 
-    input_named_sharding = jax.sharding.NamedSharding(mesh, inputs_pspec)
-    mask_named_sharding = jax.sharding.NamedSharding(mesh, masks_pspec)
-    label_named_sharding = jax.sharding.NamedSharding(mesh, labels_pspec)
-
-    for batch_start in range(0, valid_size, batch_size):
-        batch_end = batch_start + batch_size
-        batch_inputs = test_ds['sentence'][batch_start:batch_end]
-        batch_masks = test_ds['mask'][batch_start:batch_end]
-        batch_labels = test_ds['label'][batch_start:batch_end]
-
-        shard_input = jax.make_array_from_single_device_arrays(input_shape, input_named_sharding,
-                                                               [jnp.array(batch_inputs)])
-        shard_mask = jax.make_array_from_single_device_arrays(mask_shape, mask_named_sharding,
-                                                              [jnp.array(batch_masks)])
-        shard_label = jax.make_array_from_single_device_arrays(label_shape, label_named_sharding,
-                                                               [jnp.array(batch_labels)])
+        shard_input = jax.make_array_from_single_device_arrays(global_input_shape,
+                                                               input_named_sharding, [batch_input])
+        shard_mask = jax.make_array_from_single_device_arrays(global_mask_shape,
+                                                              mask_named_sharding, [batch_mask])
+        shard_label = jax.make_array_from_single_device_arrays(global_label_shape,
+                                                               label_named_sharding, [batch_label])
 
         loss, accuracy = eval_fn(state, shard_input, shard_mask, shard_label, var_collect)
         all_loss.append(loss)
@@ -376,13 +411,11 @@ def train_and_evaluate(args):
 
                     state, train_loss, train_accuracy, var_collect = train_epoch(
                         state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8,
-                        pjit_train_step, num_gpu_dp, shard_mesh, inputs_pspec, masks_pspec,
-                        labels_pspec)
+                        pjit_train_step, shard_mesh, inputs_pspec, masks_pspec, labels_pspec)
 
                     test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size,
-                                                          var_collect, pjit_eval_step, num_gpu_dp,
-                                                          shard_mesh, inputs_pspec, masks_pspec,
-                                                          labels_pspec)
+                                                          var_collect, pjit_eval_step, shard_mesh,
+                                                          inputs_pspec, masks_pspec, labels_pspec)
                     if args.process_id == 0:
                         print(f"Epoch: {epoch:>2} "
                               f"Train Loss: {train_loss:.6f} "

@@ -35,7 +35,7 @@ python test_single_gpu_encoder.py --use-fp8
 
 6. Fill in `params_pspec` and `encoder.init` to pjit to get a compiled function, `pjit_encoder_init `, and use it to initialize the model, so JAX now can know how to do the sharding.
 
-7. The `train_step` and `eval_step` also needs to be compiled by pjit. Thus, every input and output argument has to be set up `PartitionSpec` if the argument contains a tensor. For instance, the `input_pspec` is `PartitionSpec('data', None)` because the input shape is (batch size, sequence length). Then, the rest of the workflow is similar to the previous example.
+7. The `train_step` and `eval_step` also need to be compiled by pjit. Thus, every input and output argument has to be set up `PartitionSpec` if the argument contains a tensor. For instance, the `input_pspec` is `PartitionSpec('data', None)` because the input shape is (batch size, sequence length). Then, the rest of the workflow is similar to the previous example.
 
 ### Run ###
 
@@ -60,6 +60,10 @@ python test_multigpu_encoder.py --use-fp8
     import os
     os.environ['XLA_FLAGS'] = "--xla_dump_hlo_as_proto --xla_dump_hlo_as_text --xla_dump_hlo_as_html --xla_dump_to=<path to store XLA HLO>"
     ```
+5. If the model parallelism example is run in the container, it is recommended to add `--ipc=host` in launch arguments. Otherwise, it might trigger UCX errors.
+   ```sh
+   docker run --gpus=all --ipc=host ...
+   ```
 
 ### Run ###
 
@@ -93,7 +97,14 @@ python test_model_parallel_encoder.py --use-fp8
 
 5. `jax.distributed.initialize` must be called before any other JAX or Flax API, otherwise `jax.local_devices` will be incorrect. `jax.distributed.shutdown` should be the last API call.
 
-6. The input tensor must be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect.
+6. Unlike SPMD, the input tensor must be sharded manually and be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect. Using DP=4, TP=2 as an example, the device mesh looks like:
+    ```python
+    mesh.device_ids = [[0, 1],
+                       [2, 3],
+                       [4, 5],
+                       [6, 7]]
+    ```
+    Assume that the process ID is mapped to GPU ID. The process 0 and process 1 are grouped for model parallelism, the process 2 and process 3 are grouped together too, and so on. Thus, process 0 and process 1 need to share the same micro-batch in the training step, process 0 and process 2, 4, and 6 have different micro-batch.
 
 ### Run ###
 
