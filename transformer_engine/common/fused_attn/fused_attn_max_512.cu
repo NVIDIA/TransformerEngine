@@ -135,8 +135,7 @@ static cudnn_frontend::Tensor createBias(int64_t b, int64_t h, int64_t s_q, int6
                                          // NOLINTNEXTLINE(runtime/references)
                                          std::vector<cudnn_frontend::Operation> &ops,
                                          cudnn_frontend::Tensor const &prevBlockOutputTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0, "Bias op constructed incorrectly as the first one",
-                             CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops.size() != 0, "Bias op constructed incorrectly as the first one.");
 
     int64_t b_dim[4] = {1, h, s_q, s_kv};
     int64_t b_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -175,9 +174,7 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
     CUDNN_FRONTEND_UNUSED(tensorType);
     CUDNN_FRONTEND_UNUSED(is_bprop);
 
-    cudnn_frontend::throw_if(ops.size() == 0,
-                             "Padding Mask constructed incorrectly as the first one",
-                             CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops.size() != 0, "Padding mask constructed incorrectly as the first one.");
 
     // subtraction output
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
@@ -447,9 +444,7 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
                                             cudnn_frontend::Tensor const &prevBlockOutputTensor) {
     CUDNN_FRONTEND_UNUSED(d);
 
-    cudnn_frontend::throw_if(ops.size() == 0,
-                             "Dropout DAG constructed incorrectly as the first one",
-                             CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops.size() != 0, "Dropout DAG constructed incorrectly as the first one");
 
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -522,8 +517,7 @@ static void createBMM2(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t 
                        // NOLINTNEXTLINE(runtime/references)
                        std::vector<cudnn_frontend::Operation> &ops,
                        cudnn_frontend::Tensor const &prevBlockOutputTensor) {
-    cudnn_frontend::throw_if(ops.size() == 0, "BMM2 op constructed incorrectly as the first one",
-                             CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops.size() != 0, "BMM2 op constructed incorrectly as the first one");
 
     int64_t seqlen_dim[4] = {b, 1, 1, 1};
     int64_t seqlen_stride[4] = {1, 1, 1, 1};
@@ -573,9 +567,7 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
                                                     cudnn_frontend::Tensor const &dyTensor) {
     CUDNN_FRONTEND_UNUSED(tensorType);
 
-    cudnn_frontend::throw_if(ops.size() == 0,
-                             "Softmax backward constructed incorrectly as the first one",
-                             CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops.size() != 0, "Softmax backward constructed incorrectly as the first one");
 
     int64_t p_dim[4] = {b, h, s_q, s_kv};
     int64_t p_stride[4];
@@ -702,8 +694,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             auto mask_output = createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType, ops,
                                           bmm1_output, false);
 
-            cudnn_frontend::throw_if(dropout_probability == 1.0f,
-                                     "Dropout probability cannot be 1.0", CUDNN_STATUS_BAD_PARAM);
+            NVTE_CHECK(dropout_probability != 1.0f, "Dropout probability cannot be 1.0.");
 
             // TODO(rewang): check whether devPtrS can be removed
             bool softmax_output_virtual = enable_dropout;  // || devPtrS == nullptr;
@@ -810,27 +801,11 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                .setWorkspacePointer(workspace)
                                .setDataPointers(data_ptrs)
                                .build();
-        cudnnStatus_t status =
-            cudnnBackendExecute(handle, plan.get_raw_desc(), variantPack.get_raw_desc());
 
-        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); },
-                                 "Plan execute error", status);
+        NVTE_CHECK_CUDNN(
+            cudnnBackendExecute(handle, plan.get_raw_desc(), variantPack.get_raw_desc()));
     } catch (cudnn_frontend::cudnnException &e) {
-        struct cudaDeviceProp prop;
-        NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-
-        // this example is only for GA100 cards (cudnn Version >= 8700) and GH100
-        // cards (cudnn Version >= 8800)
-        if (!((prop.major == 8 && prop.minor == 0) ||
-              (prop.major == 9 && prop.minor == 0 && CUDNN_VERSION >= 8800)) &&
-            (e.getCudnnStatus() == CUDNN_STATUS_ARCH_MISMATCH ||
-             e.getCudnnStatus() == CUDNN_STATUS_NOT_SUPPORTED)) {
-            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and "
-                         "GH100 (cuDNN >= 8800) GPUs"
-                      << std::endl;
-        } else {
-            std::cout << "[ERROR] Exception " << e.what() << std::endl;
-        }
+        NVTE_ERROR(e.what());
     }
 }
 
@@ -1236,26 +1211,10 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                .setDataPointers(data_ptrs)
                                .build();
 
-        cudnnStatus_t status =
-            cudnnBackendExecute(handle, plan.get_raw_desc(), variantPack.get_raw_desc());
-
-        cudnn_frontend::throw_if([status]() { return (status != CUDNN_STATUS_SUCCESS); },
-                                 "Plan execute error", status);
+        NVTE_CHECK_CUDNN(
+            cudnnBackendExecute(handle, plan.get_raw_desc(), variantPack.get_raw_desc()));
     } catch (cudnn_frontend::cudnnException &e) {
-        struct cudaDeviceProp prop;
-        NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-
-        // this example is only for GA100 cards and GH100 cards
-        if (!((prop.major == 8 && prop.minor == 0) ||
-              (prop.major == 9 && prop.minor == 0 && CUDNN_VERSION >= 8800)) &&
-            (e.getCudnnStatus() == CUDNN_STATUS_ARCH_MISMATCH ||
-             e.getCudnnStatus() == CUDNN_STATUS_NOT_SUPPORTED)) {
-            std::cout << "Example is only supported for GA100 (cuDNN >= 8700) and "
-                         "GH100 (cuDNN >= 8800) GPUs"
-                      << std::endl;
-        } else {
-            std::cout << "[ERROR] Exception " << e.what() << std::endl;
-        }
+        NVTE_ERROR(e.what());
     }
 }
 
@@ -1273,7 +1232,7 @@ void fused_attn_max_512_fwd_qkvpacked(
     // Only is_training is verified
     NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED");
+               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
@@ -1343,12 +1302,12 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     using namespace transformer_engine;
 
     // Only is_training is verified
-    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512");
+    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED");
+               "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
                    bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
-               "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512");
+               "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512.");
 
     // Q shape is [b, s, h, d]
     void *devPtrQ = input_Q->data.dptr;
@@ -1421,7 +1380,7 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
     using namespace transformer_engine;
 
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_INTERLEAVED");
+               "qkv_layout must be NVTE_QKV_INTERLEAVED.");
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
@@ -1486,7 +1445,7 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     using namespace transformer_engine;
 
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_KV_INTERLEAVED");
+               "qkv_layout must be NVTE_KV_INTERLEAVED.");
 
     // Q shape is [b, s, h, d]
     // KV shape is [b, s, 2, h, d]
