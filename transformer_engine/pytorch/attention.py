@@ -5,7 +5,6 @@
 """Attention."""
 import os
 import math
-import warnings
 from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union
