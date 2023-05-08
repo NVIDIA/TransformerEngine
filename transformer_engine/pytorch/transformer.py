@@ -297,8 +297,135 @@ def _check_if_interleaved(q, k, v):
                         for i, x in enumerate([q, k, v]))
     return check_offsets
 
+class FlashAttnFunc(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p,
+                softmax_scale, causal):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+        out, softmax_lse, rng_state, S_dmask = fused_attn_fwd_qkvpacked(
+                _flash_attn_forward(
+            q, k, v, torch.empty_like(q), cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+            dropout_p, softmax_scale, causal=causal, return_softmax=return_softmax
+        )
+        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state)
+        ctx.dropout_p = dropout_p
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.softmax_scale = softmax_scale
+        ctx.causal = causal
+        ctx.deterministic = deterministic
+        return out if not return_softmax else (out, softmax_lse, S_dmask)
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
+        dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+        _flash_attn_backward(
+            dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k,
+            ctx.max_seqlen_q, ctx.max_seqlen_k, ctx.dropout_p, ctx.softmax_scale, ctx.causal,
+            rng_state=rng_state, num_splits=1 if ctx.deterministic else 0,
+        )
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
+class FusedAttention(torch.nn.Module):
+    """Dot product attention, implemented by using cuDNN graphs.
+
+    Support Matrix:
+    precision      qkv_layout             bias                mask      max_seqlen head_dim dropout
+       fp8      qkv_interleaved         no_bias              padding      <= 512      64      yes
+    bf16/fp16   qkv_interleaved   no_bias/post_scale_bias padding/causal  <= 512      64      no
+    bf16/fp16 qkv/sbh_interleaved       no_bias              padding       > 512    64/128    no
+    """
+
+    def __init__(
+        self,
+        norm_factor: float,
+        attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
+        attn_mask_type: str = "causal",
+    ) -> None:
+        super().__init__()
+
+        self.attn_causal_mask = attn_mask_type == "causal"
+        self.norm_factor = norm_factor
+        self.attention_dropout_ctx = attention_dropout_ctx
+        self.attention_dropout = attention_dropout
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """fused attention fprop"""
+
+        print("=========== FA - cuDNN ===========")
+        #qkv = torch.cat([query_layer.unsqueeze(2),
+        #    key_layer.unsqueeze(2),
+        #    value_layer.unsqueeze(2)], dim=2).contiguous()
+        ##query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+        ##               for x in (query_layer, key_layer, value_layer)]
+        #print("q,k,v shape: ",query_layer.shape,"qkv shape: ",qkv.shape)
+
+        ##batch_size, seq_len = query_layer.shape[0], query_layer.shape[1]
+        #seq_len, batch_size = query_layer.shape[0], query_layer.shape[1]
+
+        #cu_seqlens_q = torch.cumsum(torch.ones(
+        #    seq_len,
+        #    dtype=torch.int32,
+        #    device=query_layer.device), dim=0)
+
+        if (_check_if_interleaved(query_layer, key_layer, value_layer)):
+            query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
+                                                                         key_layer,
+                                                                         value_layer)
+        else:
+            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+                           for x in (query_layer, key_layer, value_layer)]
+
+        batch_size, seq_len_q = query_layer.shape[0], query_layer.shape[1]
+        seq_len_kv = key_layer.shape[1]
+
+        # [b, sq, np, hn]
+        query_layer, key_layer, value_layer = [
+            x.view(x.shape[0] * x.shape[1], *x.shape[2:])
+            for x in [query_layer, key_layer, value_layer]
+        ]
+
+        max_seqlen_q = seq_len_q
+        max_seqlen_kv = seq_len_kv
+        cu_seqlens_q = torch.arange(
+            0,
+            (batch_size + 1) * seq_len_q,
+            step=seq_len_q,
+            dtype=torch.int32,
+            device=query_layer.device)
+        cu_seqlens_kv = torch.arange(
+            0,
+            (batch_size + 1) * seq_len_kv,
+            step=seq_len_kv,
+            dtype=torch.int32,
+            device=query_layer.device)
+
+        with self.attention_dropout_ctx():
+            output = FlashAttnFunc.forward(
+                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
+                self.attention_dropout if self.training else 0.0,
+                softmax_scale=1.0/self.norm_factor
+            )
+
+        print("output shape: ",output.shape)
+        # [(b sq), np, hn] -> [sq, b, (np hn)]
+        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        #return output
+
+
 class FlashAttention(torch.nn.Module):
-    """Dot product attention implementation by using the flash-attn package.
+    """Dot product attention, implemented by calling HazyResearch flash-attn package:
+    https://github.com/HazyResearch/flash-attention
     """
 
     def __init__(
@@ -397,7 +524,7 @@ class DotProductAttention(torch.nn.Module):
     .. warning::
 
         For the default attention mechanism, this module executes a non-deterministic version of
-        `flash-attn <https://github.com/ksivaman/flash-attention>`_ whenever possible in order to
+        `flash-attn <https://github.com/HazyResearch/flash-attention>`_ whenever possible in order to
         achieve optimal performance. To observe deterministic behavior, set the environment
         variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order to disable
         `flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
@@ -463,6 +590,10 @@ class DotProductAttention(torch.nn.Module):
             and attn_mask_type == "causal"
             and self.device_compute_capability >= 8.0
         )
+        self.use_fused_attention = ( 
+            int(os.getenv("NVTE_FUSED_ATTN", "1"))
+            and self.device_compute_capability >= 8.0
+        )
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
@@ -472,8 +603,10 @@ class DotProductAttention(torch.nn.Module):
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
-        # Instantiating both types since use of flash-attn
+        # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
+        if self.use_fused_attention:
+            self.fused_attention = FusedAttention(norm_factor, **attn_kwargs)
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
@@ -539,6 +672,7 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
+        use_fused_attention = self.use_fused_attention
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
@@ -549,6 +683,35 @@ class DotProductAttention(torch.nn.Module):
         if is_in_onnx_export_mode():
             use_flash_attention = False
 
+        if (query_layer.dtype is torch.uint8
+            and key_layer.dtype is torch.uint8
+            and value_layer.dtype is torch.uint8
+            and self.device_compute_capability >= 9.0
+        ):
+            # flash-attn does not support FP8, fused_attn does
+            use_flash_attention = False
+            use_fused_attention = True and use_fused_attention
+        elif (query_layer.dtype in [torch.bfloat16, torch.float16]
+            and key_layer.dtype in [torch.bfloat16, torch.float16]
+            and value_layer.dtype in [torch.bfloat16, torch.float16]
+            and (self.device_compute_capability >= 8.0 and query_layer.shape[0] <= 512)
+        ):
+            # fused_attn is faster than flash-attn for seqlen <= 512 in BF16/FP16 
+            use_flash_attention = False
+            use_fused_attention = True and use_fused_attention
+        elif (query_layer.dtype in [torch.bfloat16, torch.float16]
+            and key_layer.dtype in [torch.bfloat16, torch.float16]
+            and value_layer.dtype in [torch.bfloat16, torch.float16]
+            and (self.device_compute_capability >= 8.0 and query_layer.shape[0] > 512)
+        ):
+            # flash-attn is faster than fused_attn for now for seqlen > 512 in BF16/FP16 
+            use_flash_attention = True and use_flash_attention 
+            use_fused_attention = False 
+        else:
+            # flash-attn / fused_attn does not support other configs
+            use_flash_attention = False 
+            use_fused_attention = False 
+        
         if use_flash_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.flash_attention,
@@ -556,6 +719,14 @@ class DotProductAttention(torch.nn.Module):
                                                             key_layer,
                                                             value_layer)
             return self.flash_attention(query_layer, key_layer, value_layer)
+
+        if use_fused_attention:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(self.fused_attention,
+                                                            query_layer,
+                                                            key_layer,
+                                                            value_layer)
+            return self.fused_attention(query_layer, key_layer, value_layer)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
