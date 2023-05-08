@@ -866,7 +866,7 @@ def test_export_core_attention(
     if attn_mask_type is None:
         attn_mask_type = 'causal'
         inp = (query_layer, key_layer, value_layer)
-    model = te.transformer.DotProductAttention(
+    model = te.attention.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
         attention_dropout=0.5,
@@ -959,7 +959,7 @@ def test_export_multihead_attention(
     input_ln_str = "_input-ln" if input_layernorm else ""
     fname = f"te.multihead_attention{fp8_str}{attn_mask_str}{attn_type_str}{input_ln_str}{fuse_qkv_str}{dtype_str}.onnx"
 
-    model = te.transformer.MultiHeadAttention(
+    model = te.attention.MultiHeadAttention(
         *attention_args,
         attn_mask_type=attn_mask_type,
         params_dtype=precision,
