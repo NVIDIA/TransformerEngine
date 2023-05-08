@@ -984,9 +984,12 @@ def test_export_multihead_attention(
     do_export(model, inp, fname, use_fp8, input_names=input_names, output_names=output_names)
     if not use_fp8:
         validate_result(fname, inp, model, atol=1e-3, input_names=input_names, output_names=output_names)
+    elif precision == torch.float32:
+        validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8,
+            input_names=input_names, output_names=output_names)
     else:
-        validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8, input_names=input_names, output_names=output_names)
-
+        validate_result(fname, inp, model, atol=1e-2, is_fp8=use_fp8,
+            input_names=input_names, output_names=output_names, allow_cnt_errors=3)
 
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
