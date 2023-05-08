@@ -16,8 +16,6 @@
 #include "utils.h"
 
 #if (CUDNN_VERSION >= 8901)
-#define CUDNN_FRONTEND_UNUSED(X) ((void)X)
-
 #define Q_ID 1
 #define K_ID 2
 #define V_ID 3
@@ -169,11 +167,6 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
                                          std::vector<cudnn_frontend::Operation> &ops,
                                          cudnn_frontend::Tensor const &prevBlockOutputTensor,
                                          bool is_bprop) {
-    CUDNN_FRONTEND_UNUSED(d);
-    CUDNN_FRONTEND_UNUSED(layout);
-    CUDNN_FRONTEND_UNUSED(tensorType);
-    CUDNN_FRONTEND_UNUSED(is_bprop);
-
     NVTE_CHECK(ops.size() != 0, "Padding mask constructed incorrectly as the first one.");
 
     // subtraction output
@@ -334,8 +327,6 @@ static cudnn_frontend::Tensor createSoftmaxForward(
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor) {
-    CUDNN_FRONTEND_UNUSED(d);
-    CUDNN_FRONTEND_UNUSED(layout);
 
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -442,8 +433,6 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
                                             // NOLINTNEXTLINE(runtime/references)
                                             std::vector<cudnn_frontend::Operation> &ops,
                                             cudnn_frontend::Tensor const &prevBlockOutputTensor) {
-    CUDNN_FRONTEND_UNUSED(d);
-
     NVTE_CHECK(ops.size() != 0, "Dropout DAG constructed incorrectly as the first one");
 
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
@@ -565,8 +554,6 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
                                                     std::vector<cudnn_frontend::Operation> &ops,
                                                     cudnn_frontend::Tensor const &yTensor,
                                                     cudnn_frontend::Tensor const &dyTensor) {
-    CUDNN_FRONTEND_UNUSED(tensorType);
-
     NVTE_CHECK(ops.size() != 0, "Softmax backward constructed incorrectly as the first one");
 
     int64_t p_dim[4] = {b, h, s_q, s_kv};
