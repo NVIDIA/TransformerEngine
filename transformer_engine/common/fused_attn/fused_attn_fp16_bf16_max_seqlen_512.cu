@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "fused_attn_max_512.h"
+#include "fused_attn_fp16_bf16_max_seqlen_512.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>

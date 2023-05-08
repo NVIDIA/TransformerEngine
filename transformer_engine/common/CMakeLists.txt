@@ -12,8 +12,8 @@ list(APPEND transformer_engine_SOURCES
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      activation/gelu.cu
+     fused_attn/fused_attn_fp16_bf16_max_seqlen_512.cu
      fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn_max_512.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
