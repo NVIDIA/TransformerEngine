@@ -493,7 +493,7 @@ def query_gpu(q):
 
 def unittest_query_gpu():
     r"""
-    This rountine is only used by TestEncoder.
+    It is only used by TestEncoder.
     The `jax.distributed.initialize` must be called before any other JAX or Flax API,
     otherwise `jax.local_devices` will be incorrect.
     Thus, fork another process to query number of GPUs and FP8 capability.

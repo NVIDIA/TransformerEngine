@@ -105,13 +105,13 @@ python test_model_parallel_encoder.py --use-fp8
 5. `jax.distributed.initialize` must be called before any other JAX or Flax API, otherwise `jax.local_devices` will be incorrect. `jax.distributed.shutdown` should be the last API call.
 
 6. Unlike SPMD, the input tensor must be sharded manually and be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect. Using DP=4, TP=2 as an example, the device mesh looks like:
-    ```python
-    mesh.device_ids = [[0, 1],
-                       [2, 3],
-                       [4, 5],
-                       [6, 7]]
-    ```
-    Assume that the process ID is mapped to GPU ID. The process 0 and process 1 are grouped for model parallelism, the process 2 and process 3 are grouped together too, and so on. Thus, process 0 and process 1 need to share the same micro-batch in the training step, process 0 and process 2, 4, and 6 have different micro-batch.
+   ```python
+   mesh.device_ids = [[0, 1],
+                      [2, 3],
+                      [4, 5],
+                      [6, 7]]
+   ```
+   Assume that the process ID is mapped to GPU ID. The process 0 and process 1 are grouped for model parallelism, the process 2 and process 3 are grouped together too, and so on. Thus, process 0 and process 1 need to share the same micro-batch in the training step, process 0 and process 2, 4, and 6 have different micro-batch.
 
 ### Run ###
 
