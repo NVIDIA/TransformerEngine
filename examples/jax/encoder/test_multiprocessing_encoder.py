@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Encoder training with multi-GPU, multiprocessing, and tensor parallelism"""
 import argparse
+import multiprocessing as mp
 import os
 import unittest
 from functools import partial
@@ -31,13 +32,6 @@ PARAMS_KEY = 'params'
 PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
-
-
-def check_num_gpu(desired_num_gpu):
-    """Check if the number of GPUs are correct."""
-    actual_num_gpu = len(jax.local_devices())
-    assert actual_num_gpu == desired_num_gpu, f"Number of GPUs is mismatch. " \
-        f"{desired_num_gpu} GPUs are assigned, but the actual number of GPUs is {actual_num_gpu}"
 
 
 class Net(nn.Module):
@@ -394,10 +388,6 @@ def train_and_evaluate(args):
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 check_fp8(state, var_collect, inputs, masks, labels)
 
-            train_loss = np.inf
-            train_accuracy = 0.0
-            test_loss = np.inf
-            test_accuracy = 0.0
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 rngs = {DROPOUT_KEY: dropout_rng}
@@ -423,8 +413,8 @@ def train_and_evaluate(args):
                               f"Test Loss: {test_loss:.6f} "
                               f"Test Accuracy: {test_accuracy:.6f} ")
 
-        jax.distributed.shutdown()
-        return [train_loss, train_accuracy, test_loss, test_accuracy]
+    jax.distributed.shutdown()
+    return [train_loss, train_accuracy, test_loss, test_accuracy]
 
 
 def encoder_parser(args):
@@ -494,26 +484,66 @@ def encoder_parser(args):
     return parser.parse_args(args)
 
 
+def query_gpu(q):
+    """Query GPU info on the system"""
+    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+    num_gpu = len(jax.devices())
+    q.put([num_gpu, gpu_has_fp8, reason])
+
+
+def unittest_query_gpu():
+    r"""
+    This rountine is only used by TestEncoder.
+    The `jax.distributed.initialize` must be called before any other JAX or Flax API,
+    otherwise `jax.local_devices` will be incorrect.
+    Thus, fork another process to query number of GPUs and FP8 capability.
+    """
+    q = mp.Queue()
+    p = mp.Process(target=query_gpu, args=(q,))
+    p.start()
+    num_gpu, gpu_has_fp8, reason = q.get()
+    p.join()
+    return num_gpu, gpu_has_fp8, reason
+
+
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    gpu_has_fp8, reason = te.fp8.is_fp8_available(0)
+    num_gpu, gpu_has_fp8, reason = unittest_query_gpu()
 
-    @classmethod
-    def setUpClass(cls):
+    def exec(self, use_fp8):
         """Run 3 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3", "--num-process", "1"])
+        num_gpu = self.num_gpu
+        tp_size = 2 if num_gpu > 1 and num_gpu % 2 == 0 else 1
+        dp_size = num_gpu // tp_size
+        batch_size = 64 // dp_size
+
+        arg_list = []
+        for i in range(num_gpu):
+            args = encoder_parser([])
+            args.num_process = num_gpu
+            args.use_fp8 = use_fp8
+            args.batch_size = batch_size
+            args.test_batch_size = batch_size
+            args.process_id = i
+            arg_list.append(args)
+
+        with mp.Pool(self.num_gpu) as p:
+            results = p.map(train_and_evaluate, arg_list)
+
+        return results
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
-        actual = train_and_evaluate(self.args)
+        results = self.exec(False)
+        actual = results[0]
         assert actual[0] < 0.45 and actual[1] > 0.79
 
     @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
-        self.args.use_fp8 = True
-        actual = train_and_evaluate(self.args)
+        results = self.exec(True)
+        actual = results[0]
         assert actual[0] < 0.45 and actual[1] > 0.79
 
 
