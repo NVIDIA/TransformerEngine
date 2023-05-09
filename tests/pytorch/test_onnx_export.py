@@ -44,8 +44,7 @@ from transformer_engine.pytorch.fp8 import is_fp8_available
 # Global test configuration knobs.
 
 # Enable this to serialize test inputs and outputs to file (as a Polygraphy RunResults instance).
-SAVE_TEST_IO = os.environ.get('NVTE_ONNX_EXPORT_SAVE_TEST_IO', None)
-SAVE_TEST_IO = True if SAVE_TEST_IO and SAVE_TEST_IO.lower() in ('1', 'true') else False
+SAVE_TEST_IO = bool(int(os.getenv("NVTE_ONNX_EXPORT_SAVE_TEST_IO", "0")))
 
 if SAVE_TEST_IO:
     from polygraphy.json import save_json
