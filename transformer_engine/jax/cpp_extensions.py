@@ -19,6 +19,8 @@ from jax.interpreters.mlir import ir, dtype_to_ir_type
 
 import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
 
 for _name, _value in transformer_engine_jax.registrations().items():
     xla_client.register_custom_call_target(_name, _value, platform="CUDA")
@@ -1973,3 +1975,453 @@ def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_ou
     return _scaled_upper_triang_masked_softmax_bwd_p.bind(grad_outputs,
                                                           softmax_outputs,
                                                           scale_factor=scale_factor)
+
+
+class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
+    """
+    Self Fused Attention Max Seqlen 512 Forward Primitive
+    """
+    name = "te_self_fused_attn_max_512_forward"
+    multiple_results = True
+
+    @staticmethod
+    def abstract(
+            qkv,
+            bias,
+            cu_seqlen,    # pylint: disable=unused-argument
+            rng_state,    # pylint: disable=unused-argument
+            *,
+            attn_bias_type,    # pylint: disable=unused-argument
+            attn_mask_type,    # pylint: disable=unused-argument
+            scaling_factor,    # pylint: disable=unused-argument
+            dropout_probability,    # pylint: disable=unused-argument
+            is_training    # pylint: disable=unused-argument
+    ):
+        """
+        Self fused attention max seqlen 512 fwd abstract
+        """
+        qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
+        batch, max_seqlen, nqkv, num_head, head_dim = qkv.shape
+        assert nqkv == 3
+        assert qkv.dtype == bias.dtype
+
+        output_shape = (batch, max_seqlen, num_head, head_dim)
+        output_dtype = qkv_dtype
+
+        softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
+        softmax_dtype = qkv_dtype
+
+        return (
+            ShapedArray(output_shape, output_dtype, named_shape=qkv.named_shape),    # output
+            ShapedArray(softmax_aux_shape, softmax_dtype,
+                        named_shape=qkv.named_shape),    # softmax_aux
+        )
+
+    @staticmethod
+    def lowering(ctx, qkv, bias, cu_seqlen, rng_state, *, attn_bias_type, attn_mask_type,
+                 scaling_factor, dropout_probability, is_training):
+        """
+        Self fused attention max seqlen 512 fwd lowering rules
+        """
+        qkv_aval, _, _, _ = ctx.avals_in
+
+        ir_qkv_type = ir.RankedTensorType(qkv.type)
+        ir_qkv_shape = ir_qkv_type.shape
+
+        ir_bias_type = ir.RankedTensorType(bias.type)
+        ir_bias_shape = ir_bias_type.shape
+
+        ir_cu_seqlen_type = ir.RankedTensorType(cu_seqlen.type)
+        ir_cu_seqlen_shape = ir_cu_seqlen_type.shape
+
+        ir_rng_state_type = ir.RankedTensorType(rng_state.type)
+        ir_rng_state_shape = ir_rng_state_type.shape
+
+        batch, max_seqlen, nqkv, num_head, head_dim = ir_qkv_shape
+        assert nqkv == 3
+
+        output_shape = (batch, max_seqlen, num_head, head_dim)
+        softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
+
+        out_types = [
+            ir.RankedTensorType.get(output_shape, ir_qkv_type.element_type),
+            ir.RankedTensorType.get(softmax_aux_shape, ir_qkv_type.element_type)
+        ]
+        operands = [qkv, bias, cu_seqlen, rng_state]
+        operand_shapes = [ir_qkv_shape, ir_bias_shape, ir_cu_seqlen_shape, ir_rng_state_shape]
+
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
+            attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+
+        out = custom_caller(SelfFusedAttnMax512FwdPrimitive.name,
+                            args,
+                            opaque,
+                            has_side_effect=False)
+
+        return out
+
+
+_self_fused_attn_max_512_fwd_p = register_primitive(SelfFusedAttnMax512FwdPrimitive)
+
+
+def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndarray,
+                                rng_state: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                                attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                                dropout_probability: float, is_training: bool):
+    """
+    Wrapper for TE self fused attention max seqlen 512 fwd
+    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    """
+    # Jax can't bind None, create a dummy tensor for None
+    if rng_state is None:
+        rng_state = jnp.zeros(2, dtype=jnp.int32)
+    if bias is None:
+        assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+        bias = jnp.zeros(0, dtype=qkv.dtype)
+    return _self_fused_attn_max_512_fwd_p.bind(qkv,
+                                               bias,
+                                               cu_seqlen,
+                                               rng_state,
+                                               attn_bias_type=attn_bias_type,
+                                               attn_mask_type=attn_mask_type,
+                                               scaling_factor=scaling_factor,
+                                               dropout_probability=dropout_probability,
+                                               is_training=is_training)
+
+
+class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
+    """
+    Self Fused Attention Max Seqlen 512 Backward Primitive
+    """
+    name = "te_self_fused_attn_max_512_backward"
+    multiple_results = True
+
+    @staticmethod
+    def abstract(
+            qkv,
+            softmax_aux,
+            doutput,
+            cu_seqlen,    # pylint: disable=unused-argument
+            *,
+            attn_bias_type,    # pylint: disable=unused-argument
+            attn_mask_type,    # pylint: disable=unused-argument
+            scaling_factor,    # pylint: disable=unused-argument
+            dropout_probability,    # pylint: disable=unused-argument
+            is_training    # pylint: disable=unused-argument
+    ):
+        """
+        Self fused attention bwd abstract
+        """
+        qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
+        assert qkv.dtype == softmax_aux.dtype == doutput.dtype
+
+        _, seqlen, _, num_head, _ = qkv.shape
+
+        bias_shape = (1, num_head, seqlen, seqlen)
+        bias_dtype = qkv_dtype
+
+        return (
+            ShapedArray(qkv.shape, qkv_dtype, named_shape=qkv.named_shape),    # dqkv
+            ShapedArray(bias_shape, bias_dtype, named_shape=qkv.named_shape))
+
+    @staticmethod
+    def lowering(ctx, qkv, softmax_aux, doutput, cu_seqlen, *, attn_bias_type, attn_mask_type,
+                 scaling_factor, dropout_probability, is_training):
+        """
+        Self fused attention max seqlen 512 bwd lowering rules
+        """
+        qkv_aval, _, _, _ = ctx.avals_in
+
+        ir_qkv_type = ir.RankedTensorType(qkv.type)
+        ir_qkv_shape = ir_qkv_type.shape
+
+        ir_softmax_aux_type = ir.RankedTensorType(softmax_aux.type)
+        ir_softmax_aux_shape = ir_softmax_aux_type.shape
+
+        ir_doutput_type = ir.RankedTensorType(doutput.type)
+        ir_doutput_shape = ir_doutput_type.shape
+
+        ir_cu_seqlen_type = ir.RankedTensorType(cu_seqlen.type)
+        ir_cu_seqlen_shape = ir_cu_seqlen_type.shape
+
+        batch, max_seqlen, num_head, head_dim = ir_doutput_shape
+
+        dbias_shape = (1, num_head, max_seqlen, max_seqlen)
+        dbias_dtype = ir_qkv_type.element_type
+
+        out_types = [
+            ir.RankedTensorType.get(ir_qkv_shape, ir_qkv_type.element_type),
+            ir.RankedTensorType.get(dbias_shape, dbias_dtype)
+        ]
+        operands = [qkv, softmax_aux, doutput, cu_seqlen]
+        operand_shapes = [ir_qkv_shape, ir_softmax_aux_shape, ir_doutput_shape, ir_cu_seqlen_shape]
+
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
+            attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
+
+        out = custom_caller(SelfFusedAttnMax512BwdPrimitive.name,
+                            args,
+                            opaque,
+                            has_side_effect=False)
+
+        return out
+
+
+_self_fused_attn_max_512_bwd_p = register_primitive(SelfFusedAttnMax512BwdPrimitive)
+
+
+def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, doutput: jnp.ndarray,
+                                cu_seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                                attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                                dropout_probability: float, is_training: bool):
+    """
+    Wrapper for TE self fused attention max seqlen 512 bwd
+    Return the gradients of self fused attention with packed qkv input
+    """
+    return _self_fused_attn_max_512_bwd_p.bind(qkv,
+                                               softmax_aux,
+                                               doutput,
+                                               cu_seqlen,
+                                               attn_bias_type=attn_bias_type,
+                                               attn_mask_type=attn_mask_type,
+                                               scaling_factor=scaling_factor,
+                                               dropout_probability=dropout_probability,
+                                               is_training=is_training)
+
+
+class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
+    """
+    Cross Fused Attention Forward Max Seqlen 512 Primitive
+    """
+    name = "te_cross_fused_attn_max_512_forward"
+    multiple_results = True
+
+    @staticmethod
+    def abstract(
+            q,
+            kv,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            rng_state,    # pylint: disable=unused-argument
+            *,
+            attn_bias_type,    # pylint: disable=unused-argument
+            attn_mask_type,    # pylint: disable=unused-argument
+            scaling_factor,    # pylint: disable=unused-argument
+            dropout_probability,    # pylint: disable=unused-argument
+            is_training    # pylint: disable=unused-argument
+    ):
+        """
+        Cross fused attention max seqlen 512 fwd abstract
+        """
+        q_dtype = dtypes.canonicalize_dtype(q.dtype)
+        batch_q, q_max_seqlen, num_head_q, head_dim_q = q.shape
+        kv_dtype = dtypes.canonicalize_dtype(kv.dtype)
+        batch_kv, kv_max_seqlen, nkv, num_head_kv, head_dim_kv = kv.shape
+
+        assert q_dtype == kv_dtype
+        assert batch_q == batch_kv
+        assert num_head_q == num_head_kv
+        assert head_dim_q == head_dim_kv
+        assert nkv == 2
+        assert q_cu_seqlen.dtype == kv_cu_seqlen.dtype
+
+        output_shape = q.shape
+        output_dtype = q_dtype
+        softmax_aux_shape = (batch_q, num_head_q, q_max_seqlen, kv_max_seqlen)
+        softmax_aux_dtype = q_dtype
+
+        return (
+            ShapedArray(output_shape, output_dtype, named_shape=q.named_shape),    # output
+            ShapedArray(softmax_aux_shape, softmax_aux_dtype,
+                        named_shape=q.named_shape),    # softmax_aux
+        )
+
+    @staticmethod
+    def lowering(ctx, q, kv, q_cu_seqlen, kv_cu_seqlen, rng_state, *, attn_bias_type,
+                 attn_mask_type, scaling_factor, dropout_probability, is_training):
+        """
+        Cross fused attention max seqlen 512 fwd lowering rules
+        """
+        q_aval, kv_aval, _, _, _ = ctx.avals_in
+        assert q_aval.dtype == kv_aval.dtype
+
+        ir_q_type = ir.RankedTensorType(q.type)
+        ir_q_shape = ir_q_type.shape
+
+        ir_kv_type = ir.RankedTensorType(kv.type)
+        ir_kv_shape = ir_kv_type.shape
+
+        ir_q_cu_seqlen_shape = ir.RankedTensorType(q_cu_seqlen.type).shape
+        ir_kv_cu_seqlen_shape = ir.RankedTensorType(kv_cu_seqlen.type).shape
+
+        ir_rng_state_type = ir.RankedTensorType(rng_state.type)
+        ir_rng_state_shape = ir_rng_state_type.shape
+
+        batch, q_max_seqlen, num_head, head_dim = ir_q_shape
+        kv_max_seqlen = ir_kv_shape[1]
+
+        output_shape = (batch, q_max_seqlen, num_head, head_dim)
+        softmax_aux_shape = (batch, num_head, q_max_seqlen, kv_max_seqlen)
+
+        out_types = [
+            ir.RankedTensorType.get(output_shape, ir_q_type.element_type),
+            ir.RankedTensorType.get(softmax_aux_shape, ir_q_type.element_type)
+        ]
+        operands = [q, kv, q_cu_seqlen, kv_cu_seqlen, rng_state]
+        operand_shapes = [
+            ir_q_shape, ir_kv_shape, ir_q_cu_seqlen_shape, ir_kv_cu_seqlen_shape, ir_rng_state_shape
+        ]
+
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+
+        out = custom_caller(CrossFusedAttnMax512FwdPrimitive.name,
+                            args,
+                            opaque,
+                            has_side_effect=False)
+
+        return out
+
+
+_cross_fused_attn_max_512_fwd_p = register_primitive(CrossFusedAttnMax512FwdPrimitive)
+
+
+def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
+                                 kv_cu_seqlen: jnp.ndarray, rng_state: jnp.ndarray,
+                                 attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                                 scaling_factor: float, dropout_probability: float,
+                                 is_training: bool):
+    """
+    Wrapper for TE cross fused attention max seqlen 512 fwd
+    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    """
+    # Jax can't bind None, create a dummy tensor for None
+    if rng_state is None:
+        rng_state = jnp.zeros(2, dtype=jnp.int32)
+    return _cross_fused_attn_max_512_fwd_p.bind(q,
+                                                kv,
+                                                q_cu_seqlen,
+                                                kv_cu_seqlen,
+                                                rng_state,
+                                                attn_bias_type=attn_bias_type,
+                                                attn_mask_type=attn_mask_type,
+                                                scaling_factor=scaling_factor,
+                                                dropout_probability=dropout_probability,
+                                                is_training=is_training)
+
+
+class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
+    """
+    Cross Fused Attention Max Seqlen 512 Backward Primitive
+    """
+    name = "te_cross_fused_attn_max_512_backward"
+    multiple_results = True
+
+    @staticmethod
+    def abstract(
+            q,
+            kv,
+            softmax_aux,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            *,
+            attn_bias_type,    # pylint: disable=unused-argument
+            attn_mask_type,    # pylint: disable=unused-argument
+            scaling_factor,    # pylint: disable=unused-argument
+            dropout_probability,    # pylint: disable=unused-argument
+            is_training    # pylint: disable=unused-argument
+    ):
+        """
+        Cross fused attention max seqlen 512 bwd abstract
+        """
+        q_dtype = dtypes.canonicalize_dtype(q.dtype)
+        kv_dtype = dtypes.canonicalize_dtype(kv.dtype)
+        softmax_aux_dtype = dtypes.canonicalize_dtype(softmax_aux.dtype)
+        doutput_dtype = dtypes.canonicalize_dtype(doutput.dtype)
+        assert q_dtype == kv_dtype == softmax_aux_dtype == doutput_dtype
+        assert q_cu_seqlen.dtype == kv_cu_seqlen.dtype
+
+        return (
+            ShapedArray(q.shape, q_dtype, named_shape=q.named_shape),    # dq
+            ShapedArray(kv.shape, kv_dtype, named_shape=kv.named_shape),    # dkv
+        )
+
+    @staticmethod
+    def lowering(ctx, q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen, *, attn_bias_type,
+                 attn_mask_type, scaling_factor, dropout_probability, is_training):
+        """
+        Cross fused attention max seqlen 512 bwd lowering rules
+        """
+        q_aval, _, _, _, _, _ = ctx.avals_in
+
+        ir_q_type = ir.RankedTensorType(q.type)
+        ir_q_shape = ir_q_type.shape
+
+        ir_kv_type = ir.RankedTensorType(kv.type)
+        ir_kv_shape = ir_kv_type.shape
+
+        ir_softmax_aux_type = ir.RankedTensorType(softmax_aux.type)
+        ir_softmax_aux_shape = ir_softmax_aux_type.shape
+
+        ir_doutput_shape = ir.RankedTensorType(doutput.type).shape
+        ir_q_cu_seqlen_shape = ir.RankedTensorType(q_cu_seqlen.type).shape
+        ir_kv_cu_seqlen_shape = ir.RankedTensorType(kv_cu_seqlen.type).shape
+
+        batch, q_max_seqlen, num_head, head_dim = ir_doutput_shape
+        kv_max_seqlen = ir_kv_shape[1]
+
+        out_types = [
+            ir.RankedTensorType.get(ir_q_shape, ir_q_type.element_type),
+            ir.RankedTensorType.get(ir_kv_shape, ir_kv_type.element_type),
+        ]
+        operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
+        operand_shapes = [
+            ir_q_shape, ir_kv_shape, ir_softmax_aux_shape, ir_doutput_shape, ir_q_cu_seqlen_shape,
+            ir_kv_cu_seqlen_shape
+        ]
+
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+            batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
+
+        out = custom_caller(CrossFusedAttnMax512BwdPrimitive.name,
+                            args,
+                            opaque,
+                            has_side_effect=False)
+
+        return out
+
+
+_cross_fused_attn_max_512_bwd_p = register_primitive(CrossFusedAttnMax512BwdPrimitive)
+
+
+def cross_fused_attn_max_512_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
+                                 doutput: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
+                                 kv_cu_seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                                 attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                                 dropout_probability: float, is_training: bool):
+    """
+    Wrapper for TE cross fused attention max seqlen 512 bwd
+    Return the gradients of cross fused attention with packed kv input
+    """
+    return _cross_fused_attn_max_512_bwd_p.bind(q,
+                                                kv,
+                                                softmax_aux,
+                                                doutput,
+                                                q_cu_seqlen,
+                                                kv_cu_seqlen,
+                                                attn_bias_type=attn_bias_type,
+                                                attn_mask_type=attn_mask_type,
+                                                scaling_factor=scaling_factor,
+                                                dropout_probability=dropout_probability,
+                                                is_training=is_training)

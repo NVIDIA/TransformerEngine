@@ -7,8 +7,14 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
+
+#include <cudnn.h>
 #include <cudnn_frontend.h>
+
+#include <cstdint>
+#include <mutex>
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -31,6 +37,36 @@ void generateMatrixStrides(
             int64_t d, int64_t* strideA,
             NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
+bool allowAllConfig(cudnnBackendDescriptor_t engine_config);
+
+cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id,
+                                            int64_t const *dim,
+                                            int64_t const *stride,
+                                            bool is_virtual, bool is_value);
+
+cudnn_frontend::Tensor tensor_create_with_offset(
+                cudnnDataType_t type, int64_t id,
+                int64_t const * dim, int64_t const * stride,
+                bool is_virtual, bool is_value,
+                std::shared_ptr<cudnn_frontend::Tensor> raggedOffset);
+
+cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type,
+                                                    cudnnPointwiseMode_t mode);
+
+cudnn_frontend::Operation unary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
+
+cudnn_frontend::Operation binary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
+    cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
+
+cudnn_frontend::Operation ternary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
+    cudnn_frontend::Tensor const &tDesc, cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc);
+
 struct FADescriptor {
   std::int64_t b;
   std::int64_t h;
@@ -41,21 +77,30 @@ struct FADescriptor {
   bool isTraining;
   float dropoutProbability;
   NVTE_QKV_Layout layout;
+  NVTE_Bias_Type bias_type;
+  NVTE_Mask_Type mask_type;
   cudnnDataType_t tensor_type;
 
   bool operator<(const FADescriptor &rhs) const {
     return std::tie(b, h, s_q, s_kv, d,
                     attnScale, isTraining, dropoutProbability,
-                    layout, tensor_type) < std::tie(
-                            rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
-                            rhs.attnScale, rhs.isTraining,
-                            rhs.dropoutProbability, rhs.layout, rhs.tensor_type);
+                    layout, mask_type, bias_type, tensor_type)
+                    < std::tie(
+                      rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
+                      rhs.attnScale, rhs.isTraining,
+                      rhs.dropoutProbability, rhs.layout,
+                      rhs.mask_type, rhs.bias_type, rhs.tensor_type);
   }
 };
 
 __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d,
                 int32_t *cu_seqlens_q, int32_t *actual_seqlens_q,
                 int32_t *qkv_ragged_offset, int32_t *o_ragged_offset);
+
+__global__ void cu_seqlens_to_actual_seqlens(size_t b,
+                int32_t const * const q_cu_seqlens,
+                int32_t const * const kv_cu_seqlens,
+                int32_t *q_seqlens, int32_t *kv_seqlens);
 
 }  // namespace fused_attn
 
