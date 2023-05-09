@@ -7,7 +7,7 @@ from .module import LayerNormLinear
 from .module import Linear
 from .module import LayerNormMLP
 from .module import LayerNorm
-from .transformer import DotProductAttention
+from .attention import DotProductAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
 from .export import onnx_export
