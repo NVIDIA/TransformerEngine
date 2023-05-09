@@ -1,4 +1,7 @@
+cuda-python
 flax
+jax
 nltk
+numpy
 optax
 tensorflow-datasets
