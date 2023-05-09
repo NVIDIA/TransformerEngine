@@ -1,3 +1,4 @@
 datasets
 flax
 optax
+Pillow
