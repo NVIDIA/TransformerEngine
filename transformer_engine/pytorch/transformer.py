@@ -320,24 +320,24 @@ def _check_if_interleaved(q, k, v):
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias, fp8_meta,
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, tp_group, tp_size, return_softmax=False, deterministic=True):
         if fp8_meta is not None:
             out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
-                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias,
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias,
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV],
                 fp8_meta["scaling_fwd"].scale[META_S],
                 fp8_meta["scaling_fwd"].scale[META_O],
                 fp8_meta["scaling_fwd"].amax_history[0][META_S],
                 fp8_meta["scaling_fwd"].amax_history[0][META_O],
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, return_softmax)
         else:
             out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
-                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias,
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias,
                 None, None, None, None, None,
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, return_softmax)
 
         # used by fused_attention_impl 1
@@ -350,7 +350,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.set_zero = set_zero
         ctx.qkv_layout = qkv_layout
-        ctx.bias_type = bias_type
+        ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
@@ -362,7 +362,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
     def backward(ctx, d_out, *args):
         qkv, out, aux_ctx_tensors, cu_seqlens, fp8_meta = ctx.saved_tensors
         if fp8_meta is not None:
-            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_MHA"):
+            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_DPA"):
                 dqkv, *rest = fused_attn_bwd_qkvpacked(
                     ctx.max_seqlen, cu_seqlens, qkv, out, d_out, 
                     ctx.qkv_dtype,
@@ -380,7 +380,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     ctx.dropout_p,
                     ctx.set_zero,
                     ctx.qkv_layout,
-                    ctx.bias_type,
+                    ctx.attn_bias_type,
                     ctx.attn_mask_type,
                     num_splits=1 if ctx.deterministic else 0
                 )
@@ -390,19 +390,19 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 ctx.qkv_dtype, aux_ctx_tensors,
                 None, None, None, None, None, None, None, None, None,
                 ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
-                ctx.qkv_layout, ctx.bias_type, ctx.attn_mask_type,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type,
                 num_splits=1 if ctx.deterministic else 0
             )
 
         # return dqkv if no_bias; otherwise (dqkv, dbias)
-        return dqkv if ctx.bias_type == "no_bias" else (out, rest[0])
+        return dqkv if ctx.attn_bias_type == "no_bias" else (out, rest[0])
 
 class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-                q, kv, qkv_dtype, bias, fp8_meta,
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                q, kv, qkv_dtype, attn_bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, tp_group, tp_size, return_softmax=False, deterministic=True):
         if fp8_meta is not None:
             out, aux_ctx_tensors, *rest = fused_attn_fwd_kvpacked(
@@ -413,14 +413,14 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale[META_O],
                 fp8_meta["scaling_fwd"].amax_history[0][META_S],
                 fp8_meta["scaling_fwd"].amax_history[0][META_O],
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, return_softmax)
         else:
             out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-                q, kv, qkv_dtype, bias,
+                q, kv, qkv_dtype, attn_bias,
                 None, None, None, None, None,
-                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, return_softmax)
 
         # used by fused_attention_impl 1
@@ -434,7 +434,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.set_zero = set_zero
         ctx.qkv_layout = qkv_layout
-        ctx.bias_type = bias_type
+        ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
@@ -446,7 +446,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
     def backward(ctx, d_out, *args):
         q, kv, out, aux_ctx_tensors, cu_seqlens_q, cu_seqlens_kv, fp8_meta = ctx.saved_tensors
         if fp8_meta is not None:
-            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_MHA"):
+            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_DPA"):
                 dq, dkv, *rest = fused_attn_bwd_kvpacked(
                     ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                     q, kv, out, d_out, 
@@ -465,7 +465,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     ctx.dropout_p,
                     ctx.set_zero,
                     ctx.qkv_layout,
-                    ctx.bias_type,
+                    ctx.attn_bias_type,
                     ctx.attn_mask_type,
                     num_splits=1 if ctx.deterministic else 0
                 )
@@ -476,12 +476,12 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 ctx.qkv_dtype, aux_ctx_tensors,
                 None, None, None, None, None, None, None, None, None,
                 ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
-                ctx.qkv_layout, ctx.bias_type, ctx.attn_mask_type,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type,
                 num_splits=1 if ctx.deterministic else 0
             )
 
         # return (dq, dkv) if no_bias; otherwise (dq, dkv, dbias)
-        return (dq, dkv) if ctx.bias_type == "no_bias" else (dq, dkv, rest[0])
+        return (dq, dkv) if ctx.attn_bias_type == "no_bias" else (dq, dkv, rest[0])
 
 class FusedAttention(torch.nn.Module):
     """Dot product attention, implemented by using cuDNN graphs.
@@ -521,9 +521,9 @@ class FusedAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        qkv_layout: str = "qkv_interleaved",
-        qkv_bias: Optional[torch.Tensor] = None,
-        qkv_bias_type: str = "no_bias",
+        qkv_layout: str = "sbh_interleaved",
+        attn_bias_type: str = "no_bias",
+        attn_bias: Optional[torch.Tensor] = None,
         set_zero: bool = True,
         fp8_meta: Optional[Dict[str, Any]] = None,
         fused_attention_impl: int = 3,
@@ -568,6 +568,7 @@ class FusedAttention(torch.nn.Module):
             # [total_seqs, 3, h, d]
             mixed_layer = mixed_layer.view(
                 [mixed_layer.shape[0] * mixed_layer.shape[1]] + mixed_layer.shape[2:])
+            self.qkv_layout = "qkv_interleaved"
 
             seq_len, batch_size = query_layer.shape[0], query_layer.shape[1]
             # TODO since q/k/v is written in [s, b, h, d] format, does this mean s is always m_s?
@@ -588,8 +589,8 @@ class FusedAttention(torch.nn.Module):
                 qkv_dtype = fp8_dtype_forward
                 #assert self.qkv_layout == "qkv_interleaved",
                 #    """FP8 fused attention currently only supports qkv_layout = "qkv_interleaved"."""
-                #assert self.qkv_bias_type == "no_bias",
-                #    """FP8 fused attention currently only supports qkv_bias_type = "no_bias"."""
+                #assert self.attn_bias_type == "no_bias",
+                #    """FP8 fused attention currently only supports attn_bias_type = "no_bias"."""
                 #assert self.attn_mask_type == "padding",
                 #    """FP8 fused attention currently only supports attn_mask_type = "padding"."""
             else:
@@ -601,13 +602,13 @@ class FusedAttention(torch.nn.Module):
                     cu_seqlens,
                     mixed_layer,
                     qkv_dtype,
-                    qkv_bias,
+                    attn_bias,
                     fp8_meta,
                     1.0/self.norm_factor,
                     self.attention_dropout if self.training else 0.0,
                     self.set_zero,
                     self.qkv_layout,
-                    self.qkv_bias_type,
+                    self.attn_bias_type,
                     self.attn_mask_type,
                     None, # rng_gen
                     None,
@@ -636,6 +637,7 @@ class FusedAttention(torch.nn.Module):
                 + query_layer.shape[2:])
             key_value = key_value.view([key_value.shape[0] * key_value.shape[1]]
                 + key_value.shape[2:])
+            self.qkv_layout = "kv_interleaved"
 
             seq_len_q, batch_size = query_layer.shape[0], query_layer.shape[1]
             seq_len_kv = key_layer.shape[0]
@@ -662,8 +664,8 @@ class FusedAttention(torch.nn.Module):
                 #    fp8_dtype_forward = fp8.get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 #    assert self.qkv_layout == "qkv_interleaved",
                 #        """FP8 fused attention must have qkv_layout = "qkv_interleaved"."""
-                #    assert self.qkv_bias_type == "no_bias",
-                #        """FP8 fused attention currently only supports qkv_bias_type = "no_bias"."""
+                #    assert self.attn_bias_type == "no_bias",
+                #        """FP8 fused attention currently only supports attn_bias_type = "no_bias"."""
                 #    assert self.attn_mask_type == "padding",
                 #        """FP8 fused attention currently only supports padding attn_mask_type."""
                 output = FusedAttnFunc_kvpacked.forward(
@@ -672,13 +674,13 @@ class FusedAttention(torch.nn.Module):
                     cu_seqlens_q, cu_seqlens_kv,
                     query_layer, key_value,
                     qkv_dtype,
-                    qkv_bias,
+                    attn_bias,
                     fp8_meta,
                     1.0/self.norm_factor,
                     self.attention_dropout if self.training else 0.0,
                     self.set_zero,
                     self.qkv_layout,
-                    self.qkv_bias_type,
+                    self.attn_bias_type,
                     self.attn_mask_type,
                     None, # rng_gen
                     self.return_softmax,
@@ -913,9 +915,9 @@ class DotProductAttention(torch.nn.Module):
         value_layer: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
-        qkv_layout: str = "qkv_interleaved",
-        qkv_bias: Optional[torch.Tensor] = None,
-        qkv_bias_type: str = "no_bias",
+        qkv_layout: str = "sbh_interleaved",
+        attn_bias_type: str = "no_bias",
+        attn_bias: Optional[torch.Tensor] = None,
         set_zero: bool = True,
         fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
@@ -950,13 +952,13 @@ class DotProductAttention(torch.nn.Module):
                                    during the backward pass in order to save memory that would
                                    otherwise be occupied to store the forward activations until
                                    backprop.
-        qkv_layout: str, default = `qkv_interleaved`
+        qkv_layout: str, default = `sbh_interleaved`
                     QKV layout, {`qkv_interleaved`, `sbh_interleaved`,
                     `kv_interleaved`, `not_interleaved`}
-        qkv_bias: Optional[torch.Tensor], default = `None`
-                    Bias tensor for Q * K.T
-        qkv_bias_type: str, default = `no_bias`
+        attn_bias_type: str, default = `no_bias`
                     Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        attn_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
         set_zero: bool, defautl = `True`
                     Whether to set output tensors to 0 or not before use.
         fp8_meta: Optional[Dict[str, Any]], default = `None`
@@ -1048,15 +1050,15 @@ class DotProductAttention(torch.nn.Module):
                                                             value_layer,
                                                             attention_mask,
                                                             qkv_layout,
-                                                            qkv_bias,
-                                                            qkv_bias_type,
+                                                            attn_bias_type,
+                                                            attn_bias,
                                                             set_zero,
                                                             fp8_meta,
                                                             fused_attention_impl)
             return self.fused_attention(query_layer, key_layer, value_layer,
                                                             qkv_layout,
-                                                            qkv_bias,
-                                                            qkv_bias_type,
+                                                            attn_bias_type,
+                                                            attn_bias,
                                                             attention_mask,
                                                             set_zero,
                                                             fp8_meta,
@@ -1106,7 +1108,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
-        bias: bool = True,
+        proj_bias: bool = True,
     ) -> None:
         super().__init__()
         self.layer_number = (layer_number,)
@@ -1152,7 +1154,7 @@ class MultiHeadAttention(torch.nn.Module):
                     3 * hidden_size,
                     eps=layernorm_epsilon,
                     init_method=init_method,
-                    bias=bias,
+                    bias=proj_bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
@@ -1168,7 +1170,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     3 * hidden_size,
                     init_method=init_method,
-                    bias=bias,
+                    bias=proj_bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
@@ -1181,7 +1183,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     eps=layernorm_epsilon,
                     init_method=init_method,
-                    bias=bias,
+                    bias=proj_bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
@@ -1196,7 +1198,7 @@ class MultiHeadAttention(torch.nn.Module):
                     hidden_size,
                     hidden_size,
                     init_method=init_method,
-                    bias=bias,
+                    bias=proj_bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     **common_gemm_kwargs,
@@ -1205,7 +1207,7 @@ class MultiHeadAttention(torch.nn.Module):
                 hidden_size,
                 2 * hidden_size,
                 init_method=init_method,
-                bias=bias,
+                bias=proj_bias,
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key_", "value_") if not fuse_qkv_params else None,
@@ -1263,6 +1265,10 @@ class MultiHeadAttention(torch.nn.Module):
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
+        attn_bias_type: str = "no_bias",
+        attn_bias: Optional[torch.Tensor] = None,
+        set_zero: bool = True,
+        fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
@@ -1430,7 +1436,12 @@ class MultiHeadAttention(torch.nn.Module):
             key_layer,
             value_layer,
             attention_mask,
-            checkpoint_core_attention=checkpoint_core_attention,
+            checkpoint_core_attention = checkpoint_core_attention,
+            qkv_layout = "sbh_interleaved",
+            attn_bias_type = attn_bias_type,
+            attn_bias = attn_bias,
+            set_zero = set_zero,
+            fp8_meta = fp8_meta,
         )
 
         # =================
@@ -1774,6 +1785,10 @@ class TransformerLayer(torch.nn.Module):
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
+        attn_bias_type: str = "no_bias",
+        attn_bias: Optional[torch.Tensor] = None,
+        set_zero: bool = True,
+        fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -1813,6 +1828,14 @@ class TransformerLayer(torch.nn.Module):
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        attn_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        attn_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        set_zero: bool, defautl = `True`
+                    Whether to set output tensors to 0 or not before use.
+        fp8_meta: Optional[Dict[str, Any]], default = `None`
+                    Meta data for FP8 tensors.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -1835,6 +1858,10 @@ class TransformerLayer(torch.nn.Module):
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
+            attn_bias_type=attn_bias_type,
+            attn_bias=attn_bias,
+            set_zero=set_zero,
+            fp8_meta=fp8_meta,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -1878,6 +1905,10 @@ class TransformerLayer(torch.nn.Module):
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                attn_bias_type=attn_bias_type,
+                attn_bias=attn_bias,
+                set_zero=set_zero,
+                fp8_meta=fp8_meta,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs
