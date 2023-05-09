@@ -231,12 +231,11 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
     nltk.download('punkt')
     dataset_size = len(dataset['sentence'])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
-    mask_3d = np.empty((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
+    mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
     for j, sentence in enumerate(dataset['sentence']):
         tokens = nltk.word_tokenize(sentence)
         tensor = output[j]
-        mask_1d = np.zeros((1, max_seq_len), dtype=np.uint8)
 
         for i, word in enumerate(tokens):
             if i >= max_seq_len:
@@ -249,11 +248,11 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
             else:
                 tensor[i] = vocab[word]
 
-            mask_1d[0, i] = 1
-
+        seq_len = len(tokens)
+        if seq_len > max_seq_len:
+            seq_len = max_seq_len
         mask_2d = mask_3d[j]
-        np.dot(mask_1d.T, mask_1d, out=mask_2d)
-        np.subtract(1, mask_2d, out=mask_2d)
+        mask_2d[:seq_len, :seq_len] = 0
 
     new_dataset = {
         'sentence': output,
