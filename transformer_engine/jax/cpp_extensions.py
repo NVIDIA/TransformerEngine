@@ -1979,7 +1979,7 @@ def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_ou
 
 class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
     """
-    Self Fused Attention Forward Primitive
+    Self Fused Attention Max Seqlen 512 Forward Primitive
     """
     name = "te_self_fused_attn_max_512_forward"
     multiple_results = True
@@ -1998,7 +1998,7 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Self fused attention fwd abstract
+        Self fused attention max seqlen 512 fwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
         batch, max_seqlen, nqkv, num_head, head_dim = qkv.shape
@@ -2021,7 +2021,7 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, bias, cu_seqlen, rng_state, *, attn_bias_type, attn_mask_type,
                  scaling_factor, dropout_probability, is_training):
         """
-        Self fused attention fwd lowering rules
+        Self fused attention max seqlen 512 fwd lowering rules
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
@@ -2071,13 +2071,14 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
                                 attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                                 dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE self fused attention fwd
+    Wrapper for TE self fused attention max seqlen 512 fwd
+    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
+    # Jax can't bind None, create a dummy tensor for None
     if rng_state is None:
         rng_state = jnp.zeros(2, dtype=jnp.int32)
     if bias is None:
         assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
-        # JAX can't bind None, create a dummy tensor for it
         bias = jnp.zeros(0, dtype=qkv.dtype)
     return _self_fused_attn_max_512_fwd_p.bind(qkv,
                                                bias,
@@ -2092,7 +2093,7 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
 
 class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     """
-    Self Fused Attention Backward Primitive
+    Self Fused Attention Max Seqlen 512 Backward Primitive
     """
     name = "te_self_fused_attn_max_512_backward"
     multiple_results = True
@@ -2129,7 +2130,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, softmax_aux, doutput, cu_seqlen, *, attn_bias_type, attn_mask_type,
                  scaling_factor, dropout_probability, is_training):
         """
-        Self fused attention bwd lowering rules
+        Self fused attention max seqlen 512 bwd lowering rules
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
@@ -2178,7 +2179,8 @@ def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, dout
                                 attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                                 dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE self fused attention bwd
+    Wrapper for TE self fused attention max seqlen 512 bwd
+    Return the gradients of self fused attention with packed qkv input
     """
     return _self_fused_attn_max_512_bwd_p.bind(qkv,
                                                softmax_aux,
@@ -2193,7 +2195,7 @@ def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, dout
 
 class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
     """
-    Cross Fused Attention Forward Primitive
+    Cross Fused Attention Forward Max Seqlen 512 Primitive
     """
     name = "te_cross_fused_attn_max_512_forward"
     multiple_results = True
@@ -2213,7 +2215,7 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Cross fused attention fwd abstract
+        Cross fused attention max seqlen 512 fwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         batch_q, q_max_seqlen, num_head_q, head_dim_q = q.shape
@@ -2242,7 +2244,7 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, q_cu_seqlen, kv_cu_seqlen, rng_state, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
-        Cross fused attention fwd lowering rules
+        Cross fused attention max seqlen 512 fwd lowering rules
         """
         q_aval, kv_aval, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
@@ -2297,8 +2299,10 @@ def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: j
                                  scaling_factor: float, dropout_probability: float,
                                  is_training: bool):
     """
-    Wrapper for TE cross fused attention fwd
+    Wrapper for TE cross fused attention max seqlen 512 fwd
+    Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
+    # Jax can't bind None, create a dummy tensor for None
     if rng_state is None:
         rng_state = jnp.zeros(2, dtype=jnp.int32)
     return _cross_fused_attn_max_512_fwd_p.bind(q,
@@ -2315,7 +2319,7 @@ def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: j
 
 class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
     """
-    Cross Fused Attention Backward Primitive
+    Cross Fused Attention Max Seqlen 512 Backward Primitive
     """
     name = "te_cross_fused_attn_max_512_backward"
     multiple_results = True
@@ -2336,7 +2340,7 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Cross fused attention bwd abstract
+        Cross fused attention max seqlen 512 bwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv.dtype)
@@ -2354,7 +2358,7 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
-        Cross fused attention bwd lowering rules
+        Cross fused attention max seqlen 512 bwd lowering rules
         """
         q_aval, _, _, _, _, _ = ctx.avals_in
 
@@ -2407,7 +2411,8 @@ def cross_fused_attn_max_512_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: j
                                  attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                                  dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE cross fused attention bwd
+    Wrapper for TE cross fused attention max seqlen 512 bwd
+    Return the gradients of cross fused attention with packed kv input
     """
     return _cross_fused_attn_max_512_bwd_p.bind(q,
                                                 kv,
