@@ -10,19 +10,21 @@ import jax.numpy as jnp
 import numpy as np
 from jax.experimental import maps
 
-from utils import assert_allclose, is_fp8_supported
+from utils import assert_allclose
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
-from transformer_engine.jax.fp8 import FP8Helper
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import MajorShardingType
 from transformer_engine.jax.sharding import ShardingResource
 
+is_fp8_supported, reason = is_fp8_available()
+
 
 class TestFP8Helper(unittest.TestCase):
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_initialize(self):
         margin = 5.0
         fp8_format = FP8Format.E4M3
@@ -52,7 +54,7 @@ class TestFP8Helper(unittest.TestCase):
 
         FP8Helper.finalize()
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_update_fp8_metas(self):
         FP8Helper.initialize(margin=3.0, amax_history_len=3)
 
@@ -113,7 +115,7 @@ class TestFP8Helper(unittest.TestCase):
 
         FP8Helper.finalize()
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_generate_fp8_max_array(self):
         num_of_meta = FP8Helper.NUM_META_PER_GEMM * 2
 
@@ -131,7 +133,7 @@ class TestFP8Helper(unittest.TestCase):
             assert_allclose(get_ref(fp8_format), FP8Helper.generate_fp8_max_array(num_of_meta))
             FP8Helper.finalize()
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_update_collections(self):
         original_val = 0.0
         updated_val = 10.0
@@ -163,7 +165,7 @@ class TestFP8Functions(unittest.TestCase):
         self.assertTrue(ref.amax_history_len == test.amax_history_len)
         self.assertTrue(ref.amax_compute_algo == test.amax_compute_algo)
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast(self):
         FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
         self._check_defult_state()
@@ -188,7 +190,7 @@ class TestFP8Functions(unittest.TestCase):
 
         self._check_defult_state()
 
-    @unittest.skipIf(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_with_sharding_resource(self):
         FP8Helper.finalize()    # Ensure the testing not affect by previous tests.
         self._check_defult_state()

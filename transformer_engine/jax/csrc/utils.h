@@ -18,6 +18,9 @@
 namespace transformer_engine {
 namespace jax {
 
+int GetCudaRuntimeVersion();
+int GetDeviceComputeCapability(int gpu_id);
+
 class cublasLtMetaManager {
  public:
     static cublasLtMetaManager &Instance() {

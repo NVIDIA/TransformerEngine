@@ -6,6 +6,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cublasLt.h>
+
 #include "common/include/transformer_engine/fused_attn.h"
 #include "common/include/transformer_engine/transformer_engine.h"
 #include "jax/csrc/modules.h"
@@ -58,6 +60,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
+    m.def("get_cublasLt_version", &cublasLtGetVersion);
+    m.def("get_cuda_version", &GetCudaRuntimeVersion);
+    m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
     m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
 

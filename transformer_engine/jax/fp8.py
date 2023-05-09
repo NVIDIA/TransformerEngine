@@ -13,11 +13,48 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
 from transformer_engine_jax import DType
+from transformer_engine_jax import get_cublasLt_version
+from transformer_engine_jax import get_cuda_version, get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import ShardingResource
 
+_is_fp8_available = None
+_reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
+
+
+def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    gpu_arch = get_device_compute_capability(gpu_id)
+    if gpu_arch >= 90:    # hopper and above
+        return True, ""
+    if gpu_arch < 89:    # pre-ada
+        return False, "Device compute capability 8.9 or higher required for FP8 execution."
+    if get_cublasLt_version() < 120103:
+        return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
+    if get_cuda_version() < 12010:
+        return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
+    return True, ""
+
+
+def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    if gpu_id is not None:
+        return _check_fp8_support(gpu_id)
+
+    global _is_fp8_available, _reason_for_no_fp8
+    if _is_fp8_available is None:
+        _is_fp8_available = True
+        devices = jax.local_devices()
+        for gpu in devices:
+            ret, msg = _check_fp8_support(gpu.id)
+            if ret is False:
+                _is_fp8_available = ret
+                _reason_for_no_fp8 = msg
+            break
+
+    return _is_fp8_available, _reason_for_no_fp8
 
 
 def _format2dtypes(format_: Format):
@@ -332,6 +369,9 @@ def fp8_autocast(enabled: bool = False,
     try:
         with global_shard_guard(sharding_resource):
             if enabled:
+                fp8_available, reason_for_no_fp8 = is_fp8_available()
+                assert fp8_available, reason_for_no_fp8
+
                 amax_compute_algo = AmaxComputeAlgo.MOST_RECENT
                 if fp8_recipe.amax_compute_algo == 'max':
                     amax_compute_algo = AmaxComputeAlgo.MAX
