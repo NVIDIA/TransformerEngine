@@ -396,10 +396,7 @@ class TestEncoder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
-        num_gpu = jax.local_device_count()
-        if num_gpu % 2 != 0:
-            num_gpu = 1
-        cls.args = encoder_parser(["--epochs", "3", "--num-gpu", str(num_gpu)])
+        cls.args = encoder_parser(["--epochs", "3"])
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
