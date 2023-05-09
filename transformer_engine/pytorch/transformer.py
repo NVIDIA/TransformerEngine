@@ -8,7 +8,7 @@ import math
 import warnings
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
@@ -52,6 +52,13 @@ warnings.filterwarnings("module", category=DeprecationWarning, module="transform
 
 __all__ = ["DotProductAttention", "TransformerLayer"]
 
+
+META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
+META_O    = tex.FP8FwdTensors.GEMM2_INPUT
+META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
+META_S    = 7
+META_DS   = 5
 
 class DropPath(torch.nn.Module):
     """Drop paths (Stochastic Depth) per sample
@@ -297,37 +304,165 @@ def _check_if_interleaved(q, k, v):
                         for i, x in enumerate([q, k, v]))
     return check_offsets
 
-class FlashAttnFunc(torch.autograd.Function):
+class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p,
-                softmax_scale, causal):
-        if softmax_scale is None:
-            softmax_scale = q.shape[-1] ** (-0.5)
-        out, softmax_lse, rng_state, S_dmask = fused_attn_fwd_qkvpacked(
-                _flash_attn_forward(
-            q, k, v, torch.empty_like(q), cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-            dropout_p, softmax_scale, causal=causal, return_softmax=return_softmax
-        )
-        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state)
+    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen, return_softmax, tp_group, tp_size, deterministic):
+        if fp8_meta is not None:
+            out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias,
+                fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+                fp8_meta["scaling_fwd"].scale[META_S],
+                fp8_meta["scaling_fwd"].scale[META_O],
+                fp8_meta["scaling_fwd"].amax_history[0][META_S],
+                fp8_meta["scaling_fwd"].amax_history[0][META_O],
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen)
+        else:
+            out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, bias,
+                None, None, None, None, None,
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen)
+        ctx.save_for_backward(qkv, out, aux_ctx_tensors, cu_seqlens, fp8_meta)
+        ctx.max_seqlen = max_seqlen
+        ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_k = max_seqlen_k
-        ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
+        ctx.set_zero = set_zero
+        ctx.qkv_layout = qkv_layout
+        ctx.bias_type = bias_type
+        ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
+
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
-    def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
-        dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-        _flash_attn_backward(
-            dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k,
-            ctx.max_seqlen_q, ctx.max_seqlen_k, ctx.dropout_p, ctx.softmax_scale, ctx.causal,
-            rng_state=rng_state, num_splits=1 if ctx.deterministic else 0,
-        )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+    def backward(ctx, d_out, *args):
+        qkv, out, aux_ctx_tensors, cu_seqlens, fp8_meta = ctx.saved_tensors
+        if fp8_meta is not None:
+            with _prepare_backward(True, fp8_meta, tp_group, tp_size, name="_MHA"):
+                fp8_dtype_forward = fp8.get_fp8_te_dtype(
+                    fp8_meta["recipe"], fprop_tensor=True
+                )
+                fp8_dtype_backward = fp8.get_fp8_te_dtype(
+                    fp8_meta["recipe"], fprop_tensor=False
+                )
+                dqkv, dbias = fused_attn_bwd_qkvpacked(
+                    ctx.max_seqlen, cu_seqlens, qkv, out, d_out, 
+                    fp8_dtype_forward,
+                    aux_ctx_tensors,
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV], # d_scale_qkv,
+                    fp8_meta["scaling_fwd"].scale_inv[META_S], # d_scale_s,
+                    fp8_meta["scaling_fwd"].scale_inv[META_O], # d_scale_o,
+                    fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    fp8_meta["scaling_fwd"].scale[META_S], # q_scale_s
+                    fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                    fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                    ctx.attn_scale,
+                    ctx.dropout_p,
+                    ctx.set_zero,
+                    ctx.qkv_layout,
+                    ctx.bias_type,
+                    ctx.attn_mask_type,
+                )
+        else:
+            dqkv, dbias = fused_attn_bwd_qkvpacked(
+                ctx.max_seqlen, cu_seqlens, qkv, out, d_out, 
+                TE_DType[qkv.dtype], aux_ctx_tensors,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
+                ctx.qkv_layout, ctx.bias_type, ctx.attn_mask_type,
+                num_splits=1 if ctx.deterministic else 0
+            )
+
+        return dqkv, dbias
+
+class FusedAttnFunc_kvpacked(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen, return_softmax, tp_group, tp_size, deterministic):
+        if fp8_meta is not None:
+            out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, bias,
+                fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+                fp8_meta["scaling_fwd"].scale[META_S],
+                fp8_meta["scaling_fwd"].scale[META_O],
+                fp8_meta["scaling_fwd"].amax_history[0][META_S],
+                fp8_meta["scaling_fwd"].amax_history[0][META_O],
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen)
+        else:
+            out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, bias,
+                None, None, None, None, None,
+                attn_scale, dropout_p, set_zero, qkv_layout, bias_type, attn_mask_type,
+                rng_gen)
+        ctx.save_for_backward(q, kv, out, aux_ctx_tensors, cu_seqlens_q, cu_seqlens_kv, fp8_meta)
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_kv = max_seqlen_kv
+        ctx.attn_scale = attn_scale
+        ctx.dropout_p = dropout_p
+        ctx.set_zero = set_zero
+        ctx.qkv_layout = qkv_layout
+        ctx.bias_type = bias_type
+        ctx.attn_mask_type = attn_mask_type
+        ctx.deterministic = deterministic
+
+        return out if not return_softmax else (out, softmax_lse, S_dmask)
+
+    @staticmethod
+    def backward(ctx, d_out, *args):
+        q, kv, out, aux_ctx_tensors, cu_seqlens_q, cu_seqlens_kv, fp8_meta = ctx.saved_tensors
+        if fp8_meta is not None:
+            with _prepare_backward(True, fp8_meta, tp_group, tp_size, name="_MHA"):
+                fp8_dtype_forward = fp8.get_fp8_te_dtype(
+                    fp8_meta["recipe"], fprop_tensor=True
+                )
+                fp8_dtype_backward = fp8.get_fp8_te_dtype(
+                    fp8_meta["recipe"], fprop_tensor=False
+                )
+                dq, dkv, dbias = fused_attn_bwd_kvpacked(
+                    ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                    q, kv, out, d_out, 
+                    fp8_dtype_forward,
+                    aux_ctx_tensors,
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV], # d_scale_qkv,
+                    fp8_meta["scaling_fwd"].scale_inv[META_S], # d_scale_s,
+                    fp8_meta["scaling_fwd"].scale_inv[META_O], # d_scale_o,
+                    fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    fp8_meta["scaling_fwd"].scale[META_S], # q_scale_s
+                    fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                    fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                    ctx.attn_scale,
+                    ctx.dropout_p,
+                    ctx.set_zero,
+                    ctx.qkv_layout,
+                    ctx.bias_type,
+                    ctx.attn_mask_type,
+                )
+        else:
+            dq, dkv, dbias = fused_attn_bwd_kvpacked(
+                ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, out, d_out, 
+                TE_DType[qkv.dtype], aux_ctx_tensors,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
+                ctx.qkv_layout, ctx.bias_type, ctx.attn_mask_type,
+                num_splits=1 if ctx.deterministic else 0
+            )
+
+        return dq, dkv, dbias
 
 class FusedAttention(torch.nn.Module):
     """Dot product attention, implemented by using cuDNN graphs.
@@ -345,77 +480,232 @@ class FusedAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         attn_mask_type: str = "causal",
+        attention_type: str = "self",
+        qkv_layout: str = "qkv_interleaved",
+        qkv_bias_type: str = "no_bias",
+        set_zero: bool = True,
     ) -> None:
         super().__init__()
 
-        self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
-        self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
+        self.attention_dropout_ctx = attention_dropout_ctx
+        self.attn_mask_type = attn_mask_type
+        self.attention_type = attention_type
+        self.qkv_layout = qkv_layout
+        self.qkv_bias_type = qkv_bias_type
+        self.set_zero = set_zero
+        assert (
+            attn_mask_type in AttnMaskTypes
+        ), f"FusedAttention does not support attn_mask_type {attn_mask_type}."
+        assert (
+            attention_type in AttnTypes
+        ), f"FusedAttention does not support attention_type {attention_type}."
 
     def forward(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        qkv_bias: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        #fp8_dtype_forward: Optional[tex.DType] = None,
+        fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
 
         print("=========== FA - cuDNN ===========")
-        #qkv = torch.cat([query_layer.unsqueeze(2),
-        #    key_layer.unsqueeze(2),
-        #    value_layer.unsqueeze(2)], dim=2).contiguous()
-        ##query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-        ##               for x in (query_layer, key_layer, value_layer)]
-        #print("q,k,v shape: ",query_layer.shape,"qkv shape: ",qkv.shape)
+        assert (
+            (query_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            ), 'FusedAttention currently only supports FP8, FP16 and BF16.'
+        assert (
+            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            ), 'FusedAttention currently only supports CUDA tensors.'
+        assert (
+            attention_mask is None
+        ), 'FusedAttention currently does not support external attention mask.'
 
-        ##batch_size, seq_len = query_layer.shape[0], query_layer.shape[1]
-        #seq_len, batch_size = query_layer.shape[0], query_layer.shape[1]
+        FusedAttn_branches = {
+            0: "HazyResearch FlashAttention C API, BF16/FP16, arbitrary sequence length",
+            1: "NVIDIA fused attention (non-flash), BF16/FP16, sequence length <=512",
+            2: "NVIDIA fused attention (flash), BF16/FP16, arbitrary sequence length",
+            3: "NVIDIA fused attention (flash), FP8, sequence length <=512",
+        }
 
-        #cu_seqlens_q = torch.cumsum(torch.ones(
-        #    seq_len,
-        #    dtype=torch.int32,
-        #    device=query_layer.device), dim=0)
-
-        if (_check_if_interleaved(query_layer, key_layer, value_layer)):
-            query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
-                                                                         key_layer,
-                                                                         value_layer)
+        if (query_layer.dtype in [torch.bfloat16, torch.float16]
+            and key_layer.dtype in [torch.bfloat16, torch.float16]
+            and value_layer.dtype in [torch.bfloat16, torch.float16]
+            and query_layer.shape[0] <= 512
+            and key_layer.shape[0] <= 512
+            and value_layer.shape[0] <= 512
+        ):
+            # fused_attn_branch = FusedAttn_branches[0]
+            fused_attn_branch = FusedAttn_branches[1]
+        elif (query_layer.dtype in [torch.bfloat16, torch.float16]
+            and key_layer.dtype in [torch.bfloat16, torch.float16]
+            and value_layer.dtype in [torch.bfloat16, torch.float16]
+            and (query_layer.shape[0] > 512
+            or key_layer.shape[0] > 512
+            or value_layer.shape[0] > 512)
+        ):
+            # fused_attn_branch = FusedAttn_branches[2]
+            fused_attn_branch = FusedAttn_branches[0]
+        elif (query_layer.dtype is torch.uint8
+            and key_layer.dtype is torch.uint8
+            and value_layer.dtype is torch.uint8
+            and query_layer.shape[0] <= 512
+            and key_layer.shape[0] <= 512
+            and value_layer.shape[0] <= 512
+        ):
+            fused_attn_branch = FusedAttn_branches[3]
         else:
-            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-                           for x in (query_layer, key_layer, value_layer)]
+            assert False, """FusedAttention does not support the provided
+                query_layer/key_layer/value_layer dtype or sequence length."""
 
-        batch_size, seq_len_q = query_layer.shape[0], query_layer.shape[1]
-        seq_len_kv = key_layer.shape[1]
+        if self.attention_type == "self":
+            if (_check_if_interleaved(query_layer, key_layer, value_layer)):
+                # [s, b, h, 3, d]
+                query_layer = query_layer.unsqueeze(3)
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 3)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(2, 3).transpose(0, 1)
 
-        # [b, sq, np, hn]
-        query_layer, key_layer, value_layer = [
-            x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-            for x in [query_layer, key_layer, value_layer]
-        ]
+                #if (query_layer.shape[2] * query_layer.shape[3] <= 512):
+                #else:
+                #    # BF16/FP16 fused attn long sequence version accepts (s,b,h,3,d) layout
+                #    # no need to convert to (b,s,3,h,d)
+            else:
+                # [s, b, 3, h, d]
+                query_layer = query_layer.unsqueeze(2)
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 2)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(0, 1)
 
-        max_seqlen_q = seq_len_q
-        max_seqlen_kv = seq_len_kv
-        cu_seqlens_q = torch.arange(
-            0,
-            (batch_size + 1) * seq_len_q,
-            step=seq_len_q,
-            dtype=torch.int32,
-            device=query_layer.device)
-        cu_seqlens_kv = torch.arange(
-            0,
-            (batch_size + 1) * seq_len_kv,
-            step=seq_len_kv,
-            dtype=torch.int32,
-            device=query_layer.device)
+            # [total_seqs, 3, h, d]
+            mixed_layer = mixed_layer.view([mixed_layer.shape[0] * mixed_layer.shape[1]]
+                + mixed_layer.shape[2:])
 
-        with self.attention_dropout_ctx():
-            output = FlashAttnFunc.forward(
-                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
-                self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor
-            )
+            seq_len, batch_size = query_layer.shape[0], query_layer.shape[1]
+            if fused_attention_branch == FusedAttn_branches[0]:
+                max_seqlen = seq_len
+            else:
+                max_seqlen = 512  # TODO
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seq_len,
+                step=seq_len,
+                dtype=torch.int32,
+                device=query_layer.device)
+            if fused_attn_branch == FusedAttn_branches[3]:
+                fp8_dtype_forward = fp8.get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                qkv_dtype = fp8_dtype_forward
+            else:
+                qkv_dtype = TE_DType[query_layer.dtype]
+            with self.attention_dropout_ctx():
+                #    assert self.qkv_layout == "qkv_interleaved",
+                #        """FP8 fused attention must have qkv_layout = "qkv_interleaved"."""
+                #    assert self.qkv_bias_type == "no_bias",
+                #        """FP8 fused attention currently only supports qkv_bias_type = "no_bias"."""
+                #    assert self.attn_mask_type == "padding",
+                #        """FP8 fused attention currently only supports padding attn_mask_type."""
+                output = FusedAttnFunc_qkvpacked.forward(
+                    self.training,
+                    max_seqlen,
+                    cu_seqlens,
+                    mixed_layer,
+                    qkv_dtype,
+                    qkv_bias,
+                    fp8_meta,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    self.set_zero,
+                    self.qkv_layout,
+                    self.qkv_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    self.return_softmax,
+                    None,
+                    1,
+                    self.deterministic,
+                )
+        else:
+            if (_check_if_interleaved_kv(key_layer, value_layer)):
+                # [s, b, h, 2, d]
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                key_value = torch.cat([key_layer, value_layer], dim = 3)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(2, 3).transpose(0, 1)
+            else:
+                # [s, b, 2, h, d]
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                key_value = torch.cat([key_layer, value_layer], dim = 2)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(0, 1)
+
+            # [total_seqs, 2, h, d]
+            query_layer = query_layer.transpose(0, 1)
+            query_layer = query_layer.view([query_layer.shape[0] * query_layer.shape[1]]
+                + query_layer.shape[2:])
+            key_value = key_value.view([key_value.shape[0] * key_value.shape[1]]
+                + key_value.shape[2:])
+
+            seq_len_q, batch_size = query_layer.shape[0], query_layer.shape[1]
+            seq_len_kv = key_layer.shape[0]
+            if fused_attention_branch == FusedAttn_branches[0]:
+                max_seqlen_q = seq_len_q
+                max_seqlen_kv = seq_len_kv
+            else:
+                max_seqlen_q = 512  # TODO
+                max_seqlen_kv = 512  # TODO
+            cu_seqlens_q = torch.arange(
+                0,
+                (batch_size + 1) * seq_len_q,
+                step=seq_len_q,
+                dtype=torch.int32,
+                device=query_layer.device)
+            cu_seqlens_kv = torch.arange(
+                0,
+                (batch_size + 1) * seq_len_kv,
+                step=seq_len_kv,
+                dtype=torch.int32,
+                device=key_layer.device)
+            with self.attention_dropout_ctx():
+                #if fused_attn_branch == FusedAttn_branches[3]:
+                #    fp8_dtype_forward = fp8.get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                #    assert self.qkv_layout == "qkv_interleaved",
+                #        """FP8 fused attention must have qkv_layout = "qkv_interleaved"."""
+                #    assert self.qkv_bias_type == "no_bias",
+                #        """FP8 fused attention currently only supports qkv_bias_type = "no_bias"."""
+                #    assert self.attn_mask_type == "padding",
+                #        """FP8 fused attention currently only supports padding attn_mask_type."""
+                output = FusedAttnFunc_kvpacked.forward(
+                    self.training,
+                    max_seqlen_q, max_seqlen_kv,
+                    cu_seqlens_q, cu_seqlens_kv,
+                    query_layer, key_value,
+                    qkv_dtype,
+                    qkv_bias,
+                    fp8_meta,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    self.set_zero,
+                    self.qkv_layout,
+                    self.qkv_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    self.return_softmax,
+                    None,
+                    1,
+                    self.deterministic,
+                )
 
         print("output shape: ",output.shape)
         # [(b sq), np, hn] -> [sq, b, (np hn)]
@@ -558,6 +848,7 @@ class DotProductAttention(torch.nn.Module):
         num_attention_heads: int,
         kv_channels: int,
         attention_dropout: float = 0.0,
+        attention_type: str = "self",
         attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
@@ -606,7 +897,8 @@ class DotProductAttention(torch.nn.Module):
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
         if self.use_fused_attention:
-            self.fused_attention = FusedAttention(norm_factor, **attn_kwargs)
+            self.fused_attention = FusedAttention(norm_factor, **attn_kwargs,
+                attention_type = attention_type)
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
