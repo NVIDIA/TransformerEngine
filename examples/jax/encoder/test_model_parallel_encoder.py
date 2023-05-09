@@ -31,13 +31,6 @@ DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
 
 
-def check_num_gpu(desired_num_gpu):
-    """Check if the number of GPUs are correct."""
-    actual_num_gpu = len(jax.local_devices())
-    assert actual_num_gpu == desired_num_gpu, f"Number of GPUs is mismatch. " \
-        f"{desired_num_gpu} GPUs are assigned, but the actual number of GPUs is {actual_num_gpu}"
-
-
 class Net(nn.Module):
     """NLP Encoder"""
     num_embed: int
@@ -251,11 +244,10 @@ def train_and_evaluate(args):
     print(args)
     train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
-    check_num_gpu(args.num_gpu)
-
+    num_gpu = jax.local_device_count()
     num_gpu_tp = 2
-    if args.num_gpu % num_gpu_tp == 0:
-        num_gpu_dp = args.num_gpu // num_gpu_tp
+    if num_gpu % num_gpu_tp == 0:
+        num_gpu_dp = num_gpu // num_gpu_tp
     else:
         num_gpu_dp = 1
         num_gpu_tp = 1
@@ -347,13 +339,6 @@ def encoder_parser(args):
     """Training settings."""
     parser = argparse.ArgumentParser(description="JAX Encoder Example")
     parser.add_argument(
-        "--num-gpu",
-        type=int,
-        default=8,
-        metavar="N",
-        help="number of GPUs (default: 8)",
-    )
-    parser.add_argument(
         "--batch-size",
         type=int,
         default=64,
@@ -411,7 +396,7 @@ class TestEncoder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
-        num_gpu = len(jax.local_devices())
+        num_gpu = jax.local_device_count()
         if num_gpu % 2 != 0:
             num_gpu = 1
         cls.args = encoder_parser(["--epochs", "3", "--num-gpu", str(num_gpu)])

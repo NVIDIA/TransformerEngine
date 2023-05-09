@@ -37,6 +37,13 @@ python test_single_gpu_encoder.py --use-fp8
 
 7. The `train_step` and `eval_step` also need to be compiled by pjit. Thus, every input and output argument has to be set up `PartitionSpec` if the argument contains a tensor. For instance, the `input_pspec` is `PartitionSpec('data', None)` because the input shape is (batch size, sequence length). Then, the rest of the workflow is similar to the previous example.
 
+8. Use `CUDA_VISIBLE_DEVICES` to control the number of GPUs used. For example, if the system has 8 GPUs but only 4 GPUs need to be used, then:
+   ```sh
+   export CUDA_VISIBLE_DEVICES=0,1,2,3
+   python test_multigpu_encoder.py
+   ```
+   Please refer to [CUDA Environment Variables](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#cuda-environment-variables) for more details.
+
 ### Run ###
 
 ```bash

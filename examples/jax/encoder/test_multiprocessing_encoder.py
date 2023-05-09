@@ -322,7 +322,7 @@ def train_and_evaluate(args):
                                num_processes=args.num_process,
                                process_id=args.process_id,
                                local_device_ids=args.process_id)
-    assert len(jax.local_devices()) == 1, "1 GPU per process"
+    assert jax.local_device_count() == 1, "1 GPU per process"
 
     num_gpu_tp = 2
     if args.num_process % num_gpu_tp == 0:
