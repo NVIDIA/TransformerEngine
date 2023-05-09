@@ -451,8 +451,8 @@ class DenseGeneral(TransformerEngineBase):
             y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
         if bias is not None:
-            bais_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
-            y += jnp.reshape(bias, bais_shape)
+            bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
+            y += jnp.reshape(bias, bias_shape)
         return y
 
 
@@ -660,8 +660,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                                                    axes=self.bias_axes)
 
         if bias is not None:
-            bais_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
-            z += jnp.reshape(bias, bais_shape)
+            bias_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
+            z += jnp.reshape(bias, bias_shape)
 
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
@@ -772,7 +772,10 @@ class LayerNormMLP(TransformerEngineBase):
     kernel_axes_2: Tuple[str, ...] = ('mlp', 'embed')
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
-    bias_axes_1: Tuple[str, ...] = ('mlp',)
+    bias_axes_1: Tuple[str, ...] = (
+        'act',
+        'mlp',
+    )
     bias_axes_2: Tuple[str, ...] = ('embed',)
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ('relu',)
@@ -961,10 +964,12 @@ class LayerNormMLP(TransformerEngineBase):
             bias = None
             if self.use_bias:
                 bias = nn_partitioning.param_with_axes('wi_bias',
-                                                       self.bias_init, (self.intermediate_dim,),
+                                                       self.bias_init,
+                                                       intermediate_dim,
                                                        self.dtype,
                                                        axes=self.bias_axes_1)
-                x += jnp.reshape(bias, (1,) * (x.ndim - 1) + (-1,))
+                bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
+                x += jnp.reshape(bias, bias_shape)
 
             if self.activations == ('gelu', 'linear'):
                 z = geglu(x,
