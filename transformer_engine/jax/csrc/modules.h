@@ -17,6 +17,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -94,6 +95,27 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 size_t q_seqlen, size_t k_seqlen, DType dtype,
                                                 float scale_factor);
 
+struct CustomCallFusedAttnDescriptor {
+    size_t batch;
+    size_t num_head;
+    size_t q_max_seqlen;
+    size_t kv_max_seqlen;
+    size_t head_dim;
+    float scaling_factor;
+    float dropout_probability;
+    NVTE_Bias_Type bias_type;
+    NVTE_Mask_Type mask_type;
+    DType dtype;
+    bool is_training;
+};
+
+pybind11::bytes PackCustomCallFusedAttnDescriptor(
+    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, DType dtype, bool is_training);
+
+bool IsFusedAttnKernelAvailable();
+
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
@@ -143,6 +165,18 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
+
+void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                size_t opaque_len);
+
+void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len);
+
+void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len);
+
+void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                  size_t opaque_len);
 
 }  // namespace jax
 }  // namespace transformer_engine

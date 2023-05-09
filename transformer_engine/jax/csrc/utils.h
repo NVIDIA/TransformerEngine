@@ -78,6 +78,16 @@ class cudaDevicePropertiesManager {
         return prop_.multiProcessorCount;
     }
 
+    int GetMajor() {
+        if (!prop_queried_) {
+            int device_id;
+            NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+            cudaGetDeviceProperties(&prop_, device_id);
+            prop_queried_ = true;
+        }
+        return prop_.major;
+    }
+
  private:
     bool prop_queried_ = false;
     cudaDeviceProp prop_;

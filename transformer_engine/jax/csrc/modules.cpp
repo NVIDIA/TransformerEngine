@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
+#include <cudnn.h>
 
 #include <functional>
 #include <numeric>
@@ -19,6 +20,7 @@
 #include "common/common.h"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/gemm.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
@@ -76,6 +78,25 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
                                                 float scale_factor) {
     return PackOpaque(
         SoftmaxDescriptor{batch, pad_batch, heads, q_seqlen, k_seqlen, dtype, scale_factor});
+}
+
+pybind11::bytes PackCustomCallFusedAttnDescriptor(
+    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
+    return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, q_max_seqlen, kv_max_seqlen,
+                                                    head_dim, scaling_factor, dropout_probability,
+                                                    bias_type, mask_type, dtype, is_training});
+}
+
+bool IsFusedAttnKernelAvailable() {
+#if (CUDNN_VERSION >= 8901)
+    auto major = cudaDevicePropertiesManager::Instance().GetMajor();
+    // Fused attention requires at least Ampere
+    return major >= 8;
+#else
+    return false;
+#endif
 }
 
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
@@ -718,5 +739,333 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         grad_output_tensor.data(), softmax_output_tensor.data(), dgrad_tensor.data(),
         desc.scale_factor, stream);
 }
+
+void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input
+    void *qkv = buffers[0];
+    void *bias = buffers[1];
+    void *cu_seqlens = buffers[2];
+    void *rng_state = buffers[3];
+
+    // output
+    void *output = buffers[4];
+    void *softmax_aux = buffers[5];
+
+    auto batch = descriptor.batch;
+    auto num_head = descriptor.num_head;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto head_dim = descriptor.head_dim;
+
+    NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
+               "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
+
+    auto dtype = descriptor.dtype;
+    auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
+
+    auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
+    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
+
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+    auto o_tensor =
+        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
+
+    auto cu_seqlens_tensor =
+        TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
+
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
+                                  o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
+                                  rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
+                                  descriptor.scaling_factor, descriptor.dropout_probability,
+                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
+                                  descriptor.mask_type, query_workspace_tensor.data(), stream);
+
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.dptr = softmax_aux;
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
+                                  o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
+                                  rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
+                                  descriptor.scaling_factor, descriptor.dropout_probability,
+                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
+                                  descriptor.mask_type, workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
+void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input
+    void *qkv = buffers[0];
+    void *softmax_aux = buffers[1];
+    void *doutput = buffers[2];
+    void *cu_seqlens = buffers[3];
+
+    // output
+    void *dqkv = buffers[4];
+    void *dp = softmax_aux;
+    void *dbias = buffers[5];
+
+    auto batch = descriptor.batch;
+    auto num_head = descriptor.num_head;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto head_dim = descriptor.head_dim;
+
+    NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
+               "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
+
+    auto dtype = descriptor.dtype;
+    auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
+    auto output_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
+
+    auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
+    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
+    // It's a little trick that the flash attn needs fwd output
+    // But when seqlen <= 512, it is not needed
+    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+
+    auto dqkv_tensor = TensorWrapper(dqkv, qkv_shape, dtype);
+    auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
+
+    auto cu_seqlens_tensor =
+        TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    // Currently, no rng_state required for bwd
+    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+
+    // TODO: needs to think about how to pass aux_output_tensors
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    aux_output_tensors.size = 1;
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.shape = std::vector<size_t>{batch, num_head, q_max_seqlen, kv_max_seqlen};
+    output_s->data.dptr = softmax_aux;
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
+                                  s_tensor.data(),  // not used for FP16/BF16
+                                  s_tensor.data(),  // not used for FP16/BF16
+                                  &aux_output_tensors, dqkv_tensor.data(), dbias_tensor.data(),
+                                  cu_seqlens_tensor.data(), q_max_seqlen, descriptor.scaling_factor,
+                                  descriptor.dropout_probability,
+                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
+                                  descriptor.mask_type, query_workspace_tensor.data(), stream);
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
+                                  s_tensor.data(),  // not used for FP16/BF16
+                                  s_tensor.data(),  // not used for FP16/BF16
+                                  &aux_output_tensors, dqkv_tensor.data(), dbias_tensor.data(),
+                                  cu_seqlens_tensor.data(), q_max_seqlen, descriptor.scaling_factor,
+                                  descriptor.dropout_probability,
+                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
+                                  descriptor.mask_type, workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
+void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
+                                 size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input
+    void *q = buffers[0];
+    void *kv = buffers[1];
+    void *q_cu_seqlens = buffers[2];
+    void *kv_cu_seqlens = buffers[3];
+    void *rng_state = buffers[4];
+
+    // output
+    void *output = buffers[5];
+    void *softmax_aux = buffers[6];
+
+    auto batch = descriptor.batch;
+    auto num_head = descriptor.num_head;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto head_dim = descriptor.head_dim;
+
+    auto dtype = descriptor.dtype;
+    auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
+
+    auto q_tensor = TensorWrapper(q, q_shape, dtype);
+    auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
+
+    // TODO(rewang): add bias for cross attn?
+    auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+    auto o_tensor =
+        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
+
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
+
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_fwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        query_workspace_tensor.data(), stream);
+
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.dptr = softmax_aux;
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_fwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
+void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
+                                  size_t opaque_len) {
+    const CustomCallFusedAttnDescriptor &descriptor =
+        *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+    // input
+    void *q = buffers[0];
+    void *kv = buffers[1];
+    void *softmax_aux = buffers[2];
+    void *doutput = buffers[3];
+    void *q_cu_seqlens = buffers[4];
+    void *kv_cu_seqlens = buffers[5];
+
+    // output
+    void *dq = buffers[6];
+    void *dkv = buffers[7];
+    void *dp = softmax_aux;
+
+    auto batch = descriptor.batch;
+    auto num_head = descriptor.num_head;
+    auto q_max_seqlen = descriptor.q_max_seqlen;
+    auto kv_max_seqlen = descriptor.kv_max_seqlen;
+    auto head_dim = descriptor.head_dim;
+
+    auto dtype = descriptor.dtype;
+    auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
+    auto output_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
+    auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
+
+    auto q_tensor = TensorWrapper(q, q_shape, dtype);
+    auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
+    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
+    // It's a little trick that the flash attn needs fwd output
+    // But when seqlen <= 512, it is not needed
+    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    // FP16/BF16 doesn't use this tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+
+    auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
+    auto dkv_tensor = TensorWrapper(dkv, kv_shape, dtype);
+    // TODO(rewang): generalize cross attn
+    auto dbias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+
+    auto q_cu_seqlens_tensor =
+        TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor =
+        TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
+    // Currently, no rng_state required for bwd
+    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+
+    // TODO(rewang): need to think about how to pass aux_output_tensors
+    NVTETensorPack aux_output_tensors;
+    nvte_tensor_pack_create(&aux_output_tensors);
+
+    aux_output_tensors.size = 1;
+    auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
+    output_s->data.shape = std::vector<size_t>{batch * num_head, q_max_seqlen, kv_max_seqlen};
+    output_s->data.dptr = softmax_aux;
+
+    TensorWrapper query_workspace_tensor;
+
+    nvte_fused_attn_bwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
+        s_tensor.data(),  // not used for FP16/BF16
+        s_tensor.data(),  // not used for FP16/BF16
+        &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
+        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        query_workspace_tensor.data(), stream);
+
+    size_t workspace_size =
+        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+
+    auto workspace_tensor =
+        TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    nvte_fused_attn_bwd_kvpacked(
+        q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
+        s_tensor.data(),  // not used for FP16/BF16
+        s_tensor.data(),  // not used for FP16/BF16
+        &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
+        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
+        descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        workspace_tensor.data(), stream);
+
+    nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
 }  // namespace jax
 }  // namespace transformer_engine
