@@ -194,7 +194,7 @@ class JaxBuilder(FrameworkBuilderBase):
 
     def install_requires():
         # TODO: find a way to install pybind11 and ninja directly.
-        return ['cmake', 'flax']
+        return ['cmake', 'flax', 'praxis']
 
 ext_modules = []
 dlfw_builder_funcs = []
