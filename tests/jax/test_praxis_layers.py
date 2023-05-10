@@ -21,14 +21,16 @@ from transformer_engine.jax.flax import RelativePositionBiases as flax_RelativeP
 from transformer_engine.jax.flax import TransformerLayer as flax_TransformerLayer
 from transformer_engine.jax.flax.module import Softmax
 from transformer_engine.jax.flax.transformer import AttentionType
-from transformer_engine.jax.fp8 import FP8Helper
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from transformer_engine.jax.praxis import LayerNorm
 from transformer_engine.jax.praxis import FusedSoftmax, LayerNorm
 from transformer_engine.jax.praxis import LayerNormLinear, LayerNormMLP, Linear
 from transformer_engine.jax.praxis import MultiHeadAttention, RelativePositionBiases
 from transformer_engine.jax.praxis import TransformerEngineBaseLayer, TransformerLayer, TransformerLayerType
 from transformer_engine.jax.softmax import SoftmaxType
-from utils import assert_allclose, is_fp8_supported
+from utils import assert_allclose
+
+is_fp8_supported, reason = is_fp8_available()
 
 DATA_SHAPE = [(128, 32, 512), (512, 32, 512)]
 DTYPE = [jnp.float32, jnp.bfloat16]
@@ -327,7 +329,7 @@ class TestLinear(TestLayer):
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', LinearAttr.ATTRS)
@@ -451,7 +453,7 @@ class TestLayerNormLinear(TestLayer):
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', LayerNormLinearAttr.ATTRS)
@@ -574,7 +576,7 @@ class TestLayerNormMLP(TestLayer):
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', LayerNormMLPAttr.ATTRS)
@@ -764,7 +766,7 @@ class TestMultiHeadAttn(TestLayer):
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', MultiHeadAttnAttr.ATTRS)
@@ -1023,7 +1025,7 @@ class TestTransformer(TestLayer):
         praxis_p, flax_cls = self.generate_praxis_p_and_flax_cls(dtype, attrs)
         self.forward_backward_runner(data_shape, dtype, praxis_p, flax_cls, rtol, atol)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('data_shape', DATA_SHAPE)
     @pytest.mark.parametrize('dtype', DTYPE)
     @pytest.mark.parametrize('attrs', TransformerLayerAttr.ATTRS)
