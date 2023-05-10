@@ -717,17 +717,17 @@ def test_softmax_mask_fn(precision):
     # Compare the outputs of TE when using the default softmax mask
     # to the TE outputs produced when using the ONNX-compatible causal mask.
     model = Test_Softmax(use_onnx_mask_fn=False)
-    te_outputs_default_mask = te_infer(model, (input_tensor, mask), is_fp8=True)
+    te_outputs_default_mask = te_infer(model, inp, is_fp8=True)
     with te.onnx_export(True):
         # ONNX export mode forces use of the ONNX-compatible causal mask.
         model_onnx_mask = Test_Softmax(use_onnx_mask_fn=True)
-        te_outputs_onnx_mask = te_infer(model_onnx_mask, (input_tensor, mask), is_fp8=True)
+        te_outputs_onnx_mask = te_infer(model_onnx_mask, inp, is_fp8=True)
     compare_outputs(te_outputs_default_mask, te_outputs_onnx_mask,
         atol=0, rtol=0, max_errors_printed=10, allow_cnt_errors=0, fname="softmax masking")
 
     # Compare the outputs of TE when using the default softmax mask
     # to the ORT ONNX outputs produced when using the ONNX-compatible causal mask.
-    input_names = ["input"]
+    input_names = ["input", "mask"]
     kernel_str = "FusedScaleMaskSoftmax"
     fname = f"{kernel_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, input_names=input_names)
@@ -1060,12 +1060,7 @@ def test_export_multihead_attention(
     ).to(device='cuda')
 
     inp_context = (hidden_states_context, attention_mask, encoder_output)
-    input_names = ["hidden_states"]
-    if attention_mask is not None:
-        input_names.append("attention_mask")
-    if encoder_output is not None:
-        input_names.append("encoder_output")
-
+    input_names = ["hidden_states", "attention_mask", "encoder_output"]
     output_names=["attention_output", "attention_bias"]
     do_export(model, inp_context, fname, use_fp8, input_names=input_names, output_names=output_names,
         dynamic_axes={"hidden_states": {0: "seq", 1:"bs"},
