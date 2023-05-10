@@ -27,7 +27,10 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 c10::optional<at::Tensor> amax_S,
                 c10::optional<at::Tensor> amax_O,
                 const c10::optional<at::Tensor> Bias,
-                const c10::optional<at::Generator> rng_gen);
+                const c10::optional<at::Generator> rng_gen,
+                bool return_softmax,
+                int num_split,
+                int fused_attention_backend);
 
 std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 size_t b, size_t max_seqlen, size_t total_seqs,
@@ -48,7 +51,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
                 c10::optional<at::Tensor> amax_dP,
-                c10::optional<at::Tensor> amax_dQKV);
+                c10::optional<at::Tensor> amax_dQKV,
+                int num_split,
+                int fused_attention_backend); 
 
 std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -67,7 +72,10 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 c10::optional<at::Tensor> amax_S,
                 c10::optional<at::Tensor> amax_O,
                 const c10::optional<at::Tensor> Bias,
-                const c10::optional<at::Generator> rng_gen);
+                const c10::optional<at::Generator> rng_gen,
+                bool return_softmax,
+                int num_split,
+                int fused_attention_backend);
 
 std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -91,7 +99,9 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 const c10::optional<at::Tensor> scale_dP,
                 const c10::optional<at::Tensor> scale_dQKV,
                 c10::optional<at::Tensor> amax_dP,
-                c10::optional<at::Tensor> amax_dQKV);
+                c10::optional<at::Tensor> amax_dQKV,
+                int num_split,
+                int fused_attention_backend); 
 
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
