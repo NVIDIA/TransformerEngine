@@ -31,9 +31,16 @@ def _get_onnx_export_causal_mask(seq_q: int, seq_k: int, onnx_causal_mask) -> to
 
     ONNX does not support dynamic control-flow and requires non-square masks when
     using a KV-cache (seq_k's length len(context)+len(generative) while seq_q's length is 1).
+
+    Argument `onnx_causal_mask` is a square triu (k=1) mask that is sliced to the correct
+    shape for GPT context and generation phases.
+    In the context phase the derived mask is a square triu of shape (seq_k, seq_k), and in
+    the generation phase the mask is rectangular with shape (1, seq_k).
     """
-    onnx_causal_mask = torch.triu(torch.ones(seq_k, seq_k, device="cuda"), diagonal=1).bool()
-    derived_mask = onnx_causal_mask[seq_k-seq_q:seq_k, :seq_k].bool()
+    assert len(onnx_causal_mask.size()) == 2
+    assert onnx_causal_mask.size(0) == onnx_causal_mask.size(1)
+    assert onnx_causal_mask.size(0) >= (seq_k-seq_q) >= 0
+    derived_mask = onnx_causal_mask[seq_k-seq_q:seq_k, :seq_k]
     return derived_mask
 
 
@@ -226,6 +233,17 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
 
+        # Users exporting to ONNX can optimize the attention mask for GPT text generation for inference.
+        self.kvcache_max_seq = int(os.getenv("NVTE_ONNX_KVCACHE_MAX_SEQ_LEN", "-1"))
+        if self.kvcache_max_seq > 0:
+            self.register_buffer(
+                "onnx_causal_mask",
+                torch.triu(
+                    torch.ones(self.kvcache_max_seq, self.kvcache_max_seq, device="cuda"),
+                    diagonal=1
+                ).bool(),
+                persistent=False)
+
     def forward(
         self,
         inp: torch.Tensor,
@@ -299,9 +317,10 @@ class FusedScaleMaskSoftmax(nn.Module):
             inp = inp * scale
 
         if self.attn_mask_type == "causal":
-            if is_in_onnx_export_mode():
+            if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
                 seq_len_q, seq_len_k = inp.size(2), inp.size(3)
-                mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, None)
+                assert self.kvcache_max_seq >= seq_len_k
+                mask = _get_onnx_export_causal_mask(seq_len_q, seq_len_k, self.onnx_causal_mask)
             else:
                 mask = _get_default_causal_mask(inp.size(2))
 

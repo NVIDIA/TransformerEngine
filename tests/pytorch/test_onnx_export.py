@@ -71,10 +71,16 @@ fp8_available, reason_for_no_fp8 = is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 
-# Reseed the PRNG
 @pytest.fixture()
 def seed_default_rng():
+    """Reseed the PRNG for test repeatability"""
     torch.random.seed()
+
+
+@pytest.fixture()
+def set_max_seq_len(max_seq_len=128):
+    """Set the maximum sequence length that can be used for attention masking"""
+    os.environ["NVTE_ONNX_KVCACHE_MAX_SEQ_LEN"] = f"{max_seq_len}"
 
 
 def create_fp8_recipe():
@@ -120,10 +126,7 @@ def do_export(
                 opset_version=opset,
                 input_names=input_names,
                 output_names=output_names,
-                # Do not constant-fold because torch.onnx incorrectly folds
-                # layer_norm(data, scale=add(gamma,1)) to layer_norm(data, scale=gamma)
-                # when we use LN with zero-centered gamma.
-                do_constant_folding=False,
+                do_constant_folding=True,
                 operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH)
 
 
@@ -315,7 +318,7 @@ Tests cases begin here.
     [torch.float16, 1e-7],
     [torch.bfloat16, 5e-3]
 ])
-def test_export_cast_ops(scale_factor: float, atol: float, precision: torch.dtype):
+def test_export_cast_ops(seed_default_rng, scale_factor: float, atol: float, precision: torch.dtype):
     class TestFP8_QDQ(nn.Module):
         def __init__(self, fake_bf16_io):
             super().__init__()
@@ -421,6 +424,7 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     (torch.bfloat16, True,   True,     False),
 ])
 def test_export_gemm(
+    seed_default_rng,
     precision, # Precision of inputs, weights, output and bias
     use_fp8,
     use_bias,
@@ -546,6 +550,7 @@ def test_export_gemm(
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm(
+    seed_default_rng,
     use_fp8: bool,
     scale_factor: float,
     precision: torch.dtype,
@@ -626,7 +631,7 @@ def test_export_layernorm(
 ])
 # Softmax kernel only supports FP16 or BF16!
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
-def test_export_softmax(softmax_fn, precision):
+def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision):
     class Test_Softmax(nn.Module):
         def __init__(self, softmax_fn, mask_inp=False):
             super().__init__()
@@ -686,7 +691,7 @@ def test_export_softmax(softmax_fn, precision):
 # Test dynamically generated softmax mask.
 # Softmax kernel only supports FP16 or BF16!
 @pytest.mark.parametrize("precision", [torch.float16])
-def test_softmax_mask_fn(precision):
+def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     class Test_Softmax(nn.Module):
         def __init__(self, use_onnx_mask_fn: bool):
             super().__init__()
@@ -751,6 +756,7 @@ def test_softmax_mask_fn(precision):
     # (torch.bfloat16, True),
 ])
 def test_export_linear(
+    seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
     use_bias: bool,
@@ -826,6 +832,7 @@ def test_export_linear(
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm_linear(
+    seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
     use_bias: bool,
@@ -882,6 +889,7 @@ def test_export_layernorm_linear(
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_layernorm_mlp(
+    seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
     use_bias: bool,
@@ -933,14 +941,15 @@ def test_export_layernorm_mlp(
     (torch.float16, False,    "padding"), # calls ScaledSoftmax
 ])
 def test_export_core_attention(
+    seed_default_rng,
+    set_max_seq_len,
     precision: torch.dtype,
     use_mask: bool,
     attn_mask_type: str,
 ):
     # Set dimensions (these are arbitrary).
-    kv_channels = 64
-    num_attention_heads = 1
-    qkv_size = (256, 4, num_attention_heads, kv_channels)
+    seq_len, batch_size, num_attention_heads, kv_channels = (64, 4, 1, 64)
+    qkv_size = (seq_len, batch_size, num_attention_heads, kv_channels)
 
     query_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     key_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
@@ -998,6 +1007,8 @@ test_configs_attention_type = [
 @pytest.mark.parametrize("return_layernorm_output", [False])
 @pytest.mark.parametrize("input_layernorm, attention_type, fuse_qkv_params", test_configs_attention_type)
 def test_export_multihead_attention(
+    seed_default_rng,
+    set_max_seq_len,
     use_fp8: bool,
     use_mask: bool,
     attn_mask_type: str,
@@ -1097,6 +1108,8 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_transformer_layer(
+    seed_default_rng,
+    set_max_seq_len,
     use_fp8: bool,
     use_mask: bool,
     attn_mask_type: str,
@@ -1153,6 +1166,7 @@ def test_export_transformer_layer(
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 def test_export_gemm_layernorm(
+    seed_default_rng,
     use_fp8: bool,
     ln_scale_factor: float,
     gemm_scale_factors: Tuple[float, float],
@@ -1273,6 +1287,8 @@ def test_export_gemm_layernorm(
 @pytest.mark.parametrize("precision", [torch.float16])
 @pytest.mark.parametrize("zero_centered_gamma", [True])
 def test_export_gpt_generation(
+    seed_default_rng,
+    set_max_seq_len,
     use_fp8: bool,
     precision: torch.dtype,
     zero_centered_gamma: bool
