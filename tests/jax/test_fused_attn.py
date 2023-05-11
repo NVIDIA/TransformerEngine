@@ -322,7 +322,7 @@ class TestCrossFusedAttnMax512():
                                         axis=-1)
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
-        self.dropout_rng = jax.random.PRNGKey(0)
+        self.dropout_rng = jax.random.PRNGKey(0) if self.dropout_probability > 0 else None
         self.attn_bias_type = AttnBiasType.NO_BIAS
         # deterministic = not is_training
         self.deterministic = False

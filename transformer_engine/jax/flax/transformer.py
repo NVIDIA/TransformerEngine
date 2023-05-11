@@ -372,7 +372,7 @@ class MultiHeadAttention(nn.Module):
         fused_attn_supported_seqlen = [128, 256, 384, 512]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
-            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
+            canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
             q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
             and is_fused_attn_kernel_available() and enable_fused_attn
 
@@ -385,9 +385,6 @@ class MultiHeadAttention(nn.Module):
                           f"but got {self.transpose_batch_sequence}, "
             if not self.fuse_qkv:
                 reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
-            if self.dropout_rate != 0:
-                # TODO(rewang): add dropout support
-                reason += f"no dropout is required but got dropout_rate={self.dropout_rate}, "
             if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
                 reason += f"dtype in [BF16, FP16] is required " \
                           f"but got dtype={canonicalize_dtype}, "

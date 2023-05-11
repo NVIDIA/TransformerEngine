@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Tuple
 from functools import partial, reduce
 import operator
+import warnings
+
 import numpy as np
 from jaxlib.hlo_helpers import custom_call
 import jax.numpy as jnp
@@ -1679,7 +1681,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
                                                          grad_outputs, softmax_outputs,
                                                          scale_factor)
 
-        return out # out is iterable already
+        return out    # out is iterable already
 
 
 _scaled_softmax_bwd_p = register_primitive(ScaledSoftmaxBwdPrimitive)
@@ -1828,7 +1830,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
                                                          grad_outputs, softmax_outputs,
                                                          scale_factor)
 
-        return out # out is iterable already
+        return out    # out is iterable already
 
 
 _scaled_masked_softmax_bwd_p = register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
@@ -1962,7 +1964,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             ScaledUpperTriangMaskedSoftmaxBwdPrimitive.name, ctx, grad_outputs, softmax_outputs,
             scale_factor)
 
-        return out # out is iterable already
+        return out    # out is iterable already
 
 _scaled_upper_triang_masked_softmax_bwd_p = \
     register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
@@ -2078,7 +2080,17 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
     """
     # Jax can't bind None, create a dummy tensor for None
     if rng_state is None:
-        rng_state = jnp.zeros(2, dtype=jnp.int32)
+        rng_state = jnp.zeros(2, dtype=jnp.uint32)
+
+    # Jax default use threefry PRNG, which generates 2 u32
+    # TODO(rewang): Check how to support different PRNG
+    if rng_state.dtype != jnp.uint32:
+        warnings.warn(f"Requested {rng_state.dtype=} is not available, and will be "
+                      f"casted to dtype uint32.")
+        rng_state = rng_state.astype(jnp.uint32)
+    assert rng_state.dtype == jnp.uint32
+    assert rng_state.size == 2
+
     if bias is None:
         assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
         bias = jnp.zeros(0, dtype=qkv.dtype)
@@ -2306,7 +2318,17 @@ def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: j
     """
     # Jax can't bind None, create a dummy tensor for None
     if rng_state is None:
-        rng_state = jnp.zeros(2, dtype=jnp.int32)
+        rng_state = jnp.zeros(2, dtype=jnp.uint32)
+
+    # Jax default use threefry PRNG, which generates 2 u32
+    # TODO(rewang): Check how to support different PRNG
+    if rng_state.dtype != jnp.uint32:
+        warnings.warn(f"Requested {rng_state.dtype=} is not available, and will be "
+                      f"casted to dtype uint32.")
+        rng_state = rng_state.astype(jnp.uint32)
+    assert rng_state.dtype == jnp.uint32
+    assert rng_state.size == 2
+
     return _cross_fused_attn_max_512_fwd_p.bind(q,
                                                 kv,
                                                 q_cu_seqlen,
