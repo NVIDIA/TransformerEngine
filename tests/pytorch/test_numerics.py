@@ -18,7 +18,7 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
-from transformer_engine.pytorch import Linear, LayerNormLinear, TransformerLayer
+from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, TransformerLayer
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
 
@@ -217,24 +217,24 @@ class TorchMHA(nn.Module):
         return self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
 
 
-class TorchMLP(nn.Module):
-    def __init__(self, hidden_size: int):
+class TorchLayerNormMLP(nn.Module):
+    def __init__(self, hidden_size: int, ffn_hidden_size: int, eps: float = 1e-5):
         super().__init__()
-        self.fc1 = nn.Linear(hidden_size, 4 * hidden_size)
+        self.ln = nn.LayerNorm(hidden_size, eps=eps)
+        self.fc1 = nn.Linear(hidden_size, ffn_hidden_size)
         self.gelu = nn.GELU(approximate="tanh")
-        self.fc2 = nn.Linear(4 * hidden_size, hidden_size)
+        self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
 
     def forward(self, x):
-        return self.fc2(self.gelu(self.fc1(x)))
+        return self.fc2(self.gelu(self.fc1(self.ln(x))))
 
 
 class TorchGPT(nn.Module):
     def __init__(self, hidden_size: int, eps: float, num_attention_heads: int):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=eps)
+        self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=eps)
-        self.mlp = TorchMLP(hidden_size)
+        self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
         self.resid_attn_dropout = nn.Dropout(0.1)
         self.resid_mlp_dropout = nn.Dropout(0.1)
 
@@ -243,11 +243,10 @@ class TorchGPT(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        a = self.ln_1(x)
+        a = self.ln(x)
         b, _ = self.causal_attn(a, attn_mask)
         x = x + self.resid_attn_dropout(b)
-        m = self.ln_2(x)
-        n = self.mlp(m)
+        n = self.ln_mlp(x)
         x = x + self.resid_mlp_dropout(n)
         return x
 
@@ -535,10 +534,10 @@ def test_gpt_accuracy(dtype, bs, model):
 
     # Share params
     with torch.no_grad():
-        torch_gpt.ln_1.weight = Parameter(
+        torch_gpt.ln.weight = Parameter(
             te_gpt.self_attention.layernorm_qkv.layer_norm_weight.clone()
         )
-        torch_gpt.ln_1.bias = Parameter(te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
+        torch_gpt.ln.bias = Parameter(te_gpt.self_attention.layernorm_qkv.layer_norm_bias.clone())
         torch_gpt.causal_attn.mhsa.in_proj_weight = Parameter(
             te_gpt.self_attention.layernorm_qkv.weight.clone()
         )
@@ -551,12 +550,12 @@ def test_gpt_accuracy(dtype, bs, model):
         torch_gpt.causal_attn.mhsa.out_proj.bias = Parameter(
             te_gpt.self_attention.proj.bias.clone()
         )
-        torch_gpt.ln_2.weight = Parameter(te_gpt.layernorm_mlp.layer_norm_weight.clone())
-        torch_gpt.ln_2.bias = Parameter(te_gpt.layernorm_mlp.layer_norm_bias.clone())
-        torch_gpt.mlp.fc1.weight = Parameter(te_gpt.layernorm_mlp.fc1_weight.clone())
-        torch_gpt.mlp.fc1.bias = Parameter(te_gpt.layernorm_mlp.fc1_bias.clone())
-        torch_gpt.mlp.fc2.weight = Parameter(te_gpt.layernorm_mlp.fc2_weight.clone())
-        torch_gpt.mlp.fc2.bias = Parameter(te_gpt.layernorm_mlp.fc2_bias.clone())
+        torch_gpt.ln_mlp.ln.weight = Parameter(te_gpt.layernorm_mlp.layer_norm_weight.clone())
+        torch_gpt.ln_mlp.ln.bias = Parameter(te_gpt.layernorm_mlp.layer_norm_bias.clone())
+        torch_gpt.ln_mlp.fc1.weight = Parameter(te_gpt.layernorm_mlp.fc1_weight.clone())
+        torch_gpt.ln_mlp.fc1.bias = Parameter(te_gpt.layernorm_mlp.fc1_bias.clone())
+        torch_gpt.ln_mlp.fc2.weight = Parameter(te_gpt.layernorm_mlp.fc2_weight.clone())
+        torch_gpt.ln_mlp.fc2.bias = Parameter(te_gpt.layernorm_mlp.fc2_bias.clone())
 
     te_outputs = _test_e2e_gpt_accuracy(te_gpt, bs, dtype, config)
     torch_outputs = _test_e2e_gpt_accuracy(torch_gpt, bs, dtype, config)
@@ -670,6 +669,51 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
 
     te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_layernorm_mlp_accuracy(dtype, bs, model):
+    config = model_configs[model]
+
+    te_ln_mlp = (
+        LayerNormMLP(
+            config.hidden_size,
+            4 * config.hidden_size,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_ln_mlp = (
+        TorchLayerNormMLP(
+            config.hidden_size,
+            4 * config.hidden_size,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
+        torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
+        torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
+        torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())
+        torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
+
+    te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
 
     # Check output.
     if dtype == torch.float32:
