@@ -39,6 +39,8 @@ def te_dtype_to_jax_dtype(te_dtype):
         return jnp.bfloat16
     if te_dtype == TEDType.kInt32:
         return jnp.int32
+    if te_dtype == TEDType.kInt64:
+        return jnp.int64
     return jnp.int8
 
 
@@ -214,7 +216,7 @@ class TransposePrimitive(BasePrimitive):
 
         out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _transpose_p = register_primitive(TransposePrimitive)
@@ -362,7 +364,7 @@ class GatedGeluPrimitive(BasePrimitive):
 
         out = custom_caller(GatedGeluPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _gated_gelu_p = register_primitive(GatedGeluPrimitive)
@@ -520,7 +522,7 @@ class DgatedGeluPrimitive(BasePrimitive):
 
         out = custom_caller(DgatedGeluPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _dgated_gelu_p = register_primitive(DgatedGeluPrimitive)
@@ -708,7 +710,7 @@ class GemmPrimitive(BasePrimitive):
 
         out = custom_caller(GemmPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _gemm_p = register_primitive(GemmPrimitive)
@@ -1464,7 +1466,7 @@ class DequantizePrimitive(BasePrimitive):
 
         out = custom_caller(DequantizePrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _dequantize_p = register_primitive(DequantizePrimitive)
@@ -1558,7 +1560,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         out = custom_caller(name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
@@ -1632,7 +1634,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         out = custom_caller(ScaledSoftmaxFwdPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _scaled_softmax_fwd_p = register_primitive(ScaledSoftmaxFwdPrimitive)
@@ -1673,11 +1675,9 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_softmax_backward lowering rules
         """
-        out = SoftmaxPrimitive.softmax_backward_lowering(ScaledSoftmaxBwdPrimitive.name, ctx,
-                                                         grad_outputs, softmax_outputs,
-                                                         scale_factor)
-
-        return [out]
+        return SoftmaxPrimitive.softmax_backward_lowering(ScaledSoftmaxBwdPrimitive.name, ctx,
+                                                          grad_outputs, softmax_outputs,
+                                                          scale_factor)
 
 
 _scaled_softmax_bwd_p = register_primitive(ScaledSoftmaxBwdPrimitive)
@@ -1780,7 +1780,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 
 _scaled_masked_softmax_fwd_p = register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
@@ -1822,11 +1822,9 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_masked_softmax_backward lowering rules
         """
-        out = SoftmaxPrimitive.softmax_backward_lowering(ScaledMaskedSoftmaxBwdPrimitive.name, ctx,
-                                                         grad_outputs, softmax_outputs,
-                                                         scale_factor)
-
-        return [out]
+        return SoftmaxPrimitive.softmax_backward_lowering(ScaledMaskedSoftmaxBwdPrimitive.name, ctx,
+                                                          grad_outputs, softmax_outputs,
+                                                          scale_factor)
 
 
 _scaled_masked_softmax_bwd_p = register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
@@ -1915,7 +1913,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
         out = custom_caller(ScaledUpperTriangMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
 _scaled_upper_triang_masked_softmax_fwd_p = \
     register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
@@ -1956,11 +1954,9 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_upper_triang_masked_softmax_backward lowering rules
         """
-        out = SoftmaxPrimitive.softmax_backward_lowering(
+        return SoftmaxPrimitive.softmax_backward_lowering(
             ScaledUpperTriangMaskedSoftmaxBwdPrimitive.name, ctx, grad_outputs, softmax_outputs,
             scale_factor)
-
-        return [out]
 
 _scaled_upper_triang_masked_softmax_bwd_p = \
     register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
