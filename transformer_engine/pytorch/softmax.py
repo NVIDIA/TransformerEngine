@@ -9,9 +9,8 @@ import torch
 from torch import nn
 import torch._C._onnx as _C_onnx
 from torch.onnx import _type_utils
-from transformer_engine.pytorch.export import is_in_onnx_export_mode
-
 import transformer_engine_extensions as tex
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
@@ -233,7 +232,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
 
-        # Users exporting to ONNX can optimize the attention mask for GPT text generation for inference.
+        # Users exporting to ONNX can optimize the attention mask for GPT text generation.
         self.kvcache_max_seq = int(os.getenv("NVTE_ONNX_KVCACHE_MAX_SEQ_LEN", "-1"))
         if self.kvcache_max_seq > 0:
             self.register_buffer(
