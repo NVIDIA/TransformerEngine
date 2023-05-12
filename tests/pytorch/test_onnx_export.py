@@ -73,7 +73,7 @@ skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 @pytest.fixture()
 def seed_default_rng():
-    """Reseed the PRNG for test repeatability"""
+    """Reseed the PRNG for test reproducibility"""
     torch.random.seed()
 
 
@@ -93,12 +93,14 @@ def do_export(
     fname: str,
     use_fp8: bool=True,
     opset: int=OPSET,
-    input_names: List=["input"],
-    output_names: List=["output"],
+    input_names: List[str]=None,
+    output_names: List[str]=None,
     dynamic_axes: List[str]=None
 ):
     """Export to ONNX"""
     fp8_recipe = create_fp8_recipe()
+    input_names = input_names or ["input"]
+    output_names = output_names or ["output"]
 
     with torch.inference_mode(), te.fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe), warnings.catch_warnings():
         warnings.filterwarnings(
@@ -194,8 +196,8 @@ def validate_result(
     max_errors_printed: int=10,
     is_fp8: bool=False,
     allow_cnt_errors: int=0,
-    input_names: list=["input"],
-    output_names: list=["output"],
+    input_names: List[str]=None,
+    output_names: List[str]=None,
     te_outputs: List[torch.Tensor]=None,
 ):
     """Compare the outputs of a Transformer Engine (TE) module vs the outputs of its ONNX
@@ -259,6 +261,9 @@ def validate_result(
         custom_outputs = RunResults()
         custom_outputs.add([output_data], runner_name="custom_runner")
         custom_outputs.save(json_fname)
+
+    input_names = input_names or ["input"]
+    output_names = output_names or ["output"]
 
     # Run ORT session and TE model.
     fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
@@ -354,6 +359,7 @@ def test_export_cast_ops(seed_default_rng, scale_factor: float, atol: float, pre
     high_prec_str = dtype2str(precision)
     fname = f"te.cast_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_QDQ(fake_bf16_io)
+
     do_export(model, inp, fname)
     validate_result(fname, inp, model, atol=atol, is_fp8=True)
 
