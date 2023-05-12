@@ -835,14 +835,6 @@ size_t get_cublasLt_version() {
 }
 
 
-bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
-#ifdef NVTE_WITH_USERBUFFERS
-    return true;
-#else
-    return false;
-#endif
-}
-
 void placeholder() {}  // TODO(ksivamani) clean this up
 
 namespace flash_attention {
