@@ -43,7 +43,15 @@ inline void check_cublas_(cublasStatus_t status) {
 
 inline void check_cudnn_(cudnnStatus_t status) {
     if ( status != CUDNN_STATUS_SUCCESS ) {
-        NVTE_ERROR("CUDNN Error: " + std::string(cudnnGetErrorString(status)));
+        std::string message;
+        message.reserve(1024);
+        message += "CUDNN Error: ";
+        message += cudnnGetErrorString(status);
+        message += (". "
+                    "For more information, enable cuDNN error logging "
+                    "by setting CUDNN_LOGERR_DBG=1 and "
+                    "CUDNN_LOGDEST_DBG=stderr in the environment.");
+        NVTE_ERROR(message);
     }
 }
 

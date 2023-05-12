@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from jax.experimental import maps
 
+from utils import is_devices_enough
 from transformer_engine.jax.flax import extend_logical_axis_rules
 from transformer_engine.jax.sharding import get_dot_sharding_meta
 from transformer_engine.jax.sharding import get_elementwise_sharding_meta
@@ -15,7 +16,6 @@ from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import is_dp_enabled, is_tp_enabled
 from transformer_engine.jax.sharding import ShardingMeta, ShardingResource, ShardingType
-from utils import is_devices_enough
 
 
 def _get_sharding_resource(mesh_names, sharding_type):

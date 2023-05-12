@@ -18,6 +18,9 @@
 namespace transformer_engine {
 namespace jax {
 
+int GetCudaRuntimeVersion();
+int GetDeviceComputeCapability(int gpu_id);
+
 class cublasLtMetaManager {
  public:
     static cublasLtMetaManager &Instance() {
@@ -73,6 +76,16 @@ class cudaDevicePropertiesManager {
             prop_queried_ = true;
         }
         return prop_.multiProcessorCount;
+    }
+
+    int GetMajor() {
+        if (!prop_queried_) {
+            int device_id;
+            NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+            cudaGetDeviceProperties(&prop_, device_id);
+            prop_queried_ = true;
+        }
+        return prop_.major;
     }
 
  private:

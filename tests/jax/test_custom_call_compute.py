@@ -13,13 +13,14 @@ from jax import lax
 from jax import jit, value_and_grad
 from flax import linen as nn
 
-from utils import assert_allclose, is_fp8_supported
+from utils import assert_allclose
 from transformer_engine.common.recipe import Format
 from transformer_engine.jax.cpp_extensions import dgated_gelu, gated_gelu
 from transformer_engine.jax.cpp_extensions import dgated_gelu_cast_transpose, gated_gelu_fp8
 from transformer_engine.jax.cpp_extensions import dequantize, quantize
 from transformer_engine.jax.dot import fp8_dot
 from transformer_engine.jax.fp8 import DType, FP8GemmPackage, FP8Helper, _format2dtypes
+from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.mlp import fp8_ln_mlp
 
@@ -28,11 +29,12 @@ GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 
 FP8_COMPUTE_TYPE = [_format2dtypes(Format.E4M3), _format2dtypes(Format.HYBRID)]
 LN_CASES = [(512, 1024)]
 DTYPES = [jnp.bfloat16, jnp.float32]
+is_fp8_supported, reason = is_fp8_available()
 
 
 class TestFP8Dot:
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     def test_qdq(self):
         FP8_E4M3_MAX = 448
         x = jnp.asarray([[-1, 0.1], [2, 3]], jnp.float32)
@@ -74,7 +76,7 @@ class TestFP8Dot:
         value_n_grad_func_compiled = jit(value_n_grad_func).lower(a, b).compile()
         value_n_grad_func_compiled(a, b)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('compute_type', FP8_COMPUTE_TYPE)
     def test_compile_fp8(self, compute_type):
         key = jax.random.PRNGKey(0)
@@ -115,7 +117,7 @@ class TestFP8Dot:
 
         assert_allclose(primitive_out, ref_out)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     @pytest.mark.parametrize('compute_type', FP8_COMPUTE_TYPE)
     def test_forward_fp8_randint(self, m, n, k, compute_type):
@@ -180,7 +182,7 @@ class TestFP8Dot:
         assert_allclose(primitive_a_grad, ref_a_grad)
         assert_allclose(primitive_b_grad, ref_b_grad, atol=1e-5)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     @pytest.mark.parametrize('compute_type', FP8_COMPUTE_TYPE)
     def test_grad_fp8_randint(self, m, n, k, compute_type):
@@ -252,7 +254,7 @@ class TestFP8Dot:
         assert_allclose(primitive_a_grad, ref_a_grad)
         assert_allclose(primitive_b_grad, ref_b_grad)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
                                        (16384, 1024, 1024)])
     def test_grad_fp8_mlp_randint(self, m, n, k):
@@ -464,7 +466,7 @@ class TestGatedGeLuFP8(TestGatedGeLu):
 
         return func(inputs, no_use, no_use)
 
-    @pytest.mark.skipif(not is_fp8_supported(), reason='GPU capability is not enough to run FP8')
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('shape', [(32, 64), (64, 256)])
     def test_gated_gelu(self, random_inputs):
         self.amax = jnp.zeros(1, jnp.float32)

@@ -1,9 +1,8 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" Encoder training on single GPU"""
+"""Encoder training on single GPU"""
 import argparse
-import os
 import unittest
 from functools import partial
 
@@ -12,8 +11,7 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
-import tensorflow_datasets as tfds
-from cuda import cudart
+from datasets import load_dataset
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
@@ -23,19 +21,6 @@ import transformer_engine.jax as te
 PARAMS_KEY = 'params'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
-
-
-def gpu_has_fp8():
-    """Check if the GPU has FP8."""
-    cudaSuccess = cudart.cudaError_t.cudaSuccess
-    ret, gpu_id = cudart.cudaGetDevice()
-    assert ret == cudaSuccess
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMajor
-    _, major = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMinor
-    _, minor = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    sm_arch = major * 10 + minor
-    return sm_arch >= 89
 
 
 class Net(nn.Module):
@@ -53,7 +38,7 @@ class Net(nn.Module):
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te.TransformerLayerType.ENCODER,
+                             layer_type=te.flax.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
@@ -158,12 +143,11 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
     nltk.download('punkt')
     dataset_size = len(dataset['sentence'])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
-    mask_3d = np.empty((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
+    mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
     for j, sentence in enumerate(dataset['sentence']):
-        tokens = nltk.word_tokenize(sentence.decode("utf-8"))
+        tokens = nltk.word_tokenize(sentence)
         tensor = output[j]
-        mask_1d = np.zeros((1, max_seq_len), dtype=np.uint8)
 
         for i, word in enumerate(tokens):
             if i >= max_seq_len:
@@ -176,26 +160,31 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
             else:
                 tensor[i] = vocab[word]
 
-            mask_1d[0, i] = 1
-
+        seq_len = len(tokens)
+        if seq_len > max_seq_len:
+            seq_len = max_seq_len
         mask_2d = mask_3d[j]
-        np.dot(mask_1d.T, mask_1d, out=mask_2d)
-        np.subtract(1, mask_2d, out=mask_2d)
+        mask_2d[:seq_len, :seq_len] = 0
 
-    dataset['sentence'] = output
-    dataset['label'] = dataset['label'].astype(np.float32)
-    dataset['mask'] = mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
-    return dataset, vocab, word_id
+    new_dataset = {
+        'sentence': output,
+        'label': dataset['label'].astype(np.float32),
+        'mask': mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
+    }
+    return new_dataset, vocab, word_id
 
 
 def get_datasets(max_seq_len):
     """Load GLUE train and test datasets into memory."""
     vocab = {}
     word_id = 0
-    dataset = 'glue/cola'
-    train_ds = tfds.as_numpy(tfds.load(dataset, split='train', batch_size=-1))
+
+    train_ds = load_dataset('glue', 'cola', split='train')
+    train_ds.set_format(type='np')
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
-    test_ds = tfds.as_numpy(tfds.load(dataset, split='validation', batch_size=-1))
+
+    test_ds = load_dataset('glue', 'cola', split='validation')
+    test_ds.set_format(type='np')
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
 
@@ -210,11 +199,8 @@ def check_fp8(state, var_collect, inputs, masks, labels):
 
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     print(args)
-
-    if args.use_fp8:
-        assert gpu_has_fp8(), "GPU needs to support FP8."
+    train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
     rng = jax.random.PRNGKey(args.seed)
     rng, params_rng = jax.random.split(rng)
@@ -226,7 +212,6 @@ def train_and_evaluate(args):
     label_shape = [args.batch_size]
 
     with te.fp8_autocast(enabled=args.use_fp8):
-        train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
         encoder = Net(num_embed)
         inputs = jnp.zeros(input_shape, dtype=jnp.int32)
         masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
@@ -322,6 +307,8 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
+    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+
     @classmethod
     def setUpClass(cls):
         """Run 4 epochs for testing"""
@@ -332,7 +319,7 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79
 
-    @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True

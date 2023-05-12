@@ -51,13 +51,13 @@ void generateMatrixStrides(
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 3 * h * d;
             } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                strideA[seqlen_transpose_dim_idx] = 2 * h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_dim_idx] = 2 * h * d;
+                strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 2 * h * d;
             } else {
-                strideA[seqlen_transpose_dim_idx] = h * d;
-                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_dim_idx] = h * d;
+                strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * h * d;
             }
@@ -131,6 +131,99 @@ void generateMatrixStrides(
     }
 }
 
+bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
+  (void)engine_config;
+  return false;
+}
+
+cudnn_frontend::Tensor tensor_create(
+                cudnnDataType_t type, int64_t id,
+                int64_t const * dim, int64_t const * stride,
+                bool is_virtual, bool is_value) {
+  int nbDims = 4;
+  auto tensor_created = cudnn_frontend::TensorBuilder()
+          .setDim(nbDims, dim)
+          .setStride(nbDims, stride)
+          .setId(id)
+          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
+          .setDataType(type)
+          .setVirtual(is_virtual)
+          .setByValue(is_value)
+          .build();
+  return tensor_created;
+}
+
+cudnn_frontend::Tensor tensor_create_with_offset(
+                cudnnDataType_t type, int64_t id,
+                int64_t const * dim, int64_t const * stride,
+                bool is_virtual, bool is_value,
+                std::shared_ptr<cudnn_frontend::Tensor> raggedOffset) {
+  int nbDims = 4;
+  auto tensor_created = cudnn_frontend::TensorBuilder()
+          .setDim(nbDims, dim)
+          .setStride(nbDims, stride)
+          .setId(id)
+          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
+          .setDataType(type)
+          .setVirtual(is_virtual)
+          .setByValue(is_value)
+          .setRaggedOffset(raggedOffset)
+          .build();
+  return tensor_created;
+}
+
+cudnn_frontend::PointWiseDesc pw_desc_create(
+                cudnnDataType_t type, cudnnPointwiseMode_t mode) {
+  auto pw_desc_created = cudnn_frontend::PointWiseDescBuilder()
+          .setMode(mode)
+          .setComputeType(type)
+          .build();
+  return pw_desc_created;
+}
+
+cudnn_frontend::Operation unary_pw_op_create(
+                cudnn_frontend::Tensor const &xDesc,
+                cudnn_frontend::Tensor const &yDesc,
+                cudnn_frontend::PointWiseDesc const &pwDesc) {
+  auto pw_op_created = cudnn_frontend::OperationBuilder(
+                  CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
+                      .setxDesc(xDesc)
+                      .setyDesc(yDesc)
+                      .setpwDesc(pwDesc)
+                      .build();
+  return pw_op_created;
+}
+
+cudnn_frontend::Operation binary_pw_op_create(
+                cudnn_frontend::Tensor const &xDesc,
+                cudnn_frontend::Tensor const &bDesc,
+                cudnn_frontend::Tensor const &yDesc,
+                cudnn_frontend::PointWiseDesc const &pwDesc) {
+  auto pw_op_created = cudnn_frontend::OperationBuilder(
+                  CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
+                      .setxDesc(xDesc)
+                      .setbDesc(bDesc)
+                      .setyDesc(yDesc)
+                      .setpwDesc(pwDesc)
+                      .build();
+  return pw_op_created;
+}
+
+cudnn_frontend::Operation ternary_pw_op_create(
+    cudnn_frontend::Tensor const &xDesc, cudnn_frontend::Tensor const &bDesc,
+    cudnn_frontend::Tensor const &tDesc, cudnn_frontend::Tensor const &yDesc,
+    cudnn_frontend::PointWiseDesc const &pwDesc) {
+  auto pw_op_created = cudnn_frontend::OperationBuilder(
+                           CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
+                           .setxDesc(xDesc)
+                           .setbDesc(bDesc)
+                           .settDesc(tDesc)
+                           .setyDesc(yDesc)
+                           .setpwDesc(pwDesc)
+                           .build();
+  return pw_op_created;
+}
+
 // convert cu_seqlens_q to qkv/o_ragged_offset and actual_seqlens_q
 __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d,
                 int32_t *cu_seqlens_q, int32_t *actual_seqlens_q,
@@ -144,6 +237,19 @@ __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d,
     o_ragged_offset[tid] = cu_seqlens_q[tid] * h * d;
   }
 }
+
+// convert cu_seqlens to actual_seqlens
+__global__ void cu_seqlens_to_actual_seqlens(size_t b,
+                int32_t const * const q_cu_seqlens,
+                int32_t const * const kv_cu_seqlens,
+                int32_t *q_seqlens, int32_t *kv_seqlens) {
+  size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < b) {
+    q_seqlens[tid] = q_cu_seqlens[tid + 1] - q_cu_seqlens[tid];
+    kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
+  }
+}
+
 }  // namespace fused_attn
 
 // get cuDNN data type

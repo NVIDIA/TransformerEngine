@@ -35,7 +35,14 @@ python test_single_gpu_encoder.py --use-fp8
 
 6. Fill in `params_pspec` and `encoder.init` to pjit to get a compiled function, `pjit_encoder_init `, and use it to initialize the model, so JAX now can know how to do the sharding.
 
-7. The `train_step` and `eval_step` also needs to be compiled by pjit. Thus, every input and output argument has to be set up `PartitionSpec` if the argument contains a tensor. For instance, the `input_pspec` is `PartitionSpec('data', None)` because the input shape is (batch size, sequence length). Then, the rest of the workflow is similar to the previous example.
+7. The `train_step` and `eval_step` also need to be compiled by pjit. Thus, every input and output argument has to be set up `PartitionSpec` if the argument contains a tensor. For instance, the `input_pspec` is `PartitionSpec('data', None)` because the input shape is (batch size, sequence length). Then, the rest of the workflow is similar to the previous example.
+
+8. Use `CUDA_VISIBLE_DEVICES` to control the number of GPUs used. For example, if the system has 8 GPUs but only 4 GPUs need to be used, then:
+   ```sh
+   export CUDA_VISIBLE_DEVICES=0,1,2,3
+   python test_multigpu_encoder.py
+   ```
+   Please refer to [CUDA Environment Variables](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#cuda-environment-variables) for more details.
 
 ### Run ###
 
@@ -60,10 +67,73 @@ python test_multigpu_encoder.py --use-fp8
     import os
     os.environ['XLA_FLAGS'] = "--xla_dump_hlo_as_proto --xla_dump_hlo_as_text --xla_dump_hlo_as_html --xla_dump_to=<path to store XLA HLO>"
     ```
+5. If the model parallelism example is run in the container, it is recommended to add `--ipc=host` in launch arguments. Otherwise, it might trigger UCX errors.
+   ```sh
+   docker run --gpus=all --ipc=host ...
+   ```
 
 ### Run ###
 
 ```bash
 python test_model_parallel_encoder.py
 python test_model_parallel_encoder.py --use-fp8
+```
+
+
+## Multiple Processes with Model Parallelism ##
+
+1. This example inherits previous model parallelism example, but uses multiprocessing instead of single-program multiple-data (SPMD). It uses 1 GPU per process.
+
+2. The benefit of multiprocessing is to setup hardware affinity for GPUs, such as NUMA binding. It may help improve performance and stability. Please refer to [Best Practices When Benchmarking CUDA Applications](https://www.nvidia.com/en-us/on-demand/session/gtcsiliconvalley2019-s9956/) for more details.
+
+3. The quick way to check system topology is to use `nvidia-smi`, for example:
+   ```sh
+   $ nvidia-smi topo -mp
+           CPU Affinity    NUMA Affinity
+   GPU0    48-63,176-191   3
+   GPU1    48-63,176-191   3
+   GPU2    16-31,144-159   1
+   GPU3    16-31,144-159   1
+   GPU4    112-127,240-255 7
+   GPU5    112-127,240-255 7
+   GPU6    80-95,208-223   5
+   GPU7    80-95,208-223   5
+   ```
+
+4. It is recommended to set the environment variable `CUDA_DEVICE_ORDER` to `PCI_BUS_ID` before running the example with the affinity setting. To ensure that the device order is aligned between CUDA and `nvidia-smi`. Please refer to [CUDA Environment Variables](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#cuda-environment-variables) for more details.
+
+5. `jax.distributed.initialize` must be called before any other JAX or Flax API, otherwise `jax.local_devices` will be incorrect. `jax.distributed.shutdown` should be the last API call.
+
+6. Unlike SPMD, the input tensor must be sharded manually and be wrapped by `jax.make_array_from_single_device_arrays`. Otherwise, the sharding will be incorrect. Using DP=4, TP=2 as an example, the device mesh looks like:
+   ```python
+   mesh.device_ids = [[0, 1],
+                      [2, 3],
+                      [4, 5],
+                      [6, 7]]
+   ```
+   Assume that the process ID is mapped to GPU ID. The process 0 and process 1 are grouped for model parallelism, the process 2 and process 3 are grouped together too, and so on. Thus, process 0 and process 1 need to share the same micro-batch in the training step, process 0 and process 2, 4, and 6 have different micro-batch.
+
+### Run ###
+
+If the system has 8 GPUs, the basic commands are:
+```bash
+python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
+```
+The correct setting for hardware affinity is system dependent. Taking the above system topology as an example, the command can be:
+```bash
+numactl --cpunodebind=48  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 0 &
+numactl --cpunodebind=49  --membind=3 python test_multiprocessing_encoder.py --num-process 8 --process-id 1 &
+numactl --cpunodebind=16  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 2 &
+numactl --cpunodebind=17  --membind=1 python test_multiprocessing_encoder.py --num-process 8 --process-id 3 &
+numactl --cpunodebind=112 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 4 &
+numactl --cpunodebind=113 --membind=7 python test_multiprocessing_encoder.py --num-process 8 --process-id 5 &
+numactl --cpunodebind=80  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 6 &
+numactl --cpunodebind=81  --membind=5 python test_multiprocessing_encoder.py --num-process 8 --process-id 7 &
 ```
