@@ -53,14 +53,14 @@ void nvte_fused_attn_fwd_qkvpacked(
     // uses return_softmax and num_split
   } else if (fused_attention_backend == 2) {
 #if (CUDNN_VERSION >= 8901)
-        fused_attn_max_512_fwd_qkvpacked(
-            b, max_seqlen, h, d,
-            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-            input_QKV, input_Bias, output_O,
-            Aux_Output_Tensors,
-            input_cu_seqlens,
-            input_rng_state,
-            wkspace, stream, handle);
+      fused_attn_max_512_fwd_qkvpacked(
+          b, max_seqlen, h, d,
+          is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_QKV, input_Bias, output_O,
+          Aux_Output_Tensors,
+          input_cu_seqlens,
+          input_rng_state,
+          wkspace, stream, handle);
 #else
     NVTE_ERROR(
       "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
@@ -131,14 +131,16 @@ void nvte_fused_attn_bwd_qkvpacked(
     // uses return_softmax and num_split
   } else if (fused_attention_backend == 2) {
 #if (CUDNN_VERSION >= 8901)
-        fused_attn_max_512_bwd_qkvpacked(
-            b, max_seqlen, h, d,
-            attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-            input_QKV, input_dO,
-            Aux_CTX_Tensors,
-            output_dQKV, output_dBias,
-            input_cu_seqlens,
-            wkspace, stream, handle);
+      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      fused_attn_max_512_bwd_qkvpacked(
+          b, max_seqlen, h, d,
+          attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_QKV, input_dO,
+//          Aux_CTX_Tensors,
+          output_S,
+          output_dQKV, output_dBias,
+          input_cu_seqlens,
+          wkspace, stream, handle);
 #else
     NVTE_ERROR(
       "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
@@ -217,14 +219,14 @@ void nvte_fused_attn_fwd_kvpacked(
     // uses return_softmax and num_split
   } else if (fused_attention_backend == 2) {
 #if (CUDNN_VERSION >= 8901)
-        fused_attn_max_512_fwd_kvpacked(
-            b, max_seqlen_q, max_seqlen_kv, h, d,
-            is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-            input_Q, input_KV, input_Bias, output_O,
-            Aux_Output_Tensors,
-            input_cu_seqlens_q, input_cu_seqlens_kv,
-            input_rng_state,
-            wkspace, stream, handle);
+      fused_attn_max_512_fwd_kvpacked(
+          b, max_seqlen_q, max_seqlen_kv, h, d,
+          is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_Q, input_KV, input_Bias, output_O,
+          Aux_Output_Tensors,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
+          input_rng_state,
+          wkspace, stream, handle);
 #else
     NVTE_ERROR(
       "cuDNN 8.9.1 is required to run BF16/FP16 fused attention with max_seqlen<=512. \n");
@@ -289,11 +291,13 @@ void nvte_fused_attn_bwd_kvpacked(
     // uses return_softmax and num_split
   } else if (fused_attention_backend == 2) {
 #if (CUDNN_VERSION >= 8901)
+      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       fused_attn_max_512_bwd_kvpacked(
           b, max_seqlen_q, max_seqlen_kv, h, d,
           attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_KV, input_dO,
-          Aux_CTX_Tensors,
+//          Aux_CTX_Tensors,
+          output_S,
           output_dQ, output_dKV, output_dBias,
           input_cu_seqlens_q, input_cu_seqlens_kv,
           wkspace, stream, handle);

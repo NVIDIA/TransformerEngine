@@ -89,6 +89,7 @@ enum NVTE_Mask_Type {
  *  \param[in,out] S                        The S tensor.
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_Output_Tensors       Auxiliary output tensors when training, e.g. M, ZInv.
+ *                                          Note: Aux_Output_Tensors does not include rng_state.
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen               Max sequence length used for computing,
@@ -137,7 +138,10 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     dO                       The gradient of the O tensor.
  *  \param[in]     S                        The S tensor.
  *  \param[in,out] dP                       The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from forward when in training mode.
+ *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
+ *                                          e.g. M, ZInv, rng_state.
+ *                                          Note: different from Aux_Output_Tensors,
+ *                                          Aux_CTX_Tensors does include rng_state.
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
@@ -190,6 +194,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in,out] S                        The S tensor.
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_Output_Tensors       Auxiliary output tensors when training, e.g. M, ZInv.
+ *                                          Note: Aux_Output_Tensors does not include rng_state.
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
@@ -239,7 +244,10 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     dO                       The gradient of the O tensor.
  *  \param[in]     S                        The S tensor.
  *  \param[in,out] dP                       The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from forward when in training mode.
+ *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
+ *                                          e.g. M, ZInv, rng_state.
+ *                                          Note: different from Aux_Output_Tensors,
+ *                                          Aux_CTX_Tensors does include rng_state.
  *  \param[out]    dQ                       The gradient of the Q tensor.
  *  \param[out]    dKV                      The gradient of the KV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.

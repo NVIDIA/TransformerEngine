@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, Dict
 
 import torch
 
@@ -36,20 +36,6 @@ warnings.filterwarnings("module", category=DeprecationWarning, module="transform
 
 
 __all__ = ["TransformerLayer"]
-
-
-META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_O    = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_S    = 7
-META_DS   = 5
-
-# different implementations in FusedAttention
-FUSED_ATTN_FP16_BF16_FlashAttn = 1          # HazyResearch FlashAttention C API
-FUSED_ATTN_FP16_BF16_max_seqlen_512 = 2     # FP16/BF16 fused attention, <=512 sequence length
-FUSED_ATTN_FP16_BF16_arbitrary_seqlen = 3   # FP16/BF16 fused attention, any sequence length
-FUSED_ATTN_FP8 = 4                          # FP8 fused attention, <=512 sequence length
 
 class DropPath(torch.nn.Module):
     """Drop paths (Stochastic Depth) per sample

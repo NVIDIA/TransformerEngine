@@ -78,6 +78,7 @@ class _Linear(torch.autograd.Function):
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
+        print("inpt, features",inp.shape, in_features)
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         assert (

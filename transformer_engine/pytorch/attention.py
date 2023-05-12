@@ -7,7 +7,7 @@ import os
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
@@ -21,6 +21,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
+    FusedAttnBackends
 )
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.utils import (
@@ -33,6 +34,7 @@ from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
     dist_group_type,
+    TE_DType,
 )
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
@@ -47,6 +49,12 @@ _flash_attn_version_required = packaging.version.Version("1.0.2")
 
 __all__ = ["DotProductAttention"]
 
+META_QKV  = tex.FP8FwdTensors.GEMM1_OUTPUT
+META_O    = tex.FP8FwdTensors.GEMM2_INPUT
+META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
+META_S    = 7
+META_DS   = 5
 
 class _SplitLastDim(torch.autograd.Function):
     """"""
@@ -361,6 +369,472 @@ class FlashAttention(torch.nn.Module):
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
 
+class FusedAttnFunc_qkvpacked(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, tp_group, tp_size,
+                return_softmax=False, deterministic=True, fused_attention_backend=None):
+        # deterministic and num_splits are only used by fused_attention_backend = 1
+        if fp8_meta is not None:
+            out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias,
+                fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+                fp8_meta["scaling_fwd"].scale[META_S],
+                fp8_meta["scaling_fwd"].scale[META_O],
+                fp8_meta["scaling_fwd"].amax_history[0][META_S],
+                fp8_meta["scaling_fwd"].amax_history[0][META_O],
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, return_softmax, num_splits=1 if deterministic else 0,
+                fused_attention_backend=fused_attention_backend)
+        else:
+            print('----apply ',qkv.shape)
+            out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias,
+                None, None, None, None, None,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, return_softmax, num_splits=1 if deterministic else 0,
+                fused_attention_backend=fused_attention_backend)
+            print('----apply ',out.shape)
+
+        # if return_softmax, S_dmask is:
+        # backend 1: softmax tensor with dropout as the sign bits
+        # backend 2/3/4: None
+        S_dmask = rest[0] if return_softmax else None
+        print('----qkv ctx length',type(aux_ctx_tensors),len(aux_ctx_tensors))
+
+        # TODO can you save a dict
+        ctx.save_for_backward(qkv, out, cu_seqlens, fp8_meta)
+        ctx.aux_ctx_tensors = aux_ctx_tensors
+        ctx.max_seqlen = max_seqlen
+        ctx.qkv_dtype = qkv_dtype
+        ctx.attn_scale = attn_scale
+        ctx.dropout_p = dropout_p
+        ctx.set_zero = set_zero
+        ctx.qkv_layout = qkv_layout
+        ctx.attn_bias_type = attn_bias_type
+        ctx.attn_mask_type = attn_mask_type
+        ctx.tp_group = tp_group
+        ctx.tp_size = tp_size
+        ctx.deterministic = deterministic
+        ctx.fused_attention_backend = fused_attention_backend
+
+        # if return_softmax, return:
+        # backend 1: out, softmax_lse, S_dmask
+        # backend 2: out, softmax, None
+        # backend 3: out, softmax_stats, None
+        # backend 4: out, M, ZInv, None
+        # else, return out
+        # TODO
+        print('odd return softmax',return_softmax)
+        print('----apply ',out.shape)
+        if not return_softmax:
+            print('executing')
+            return out
+        print('still executing')
+        return (out, aux_ctx_tensors[:-1], S_dmask)
+
+    @staticmethod
+    def backward(ctx, d_out, *args):
+        qkv, out, cu_seqlens, fp8_meta = ctx.saved_tensors
+        print('argssssssssss',len(args))
+        if fp8_meta is not None:
+            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_DPA"):
+                dqkv, *rest = fused_attn_bwd_qkvpacked(
+                    ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
+                    ctx.qkv_dtype,
+                    ctx.aux_ctx_tensors,
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV], # d_scale_qkv,
+                    fp8_meta["scaling_fwd"].scale_inv[META_S], # d_scale_s,
+                    fp8_meta["scaling_fwd"].scale_inv[META_O], # d_scale_o,
+                    fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    fp8_meta["scaling_fwd"].scale[META_S], # q_scale_s
+                    fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                    fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                    ctx.attn_scale,
+                    ctx.dropout_p,
+                    ctx.set_zero,
+                    ctx.qkv_layout,
+                    ctx.attn_bias_type,
+                    ctx.attn_mask_type,
+                    num_splits=1 if ctx.deterministic else 0,
+                    fused_attention_backend=ctx.fused_attention_backend)
+        else:
+            dqkv, *rest = fused_attn_bwd_qkvpacked(
+                ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
+                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type,
+                num_splits=1 if ctx.deterministic else 0,
+                fused_attention_backend=ctx.fused_attention_backend)
+
+        print('dqkv shape',dqkv.shape)
+        # if no_bias, return dqkv
+        # otherwise, return (dqkv, dbias)
+        #return dqkv if ctx.attn_bias_type == "no_bias" else (dqkv, rest[0])
+        if ctx.attn_bias_type == "no_bias":
+#    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, fp8_meta,
+#                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+#                rng_gen, tp_group, tp_size,
+#                return_softmax=False, deterministic=True, fused_attention_backend=None):
+            return (None, None, None, dqkv, None, None, None,
+                    None, None, None, None, None, None,
+                    None, None, None, None, None, None)
+        return (None, None, None, dqkv, None, rest[0], None,
+                None, None, None, None, None, None,
+                None, None, None, None, None, None)
+
+class FusedAttnFunc_kvpacked(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, attn_bias, fp8_meta,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, tp_group, tp_size,
+                return_softmax=False, deterministic=True, fused_attention_backend=None):
+        # deterministic and num_splits are only used by fused_attention_backend = 1
+        if fp8_meta is not None:
+            out, aux_ctx_tensors, *rest = fused_attn_fwd_kvpacked(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, attn_bias,
+                fp8_meta["scaling_fwd"].scale_inv[META_QKV],
+                fp8_meta["scaling_fwd"].scale[META_S],
+                fp8_meta["scaling_fwd"].scale[META_O],
+                fp8_meta["scaling_fwd"].amax_history[0][META_S],
+                fp8_meta["scaling_fwd"].amax_history[0][META_O],
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, return_softmax, num_splits=1 if deterministic else 0,
+                fused_attention_backend=fused_attention_backend)
+        else:
+            out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
+                is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, attn_bias,
+                None, None, None, None, None,
+                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, return_softmax, num_splits=1 if deterministic else 0,
+                fused_attention_backend=fused_attention_backend)
+
+        # if return_softmax, S_dmask is:
+        # backend 1: softmax tensor with dropout as the sign bits
+        # backend 2/3/4: None
+        S_dmask = rest[0] if return_softmax else None
+
+        ctx.save_for_backward(q, kv, out, cu_seqlens_q, cu_seqlens_kv, fp8_meta)
+        ctx.aux_ctx_tensors = aux_ctx_tensors
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_kv = max_seqlen_kv
+        ctx.qkv_dtype = qkv_dtype
+        ctx.attn_scale = attn_scale
+        ctx.dropout_p = dropout_p
+        ctx.set_zero = set_zero
+        ctx.qkv_layout = qkv_layout
+        ctx.attn_bias_type = attn_bias_type
+        ctx.attn_mask_type = attn_mask_type
+        ctx.tp_group = tp_group
+        ctx.tp_size = tp_size
+        ctx.deterministic = deterministic
+        ctx.fused_attention_backend = fused_attention_backend
+
+        # if return_softmax, return:
+        # backend 1: out, softmax_lse, S_dmask
+        # backend 2: out, softmax, None
+        # backend 3: out, softmax_stats, None
+        # backend 4: out, M, ZInv, None
+        # else, return out
+        # TODO
+        #return out if not return_softmax else (out, aux_ctx_tensors[:-1], S_dmask)
+        #return out
+        if not return_softmax:
+            return out
+        return (out, aux_ctx_tensors[:-1], S_dmask)
+
+    @staticmethod
+    def backward(ctx, d_out, *args):
+        q, kv, out, cu_seqlens_q, cu_seqlens_kv, fp8_meta = ctx.saved_tensors
+        if fp8_meta is not None:
+            with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_DPA"):
+                dq, dkv, *rest = fused_attn_bwd_kvpacked(
+                    ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                    q, kv, out, d_out,
+                    ctx.qkv_dtype,
+                    ctx.aux_ctx_tensors,
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV], # d_scale_qkv,
+                    fp8_meta["scaling_fwd"].scale_inv[META_S], # d_scale_s,
+                    fp8_meta["scaling_fwd"].scale_inv[META_O], # d_scale_o,
+                    fp8_meta['scaling_bwd'].scale_inv[META_DO], # d_scale_do
+                    fp8_meta["scaling_fwd"].scale[META_S], # q_scale_s
+                    fp8_meta['scaling_bwd'].scale[META_DS], # q_scale_ds
+                    fp8_meta['scaling_bwd'].scale[META_DQKV], # q_scale_dqkv
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DS], # amax_ds
+                    fp8_meta['scaling_bwd'].amax_history[0][META_DQKV], # amax_dqkv
+                    ctx.attn_scale,
+                    ctx.dropout_p,
+                    ctx.set_zero,
+                    ctx.qkv_layout,
+                    ctx.attn_bias_type,
+                    ctx.attn_mask_type,
+                    num_splits=1 if ctx.deterministic else 0,
+                    fused_attention_backend=ctx.fused_attention_backend)
+        else:
+            dq, dkv, *rest = fused_attn_bwd_kvpacked(
+                ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, out, d_out,
+                ctx.qkv_dtype, aux_ctx_tensors,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type,
+                num_splits=1 if ctx.deterministic else 0,
+                fused_attention_backend=ctx.fused_attention_backend)
+
+        # if no_bias, return dqkv
+        # otherwise, return (dqkv, dbias)
+        return (dq, dkv) if ctx.attn_bias_type == "no_bias" else (dq, dkv, rest[0])
+#    def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+#                q, kv, qkv_dtype, attn_bias, fp8_meta,
+#                attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
+#                rng_gen, tp_group, tp_size,
+#                return_softmax=False, deterministic=True, fused_attention_backend=None):
+        if ctx.attn_bias_type == "no_bias":
+            return (None, None, None, None, None, dq, dkv, None, None, None,
+                    None, None, None, None, None, None,
+                    None, None, None, None, None, None)
+        return (None, None, None, None, None, dq, dkv, None, rest[0], None,
+                None, None, None, None, None, None,
+                None, None, None, None, None, None)
+
+class FusedAttention(torch.nn.Module):
+    """Dot product attention, implemented by using cuDNN graphs.
+
+    Supported backends:
+     1. HazyResearch FlashAttention C API
+        i.e. FUSED_ATTN_FP16_BF16_FlashAttn
+        (only for testing purposes, same performance as FlashAttention PyTorch API)
+     2. FP16/BF16 fused attention, <=512 sequence length
+        i.e. FUSED_ATTN_FP16_BF16_max_seqlen_512
+     3. FP16/BF16 fused attention, any sequence length
+        i.e. FUSED_ATTN_FP16_BF16_arbitrary_seqlen
+     4. FP8 fused attention, <=512 sequence length
+        i.e. FUSED_ATTN_FP8
+
+    Support matrix:
+    | backends       | 1              | 2                       | 3                   | 4                   |
+    | flash based    | yes            | no                      | yes                 | yes                 |
+    | precision      | fp16/bf16      | fp16/bf16               | fp16/bf16           | fp8                 |
+    | attn_type      | self           | self/cross              | self                | self                |
+    | qkv/qkv_layout | qkv/NA         | qkv/qkv_interleaved     | qkv/qkv_interleaved | qkv/qkv_interleaved |
+    |                | (q,kv)/NA      | (q,kv)/kv_interleaved   | qkv/sbh_interleaved |                     |
+    |                | (q,k,v)/NA     | (q,k,v)/not_interleaved |                     |                     |
+    | qkv padding    | padded/ragged  | padded/ragged           | padded              | ragged              |
+    | mask_type      | causal/(p?no?) | padding/padding+causal  | causal/p?no mask?   | padding             |
+    | bias_type      | no_bias        | pre/post_scale/no_bias  | no_bias             | no_bias             |
+    | dropout        | yes            | yes (jax no)            | yes (jax no)        | yes                 |
+    | max_seqlen     | >512           | <=512                   | >512                | <=512               |
+    | head_dim       | multiples of 8 | 64                      | 64, 128             | 64                  |
+    |                | up to 128      |                         |                     |                     |
+    """
+
+    def __init__(
+        self,
+        norm_factor: float,
+        attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
+        attn_mask_type: str = "causal",
+        attention_type: str = "self",
+    ) -> None:
+        super().__init__()
+
+        self.norm_factor = norm_factor
+        self.attention_dropout = attention_dropout
+        self.attention_dropout_ctx = attention_dropout_ctx
+        self.attn_mask_type = attn_mask_type
+        self.attention_type = attention_type
+        assert (
+            attn_mask_type in AttnMaskTypes
+        ), f"FusedAttention does not support attn_mask_type {attn_mask_type}."
+        assert (
+            attention_type in AttnTypes
+        ), f"FusedAttention does not support attention_type {attention_type}."
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        set_zero: bool = True,
+        fp8_meta: Optional[Dict[str, Any]] = None,
+        fused_attention_backend: int = 3,
+    ) -> torch.Tensor:
+        """fused attention fprop"""
+
+        assert (
+            (query_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.uint8, torch.float16, torch.bfloat16])
+            ), 'FusedAttention currently only supports FP8, FP16 and BF16.'
+        assert (
+            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            ), 'FusedAttention currently only supports CUDA tensors.'
+        assert (
+            attention_mask is None
+            ), 'FusedAttention currently does not support external attention mask.'
+
+        if fused_attention_backend == FusedAttnBackends["FUSED_ATTN_FP8"]:
+            assert (fp8_meta is not None
+                    ), "fp8_meta tensor is required for FP8 fused attention calculation."
+            fp8_dtype_forward = fp8.get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            qkv_dtype = fp8_dtype_forward
+        else:
+            qkv_dtype = TE_DType[query_layer.dtype]
+
+        seq_len_q, batch_size = query_layer.shape[0], query_layer.shape[1]
+        seq_len_kv = key_layer.shape[0]
+        max_seqlen_q = seq_len_q
+        max_seqlen_kv = seq_len_kv
+
+        if self.attention_type == "self":
+            if (_check_if_interleaved(query_layer, key_layer, value_layer)):
+                # TODO BF16/FP16 >512 fused attention supports (s,b,h,3,d)
+                # so no need for transposes/conversions
+                #if fused_attention_backend == FUSED_ATTN_FP16_BF16_arbitrary_seqlen:
+                #else:
+
+                query_layer = query_layer.unsqueeze(3)
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                # [s, b, h, 3, d]
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 3)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(2, 3).transpose(0, 1).contiguous()
+                print('is interleaved')
+            else:
+                query_layer = query_layer.unsqueeze(2)
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                # [s, b, 3, h, d]
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 2)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(0, 1).contiguous()
+
+            # [total_seqs, 3, h, d]
+            mixed_layer = mixed_layer.view(
+                mixed_layer.shape[0] * mixed_layer.shape[1], *mixed_layer.shape[2:])
+            qkv_layout = "qkv_interleaved"
+            print('FA: qkv',mixed_layer.shape,query_layer.shape)
+            mixed_layer = mixed_layer.contiguous()
+
+            # TODO since query/key/value_layer is written in [s,b,h,d] format, does this mean s is always m_s?
+            # i.e. q/k/v is always padded, never ragged
+            # TODO is the m_s (=s) here the max of seqlens or the actual seqlen later used for computation
+            # i.e. m_s can be bigger than max of all the seqlens
+            # TODO what about the sbh_interleaved layout?
+            max_seqlen = seq_len_q
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seq_len_q,
+                step=seq_len_q,
+                dtype=torch.int32,
+                device=query_layer.device)
+
+            with self.attention_dropout_ctx():
+                #output, *rest
+                output = FusedAttnFunc_qkvpacked.apply(
+                    self.training,
+                    max_seqlen,
+                    cu_seqlens,
+                    mixed_layer,
+                    qkv_dtype,
+                    core_attention_bias,
+                    fp8_meta,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    set_zero,
+                    qkv_layout,
+                    core_attention_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    None, # tp_group
+                    1, # tp_size
+                    False, # return_softmax
+                    self.deterministic,
+                    fused_attention_backend,
+                )
+                print('output :',output.shape)
+            return output.view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous()
+        else:
+            if (_check_if_interleaved_kv(key_layer, value_layer)):
+                # [s, b, h, 2, d]
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                key_value = torch.cat([key_layer, value_layer], dim = 3)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(2, 3).transpose(0, 1).contiguous()
+            else:
+                # [s, b, 2, h, d]
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                key_value = torch.cat([key_layer, value_layer], dim = 2)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(0, 1).contiguous()
+
+            # [total_seqs, 2, h, d]
+            query_layer = query_layer.transpose(0, 1).contiguous()
+            query_layer = query_layer.view(
+                    query_layer.shape[0] * query_layer.shape[1], *query_layer.shape[2:])
+            key_value = key_value.view([key_value.shape[0] * key_value.shape[1]]
+                + key_value.shape[2:])
+            qkv_layout = "kv_interleaved"
+
+            cu_seqlens_q = torch.arange(
+                0,
+                (batch_size + 1) * seq_len_q,
+                step=seq_len_q,
+                dtype=torch.int32,
+                device=query_layer.device)
+            cu_seqlens_kv = torch.arange(
+                0,
+                (batch_size + 1) * seq_len_kv,
+                step=seq_len_kv,
+                dtype=torch.int32,
+                device=key_layer.device)
+
+            with self.attention_dropout_ctx():
+                #output, *rest 
+                output = FusedAttnFunc_kvpacked.apply(
+                    self.training,
+                    max_seqlen_q, max_seqlen_kv,
+                    cu_seqlens_q, cu_seqlens_kv,
+                    query_layer, key_value,
+                    qkv_dtype,
+                    core_attention_bias,
+                    fp8_meta,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    set_zero,
+                    qkv_layout,
+                    core_attention_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    None, # tp_group
+                    1, # tp_size
+                    False, # return_softmax
+                    self.deterministic,
+                    fused_attention_backend,
+                )
+
+            return (output[0].view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous(),
+                    output[1].view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous())
+        # [(b s), h, d] -> [s, b, (h d)]
+        # *rest tensors only for testing, not returned to DotProductAttention
+        #return output.view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous()
+
 
 class DotProductAttention(torch.nn.Module):
     """Allows the model to jointly attend to information from different
@@ -415,6 +889,7 @@ class DotProductAttention(torch.nn.Module):
         get_rng_state_tracker: Optional[Callable] = None,
         tp_group: Optional[dist_group_type] = None,
         layer_number: Optional[int] = None,
+        attention_type: str = "self",
     ) -> None:
         super().__init__()
 
@@ -573,7 +1048,7 @@ class DotProductAttention(torch.nn.Module):
             # FlashAttention does not support FP8
             use_flash_attention = False
             use_fused_attention = True and use_fused_attention
-            fused_attention_backend = FUSED_ATTN_FP8
+            fused_attention_backend = FusedAttnBackends["FUSED_ATTN_FP8"]
         elif (query_layer.dtype in [torch.bfloat16, torch.float16]
             and key_layer.dtype in [torch.bfloat16, torch.float16]
             and value_layer.dtype in [torch.bfloat16, torch.float16]
@@ -585,7 +1060,7 @@ class DotProductAttention(torch.nn.Module):
             # FusedAttention backend 2 is faster than FlashAttention as of now
             use_flash_attention = False
             use_fused_attention = True and use_fused_attention
-            fused_attention_backend = FUSED_ATTN_FP16_BF16_max_seqlen_512
+            fused_attention_backend = FusedAttnBackends["FUSED_ATTN_FP16_BF16_max_seqlen_512"]
         elif (query_layer.dtype in [torch.bfloat16, torch.float16]
             and key_layer.dtype in [torch.bfloat16, torch.float16]
             and value_layer.dtype in [torch.bfloat16, torch.float16]
@@ -606,12 +1081,20 @@ class DotProductAttention(torch.nn.Module):
                     # in the self attn code path, i.e. max_seqlen is longer than max of seqlens 
                     # TODO what about the "no mask" case, i.e. is_causal = False
                     use_fused_attention = True and use_fused_attention 
-                    fused_attention_backend = FUSED_ATTN_FP16_BF16_arbitrary_seqlen
+                    fused_attention_backend = FusedAttnBackends["FUSED_ATTN_FP16_BF16_arbitrary_seqlen"]
         else:
             # disable FlashAttention and FusedAttention outside their support matrix
             use_flash_attention = False 
             use_fused_attention = False 
         
+        print("flasg 3: ------------- ",self.use_flash_attention, self.use_fused_attention, fused_attention_backend)
+        print('DPA qkv',query_layer.shape,key_layer.shape)
+        print(attention_mask)#.shape if attention_mask is not None])
+        print(core_attention_bias_type)
+        print(core_attention_bias)
+        print(set_zero)
+        print(fp8_meta)
+        print(fused_attention_backend)
         # if FlashAttention is selected
         if use_flash_attention:
             if checkpoint_core_attention:
@@ -628,12 +1111,14 @@ class DotProductAttention(torch.nn.Module):
                                                             query_layer,
                                                             key_layer,
                                                             value_layer,
+                                                            attention_mask,
                                                             core_attention_bias_type,
                                                             core_attention_bias,
                                                             set_zero,
                                                             fp8_meta,
                                                             fused_attention_backend)
             return self.fused_attention(query_layer, key_layer, value_layer,
+                                                            attention_mask,
                                                             core_attention_bias_type,
                                                             core_attention_bias,
                                                             set_zero,
@@ -1009,6 +1494,7 @@ class MultiHeadAttention(torch.nn.Module):
         # core attention computation
         # ==================================
 
+        print('q/k/v ', query_layer.shape,key_layer.shape)
         context_layer = self.core_attention(
             query_layer,
             key_layer,
@@ -1020,6 +1506,7 @@ class MultiHeadAttention(torch.nn.Module):
             set_zero = set_zero,
             fp8_meta = fp8_meta,
         )
+        print('contextv ', context_layer.shape)
 
         # =================
         # Output. [sq, b, h]
