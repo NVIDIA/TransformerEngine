@@ -1289,6 +1289,7 @@ def test_export_gemm_layernorm(
             fname, (inp, weight), model, atol=5e-2, is_fp8=use_fp8, allow_cnt_errors=2, input_names=input_names)
 
 
+@skip_FP8
 @pytest.mark.parametrize("use_fp8", [True, False])
 @pytest.mark.parametrize("precision", [torch.float16])
 @pytest.mark.parametrize("zero_centered_gamma", [True])
