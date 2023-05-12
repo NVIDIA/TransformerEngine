@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """ MNIST training on single GPU"""
 import argparse
-import os
 import unittest
 from functools import partial
 
@@ -11,8 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import tensorflow_datasets as tfds
-from cuda import cudart
+from datasets import load_dataset
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
@@ -25,19 +23,6 @@ IMAGE_C = 1
 PARAMS_KEY = 'params'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
-
-
-def gpu_has_fp8():
-    """Check if the GPU has FP8."""
-    cudaSuccess = cudart.cudaError_t.cudaSuccess
-    ret, gpu_id = cudart.cudaGetDevice()
-    assert ret == cudaSuccess
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMajor
-    _, major = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMinor
-    _, minor = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    sm_arch = major * 10 + minor
-    return sm_arch >= 89
 
 
 class Net(nn.Module):
@@ -144,13 +129,23 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 def get_datasets():
     """Load MNIST train and test datasets into memory."""
-    ds_builder = tfds.builder('mnist')
-    ds_builder.download_and_prepare()
-    train_ds = tfds.as_numpy(ds_builder.as_dataset(split='train', batch_size=-1))
-    test_ds = tfds.as_numpy(ds_builder.as_dataset(split='test', batch_size=-1))
-    train_ds['image'] = jnp.float32(train_ds['image']) / 255.
-    test_ds['image'] = jnp.float32(test_ds['image']) / 255.
-    return train_ds, test_ds
+    train_ds = load_dataset('mnist', split='train')
+    train_ds.set_format(type='np')
+    batch_size = train_ds['image'].shape[0]
+    shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
+    new_train_ds = {
+        'image': train_ds['image'].astype(np.float32).reshape(shape) / 255.,
+        'label': train_ds['label']
+    }
+    test_ds = load_dataset('mnist', split='test')
+    test_ds.set_format(type='np')
+    batch_size = test_ds['image'].shape[0]
+    shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
+    new_test_ds = {
+        'image': test_ds['image'].astype(np.float32).reshape(shape) / 255.,
+        'label': test_ds['label']
+    }
+    return new_train_ds, new_test_ds
 
 
 def check_fp8(state, var_collect, input_shape, label_shape):
@@ -162,11 +157,9 @@ def check_fp8(state, var_collect, input_shape, label_shape):
 
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     print(args)
 
     if args.use_fp8:
-        assert gpu_has_fp8(), "GPU needs to support FP8."
         args.use_te = True
 
     train_ds, test_ds = get_datasets()
@@ -275,6 +268,8 @@ def mnist_parser(args):
 class TestMNIST(unittest.TestCase):
     """MNIST unittests"""
 
+    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+
     @classmethod
     def setUpClass(cls):
         """Run MNIST without Transformer Engine"""
@@ -299,7 +294,7 @@ class TestMNIST(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         self.verify(actual)
 
-    @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True

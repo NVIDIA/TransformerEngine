@@ -17,8 +17,8 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8, cast_from_fp8
-from transformer_engine.pytorch.module import get_workspace
-from transformer_engine.pytorch.module import TransformerEngineBaseModule
+from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
 
 def init_meta(size: int=1):

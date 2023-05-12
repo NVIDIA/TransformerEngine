@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-""" Encoder training on multi-GPU with tesnor parallelism"""
+"""Encoder training on multi-GPU with tesnor parallelism"""
 import argparse
 import unittest
 from functools import partial
@@ -11,10 +11,10 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
-import tensorflow_datasets as tfds
-from cuda import cudart
+from datasets import load_dataset
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
+from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
@@ -29,26 +29,6 @@ PARAMS_KEY = 'params'
 PARAMS_AXES_KEY = PARAMS_KEY + '_axes'
 DROPOUT_KEY = 'dropout'
 INPUT_KEY = 'input_rng'
-
-
-def check_num_gpu(desired_num_gpu):
-    """Check if the number of GPUs are correct."""
-    actual_num_gpu = len(jax.local_devices())
-    assert actual_num_gpu == desired_num_gpu, f"Number of GPUs is mismatch. " \
-        f"{desired_num_gpu} GPUs are assigned, but the actual number of GPUs is {actual_num_gpu}"
-
-
-def gpu_has_fp8():
-    """Check if the GPU has FP8."""
-    cudaSuccess = cudart.cudaError_t.cudaSuccess
-    ret, gpu_id = cudart.cudaGetDevice()
-    assert ret == cudaSuccess
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMajor
-    _, major = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    flag = cudart.cudaDeviceAttr.cudaDevAttrComputeCapabilityMinor
-    _, minor = cudart.cudaDeviceGetAttribute(flag, gpu_id)
-    sm_arch = major * 10 + minor
-    return sm_arch >= 89
 
 
 class Net(nn.Module):
@@ -66,7 +46,7 @@ class Net(nn.Module):
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te.TransformerLayerType.ENCODER,
+                             layer_type=te.flax.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
@@ -177,12 +157,11 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
     nltk.download('punkt')
     dataset_size = len(dataset['sentence'])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
-    mask_3d = np.empty((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
+    mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
 
     for j, sentence in enumerate(dataset['sentence']):
-        tokens = nltk.word_tokenize(sentence.decode("utf-8"))
+        tokens = nltk.word_tokenize(sentence)
         tensor = output[j]
-        mask_1d = np.zeros((1, max_seq_len), dtype=np.uint8)
 
         for i, word in enumerate(tokens):
             if i >= max_seq_len:
@@ -195,26 +174,31 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
             else:
                 tensor[i] = vocab[word]
 
-            mask_1d[0, i] = 1
-
+        seq_len = len(tokens)
+        if seq_len > max_seq_len:
+            seq_len = max_seq_len
         mask_2d = mask_3d[j]
-        np.dot(mask_1d.T, mask_1d, out=mask_2d)
-        np.subtract(1, mask_2d, out=mask_2d)
+        mask_2d[:seq_len, :seq_len] = 0
 
-    dataset['sentence'] = output
-    dataset['label'] = dataset['label'].astype(np.float32)
-    dataset['mask'] = mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
-    return dataset, vocab, word_id
+    new_dataset = {
+        'sentence': output,
+        'label': dataset['label'].astype(np.float32),
+        'mask': mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len))
+    }
+    return new_dataset, vocab, word_id
 
 
 def get_datasets(max_seq_len):
     """Load GLUE train and test datasets into memory."""
     vocab = {}
     word_id = 0
-    dataset = 'glue/cola'
-    train_ds = tfds.as_numpy(tfds.load(dataset, split='train', batch_size=-1))
+
+    train_ds = load_dataset('glue', 'cola', split='train')
+    train_ds.set_format(type='np')
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
-    test_ds = tfds.as_numpy(tfds.load(dataset, split='validation', batch_size=-1))
+
+    test_ds = load_dataset('glue', 'cola', split='validation')
+    test_ds.set_format(type='np')
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
 
@@ -238,7 +222,7 @@ def get_params_pspec(sharding_rules, abs_var_collect):
         return jax.sharding.PartitionSpec(*partitions)
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_pspec = jax.tree_map(to_device_axis, nn.partitioning.get_axis_names(params_axes))
+    params_axes_pspec = jax.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
     params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
     return params_pspec
@@ -257,14 +241,12 @@ def get_state_pspec(state, params_pspec):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
-    check_num_gpu(args.num_gpu)
+    train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
-    if args.use_fp8:
-        assert gpu_has_fp8(), "GPU needs to support FP8."
-
+    num_gpu = jax.local_device_count()
     num_gpu_tp = 2
-    if args.num_gpu % num_gpu_tp == 0:
-        num_gpu_dp = args.num_gpu // num_gpu_tp
+    if num_gpu % num_gpu_tp == 0:
+        num_gpu_dp = num_gpu // num_gpu_tp
     else:
         num_gpu_dp = 1
         num_gpu_tp = 1
@@ -287,14 +269,13 @@ def train_and_evaluate(args):
 
         with te.fp8_autocast(args.use_fp8,
                              sharding_resource=te.ShardingResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS)):
-            train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
             customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
-            sharding_rules = te.extend_logical_axis_rules(tuple()) + customized_rules
+            sharding_rules = te.flax.extend_logical_axis_rules(tuple()) + customized_rules
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
@@ -357,13 +338,6 @@ def encoder_parser(args):
     """Training settings."""
     parser = argparse.ArgumentParser(description="JAX Encoder Example")
     parser.add_argument(
-        "--num-gpu",
-        type=int,
-        default=8,
-        metavar="N",
-        help="number of GPUs (default: 8)",
-    )
-    parser.add_argument(
         "--batch-size",
         type=int,
         default=64,
@@ -416,20 +390,19 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
+    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+
     @classmethod
     def setUpClass(cls):
         """Run 3 epochs for testing"""
-        num_gpu = len(jax.local_devices())
-        if num_gpu % 2 != 0:
-            num_gpu = 1
-        cls.args = encoder_parser(["--epochs", "3", "--num-gpu", str(num_gpu)])
+        cls.args = encoder_parser(["--epochs", "3"])
 
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79
 
-    @unittest.skipIf(not gpu_has_fp8(), reason='GPU capability is not enough to run FP8')
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True

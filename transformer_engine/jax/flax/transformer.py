@@ -6,18 +6,24 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
 from enum import Enum
+from math import sqrt
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
+import warnings
 
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from jax import dtypes
 from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
+from ..fused_attn import AttnBiasType, AttnMaskType
+from ..fused_attn import is_fused_attn_kernel_available
+from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
 from ..sharding import global_shard_resource, ShardingType
@@ -129,6 +135,7 @@ def combine_biases(*masks: Optional[Array]):
 def core_attention(query: Array,
                    key: Array,
                    value: Array,
+                   scale_factor: float,
                    transpose_batch_sequence: bool,
                    softmax_type: SoftmaxType = SoftmaxType.SCALED,
                    softmax_sharding_type: ShardingType = ShardingType.SINGLE,
@@ -159,6 +166,7 @@ def core_attention(query: Array,
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
     attn_weights = Softmax(softmax_type=softmax_type,
+                           scale_factor=scale_factor,
                            sharding_type=softmax_sharding_type)(attn_weights, mask, bias)
 
     if not deterministic and dropout_rate > 0.:
@@ -181,8 +189,8 @@ dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, N
 
 class AttentionType(Enum):
     """TransformerLayerType."""
-    PADDING = "padding_attention"
-    CAUSAL = "causal_attention"
+    PADDING = AttnMaskType.PADDING_MASK
+    CAUSAL = AttnMaskType.CAUSAL_MASK
 
 
 class MultiHeadAttention(nn.Module):
@@ -312,9 +320,8 @@ class MultiHeadAttention(nn.Module):
             Output tensors.
         """
 
-        depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-
         def query_init(*args):
+            depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
             return self.kernel_init(*args) / (depth_scaling if self.scaled_query_init else 1.0)
 
         def qkv_init(key, shape, dtype):
@@ -349,6 +356,43 @@ class MultiHeadAttention(nn.Module):
 
         first_sharding_type, second_sharding_type = infer_sharding_type()
 
+        canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
+        q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
+        kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
+        fused_attn_supported_seqlen = [128, 256, 384, 512]
+        use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
+            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
+            q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
+            and is_fused_attn_kernel_available()
+
+        if not use_fused_attn:
+            reason = ""
+            if decode:
+                reason += f"decode=False is required but got {decode}, "
+            if self.transpose_batch_sequence:
+                reason += f"transpose_batch_sequence=False is required " \
+                          f"but got {self.transpose_batch_sequence}, "
+            if not self.fuse_qkv:
+                reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
+            if self.dropout_rate != 0:
+                # TODO(rewang): add dropout support
+                reason += f"no dropout is required but got dropout_rate={self.dropout_rate}, "
+            if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
+                reason += f"dtype in [BF16, FP16] is required " \
+                          f"but got dtype={canonicalize_dtype}, "
+            if q_seqlen not in fused_attn_supported_seqlen:
+                reason += f"q_seqlen in {fused_attn_supported_seqlen} is required " \
+                          f"but got {q_seqlen=}, "
+            if kv_seqlen not in fused_attn_supported_seqlen:
+                reason += f"kv_seqlen in {fused_attn_supported_seqlen} is required " \
+                          f"but got {kv_seqlen=}, "
+            if not is_fused_attn_kernel_available():
+                reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
+
+            warnings.warn(
+                f"Fused attention is not enabled, " \
+                f"{reason}fall back to unfused attention")
+
         residual = inputs_q
         if self.fuse_qkv:
             if inputs_q is inputs_kv:
@@ -367,14 +411,14 @@ class MultiHeadAttention(nn.Module):
                     kernel_init=qkv_init,
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
+                    bias_axes=(
+                        'qkv_dim',
+                        'joined_kv',
+                    ),
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
-                query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
-                query = jnp.reshape(query, (*query.shape[:-2], -1))
-                key = jnp.reshape(key, (*key.shape[:-2], -1))
-                value = jnp.reshape(value, (*value.shape[:-2], -1))
-                if self.scale_attn_logits:
-                    query = query / depth_scaling
+                if not use_fused_attn:
+                    query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
                 query, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
@@ -386,11 +430,11 @@ class MultiHeadAttention(nn.Module):
                     sharding_type=first_sharding_type,
                     transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.apply_residual_connection_post_layernorm,
-                    depth_scaling=depth_scaling if self.scale_attn_logits else None,
                     scale_axes=('embed',),
                     kernel_axes=('embed', 'joined_kv'),
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
+                    bias_axes=('joined_kv',),
                     dtype=self.dtype,
                     kernel_init=query_init,
                     name='query')(inputs_q)
@@ -402,13 +446,14 @@ class MultiHeadAttention(nn.Module):
                                        kernel_init=kv_init,
                                        use_bias=self.use_bias,
                                        bias_init=self.bias_init,
+                                       bias_axes=(
+                                           'kv_dim',
+                                           'joined_kv',
+                                       ),
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
-                key, value = jnp.split(kv_proj, [
-                    1,
-                ], axis=-2)
-                key = jnp.reshape(key, (*key.shape[:-2], -1))
-                value = jnp.reshape(value, (*value.shape[:-2], -1))
+                if not use_fused_attn:
+                    key, value = jnp.split(kv_proj, [1], axis=-2)
         else:
             kv_projection = functools.partial(
                 DenseGeneral,
@@ -419,6 +464,7 @@ class MultiHeadAttention(nn.Module):
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
+                bias_axes=('joined_kv',),
                 dtype=self.dtype)
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=not self.output_layernorm,
@@ -430,11 +476,11 @@ class MultiHeadAttention(nn.Module):
                 sharding_type=first_sharding_type,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
-                depth_scaling=depth_scaling if self.scale_attn_logits else None,
                 scale_axes=('embed',),
                 kernel_axes=('embed', 'joined_kv'),
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
+                bias_axes=('joined_kv',),
                 dtype=self.dtype,
                 kernel_init=query_init,
                 name='query')(inputs_q)
@@ -446,21 +492,21 @@ class MultiHeadAttention(nn.Module):
             key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
             value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-        query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
-        key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
-        value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
-
         if self.apply_residual_connection_post_layernorm:
             assert ln_out is not None
             residual = ln_out
 
-        qkv_sharding_constraint = \
-            ('length', 'batch', 'heads','kv') \
-            if self.transpose_batch_sequence \
-            else ('batch', 'length', 'heads', 'kv')
-        query = nn_partitioning.with_sharding_constraint(query, qkv_sharding_constraint)
-        key = nn_partitioning.with_sharding_constraint(key, qkv_sharding_constraint)
-        value = nn_partitioning.with_sharding_constraint(value, qkv_sharding_constraint)
+        if not use_fused_attn:
+            query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
+            key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
+            value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
+            qkv_sharding_constraint = \
+                ('length', 'batch', 'heads','kv') \
+                if self.transpose_batch_sequence \
+                else ('batch', 'length', 'heads', 'kv')
+            query = nn_partitioning.with_sharding_constraint(query, qkv_sharding_constraint)
+            key = nn_partitioning.with_sharding_constraint(key, qkv_sharding_constraint)
+            value = nn_partitioning.with_sharding_constraint(value, qkv_sharding_constraint)
 
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
@@ -502,30 +548,74 @@ class MultiHeadAttention(nn.Module):
                     bias = dynamic_vector_slice_in_dim(jnp.squeeze(bias, axis=0),
                                                        jnp.reshape(cur_index, (-1)), 1, -2)
 
+        scale_factor = 1.0 / sqrt(self.head_dim) if self.scale_attn_logits else 1.0
+
         dropout_rng = None
         if not deterministic and self.dropout_rate > 0.:
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
-        softmax_type = SoftmaxType.SCALED
-        if self.attn_type is AttentionType.PADDING:
-            if mask is not None:
-                softmax_type = SoftmaxType.SCALED_MASKED
-        else:
-            softmax_type = SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+        if use_fused_attn:
+            assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
+            assert not self.transpose_batch_sequence
+            # TODO(rewang): make it configurable for pre_scale_bias
+            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
-        x = core_attention(query,
-                           key,
-                           value,
-                           transpose_batch_sequence=self.transpose_batch_sequence,
-                           softmax_type=softmax_type,
-                           softmax_sharding_type=first_sharding_type,
-                           mask=mask,
-                           bias=bias,
-                           dropout_rng=dropout_rng,
-                           dropout_rate=self.dropout_rate,
-                           deterministic=deterministic,
-                           dtype=self.dtype,
-                           float32_logits=self.float32_logits)
+            if inputs_q is inputs_kv:
+                qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
+                qkv_sharding_constraint = ('batch', 'length', 'qkv_dim', 'heads', 'kv')
+                qkv_proj = nn_partitioning.with_sharding_constraint(qkv_proj,
+                                                                    qkv_sharding_constraint)
+                x = self_fused_attn(qkv_proj,
+                                    bias,
+                                    mask,
+                                    dropout_rng,
+                                    attn_bias_type=attn_bias_type,
+                                    attn_mask_type=self.attn_type.value,
+                                    scaling_factor=scale_factor,
+                                    dropout_probability=self.dropout_rate,
+                                    is_training=not deterministic,
+                                    sharding_type=first_sharding_type)
+            else:
+                assert bias is None
+                query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
+                kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_heads, self.head_dim))
+                q_sharding_constraint = ('batch', 'length', 'heads', 'kv')
+                kv_sharding_constraint = ('batch', 'length', 'kv_dim', 'heads', 'kv')
+                query = nn_partitioning.with_sharding_constraint(query, q_sharding_constraint)
+                kv_proj = nn_partitioning.with_sharding_constraint(kv_proj, kv_sharding_constraint)
+
+                x = cross_fused_attn(query,
+                                     kv_proj,
+                                     mask,
+                                     dropout_rng,
+                                     attn_bias_type=attn_bias_type,
+                                     attn_mask_type=self.attn_type.value,
+                                     scaling_factor=scale_factor,
+                                     dropout_probability=self.dropout_rate,
+                                     is_training=not deterministic,
+                                     sharding_type=first_sharding_type)
+        else:
+            softmax_type = SoftmaxType.SCALED
+            if self.attn_type is AttentionType.PADDING:
+                if mask is not None:
+                    softmax_type = SoftmaxType.SCALED_MASKED
+            else:
+                softmax_type = SoftmaxType.SCALED_UPPER_TRIANG_MASKED
+
+            x = core_attention(query,
+                               key,
+                               value,
+                               scale_factor=scale_factor,
+                               transpose_batch_sequence=self.transpose_batch_sequence,
+                               softmax_type=softmax_type,
+                               softmax_sharding_type=first_sharding_type,
+                               mask=mask,
+                               bias=bias,
+                               dropout_rng=dropout_rng,
+                               dropout_rate=self.dropout_rate,
+                               deterministic=deterministic,
+                               dtype=self.dtype,
+                               float32_logits=self.float32_logits)
 
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -543,6 +633,7 @@ class MultiHeadAttention(nn.Module):
                            kernel_axes=('joined_kv', 'embed'),
                            use_bias=self.use_bias,
                            bias_init=self.bias_init,
+                           bias_axes=('embed',),
                            dtype=self.dtype,
                            name='out')(x)
         return out, residual
@@ -980,6 +1071,11 @@ class TransformerLayer(nn.Module):
             kernel_axes_2=('mlp', 'embed'),
             use_bias=self.use_bias,
             bias_init=self.bias_init,
+            bias_axes_1=(
+                'act',
+                'mlp',
+            ),
+            bias_axes_2=('embed',),
             name='mlp',
         )(mlp_input, deterministic=deterministic)
 

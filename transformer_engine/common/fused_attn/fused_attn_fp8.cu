@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "transformer_engine/fused_attn.h"
+
 #include "../common.h"
 #include "utils.h"
 #include "fused_attn_fp8.h"
@@ -69,84 +70,6 @@ std::unordered_map<std::string, int> tensor_name_to_uid = {
   {"DROPOUT_SEED",                52},
   {"VIRTUAL",                     80}
 };
-
-bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
-  (void)engine_config;
-  return false;
-}
-
-static cudnn_frontend::Tensor tensor_create(
-                cudnnDataType_t type, int64_t id,
-                int64_t const * dim, int64_t const * stride,
-                bool is_virtual, bool is_value) {
-  int nbDims = 4;
-  auto tensor_created = cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .build();
-  return tensor_created;
-}
-
-static cudnn_frontend::Tensor tensor_create_with_offset(
-                cudnnDataType_t type, int64_t id,
-                int64_t const * dim, int64_t const * stride,
-                bool is_virtual, bool is_value,
-                std::shared_ptr<cudnn_frontend::Tensor> raggedOffset) {
-  int nbDims = 4;
-  auto tensor_created = cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .setRaggedOffset(raggedOffset)
-          .build();
-  return tensor_created;
-}
-
-static cudnn_frontend::PointWiseDesc pw_desc_create(
-                cudnnDataType_t type, cudnnPointwiseMode_t mode) {
-  auto pw_desc_created = cudnn_frontend::PointWiseDescBuilder()
-          .setMode(mode)
-          .setComputeType(type)
-          .build();
-  return pw_desc_created;
-}
-
-static cudnn_frontend::Operation unary_pw_op_create(
-                cudnn_frontend::Tensor const &xDesc,
-                cudnn_frontend::Tensor const &yDesc,
-                cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created = cudnn_frontend::OperationBuilder(
-                  CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-                      .setxDesc(xDesc)
-                      .setyDesc(yDesc)
-                      .setpwDesc(pwDesc)
-                      .build();
-  return pw_op_created;
-}
-
-static cudnn_frontend::Operation binary_pw_op_create(
-                cudnn_frontend::Tensor const &xDesc,
-                cudnn_frontend::Tensor const &bDesc,
-                cudnn_frontend::Tensor const &yDesc,
-                cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created = cudnn_frontend::OperationBuilder(
-                  CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-                      .setxDesc(xDesc)
-                      .setbDesc(bDesc)
-                      .setyDesc(yDesc)
-                      .setpwDesc(pwDesc)
-                      .build();
-  return pw_op_created;
-}
 
 static cudnn_frontend::Tensor createAmax(
             const std::string& amax_tensor_name,
@@ -1089,7 +1012,8 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
-              attnScale, isTraining, dropoutProbability, layout, tensorType};
+              attnScale, isTraining, dropoutProbability, layout,
+              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static CacheType fa_fprop_cache;
@@ -1404,7 +1328,8 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
-              attnScale, false, dropoutProbability, layout, tensorType};
+              attnScale, false, dropoutProbability, layout,
+              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static CacheType fa_bprop_cache;

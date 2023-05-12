@@ -8,6 +8,7 @@ Sharding Meta for xmap with CustomCall
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from itertools import repeat
 from typing import Union, Tuple, Dict, Callable, Sequence
 from jax.interpreters import pxla
 import jax
@@ -313,6 +314,121 @@ class FP8MetaShardingMetaGenerator(ShardingMetaGenerator):
         return ShardingMeta(FP8MetaShardingMetaGenerator._stack_axes_meta(num_of_meta, {}),
                             FP8MetaShardingMetaGenerator._stack_axes_meta(num_of_meta, {}),
                             axis_resource, (), ())
+
+
+class FusedAttnShardingMetaGenerator(ShardingMetaGenerator):
+    """
+    FusedAttnShardingMetaGenerator
+    """
+
+    def get_dp_sharding_meta(
+            self,
+            input_shapes: Tuple[Tuple[int, ...]],
+            output_shapes: Tuple[Tuple[int, ...]],
+            dp_dims: Tuple[Tuple[int, ...]],
+            tp_dims: Tuple[Tuple[int, ...]],    # pylint: disable=unused-argument
+            dp_axis_name: str = 'data',
+            tp_axis_name: str = 'model'    # pylint: disable=unused-argument
+    ) -> ShardingMeta:
+        """get_dp_sharding_meta"""
+        dummy_tp_dims = [repeat(None), repeat(None)]
+        return FusedAttnShardingMetaGenerator._get_dptp_sharding_meta(input_shapes, output_shapes,
+                                                                      dp_dims, dummy_tp_dims,
+                                                                      dp_axis_name, None)
+
+    def get_tp_col_sharding_meta(self, *argv, **kwargs) -> ShardingMeta:
+        """get_tp_col_sharding_meta"""
+        return FusedAttnShardingMetaGenerator._get_tp_sharding_meta(*argv, **kwargs)
+
+    def get_tp_row_sharding_meta(self, *argv, **kwargs) -> ShardingMeta:
+        """get_tp_row_sharding_meta"""
+        return FusedAttnShardingMetaGenerator._get_tp_sharding_meta(*argv, **kwargs)
+
+    def get_dp_tp_col_sharding_meta(self, *argv, **kwargs) -> ShardingMeta:
+        """get_dp_tp_col_sharding_meta"""
+        return FusedAttnShardingMetaGenerator._get_dptp_sharding_meta(*argv, **kwargs)
+
+    def get_dp_tp_row_sharding_meta(self, *argv, **kwargs) -> ShardingMeta:
+        """get_dp_tp_row_sharding_meta"""
+        return FusedAttnShardingMetaGenerator._get_dptp_sharding_meta(*argv, **kwargs)
+
+    @staticmethod
+    def _get_tp_sharding_meta(
+            input_shapes: Tuple[Tuple[int, ...]],
+            output_shapes: Tuple[Tuple[int, ...]],
+            dp_dims: Tuple[Tuple[int, ...]],    # pylint: disable=unused-argument
+            tp_dims: Tuple[Tuple[int, ...]],
+            dp_axis_name: str = 'data',    # pylint: disable=unused-argument
+            tp_axis_name: str = 'model') -> ShardingMeta:
+        """get_tp_sharding_meta"""
+        dummy_dp_dims = [repeat(None), repeat(None)]
+        return FusedAttnShardingMetaGenerator._get_dptp_sharding_meta(input_shapes, output_shapes,
+                                                                      dummy_dp_dims, tp_dims, None,
+                                                                      tp_axis_name)
+
+    @staticmethod
+    def _get_dptp_sharding_meta(input_shapes: Tuple[Tuple[int, ...]],
+                                output_shapes: Tuple[Tuple[int, ...]],
+                                dp_dims: Tuple[Tuple[int, ...]],
+                                tp_dims: Tuple[Tuple[int, ...]],
+                                dp_axis_name: str = 'data',
+                                tp_axis_name: str = 'model') -> ShardingMeta:
+        """get_dp_tp_sharding_meta"""
+
+        dp_size, dp_mesh_axis = _get_mesh_info(global_shard_resource().dp_resource)
+        tp_size, tp_mesh_axis = _get_mesh_info(global_shard_resource().tp_resource)
+
+        input_dp_dims, output_dp_dims = dp_dims
+        input_tp_dims, output_tp_dims = tp_dims
+
+        input_new_shapes = []
+        in_axes = []
+
+        for input_shape, dp_dim, tp_dim in zip(input_shapes, input_dp_dims, input_tp_dims):
+            in_axis = {}
+            if dp_dim is not None:
+                in_axis[dp_dim] = dp_axis_name
+                assert input_shape[dp_dim] % dp_size == 0, \
+                    f"The dimension of batch in input_shape should be a multiple of " \
+                    f"data parallelism size, but got {input_shape[dp_dim]=} and {dp_size=}."
+                input_shape = (*input_shape[:dp_dim], dp_size, input_shape[dp_dim] // dp_size,
+                               *input_shape[dp_dim + 1:])
+
+                # the input shape has been expanded for dp_dim, tp_dim should +1 if tp_dim >= dp_dim
+                if tp_dim is not None and tp_dim >= dp_dim:
+                    tp_dim = tp_dim + 1
+
+            if tp_dim is not None:
+                in_axis[tp_dim] = tp_axis_name
+                assert input_shape[tp_dim] % tp_size == 0, \
+                    f"The dimension of tensor parallel in input_shape should be a multiple of " \
+                    f"tensor parallelism size, but got {input_shape[tp_dim]=} and {tp_size=}."
+                input_shape = (*input_shape[:tp_dim], tp_size, input_shape[tp_dim] // tp_size,
+                               *input_shape[tp_dim + 1:])
+
+            in_axes.append(in_axis)
+            input_new_shapes.append(input_shape)
+
+        output_new_shapes = output_shapes
+        out_axes = []
+        for dp_dim, tp_dim in zip(output_dp_dims, output_tp_dims):
+            out_axis = {}
+            if dp_dim is not None:
+                out_axis[dp_dim] = dp_axis_name
+                if tp_dim is not None and tp_dim >= dp_dim:
+                    tp_dim = tp_dim + 1
+            if tp_dim is not None:
+                out_axis[tp_dim] = tp_axis_name
+            out_axes.append(out_axis)
+
+        axis_resources = {}
+        if dp_axis_name is not None:
+            axis_resources[dp_axis_name] = dp_mesh_axis
+        if tp_axis_name is not None:
+            axis_resources[tp_axis_name] = tp_mesh_axis
+
+        return ShardingMeta(tuple(in_axes), out_axes, axis_resources, input_new_shapes,
+                            output_new_shapes)
 
 
 class DotShardingMetaGenerator(ShardingMetaGenerator):
@@ -882,6 +998,21 @@ def get_softmax_sharding_meta(stype: ShardingType,
     """
     return SoftmaxShardingMetaGenerator().get_sharding_meta(stype, input_shape, dp_dim, tp_dim,
                                                             dp_axis_name, tp_axis_name)
+
+
+def get_fused_attn_sharding_meta(stype: ShardingType,
+                                 input_shapes: Tuple[Tuple[int, ...]],
+                                 output_shapes: Tuple[Tuple[int, ...]],
+                                 dp_dims: Tuple[Tuple[int, ...]],
+                                 tp_dims: Tuple[Tuple[int, ...]],
+                                 dp_axis_name: str = 'data',
+                                 tp_axis_name: str = 'model') -> ShardingMeta:
+    """
+    get_self_fused_attn_sharding_meta
+    """
+    return FusedAttnShardingMetaGenerator().get_sharding_meta(stype, input_shapes, output_shapes,
+                                                              dp_dims, tp_dims, dp_axis_name,
+                                                              tp_axis_name)
 
 
 def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
