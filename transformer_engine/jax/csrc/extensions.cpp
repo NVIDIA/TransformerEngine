@@ -69,7 +69,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
         .value("kInt32", DType::kInt32)
-        .value("KInt64", DType::kInt64)
+        .value("kInt64", DType::kInt64)
         .value("kFloat32", DType::kFloat32)
         .value("kFloat16", DType::kFloat16)
         .value("kBFloat16", DType::kBFloat16)
