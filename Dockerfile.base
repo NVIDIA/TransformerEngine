@@ -20,13 +20,18 @@ ARG FRAMEWORK
 WORKDIR /opt/transformerengine/
 COPY --from=transformerengine . .
 
-# Install dependencies for JAX build
-RUN [[ "${FRAMEWORK}" =~ jax|tensorflow|all ]] \
- && DEBIAN_FRONTEND=noninteractive apt-get -y update \
- && DEBIAN_FRONTEND=noninteractive apt -y install pybind11-dev ninja-build \
- && pip install pydantic \
- || [[ ! "${FRAMEWORK}" =~ jax|tensorflow|all ]]
+# Install dependencies for building
+# Note: pybind11 is not a strict dependency since it may be installed
+# outside of Python, e.g. installed via apt.
+RUN pip install ninja pybind11
 
+# JAX build requires Praxis
+# Note: Praxis pins specific versions for its dependencies, so naively
+# installing will reinstall JAX.
+RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
+ && pip install flax fiddle lingvo clu jax-bitempered-loss einops \
+ && pip install --no-deps praxis \
+ || [[ ! "${FRAMEWORK}" =~ jax|all ]]
 
 # Install Transformer Engine
 RUN \
