@@ -25,7 +25,7 @@ def _get_default_causal_mask(sq: int) -> torch.Tensor:
     return _default_causal_mask[sq]
 
 
-def _get_onnx_export_causal_mask(seq_q: int, seq_k: int, onnx_causal_mask) -> torch.Tensor:
+def _get_onnx_export_causal_mask(seq_q: int, seq_k: int, onnx_causal_mask: torch.Tensor) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input, for ONNX export.
 
     ONNX does not support dynamic control-flow and requires non-square masks when
