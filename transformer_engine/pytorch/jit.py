@@ -157,8 +157,11 @@ def bias_dropout_add_fused_inference(
 def warmup_jit_bias_dropout_add(
     hidden_size: int, dtype: torch.dtype, seq_length: int, micro_batch_size: int
 ) -> None:
-    """Compilie BDA JIT function before the main training steps"""
-    # Warmup fused bias+dropout+add
+    """Compile BDA JIT function before the main training steps"""
+
+    # Save cuda RNG state to ensure warmup does not affect reproducibility.
+    rng_state = torch.cuda.get_rng_state()
+
     inp = torch.rand(
         (seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda"
     )
@@ -178,18 +181,17 @@ def warmup_jit_bias_dropout_add(
         for _ in range(5):
             output = bias_dropout_add_fused_train(inp, bias, residual, dropout_rate)
     del bias, inp, residual, output
+
     torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_bias_dropout_add_all_dtypes(
     hidden_size: int, seq_length: int, micro_batch_size: int
 ) -> None:
     """Call `warmup_jit_bias_dropout_add` for all training dtypes"""
-    # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
         warmup_jit_bias_dropout_add(hidden_size, dtype, seq_length, micro_batch_size)
-    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_bias_gelu(
@@ -198,8 +200,11 @@ def warmup_jit_bias_gelu(
     seq_length: int,
     micro_batch_size: int,
 ) -> None:
-    """Compilie bias-gelu JIT function before the main training steps"""
-    # Warmup fused bias+gelu
+    """Compile bias-gelu JIT function before the main training steps"""
+
+    # Save cuda RNG state to ensure warmup does not affect reproducibility.
+    rng_state = torch.cuda.get_rng_state()
+
     bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device="cuda")
     inp = torch.rand(
         (seq_length, micro_batch_size, ffn_hidden_size_per_partition),
@@ -213,15 +218,14 @@ def warmup_jit_bias_gelu(
         for _ in range(5):
             output = bias_gelu_fused(inp, bias)
     del bias, inp, output
+
     torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_bias_gelu_all_dtypes(
     ffn_hidden_size: int, seq_length: int, micro_batch_size: int
 ) -> None:
     """Call `warmup_jit_bias_gelu` for all training dtypes"""
-    # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
         warmup_jit_bias_gelu(ffn_hidden_size, dtype, seq_length, micro_batch_size)
-    torch.cuda.set_rng_state(rng_state)
