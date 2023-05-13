@@ -318,6 +318,7 @@ class FlashAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
+        print('flash enter----')
         assert (
             (query_layer.dtype in [torch.float16, torch.bfloat16])
             and (key_layer.dtype in [torch.float16, torch.bfloat16])
@@ -357,14 +358,20 @@ class FlashAttention(torch.nn.Module):
             step=seqlen,
             dtype=torch.int32,
             device=query_layer.device)
+        print('flash enter----')
 
         with self.attention_dropout_ctx():
+            torch.save(query_layer, 'flash_query_layer.pt')
+            torch.save(key_layer, 'flash_key_layer.pt')
+            torch.save(value_layer, 'flash_value_layer.pt')
             output = flash_attn_unpadded_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
                 deterministic=self.deterministic,
             )
+            print('output shape',output.shape)
+            torch.save(output,'flash_out.pt')
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
@@ -745,6 +752,10 @@ class FusedAttention(torch.nn.Module):
 
             with self.attention_dropout_ctx():
                 #output, *rest
+                #torch.save(query_layer, 'flash_query_layer.pt')
+                #torch.save(key_layer, 'flash_key_layer.pt')
+                #torch.save(value_layer, 'flash_value_layer.pt')
+                torch.save(mixed_layer, 'fused_mixed_layer.pt')
                 output = FusedAttnFunc_qkvpacked.apply(
                     self.training,
                     max_seqlen,
@@ -767,6 +778,7 @@ class FusedAttention(torch.nn.Module):
                     fused_attention_backend,
                 )
                 print('output :',output.shape)
+                torch.save(output,'fused_out.pt')
             return output.view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous()
         else:
             if (_check_if_interleaved_kv(key_layer, value_layer)):
@@ -1087,21 +1099,31 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False 
             use_fused_attention = False 
         
-        print("flasg 3: ------------- ",self.use_flash_attention, self.use_fused_attention, fused_attention_backend)
-        print('DPA qkv',query_layer.shape,key_layer.shape)
-        print(attention_mask)#.shape if attention_mask is not None])
-        print(core_attention_bias_type)
-        print(core_attention_bias)
-        print(set_zero)
-        print(fp8_meta)
-        print(fused_attention_backend)
+        print("flasg 3: ------------- ",use_flash_attention, use_fused_attention, fused_attention_backend)
+        #use_flash_attention = False if int(os.getenv("NVTE_FLASH_ATTN", "1")) == 0 else True
+        #use_fused_attention = False if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0 else True
+        use_flash_attention = False if int(os.getenv("NVTE_FLASH_ATTN")) == 0 else True
+        use_fused_attention = False if int(os.getenv("NVTE_FUSED_ATTN")) == 0 else True
+        print("flasg 3: ------------- ",use_flash_attention, use_fused_attention, fused_attention_backend)
+        #print('DPA qkv',query_layer.shape,key_layer.shape)
+        #print(attention_mask)#.shape if attention_mask is not None])
+        #print(core_attention_bias_type)
+        #print(core_attention_bias)
+        #print(set_zero)
+        #print(fp8_meta)
+        #print(fused_attention_backend)
+        #torch.save(query_layer, 'query_layer.pt')
+        #torch.save(key_layer, 'key_layer.pt')
+        #torch.save(value_layer, 'value_layer.pt')
         # if FlashAttention is selected
         if use_flash_attention:
             if checkpoint_core_attention:
+                print('---- flash ckpt')
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
                                                             key_layer,
                                                             value_layer)
+            print('---- flash ')
             return self.flash_attention(query_layer, key_layer, value_layer)
 
         # if FusedAttention is selected
