@@ -234,7 +234,8 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
 
     if zero_centered_gamma:
         inputs_dtype = inputs.type().dtype()
-        one = g.op("Constant", value_t=torch.tensor([1.], dtype=inputs_dtype, device="cuda"))
+        shape = g.op("Shape", weight)
+        one =  g.op("ConstantOfShape", shape, value_t=torch.tensor([1], dtype=inputs_dtype))
         weight = g.op("Add", weight, one)
 
     axis = -len(normalized_shape)
