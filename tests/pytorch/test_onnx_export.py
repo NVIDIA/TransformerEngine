@@ -696,6 +696,7 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
 
 # Test dynamically generated softmax mask.
 # Softmax kernel only supports FP16 or BF16!
+@skip_FP8
 @pytest.mark.parametrize("precision", [torch.float16])
 def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     class Test_Softmax(nn.Module):
