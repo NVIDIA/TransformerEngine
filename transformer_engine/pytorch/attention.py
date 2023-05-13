@@ -318,7 +318,6 @@ class FlashAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
-        print('flash enter----')
         assert (
             (query_layer.dtype in [torch.float16, torch.bfloat16])
             and (key_layer.dtype in [torch.float16, torch.bfloat16])
@@ -358,20 +357,14 @@ class FlashAttention(torch.nn.Module):
             step=seqlen,
             dtype=torch.int32,
             device=query_layer.device)
-        print('flash enter----')
 
         with self.attention_dropout_ctx():
-            torch.save(query_layer, 'flash_query_layer.pt')
-            torch.save(key_layer, 'flash_key_layer.pt')
-            torch.save(value_layer, 'flash_value_layer.pt')
             output = flash_attn_unpadded_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
                 deterministic=self.deterministic,
             )
-            print('output shape',output.shape)
-            torch.save(output,'flash_out.pt')
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
@@ -396,20 +389,17 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 rng_gen, return_softmax, num_splits=1 if deterministic else 0,
                 fused_attention_backend=fused_attention_backend)
         else:
-            print('----apply ',qkv.shape)
             out, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
                 is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias,
                 None, None, None, None, None,
                 attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, return_softmax, num_splits=1 if deterministic else 0,
                 fused_attention_backend=fused_attention_backend)
-            print('----apply ',out.shape)
 
         # if return_softmax, S_dmask is:
         # backend 1: softmax tensor with dropout as the sign bits
         # backend 2/3/4: None
         S_dmask = rest[0] if return_softmax else None
-        print('----qkv ctx length',type(aux_ctx_tensors),len(aux_ctx_tensors))
 
         # TODO can you save a dict
         ctx.save_for_backward(qkv, out, cu_seqlens, fp8_meta)
@@ -434,18 +424,13 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         # backend 4: out, M, ZInv, None
         # else, return out
         # TODO
-        print('odd return softmax',return_softmax)
-        print('----apply ',out.shape)
         if not return_softmax:
-            print('executing')
             return out
-        print('still executing')
         return (out, aux_ctx_tensors[:-1], S_dmask)
 
     @staticmethod
     def backward(ctx, d_out, *args):
         qkv, out, cu_seqlens, fp8_meta = ctx.saved_tensors
-        print('argssssssssss',len(args))
         if fp8_meta is not None:
             with _prepare_backward(True, fp8_meta, ctx.tp_group, ctx.tp_size, name="_DPA"):
                 dqkv, *rest = fused_attn_bwd_qkvpacked(
@@ -479,7 +464,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 num_splits=1 if ctx.deterministic else 0,
                 fused_attention_backend=ctx.fused_attention_backend)
 
-        print('dqkv shape',dqkv.shape)
         # if no_bias, return dqkv
         # otherwise, return (dqkv, dbias)
         #return dqkv if ctx.attn_bias_type == "no_bias" else (dqkv, rest[0])
@@ -720,7 +704,6 @@ class FusedAttention(torch.nn.Module):
                 mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 3)
                 # [b, s, 3, h, d]
                 mixed_layer = mixed_layer.transpose(2, 3).transpose(0, 1).contiguous()
-                print('is interleaved')
             else:
                 query_layer = query_layer.unsqueeze(2)
                 key_layer = key_layer.unsqueeze(2)
@@ -734,7 +717,6 @@ class FusedAttention(torch.nn.Module):
             mixed_layer = mixed_layer.view(
                 mixed_layer.shape[0] * mixed_layer.shape[1], *mixed_layer.shape[2:])
             qkv_layout = "qkv_interleaved"
-            print('FA: qkv',mixed_layer.shape,query_layer.shape)
             mixed_layer = mixed_layer.contiguous()
 
             # TODO since query/key/value_layer is written in [s,b,h,d] format, does this mean s is always m_s?
@@ -752,10 +734,6 @@ class FusedAttention(torch.nn.Module):
 
             with self.attention_dropout_ctx():
                 #output, *rest
-                #torch.save(query_layer, 'flash_query_layer.pt')
-                #torch.save(key_layer, 'flash_key_layer.pt')
-                #torch.save(value_layer, 'flash_value_layer.pt')
-                torch.save(mixed_layer, 'fused_mixed_layer.pt')
                 output = FusedAttnFunc_qkvpacked.apply(
                     self.training,
                     max_seqlen,
@@ -777,8 +755,6 @@ class FusedAttention(torch.nn.Module):
                     self.deterministic,
                     fused_attention_backend,
                 )
-                print('output :',output.shape)
-                torch.save(output,'fused_out.pt')
             return output.view(batch_size, seq_len_q, -1).transpose(0, 1).contiguous()
         else:
             if (_check_if_interleaved_kv(key_layer, value_layer)):
@@ -1099,31 +1075,22 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False 
             use_fused_attention = False 
         
-        print("flasg 3: ------------- ",use_flash_attention, use_fused_attention, fused_attention_backend)
-        #use_flash_attention = False if int(os.getenv("NVTE_FLASH_ATTN", "1")) == 0 else True
-        #use_fused_attention = False if int(os.getenv("NVTE_FUSED_ATTN", "1")) == 0 else True
+        # TODO testing 
+        print("DotProductAttention backend: ")
+        print("  before applying envvar control: FlashAttention ", use_flash_attention,
+                "FusedAttention ", use_fused_attention)
         use_flash_attention = False if int(os.getenv("NVTE_FLASH_ATTN")) == 0 else True
         use_fused_attention = False if int(os.getenv("NVTE_FUSED_ATTN")) == 0 else True
-        print("flasg 3: ------------- ",use_flash_attention, use_fused_attention, fused_attention_backend)
-        #print('DPA qkv',query_layer.shape,key_layer.shape)
-        #print(attention_mask)#.shape if attention_mask is not None])
-        #print(core_attention_bias_type)
-        #print(core_attention_bias)
-        #print(set_zero)
-        #print(fp8_meta)
-        #print(fused_attention_backend)
-        #torch.save(query_layer, 'query_layer.pt')
-        #torch.save(key_layer, 'key_layer.pt')
-        #torch.save(value_layer, 'value_layer.pt')
+        print("  after applying envvar control: FlashAttention ", use_flash_attention,
+                "FusedAttention ", use_fused_attention)
+
         # if FlashAttention is selected
         if use_flash_attention:
             if checkpoint_core_attention:
-                print('---- flash ckpt')
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
                                                             key_layer,
                                                             value_layer)
-            print('---- flash ')
             return self.flash_attention(query_layer, key_layer, value_layer)
 
         # if FusedAttention is selected
@@ -1516,7 +1483,6 @@ class MultiHeadAttention(torch.nn.Module):
         # core attention computation
         # ==================================
 
-        print('q/k/v ', query_layer.shape,key_layer.shape)
         context_layer = self.core_attention(
             query_layer,
             key_layer,
@@ -1528,7 +1494,6 @@ class MultiHeadAttention(torch.nn.Module):
             set_zero = set_zero,
             fp8_meta = fp8_meta,
         )
-        print('contextv ', context_layer.shape)
 
         # =================
         # Output. [sq, b, h]

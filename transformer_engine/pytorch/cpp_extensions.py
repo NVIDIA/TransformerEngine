@@ -391,10 +391,6 @@ def fused_attn_fwd_qkvpacked(
             fused_attention_backend,
     )
  
-    aux_ctx_tensors = output_tensors[1:]
-    print('----cpp qkv ctx length',type(aux_ctx_tensors),len(aux_ctx_tensors), fused_attention_backend)
-    for i in range(len(output_tensors)):
-        print(i, output_tensors[i].shape)
     if return_softmax and fused_attention_backend == FusedAttnBackends["FUSED_ATTN_FP16_BF16_FlashAttn"]:
         # out, [softmax_lse, rng_state], S_dmask
         return output_tensors[0], output_tensors[1:-1], output_tensors[-1]
@@ -589,7 +585,6 @@ def fused_attn_bwd_qkvpacked(
             fused_attention_backend,
     )
 
-    print('fused_attn_bwd_qkvpacked output',output_tensors[0].shape)
     if attn_bias_type == "no_bias":
         # return d_qkv when attn_bias_type is no_bias
         return output_tensors
