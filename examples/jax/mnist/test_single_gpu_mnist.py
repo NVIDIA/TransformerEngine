@@ -16,6 +16,7 @@ from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
 
 import transformer_engine.jax as te
+import transformer_engine.jax.flax as te_flax
 
 IMAGE_H = 28
 IMAGE_W = 28
@@ -32,7 +33,7 @@ class Net(nn.Module):
     @nn.compact
     def __call__(self, x, disable_dropout=False):
         if self.use_te:
-            nn_Dense = te.flax.DenseGeneral
+            nn_Dense = te_flax.DenseGeneral
         else:
             nn_Dense = nn.Dense
 

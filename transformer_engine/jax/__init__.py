@@ -4,7 +4,6 @@
 """Transformer Engine bindings for JAX"""
 
 from . import flax
-from . import praxis
 from .fp8 import fp8_autocast, update_collections, update_fp8_metas, get_delayed_scaling
 from .sharding import MajorShardingType, ShardingResource, ShardingType
 from ..common.utils import deprecate_wrapper

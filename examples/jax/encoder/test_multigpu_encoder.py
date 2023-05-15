@@ -20,6 +20,7 @@ from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
 
 import transformer_engine.jax as te
+import transformer_engine.jax.flax as te_flax
 
 DEVICE_DP_AXIS = 'data'
 PARAMS_KEY = 'params'
@@ -36,24 +37,24 @@ class Net(nn.Module):
     def __call__(self, x, mask, disable_dropout=False):
         x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
-        te_Encoder = partial(te.flax.TransformerLayer,
+        te_Encoder = partial(te_flax.TransformerLayer,
                              hidden_size=256,
                              mlp_hidden_size=1024,
                              num_attention_heads=8,
                              hidden_dropout=0.1,
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
-                             layer_type=te.flax.TransformerLayerType.ENCODER,
+                             layer_type=te_flax.TransformerLayerType.ENCODER,
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
 
-        x = te.flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
+        x = te_flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
                                  dtype=jnp.bfloat16)(x)
 
-        x = te.flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
+        x = te_flax.DenseGeneral(features=256, sharding_type=te.ShardingType.DP,
                                  dtype=jnp.bfloat16)(x)
 
         x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
@@ -165,9 +166,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
             else:
                 tensor[i] = vocab[word]
 
-        seq_len = len(tokens)
-        if seq_len > max_seq_len:
-            seq_len = max_seq_len
+        seq_len = min(len(tokens), max_seq_len)
         mask_2d = mask_3d[j]
         mask_2d[:seq_len, :seq_len] = 0
 
@@ -257,7 +256,7 @@ def train_and_evaluate(args):
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-            sharding_rules = te.flax.extend_logical_axis_rules(tuple())
+            sharding_rules = te_flax.extend_logical_axis_rules(tuple())
             params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
