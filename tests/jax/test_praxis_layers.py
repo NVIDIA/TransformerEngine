@@ -8,7 +8,7 @@ from typing import Dict
 import jax
 import jax.numpy as jnp
 from praxis import pax_fiddle
-from praxis.base_layer import WeightInit
+from praxis.base_layer import WeightInit, DEFAULT_INIT_MUTABLE_LIST
 import pytest
 
 from transformer_engine.common.recipe import DelayedScaling, Format
@@ -120,7 +120,10 @@ class TestLayer:
         test_inputs = self.input_getter(data_shape, dtype)
 
         praxis_layer = praxis_p.Instantiate()
-        praxis_variables = praxis_layer.init(init_key, *test_inputs)
+        # This is a workaround to correctly enable FP8 meta generation for Praxis.
+        # TODO (Ming Huang): To come out a better solution.
+        mutable_list = DEFAULT_INIT_MUTABLE_LIST + [FP8Helper.FP8_COLLECTION_NAME]
+        praxis_variables = praxis_layer.init(init_key, *test_inputs, mutable=mutable_list)
 
         flax_layer = flax_cls()
         flax_variables = flax_layer.init(init_key, *test_inputs)
