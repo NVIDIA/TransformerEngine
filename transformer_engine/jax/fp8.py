@@ -46,9 +46,9 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
     global _is_fp8_available, _reason_for_no_fp8
     if _is_fp8_available is None:
         _is_fp8_available = True
-        devices = jax.local_devices()
-        for gpu in devices:
-            ret, msg = _check_fp8_support(gpu.id)
+        # JAX doesn't provide the local GPU id.
+        for local_gpu_id in range(len(jax.local_devices())):
+            ret, msg = _check_fp8_support(local_gpu_id)
             if ret is False:
                 _is_fp8_available = ret
                 _reason_for_no_fp8 = msg
