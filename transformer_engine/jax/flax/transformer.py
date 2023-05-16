@@ -165,8 +165,17 @@ def core_attention(query: Array,
     else:
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
+    # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
+    # In this case, the scale can not fused into the Softmax module.
+    if bias is not None:
+        attn_weights = attn_weights * scale_factor
+        fused_scale_factor = 1.
+    else:
+        # If no bias, the scale can be fused into Softmax module
+        fused_scale_factor = scale_factor
+
     attn_weights = Softmax(softmax_type=softmax_type,
-                           scale_factor=scale_factor,
+                           scale_factor=fused_scale_factor,
                            sharding_type=softmax_sharding_type)(attn_weights, mask, bias)
 
     if not deterministic and dropout_rate > 0.:
