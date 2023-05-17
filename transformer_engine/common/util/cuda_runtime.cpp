@@ -5,15 +5,23 @@
  ************************************************************************/
 
 #include <filesystem>
-#include <mutex>  // NOLINT(*)
+#include <mutex>
 
 #include "../common.h"
+#include "../util/cuda_driver.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 
 namespace transformer_engine {
 
 namespace cuda {
+
+namespace {
+
+// String with build-time CUDA include path
+#include "string_path_cuda_include.h"
+
+}  // namespace
 
 int num_devices() {
   auto query_num_devices = [] () -> int {
@@ -26,6 +34,14 @@ int num_devices() {
 }
 
 int current_device() {
+  // Return 0 if CUDA context is not initialized
+  CUcontext context;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
+  if (context == nullptr) {
+    return 0;
+  }
+
+  // Query device from CUDA runtime
   int device_id;
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
   return device_id;
@@ -78,6 +94,7 @@ const std::string &include_directory(bool required) {
       {"NVTE_CUDA_INCLUDE_DIR", ""},
       {"CUDA_HOME", ""},
       {"CUDA_DIR", ""},
+      {"", string_path_cuda_include},
       {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
       if (p.empty()) {

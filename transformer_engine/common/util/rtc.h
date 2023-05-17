@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
-#include <mutex>  // NOLINT(*)
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>

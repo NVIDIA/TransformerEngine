@@ -22,7 +22,7 @@ namespace rtc {
 namespace {
 
 // Strings with headers for RTC kernels
-#include "code_string_utils_cuh.h"
+#include "string_code_utils_cuh.h"
 
 /*! \brief Latest compute capability that NVRTC supports
  *
@@ -32,23 +32,12 @@ namespace {
 inline int max_supported_sm_arch() {
   static int arch_ = -1;
   if (arch_ < 0) {
-#if CUDA_VERSION < 10000
-    arch_ = 72;
-#elif CUDA_VERSION < 11000
-    arch_ = 75;
-#elif CUDA_VERSION < 11010
-    arch_ = 80;
-#elif CUDA_VERSION < 11020
-    arch_ = 86;
-#else
-    // Starting from CUDA 11.2, NVRTC can report its supported archs
     int num_archs = 0;
     NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
     NVTE_CHECK(num_archs > 0, "Could not determine SM archs that NVRTC supports");
     std::vector<int> archs(num_archs);
     NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
     arch_ = archs.back();
-#endif
   }
   return arch_;
 }
@@ -180,7 +169,7 @@ void KernelManager::compile(const std::string &kernel_label,
   // Compile source
   nvrtcProgram program;
   constexpr int num_headers = 1;
-  constexpr const char* headers[num_headers] = {code_string_utils_cuh};
+  constexpr const char* headers[num_headers] = {string_code_utils_cuh};
   constexpr const char* include_names[num_headers] = {"utils.cuh"};
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program,
                                       code.c_str(),

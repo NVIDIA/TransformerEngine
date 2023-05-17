@@ -48,18 +48,25 @@ target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
 
-# Convert files to C++ strings
-function(convert_file_to_string_header file_ string_name)
-    file(READ "${file_}" STRING)
-    set(STRING_NAME "${string_name}")
+# Make header files with C++ strings
+function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
-                   "string_headers/${string_name}.h"
+                   "string_headers/${STRING_NAME}.h"
                    @ONLY)
 endfunction()
-convert_file_to_string_header(utils.cuh
-                              code_string_utils_cuh)
-convert_file_to_string_header(transpose/rtc/transpose.cu
-                              code_string_transpose_rtc_transpose_cu)
+function(make_string_header_from_file file_ STRING_NAME)
+    file(READ "${file_}" STRING)
+    configure_file(util/string_header.h.in
+                   "string_headers/${STRING_NAME}.h"
+                   @ONLY)
+endfunction()
+list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
+make_string_header("${cuda_include_path}"
+                   string_path_cuda_include)
+make_string_header_from_file(utils.cuh
+                             string_code_utils_cuh)
+make_string_header_from_file(transpose/rtc/transpose.cu
+                             string_code_transpose_rtc_transpose_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 

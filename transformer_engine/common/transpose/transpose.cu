@@ -18,7 +18,7 @@ namespace transformer_engine {
 namespace {
 
 // String with RTC kernel implementation
-#include "code_string_transpose_rtc_transpose_cu.h"
+#include "string_code_transpose_rtc_transpose_cu.h"
 
 // Hard-coded kernel parameters
 constexpr size_t warps_per_tile = 4;
@@ -225,7 +225,7 @@ void transpose(const Tensor &input,
                                                       ",load_size=", load_size,
                                                       ",store_size", store_size);
       if (!rtc_manager.is_compiled(kernel_label)) {
-        std::string code = code_string_transpose_rtc_transpose_cu;
+        std::string code = string_code_transpose_rtc_transpose_cu;
         code = regex_replace(code, "__TYPE__", type_name);
         code = regex_replace(code, "__LOAD_SIZE__", load_size);
         code = regex_replace(code, "__STORE_SIZE__", store_size);
