@@ -281,9 +281,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            attn_mask_type == "causal"
-        ), 'FlashAttention currently only supports causal attention mask.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
@@ -428,7 +425,6 @@ class DotProductAttention(torch.nn.Module):
         self.device_compute_capability = get_device_compute_capability()
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attn_mask_type == "causal"
             and self.device_compute_capability >= 8.0
         )
 
