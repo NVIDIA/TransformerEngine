@@ -88,3 +88,21 @@ For already cloned repos, run the following command in TE directory:
 .. code-block:: bash
 
   git submodule update --init --recursive                                   # Checkout all submodules recursively.
+
+
+To build the C code with the debug symbol, apply this diff to the setup.py file:
+
+.. code-block:: bash
+
+    diff --git a/setup.py b/setup.py
+    index e26af97..7654b05 100644
+    --- a/setup.py
+    +++ b/setup.py
+    @@ -287,6 +287,7 @@ class CMakeBuildExtension(build_ext, object):
+
+             cmake_bin = get_cmake_bin()
+             config = "Debug" if self.debug else "Release"
+    +        config = "Debug"
+
+             ext_name = self.extensions[0].name
+             build_dir = self.get_ext_fullpath(ext_name).replace(
