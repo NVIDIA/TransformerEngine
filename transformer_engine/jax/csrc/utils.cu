@@ -32,5 +32,24 @@ int GetDeviceComputeCapability(int gpu_id) {
     return gpu_arch;
 }
 
+template <typename OutT, typename InT>
+__global__ void cast_kernel(OutT *out, const InT *in, size_t num_elem) {
+    // This kernel is not optimized as the num_elem is small now
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_elem) return;
+    out[tid] = static_cast<OutT>(in[tid]);
+}
+
+template <typename OutT, typename InT>
+void CastAsync(void *out, const void *in, size_t num_elem, cudaStream_t stream) {
+    constexpr size_t nthreads_per_block = 128;
+    const size_t grid = (num_elem + nthreads_per_block - 1) / nthreads_per_block;
+
+    cast_kernel<<<grid, nthreads_per_block, 0, stream>>>(
+        reinterpret_cast<OutT *>(out), reinterpret_cast<const InT *>(in), num_elem);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+}
+template void CastAsync<int64_t, uint32_t>(void *, const void *, size_t, cudaStream_t);
+
 }  // namespace jax
 }  // namespace transformer_engine

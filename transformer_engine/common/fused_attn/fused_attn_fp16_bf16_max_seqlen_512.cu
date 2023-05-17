@@ -750,6 +750,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             b, static_cast<const int32_t *>(devCuSeqlenQ),
             static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
             static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         // change this if you have access to float_min
         float negInfinity = -1.0E+10;
@@ -1186,6 +1187,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             b, static_cast<const int32_t *>(devCuSeqlenQ),
             static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
             static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
@@ -1268,11 +1270,10 @@ void fused_attn_max_512_fwd_qkvpacked(
 
     void *devCuSeqlen = cu_seqlens->data.dptr;
 
-    // TODO(rewang): Check seed and offset order
     void *devPtrDropoutSeed =
-        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr));
+        reinterpret_cast<void *>(reinterpret_cast<int64_t *>(rng_state->data.dptr));
     void *devPtrDropoutOffset =
-        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
+        reinterpret_cast<void *>(reinterpret_cast<int64_t *>(rng_state->data.dptr) + 1);
 
     const DType QKV_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
@@ -1347,11 +1348,10 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     void *devQCuSeqlen = q_cu_seqlens->data.dptr;
     void *devKVCuSeqlen = kv_cu_seqlens->data.dptr;
 
-    // TODO(rewang): Check seed and offset order
     void *devPtrDropoutSeed =
-        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr));
+        reinterpret_cast<void *>(reinterpret_cast<int64_t *>(rng_state->data.dptr));
     void *devPtrDropoutOffset =
-        reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
+        reinterpret_cast<void *>(reinterpret_cast<int64_t *>(rng_state->data.dptr) + 1);
 
     size_t workspace_size = 0;
 
