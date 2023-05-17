@@ -36,7 +36,7 @@ TransformerLayerType = deprecate_wrapper(
 
 __all__ = [
     'fp8_autocast', 'update_collections', 'update_fp8_metas', 'get_delayed_scaling',
-    'MajorShardingType', 'ShardingResource', 'ShardingType', 'flax', 'DenseGeneral', 'LayerNorm',
-    'LayerNormDenseGeneral', 'LayerNormMLP', 'TransformerEngineBase', 'MultiHeadAttention',
-    'RelativePositionBiases', 'TransformerLayer', 'TransformerLayerType'
+    'MajorShardingType', 'ShardingResource', 'ShardingType', 'flax', 'praxis', 'DenseGeneral',
+    'LayerNorm', 'LayerNormDenseGeneral', 'LayerNormMLP', 'TransformerEngineBase',
+    'MultiHeadAttention', 'RelativePositionBiases', 'TransformerLayer', 'TransformerLayerType'
 ]
