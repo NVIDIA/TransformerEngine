@@ -633,15 +633,13 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
     return dxTensor;
 }
 
-void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 bool is_training, float scaling_factor, float dropout_probability,
-                                 NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type,
-                                 NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
-                                 void *devPtrV, void *devPtrS, void *devPtrO, void *devPtrBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *devPtrDropoutSeed,
-                                 void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
-                                 cudnnDataType_t tensorType, cudaStream_t stream,
-                                 cudnnHandle_t handle) {
+void fused_attn_max_512_fwd_impl(
+    int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d, bool is_training,
+    float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK, void *devPtrV,
+    void *devPtrS, void *devPtrO, void *devPtrBias, void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
+    void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
+    cudnnDataType_t tensorType, cudaStream_t stream, cudnnHandle_t handle) {
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
@@ -747,9 +745,9 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, static_cast<const int32_t *>(devCuSeqlenQ),
-            static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
-            static_cast<int32_t *>(devActualSeqlenK));
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenK));
         NVTE_CHECK_CUDA(cudaGetLastError());
 
         // change this if you have access to float_min
@@ -826,7 +824,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                  NVTE_Bias_Type bias_type, void *devPtrQ, void *devPtrK,
                                  void *devPtrV, void *devPtrS, void *devPtrdQ, void *devPtrdK,
                                  void *devPtrdV, void *devPtrdO, void *devPtrdS, void *devPtrdBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
+                                 void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV, void *workspace,
                                  size_t *workspace_size, cudnnDataType_t tensorType,
                                  cudaStream_t stream, cudnnHandle_t handle) {
     try {
@@ -1184,9 +1182,9 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, static_cast<const int32_t *>(devCuSeqlenQ),
-            static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
-            static_cast<int32_t *>(devActualSeqlenK));
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenK));
         NVTE_CHECK_CUDA(cudaGetLastError());
 
         std::set<std::pair<uint64_t, void *>> data_ptrs;
@@ -1268,7 +1266,7 @@ void fused_attn_max_512_fwd_qkvpacked(
         devPtrS = output_S->data.dptr;
     }
 
-    void *devCuSeqlen = cu_seqlens->data.dptr;
+    void *devPtrCuSeqlen = cu_seqlens->data.dptr;
 
     void *devPtrDropoutSeed =
         reinterpret_cast<void *>(reinterpret_cast<int64_t *>(rng_state->data.dptr));
@@ -1281,8 +1279,8 @@ void fused_attn_max_512_fwd_qkvpacked(
     fused_attn_max_512_fwd_impl(
         batch, num_head, max_seqlen, max_seqlen, head_dim, is_training, attn_scale, p_dropout,
         qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
-        devCuSeqlen, devCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
-        &workspace_size, get_cudnn_dtype(QKV_type), stream, handle);
+        devPtrCuSeqlen, devPtrCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset,
+        workspace->data.dptr, &workspace_size, get_cudnn_dtype(QKV_type), stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
