@@ -428,6 +428,9 @@ setup(
     extras_require={
         'test': ['pytest',
                  'tensorflow_datasets'],
+        'jax_test': ['pytest',
+                     'tensorflow_datasets',
+                     'flax', 'praxis'],
         'test_pytest': ['onnxruntime',],
     },
     license_files=("LICENSE",),
