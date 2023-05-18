@@ -10,3 +10,4 @@ pybind11_add_module(
 )
 
 target_link_libraries(transformer_engine_jax PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt transformer_engine)
+install(TARGETS transformer_engine_jax DESTINATION .)
