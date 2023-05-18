@@ -29,8 +29,57 @@ def with_debug_build() -> bool:
 with_debug_build()
 
 def found_cmake() -> bool:
-    """"Check if CMake is available"""
-    return shutil.which("cmake") is not None
+    """"Check if valid CMake is available
+
+    CMake 3.18 or newer is required.
+
+    """
+
+    # Check if CMake is available
+    try:
+        _cmake_bin = cmake_bin()
+    except FileNotFoundError:
+        return False
+
+    # Query CMake for version info
+    output = subprocess.check_output(
+        [_cmake_bin, "--version"],
+        universal_newlines=True,
+    )
+    match = re.search(r"version\s*([\d.]+)", output)
+    version = match.group(1).split('.')
+    version = tuple(int(v) for v in version)
+    return version >= (3, 18)
+
+def cmake_bin() -> Path:
+    """Get CMake executable
+
+    Throws FileNotFoundError if not found.
+
+    """
+
+    # Search in CMake Python package
+    _cmake_bin: Optional[Path] = None
+    try:
+        import cmake
+    except ImportError:
+        pass
+    else:
+        cmake_dir = Path(cmake.__file__).resolve().parent
+        _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
+        if not _cmake_bin.is_file():
+            _cmake_bin = None
+
+    # Search in path
+    if _cmake_bin is None:
+        _cmake_bin = shutil.which("cmake")
+        if _cmake_bin is not None:
+            _cmake_bin = Path(_cmake_bin).resolve()
+
+    # Return executable if found
+    if _cmake_bin is None:
+        raise FileNotFoundError("Could not find CMake executable")
+    return _cmake_bin
 
 def found_ninja() -> bool:
     """"Check if Ninja is available"""
@@ -73,12 +122,12 @@ def found_pybind11() -> bool:
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple
 
-    Throws RuntimeError if NVCC is not found.
+    Throws FileNotFoundError if NVCC is not found.
 
     """
 
     # Try finding NVCC
-    nvcc_bin = None
+    nvcc_bin: Optional[Path] = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
         # Check in CUDA_HOME
         cuda_home = Path(os.getenv("CUDA_HOME"))
@@ -93,22 +142,16 @@ def cuda_version() -> Tuple[int, ...]:
         cuda_home = Path("/usr/local/cuda")
         nvcc_bin = cuda_home / "bin" / "nvcc"
     if not nvcc_bin.is_file():
-        raise RuntimeError(f"Could not find NVCC at {nvcc_bin}")
+        raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
-    # Get NVCC version info
-    nvcc_output = subprocess.check_output(
+    # Query NVCC for version info
+    output = subprocess.check_output(
         [nvcc_bin, "-V"],
         universal_newlines=True,
     )
-
-    # Parse NVCC version info
-    match = re.search(
-        r"release (\d+)\.(\d+),",
-        nvcc_output,
-    )
-    major = int(match.group(1))
-    minor = int(match.group(2))
-    return major, minor
+    match = re.search(r"release\s*([\d.]+)", output)
+    version = match.group(1).split('.')
+    return tuple(int(v) for v in version)
 
 @lru_cache(maxsize=1)
 def with_userbuffers() -> bool:
@@ -122,7 +165,7 @@ def with_userbuffers() -> bool:
 @lru_cache(maxsize=1)
 def frameworks() -> List[str]:
     """DL frameworks to build support for"""
-    _frameworks = []
+    _frameworks: List[str] = []
     supported_frameworks = ["pytorch", "jax", "tensorflow"]
 
     # Check environment variable
@@ -165,6 +208,7 @@ def frameworks() -> List[str]:
         _frameworks = []
 
     # Check that frameworks are valid
+    _frameworks = [framework.lower() for framework in _frameworks]
     for framework in _frameworks:
         if framework not in supported_frameworks:
             raise ValueError(
@@ -185,9 +229,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs = []
-    install_reqs = ["pydantic"]
-    test_reqs = ["pytest"]
+    setup_reqs: List[str] = []
+    install_reqs: List[str] = ["pydantic"]
+    test_reqs: List[str] = ["pytest"]
 
     def add_unique(l: List[str], vals: Union[str, List[str]]) -> None:
         """Add entry to list if not already included"""
@@ -199,7 +243,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Requirements that may be installed outside of Python
     if not found_cmake():
-        add_unique(setup_reqs, "cmake")
+        add_unique(setup_reqs, "cmake>=3.18")
     if not found_ninja():
         add_unique(setup_reqs, "ninja")
 
@@ -209,12 +253,12 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
-            add_unique(setup_reqs, "pybind1")
+            add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "tensorflow" in frameworks():
         if not found_pybind11():
-            add_unique(setup_reqs, "pybind1")
+            add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, "tensorflow")
         add_unique(test_reqs, ["keras", "tensorflow_datasets"])
 
@@ -237,17 +281,15 @@ class CMakeExtension(setuptools.Extension):
     def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
 
         # Make sure paths are str
+        _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
         build_dir = str(build_dir)
         install_dir = str(install_dir)
 
-        # Assume CMake is in path
-        cmake_bin = shutil.which("cmake")
-
         # CMake configure command
         build_type = "Debug" if with_debug_build() else "Release"
         configure_command = [
-            cmake_bin,
+            _cmake_bin,
             "-S",
             cmake_path,
             "-B",
@@ -268,12 +310,12 @@ class CMakeExtension(setuptools.Extension):
             configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
 
         # CMake build and install commands
-        build_command = [cmake_bin, "--build", build_dir]
-        install_command = [cmake_bin, "--install", build_dir]
+        build_command = [_cmake_bin, "--build", build_dir]
+        install_command = [_cmake_bin, "--install", build_dir]
 
         # Run CMake commands
         for command in [configure_command, build_command, install_command]:
-            print(f"Running {' '.join(command)}")
+            print(f"Running command {' '.join(command)}")
             try:
                 subprocess.run(command, cwd=build_dir, check=True)
             except (CalledProcessError, OSError) as e:
@@ -374,7 +416,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Version-dependent CUDA options
     try:
         version = cuda_version()
-    except RuntimeError:
+    except FileNotFoundError:
         print("Could not determine CUDA Toolkit version")
     else:
         if version >= (11, 2):

@@ -47,7 +47,6 @@ jobs:
           submodules: recursive
       - name: 'Build'
         run: |
-          pip install ninja pybind11 && \
           pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=jax pip wheel -w wheelhouse . -v
@@ -74,7 +73,6 @@ jobs:
           submodules: recursive
       - name: 'Build'
         run: |
-          pip install ninja pybind11 && \
           mkdir -p wheelhouse && \
           NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'
