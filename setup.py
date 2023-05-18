@@ -201,7 +201,7 @@ class CMakeExtension(setuptools.Extension):
         # Assume CMake is in path
         cmake_bin = shutil.which("cmake")
 
-        # CMake commands
+        # CMake configure command
         build_type = "Debug" if with_debug_build() else "Release"
         configure_command = [
             cmake_bin,
@@ -211,17 +211,26 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-            f"-DCMAKE_PREFIX_PATH={install_dir}",
         ]
+        configure_command += self.cmake_flags
         if found_ninja():
             configure_command.append("-GNinja")
-        configure_command += self.cmake_flags
+        try:
+            import pybind11
+        except ImportError:
+            pass
+        else:
+            pybind11_dir = Path(pybind11.__file__).resolve().parent
+            pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
+            configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
+
+        # CMake build and install commands
         build_command = [cmake_bin, "--build", build_dir]
         install_command = [cmake_bin, "--install", build_dir]
 
         # Run CMake commands
         for command in [configure_command, build_command, install_command]:
-            print(f"Running CMake: {' '.join(command)}")
+            print(f"Running {' '.join(command)}")
             try:
                 subprocess.run(command, cwd=build_dir, check=True)
             except (CalledProcessError, OSError) as e:
@@ -245,28 +254,25 @@ class CMakeBuildExtension(BuildExtension):
 
         # Build CMake extensions
         for ext in self.extensions:
-            if not isinstance(ext, CMakeExtension):
-                continue
-            print(f"Building CMake extension {ext.name}")
-
-            # Create temporary build dir
-            with tempfile.TemporaryDirectory() as build_dir:
-                build_dir = Path(build_dir)
-
-                # Determine install dir
-                ext_path = Path(self.get_ext_fullpath(ext.name))
-                install_dir = ext_path.parent.resolve() ### TODO Figure out
-
-                # Build CMake project
-                ext._build_cmake(build_dir, install_dir)
+            if isinstance(ext, CMakeExtension):
+                print(f"Building CMake extension {ext.name}")
+                with tempfile.TemporaryDirectory() as build_dir:
+                    build_dir = Path(build_dir)
+                    package_path = Path(self.get_ext_fullpath(ext.name))
+                    install_dir = package_path.resolve().parent
+                    ext._build_cmake(
+                        build_dir=build_dir,
+                        install_dir=install_dir,
+                    )
 
         # Build non-CMake extensions as usual
+        all_extensions = self.extensions
         self.extensions = [
             ext for ext in self.extensions
             if not isinstance(ext, CMakeExtension)
         ]
         super().run()
-
+        self.extensions = all_extensions
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -366,21 +372,22 @@ def main():
         version = f.readline()
 
     # Setup dependencies
+    setup_requires = []
     install_requires = ["pydantic"]
     if not found_cmake():
-        install_requires.append("cmake")
+        setup_requires.append("cmake")
     if not found_ninja():
-        install_requires.append("ninja")
-    if 'jax' in frameworks() or 'tensorflow' in frameworks():
+        setup_requires.append("ninja")
+    if "pytorch" in frameworks():
+        install_requires.extend(["torch", "flash-attn>=1.0.2"])
+    if "jax" in frameworks():
         if not found_pybind11():
-            install_requires.append("pybind11")
-    framework_requires = {
-        "pytorch": ["torch", "flash-attn>=1.0.2"],
-        "jax": ["jax", "flax"],
-        "tensorflow": ["tensorflow"],
-    }
-    for framework in frameworks():
-        install_requires.extend(framework_requires[framework])
+            setup_requires.append("pybind11")
+        install_requires.extend(["jax", "flax"])
+    if "tensorflow" in frameworks():
+        if not found_pybind11():
+            setup_requires.append("pybind11")
+        install_requires.extend(["tensorflow"])
 
     # Setup extensions
     ext_modules = [setup_common_extension()]
@@ -395,6 +402,7 @@ def main():
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+        setup_requires=setup_requires,
         install_requires=install_requires,
         extras_require={
             "test": ["pytest",
