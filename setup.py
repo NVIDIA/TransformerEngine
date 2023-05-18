@@ -7,7 +7,7 @@ import subprocess
 from subprocess import CalledProcessError
 import sys
 import tempfile
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import setuptools
 from setuptools.command.build_ext import build_ext
@@ -176,6 +176,49 @@ def frameworks() -> List[str]:
 # Call once in global scope since this function manipulates the
 # command-line arguments. Future calls will use a cached value.
 frameworks()
+
+def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+    """Setup Python dependencies
+
+    Returns dependencies for build, runtime, and testing.
+
+    """
+
+    # Common requirements
+    setup_reqs = []
+    install_reqs = ["pydantic"]
+    test_reqs = ["pytest"]
+
+    def add_unique(l: List[str], vals: Union[str, List[str]]) -> None:
+        """Add entry to list if not already included"""
+        if isinstance(vals, str):
+            vals = [vals]
+        for val in vals:
+            if val not in l:
+                l.append(val)
+
+    # Requirements that may be installed outside of Python
+    if not found_cmake():
+        add_unique(setup_reqs, "cmake")
+    if not found_ninja():
+        add_unique(setup_reqs, "ninja")
+
+    # Framework-specific requirements
+    if "pytorch" in frameworks():
+        add_unique(install_reqs, ["torch", "flash-attn>=1.0.2"])
+        add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+    if "jax" in frameworks():
+        if not found_pybind11():
+            add_unique(setup_reqs, "pybind1")
+        add_unique(install_reqs, ["jax", "flax"])
+        add_unique(test_reqs, ["numpy", "praxis"])
+    if "tensorflow" in frameworks():
+        if not found_pybind11():
+            add_unique(setup_reqs, "pybind1")
+        add_unique(install_reqs, "tensorflow")
+        add_unique(test_reqs, ["keras", "tensorflow_datasets"])
+
+    return setup_reqs, install_reqs, test_reqs
 
 
 class CMakeExtension(setuptools.Extension):
@@ -357,7 +400,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         name="transformer_engine_extensions",
         sources=sources,
         include_dirs=include_dirs,
-        libraries=["transformer_engine"],
+        # libraries=["transformer_engine"], ### TODO Debug linker errors
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
@@ -372,22 +415,7 @@ def main():
         version = f.readline()
 
     # Setup dependencies
-    setup_requires = []
-    install_requires = ["pydantic"]
-    if not found_cmake():
-        setup_requires.append("cmake")
-    if not found_ninja():
-        setup_requires.append("ninja")
-    if "pytorch" in frameworks():
-        install_requires.extend(["torch", "flash-attn>=1.0.2"])
-    if "jax" in frameworks():
-        if not found_pybind11():
-            setup_requires.append("pybind11")
-        install_requires.extend(["jax", "flax"])
-    if "tensorflow" in frameworks():
-        if not found_pybind11():
-            setup_requires.append("pybind11")
-        install_requires.extend(["tensorflow"])
+    setup_requires, install_requires, test_requires = setup_requirements()
 
     # Setup extensions
     ext_modules = [setup_common_extension()]
@@ -404,11 +432,7 @@ def main():
         cmdclass={"build_ext": CMakeBuildExtension},
         setup_requires=setup_requires,
         install_requires=install_requires,
-        extras_require={
-            "test": ["pytest",
-                     "tensorflow_datasets"],
-            "test_pytest": ["onnxruntime",],
-        },
+        extras_require={"test": test_requires},
         license_files=("LICENSE",),
     )
 
