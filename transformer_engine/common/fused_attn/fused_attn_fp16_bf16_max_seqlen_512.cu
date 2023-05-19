@@ -668,7 +668,8 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
             // if bias, we need to memset the S buffer to correctly computate dbias
-            auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS);
+            auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK);
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,

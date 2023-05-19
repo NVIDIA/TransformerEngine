@@ -113,7 +113,7 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
                     reason="Fused attention kernel is not supported.")
 class TestSelfFusedAttnMax512():
 
-    def set_input(self, b, s, h, d, dtype, attn_mask_type, pad_ratio):
+    def set_input(self, b, s, h, d, dtype, attn_mask_type, pad_ratio, with_bias):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -125,7 +125,8 @@ class TestSelfFusedAttnMax512():
 
         min_val, max_val = -1, 1
         self.qkv = jax.random.uniform(subkeys[0], qkv_shape, dtype, min_val, max_val)
-        self.bias = jax.random.uniform(subkeys[1], bias_shape, dtype, min_val, max_val)
+        self.bias = jax.random.uniform(subkeys[1], bias_shape, dtype, min_val,
+                                       max_val) if with_bias else None
 
         self.q_token = jnp.concatenate((jnp.ones((b, self.valid_len)), jnp.zeros((b, pad_len))),
                                        axis=-1)
@@ -133,8 +134,8 @@ class TestSelfFusedAttnMax512():
 
         self.scaling_factor = 1. / math.sqrt(d)
         self.dropout_probability = 0.
-        self.dropout_rng = jax.random.PRNGKey(0)
-        self.attn_bias_type = AttnBiasType.POST_SCALE_BIAS
+        self.dropout_rng = jax.random.PRNGKey(0) if self.dropout_probability > 0 else None
+        self.attn_bias_type = AttnBiasType.NO_BIAS if self.bias is None else AttnBiasType.POST_SCALE_BIAS
         # deterministic = not is_training
         self.deterministic = False
 
@@ -143,9 +144,17 @@ class TestSelfFusedAttnMax512():
     @pytest.mark.parametrize('attn_mask_type',
                              [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
-    def test_forward(self, b, s, h, d, dtype, attn_mask_type, pad_ratio):
+    @pytest.mark.parametrize('with_bias', [True, False])
+    def test_forward(self, b, s, h, d, dtype, attn_mask_type, pad_ratio, with_bias):
 
-        self.set_input(b, s, h, d, dtype=dtype, attn_mask_type=attn_mask_type, pad_ratio=pad_ratio)
+        self.set_input(b,
+                       s,
+                       h,
+                       d,
+                       dtype=dtype,
+                       attn_mask_type=attn_mask_type,
+                       pad_ratio=pad_ratio,
+                       with_bias=with_bias)
 
         primitive_out = customcall_self_fused_attn(self.qkv,
                                                    self.bias,
@@ -183,8 +192,16 @@ class TestSelfFusedAttnMax512():
                              [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
     @pytest.mark.parametrize('dtype', DTYPES)
     @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
-    def test_forward_backward(self, b, s, h, d, dtype, attn_mask_type, pad_ratio):
-        self.set_input(b, s, h, d, dtype=dtype, attn_mask_type=attn_mask_type, pad_ratio=pad_ratio)
+    @pytest.mark.parametrize('with_bias', [True, False])
+    def test_forward_backward(self, b, s, h, d, dtype, attn_mask_type, pad_ratio, with_bias):
+        self.set_input(b,
+                       s,
+                       h,
+                       d,
+                       dtype=dtype,
+                       attn_mask_type=attn_mask_type,
+                       pad_ratio=pad_ratio,
+                       with_bias=with_bias)
 
         def grad_func(fused_attn_max_512_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
@@ -261,20 +278,22 @@ class TestSelfFusedAttnMax512():
         # Padded part should be 0s
         assert jnp.allclose(invalid_primitive_dqkv, jnp.zeros_like(invalid_primitive_dqkv))
 
-        # dbeta valid part
-        np.testing.assert_allclose(
-            jnp.asarray(primitive_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
-            jnp.asarray(reference_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
-            rtol=1e-4,
-            atol=3e-5)
+        if self.attn_bias_type != AttnBiasType.NO_BIAS:
+            # dbeta valid part
+            np.testing.assert_allclose(
+                jnp.asarray(primitive_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
+                jnp.asarray(reference_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
+                rtol=1e-4,
+                atol=3e-5)
 
-        # dbeta padded part
-        np.testing.assert_allclose(
-            jnp.asarray(primitive_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32),
-            jnp.asarray(reference_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32))
+            # dbeta padded part
+            np.testing.assert_allclose(
+                jnp.asarray(primitive_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32),
+                jnp.asarray(reference_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32))
 
-        assert jnp.allclose(primitive_dbeta[:, :, self.valid_len:, self.valid_len:],
-                            jnp.zeros_like(primitive_dbeta[:, :, self.valid_len:, self.valid_len:]))
+            assert jnp.allclose(
+                primitive_dbeta[:, :, self.valid_len:, self.valid_len:],
+                jnp.zeros_like(primitive_dbeta[:, :, self.valid_len:, self.valid_len:]))
 
 
 @pytest.mark.skipif(not is_fused_attn_kernel_available(),
