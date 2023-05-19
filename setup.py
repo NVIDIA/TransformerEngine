@@ -456,14 +456,19 @@ def setup_pytorch_extension() -> setuptools.Extension:
 
 def main():
 
-    # Read package version from file
+    # Version
     with open(root_path / "VERSION", "r") as f:
         version = f.readline()
 
-    # Setup dependencies
+    # Submodules to install
+    packages = setuptools.find_packages(
+        include=["transformer_engine", "transformer_engine.*"],
+    )
+
+    # Dependencies
     setup_requires, install_requires, test_requires = setup_requirements()
 
-    # Setup extensions
+    # Extensions
     ext_modules = [setup_common_extension()]
     if "pytorch" in frameworks():
         ext_modules.append(setup_pytorch_extension())
@@ -472,7 +477,7 @@ def main():
     setuptools.setup(
         name="transformer_engine",
         version=version,
-        packages=("transformer_engine",),
+        packages=packages,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
