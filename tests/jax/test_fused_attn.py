@@ -238,11 +238,11 @@ class TestSelfFusedAttnMax512():
                 (0, 1)))
 
         primitive_out, (primitive_dqkv,
-                        primitive_dbeta) = jitted_primitive(self.qkv, self.bias, self.q_token,
+                        primitive_dbias) = jitted_primitive(self.qkv, self.bias, self.q_token,
                                                             self.kv_token, self.dropout_rng)
 
         reference_out, (reference_dqkv,
-                        reference_dbeta) = jitted_reference(self.qkv, self.bias, self.q_token,
+                        reference_dbias) = jitted_reference(self.qkv, self.bias, self.q_token,
                                                             self.kv_token, self.dropout_rng)
 
         np.testing.assert_allclose(jnp.asarray(primitive_out, np.float32),
@@ -279,21 +279,21 @@ class TestSelfFusedAttnMax512():
         assert jnp.allclose(invalid_primitive_dqkv, jnp.zeros_like(invalid_primitive_dqkv))
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
-            # dbeta valid part
+            # dbias valid part
             np.testing.assert_allclose(
-                jnp.asarray(primitive_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
-                jnp.asarray(reference_dbeta[:, :, :self.valid_len, :self.valid_len], np.float32),
+                jnp.asarray(primitive_dbias[:, :, :self.valid_len, :self.valid_len], np.float32),
+                jnp.asarray(reference_dbias[:, :, :self.valid_len, :self.valid_len], np.float32),
                 rtol=1e-4,
                 atol=3e-5)
 
-            # dbeta padded part
+            # dbias padded part
             np.testing.assert_allclose(
-                jnp.asarray(primitive_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32),
-                jnp.asarray(reference_dbeta[:, :, self.valid_len:, self.valid_len:], np.float32))
+                jnp.asarray(primitive_dbias[:, :, self.valid_len:, self.valid_len:], np.float32),
+                jnp.asarray(reference_dbias[:, :, self.valid_len:, self.valid_len:], np.float32))
 
             assert jnp.allclose(
-                primitive_dbeta[:, :, self.valid_len:, self.valid_len:],
-                jnp.zeros_like(primitive_dbeta[:, :, self.valid_len:, self.valid_len:]))
+                primitive_dbias[:, :, self.valid_len:, self.valid_len:],
+                jnp.zeros_like(primitive_dbias[:, :, self.valid_len:, self.valid_len:]))
 
 
 @pytest.mark.skipif(not is_fused_attn_kernel_available(),
