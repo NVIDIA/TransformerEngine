@@ -17,6 +17,9 @@ Prerequisites
 4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
 5. For FP8/FP16/BF16 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9.1 <https://developer.nvidia.com/cudnn>`__ or later.
 
+If the CUDA Toolkit headers are not available at runtime in a standard
+installation path, e.g. within `CUDA_HOME`, set
+`NVTE_CUDA_INCLUDE_PATH` in the environment.
 
 Transformer Engine in NGC Containers
 ------------------------------------
