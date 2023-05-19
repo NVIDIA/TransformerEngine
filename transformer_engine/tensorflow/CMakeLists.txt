@@ -43,3 +43,4 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Install library
 install(TARGETS transformer_engine_tensorflow DESTINATION .)
+install(TARGETS _get_stream DESTINATION .)
