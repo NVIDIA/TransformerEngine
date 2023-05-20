@@ -328,7 +328,7 @@ class CMakeExtension(setuptools.Extension):
 
 # PyTorch extension modules require special handling
 if "pytorch" in frameworks():
-    from torch.utils.cpp_extension import BuildExtension as BuildExtension
+    from torch.utils.cpp_extension import BuildExtension
 else:
     from setuptools.command.build_ext import build_ext as BuildExtension
 

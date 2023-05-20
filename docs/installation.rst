@@ -31,12 +31,9 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. `CMake <https://cmake.org/>`__ version 3.18 or later: `pip install cmake`.
-2. [For pyTorch support] `pyTorch <https://pytorch.org/>`__ with GPU support.
-3. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
-4. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
-5. `pybind11`: `pip install pybind11`.
-6. [Optional] `Ninja <https://ninja-build.org/>`__: `pip install ninja`.
+1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support.
+2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
+3. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -45,11 +42,9 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-  # Execute one of the following commands
-  NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable    # Build TE for PyTorch only. The default.
-  NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable        # Build TE for JAX only.
-  NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable # Build TE for TensorFlow only.
-  NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable        # Build TE for all supported frameworks.
+  pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+This will automatically detect any installed deep learning frameworks and build support for them. To explicitly specify which frameworks to support, set `NVTE_FRAMEWORK` in the environment.
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,12 +59,10 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-  # Execute one of the following commands
-  NVTE_FRAMEWORK=pytorch pip install git+https://github.com/NVIDIA/TransformerEngine.git@main    # Build TE for PyTorch only. The default.
-  NVTE_FRAMEWORK=jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for JAX only.
-  NVTE_FRAMEWORK=tensorflow pip install git+https://github.com/NVIDIA/TransformerEngine.git@main # Build TE for TensorFlow only.
-  NVTE_FRAMEWORK=all pip install git+https://github.com/NVIDIA/TransformerEngine.git@main        # Build TE for all supported frameworks.
-  
+  pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
+
+This will automatically detect any installed deep learning frameworks and build support for them. To explicitly specify which frameworks to support, set `NVTE_FRAMEWORK` in the environment.
+
 Installation (from source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -77,14 +70,26 @@ Execute the following commands to install Transformer Engine from source:
 
 .. code-block:: bash
 
-  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone the repository/fork and checkout all submodules recursively.
-  cd TransformerEngine                                                     # Enter TE directory.
-  git checkout stable                                                      # Checkout the correct branch.
-  export NVTE_FRAMEWORK=pytorch                                            # Optionally set the framework.
+  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone repository and submodules
+  cd TransformerEngine                                                     # Enter TE directory
+  git checkout stable                                                      # Checkout correct branch
+  export NVTE_FRAMEWORK=pytorch                                            # Optionally set framework
   pip install .                                                            # Build and install
 
-For already cloned repos, run the following command in TE directory:
+If the Git repository has already been cloned, make sure to also clone the submodules:
 
 .. code-block:: bash
 
-  git submodule update --init --recursive                                   # Checkout all submodules recursively.
+  git submodule update --init --recursive
+
+Extra dependencies for testing can be installed by setting the "test" option:
+
+.. code-block:: bash
+
+  pip install .[test]
+
+To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
+
+.. code-block:: bash
+
+  pip install . --global-option=--debug
