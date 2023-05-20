@@ -293,7 +293,6 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -305,9 +304,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'FlashAttention currently only supports CUDA tensors.'
-        assert (
-            attention_mask is None
-        ), 'FlashAttention currently does not support external attention mask.'
 
         # For now just 128, will make it more general in the future
 
@@ -433,6 +429,7 @@ class DotProductAttention(torch.nn.Module):
             "attention_dropout_ctx": attention_dropout_ctx,
             "attn_mask_type": attn_mask_type,
         }
+        self.attn_mask_type = attn_mask_type
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
@@ -507,7 +504,7 @@ class DotProductAttention(torch.nn.Module):
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
-            or attention_mask is not None
+            or (self.attn_mask_type == "padding" and attention_mask is not None)
         ):
             use_flash_attention = False
 
