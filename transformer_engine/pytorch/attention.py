@@ -281,9 +281,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            attn_mask_type == "causal"
-        ), 'FlashAttention currently only supports causal attention mask.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
@@ -296,7 +293,6 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -308,9 +304,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'FlashAttention currently only supports CUDA tensors.'
-        assert (
-            attention_mask is None
-        ), 'FlashAttention currently does not support external attention mask.'
 
         # For now just 128, will make it more general in the future
 
@@ -428,7 +421,6 @@ class DotProductAttention(torch.nn.Module):
         self.device_compute_capability = get_device_compute_capability()
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attn_mask_type == "causal"
             and self.device_compute_capability >= 8.0
         )
 
@@ -437,6 +429,7 @@ class DotProductAttention(torch.nn.Module):
             "attention_dropout_ctx": attention_dropout_ctx,
             "attn_mask_type": attn_mask_type,
         }
+        self.attn_mask_type = attn_mask_type
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
@@ -512,6 +505,9 @@ class DotProductAttention(torch.nn.Module):
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
         ):
+            use_flash_attention = False
+
+        if self.attn_mask_type == "padding" and attention_mask is not None:
             use_flash_attention = False
 
         if is_in_onnx_export_mode():
