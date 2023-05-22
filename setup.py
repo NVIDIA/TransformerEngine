@@ -248,8 +248,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
-    if not found_ninja():
-        add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
