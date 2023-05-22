@@ -821,6 +821,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
          a value added to the denominator of layer normalization for numerical stability.
     bias : bool, default = `True`
           if set to `False`, the FC1 and FC2 layers will not learn an additive bias.
+    activation : str, default = 'gelu'
+          activation function used. Options: 'gelu', 'geglu', 'relu', 'squared_relu', 'swiglu'.
     init_method : Callable, default = `None`
                  used for initializing FC1 weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -893,6 +895,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         tp_size: int = 1,
         init_method: Optional[Callable] = None,
         bias: bool = True,
+        activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
         params_dtype: torch.dtype = torch.float32,
@@ -910,6 +913,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
+        self.activation = activation
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.return_layernorm_output = return_layernorm_output

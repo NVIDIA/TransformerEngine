@@ -6,46 +6,43 @@
 
 #include <transformer_engine/activation.h>
 #include <cuda_runtime.h>
-#include <cfloat>
-#include <iostream>
-#include "../utils.cuh"
-#include "../common.h"
-#include <cstdlib>
-#include <../util/vectorized_pointwise.h>
+#include "../util/vectorized_pointwise.h"
 #include "../util/math.h"
+#include "../common.h"
+
 
 namespace transformer_engine {
 
-void gelu(const Tensor &input,
+void relu(const Tensor &input,
           Tensor *output,
           cudaStream_t stream) {
-  CheckInputTensor(input, "gelu_input");
-  CheckOutputTensor(*output, "gelu_output");
+  CheckInputTensor(input, "relu_input");
+  CheckOutputTensor(*output, "relu_output");
   NVTE_CHECK(input.data.shape == output->data.shape, "Input and output shapes must match.");
   const size_t tot_elts = product(input.data.shape);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
       constexpr int nvec = 32 / sizeof(IType);
-      VectorizedUnaryKernelLauncher<nvec, Empty, gelu<fp32, fp32> >(
+      VectorizedUnaryKernelLauncher<nvec, Empty, relu<fp32, fp32>>(
         reinterpret_cast<const IType*>(input.data.dptr),
         reinterpret_cast<OType*>(output->data.dptr),
         reinterpret_cast<const fp32*>(output->scale.dptr),
         reinterpret_cast<fp32*>(output->amax.dptr),
         tot_elts,
-        Empty(),
+        {},
         stream);
     );  // NOLINT(*)
   );  // NOLINT(*)
 }
 
-void dgelu(const Tensor &grad,
+void drelu(const Tensor &grad,
            const Tensor &input,
            Tensor *output,
            cudaStream_t stream) {
-  CheckInputTensor(input, "dgelu_input");
-  CheckInputTensor(grad, "dgelu_input_grad");
-  CheckOutputTensor(*output, "dgelu_output");
+  CheckInputTensor(input, "drelu_input");
+  CheckInputTensor(grad, "drelu_input_grad");
+  CheckOutputTensor(*output, "drelu_output");
   NVTE_CHECK(input.data.shape == output->data.shape, "Input and output shapes must match.");
   NVTE_CHECK(input.data.dtype == grad.data.dtype,
              "Input and incoming gradient types must match.");
@@ -54,7 +51,7 @@ void dgelu(const Tensor &grad,
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
       constexpr int nvec = 32 / sizeof(IType);
-      VectorizedUnaryGradKernelLauncher<nvec, Empty, dgelu<fp32, fp32>>(
+      VectorizedUnaryGradKernelLauncher<nvec, Empty, drelu<fp32, fp32>>(
         reinterpret_cast<const IType*>(grad.data.dptr),
         reinterpret_cast<const IType*>(input.data.dptr),
         reinterpret_cast<OType*>(output->data.dptr),
@@ -67,11 +64,11 @@ void dgelu(const Tensor &grad,
   );  // NOLINT(*)
 }
 
-void geglu(const Tensor &input,
+void reglu(const Tensor &input,
            Tensor *output,
            cudaStream_t stream) {
-  CheckInputTensor(input, "geglu_input");
-  CheckOutputTensor(*output, "geglu_output");
+  CheckInputTensor(input, "reglu_input");
+  CheckOutputTensor(*output, "reglu_output");
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
   NVTE_CHECK(input.data.shape[0] == output->data.shape[0],
@@ -82,7 +79,7 @@ void geglu(const Tensor &input,
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
       constexpr int nvec = 32 / sizeof(IType);
-      GatedActivationKernelLauncher<nvec, fp32, Empty, gelu<fp32, fp32>>(
+      GatedActivationKernelLauncher<nvec, fp32, Empty, relu<fp32, fp32>>(
         reinterpret_cast<const IType*>(input.data.dptr),
         reinterpret_cast<OType*>(output->data.dptr),
         reinterpret_cast<const fp32*>(output->scale.dptr),
@@ -95,13 +92,13 @@ void geglu(const Tensor &input,
   );  // NOLINT(*)
 }
 
-void dgeglu(const Tensor &grad,
+void dreglu(const Tensor &grad,
             const Tensor &input,
             Tensor *output,
             cudaStream_t stream) {
-  CheckInputTensor(grad, "dgeglu_grad");
-  CheckInputTensor(input, "dgeglu_input");
-  CheckOutputTensor(*output, "dgeglu_output");
+  CheckInputTensor(grad, "dreglu_grad");
+  CheckInputTensor(input, "dreglu_input");
+  CheckOutputTensor(*output, "dreglu_output");
   NVTE_CHECK(grad.data.shape.size() == 2, "Grad must have 2 dimensions.");
   NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
   NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
@@ -115,7 +112,7 @@ void dgeglu(const Tensor &grad,
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(output->data.dtype, OType,
       constexpr int nvec = 32 / sizeof(IType);
-      DGatedActivationKernelLauncher<nvec, fp32, Empty, gelu<fp32, fp32>, dgelu<fp32, fp32>>(
+      DGatedActivationKernelLauncher<nvec, fp32, Empty, relu<fp32, fp32>, drelu<fp32, fp32>>(
         reinterpret_cast<const IType*>(grad.data.dptr),
         reinterpret_cast<const IType*>(input.data.dptr),
         reinterpret_cast<OType*>(output->data.dptr),
@@ -129,45 +126,45 @@ void dgeglu(const Tensor &grad,
 
 }  // namespace transformer_engine
 
-void nvte_gelu(const NVTETensor input,
+void nvte_relu(const NVTETensor input,
                NVTETensor output,
                cudaStream_t stream) {
-  NVTE_API_CALL(nvte_gelu);
+  NVTE_API_CALL(nvte_relu);
   using namespace transformer_engine;
-  gelu(*reinterpret_cast<const Tensor*>(input),
+  relu(*reinterpret_cast<const Tensor*>(input),
        reinterpret_cast<Tensor*>(output),
        stream);
 }
 
-void nvte_dgelu(const NVTETensor grad,
+void nvte_drelu(const NVTETensor grad,
                 const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dgelu);
+  NVTE_API_CALL(nvte_drelu);
   using namespace transformer_engine;
-  dgelu(*reinterpret_cast<const Tensor*>(grad),
+  drelu(*reinterpret_cast<const Tensor*>(grad),
         *reinterpret_cast<const Tensor*>(input),
         reinterpret_cast<Tensor*>(output),
         stream);
 }
 
-void nvte_geglu(const NVTETensor input,
+void nvte_reglu(const NVTETensor input,
                 NVTETensor output,
                 cudaStream_t stream) {
-  NVTE_API_CALL(nvte_geglu);
+  NVTE_API_CALL(nvte_reglu);
   using namespace transformer_engine;
-  geglu(*reinterpret_cast<const Tensor*>(input),
+  reglu(*reinterpret_cast<const Tensor*>(input),
         reinterpret_cast<Tensor*>(output),
         stream);
 }
 
-void nvte_dgeglu(const NVTETensor grad,
+void nvte_dreglu(const NVTETensor grad,
                  const NVTETensor input,
                  NVTETensor output,
                  cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dgeglu);
+  NVTE_API_CALL(nvte_dreglu);
   using namespace transformer_engine;
-  dgeglu(*reinterpret_cast<const Tensor*>(grad),
+  dreglu(*reinterpret_cast<const Tensor*>(grad),
          *reinterpret_cast<const Tensor*>(input),
          reinterpret_cast<Tensor*>(output),
          stream);
