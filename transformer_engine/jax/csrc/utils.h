@@ -21,9 +21,6 @@ namespace jax {
 int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
-template <typename OutT, typename InT>
-void CastAsync(void *out, const void *in, size_t num_elem, cudaStream_t stream);
-
 class cublasLtMetaManager {
  public:
     static cublasLtMetaManager &Instance() {

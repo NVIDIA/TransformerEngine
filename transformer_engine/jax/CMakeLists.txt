@@ -6,7 +6,7 @@ pybind11_add_module(
     transformer_engine_jax
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/extensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/modules.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/utils.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/utils.cpp
 )
 
 target_link_libraries(transformer_engine_jax PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt transformer_engine)

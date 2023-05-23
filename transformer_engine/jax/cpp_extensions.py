@@ -1987,7 +1987,6 @@ def _check_rng_state(rng_state):
         rng_state = jnp.zeros(2, dtype=jnp.uint32)
 
     # Jax default use threefry PRNG, which generates 2 u32
-    # TODO(rewang): Check how to support different PRNG
     if rng_state.dtype != jnp.uint32:
         warnings.warn(f"Requested {rng_state.dtype=} is not available, and will be "
                       f"casted to dtype uint32.")
