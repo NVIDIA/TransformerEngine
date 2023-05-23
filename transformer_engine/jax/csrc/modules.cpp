@@ -82,11 +82,11 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t num_rng_state, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-    return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, q_max_seqlen, kv_max_seqlen,
-                                                    head_dim, scaling_factor, dropout_probability,
-                                                    bias_type, mask_type, dtype, is_training});
+    return PackOpaque(CustomCallFusedAttnDescriptor{
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, num_rng_state, scaling_factor,
+        dropout_probability, bias_type, mask_type, dtype, is_training});
 }
 
 bool IsFusedAttnKernelAvailable() {
@@ -760,6 +760,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto num_rng_state = descriptor.num_rng_state;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -778,7 +779,12 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
+
+    // The number of rng_state could be 2 or 4, and the dtype is u32
+    // If there are 4 rng_state, see (0, 1), (2, 3) as 2 u32 rng_state respectively
+    NVTE_CHECK(num_rng_state == 2 || num_rng_state == 4);
+    DType rng_state_type = num_rng_state == 4 ? DType::kInt64 : DType::kInt32;
+    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, rng_state_type);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -795,18 +801,18 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    size_t fused_attn_workspace_size =
+    auto workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
     // fused attn workspace size + casted rng state size
-    size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
+    // size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
 
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
-    CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
+    // void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
+    // CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
 
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
-    auto rng_state_tensor = TensorWrapper(casted_rng_state, std::vector<size_t>{2}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, rng_state_type);
 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
@@ -924,6 +930,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto num_rng_state = descriptor.num_rng_state;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
@@ -945,7 +952,12 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
+
+    // The number of rng_state could be 2 or 4, and the dtype is u32
+    // If there are 4 rng_state, see (0, 1), (2, 3) as 2 u32 rng_state respectively
+    NVTE_CHECK(num_rng_state == 2 || num_rng_state == 4);
+    DType rng_state_type = num_rng_state == 4 ? DType::kInt64 : DType::kInt32;
+    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, rng_state_type);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -963,18 +975,18 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    size_t fused_attn_workspace_size =
+    auto workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
     // fused attn workspace size + casted rng state size
-    size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
+    // size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
 
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
-    CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
+    // void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
+    // CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
 
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
-    auto rng_state_tensor = TensorWrapper(casted_rng_state, std::vector<size_t>{2}, DType::kInt64);
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, rng_state_type);
 
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),

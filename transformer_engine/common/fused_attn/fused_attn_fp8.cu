@@ -1013,7 +1013,10 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, isTraining, dropoutProbability, layout,
-              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
+              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK,
+              tensorType,
+              CUDNN_DATA_INT64  // INT64 is set in createDropoutForward
+      };
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static thread_local CacheType fa_fprop_cache;
@@ -1329,7 +1332,10 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
       FADescriptor descriptor{
               b, h, s_q, s_kv, d,
               attnScale, false, dropoutProbability, layout,
-              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
+              NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK,
+              tensorType,
+              CUDNN_DATA_INT64  // INT64 is set in createDropoutBackward
+      };
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
       static thread_local CacheType fa_bprop_cache;
