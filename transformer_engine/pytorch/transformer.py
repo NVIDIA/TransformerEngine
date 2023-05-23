@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 
@@ -61,8 +61,6 @@ class DropPath(torch.nn.Module):
         random_tensor.floor_()  # binarize
         output = hidden_state.div(keep_prob) * random_tensor
         return output
-
-
 
 
 class TransformerLayer(torch.nn.Module):
@@ -394,6 +392,7 @@ class TransformerLayer(torch.nn.Module):
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
+        rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -433,6 +432,9 @@ class TransformerLayer(torch.nn.Module):
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                       Embedding tensors for query and key tensors for applied rotary positional
+                       embedding. By default no input embedding is applied.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -460,6 +462,7 @@ class TransformerLayer(torch.nn.Module):
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
+            rotary_pos_emb=rotary_pos_emb,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
