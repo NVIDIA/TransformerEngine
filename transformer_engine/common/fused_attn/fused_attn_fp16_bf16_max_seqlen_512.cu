@@ -327,7 +327,6 @@ static cudnn_frontend::Tensor createSoftmaxForward(
     // NOLINTNEXTLINE(runtime/references)
     std::vector<cudnn_frontend::Operation> &ops,
     cudnn_frontend::Tensor const &prevBlockOutputTensor) {
-
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
 
@@ -645,7 +644,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                 mask_type,   tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-        static CacheType fmha_fprop_cache;
+        static thread_local CacheType fmha_fprop_cache;
 
         bool enable_dropout = (dropout_probability != 0.0f);
 
@@ -668,7 +667,8 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
             // if bias, we need to memset the S buffer to correctly computate dbias
-            auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS);
+            auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK);
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
@@ -814,7 +814,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             layout, bias_type, mask_type, tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-        static CacheType fmha_bprop_cache;
+        static thread_local CacheType fmha_bprop_cache;
 
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
             auto it = cache.find(descriptor);

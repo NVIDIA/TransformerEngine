@@ -386,7 +386,7 @@ class FusedAttnShardingMetaGenerator(ShardingMetaGenerator):
 
         for input_shape, dp_dim, tp_dim in zip(input_shapes, input_dp_dims, input_tp_dims):
             in_axis = {}
-            if dp_dim is not None:
+            if dp_dim is not None and input_shape is not None:
                 in_axis[dp_dim] = dp_axis_name
                 assert input_shape[dp_dim] % dp_size == 0, \
                     f"The dimension of batch in input_shape should be a multiple of " \
@@ -398,7 +398,7 @@ class FusedAttnShardingMetaGenerator(ShardingMetaGenerator):
                 if tp_dim is not None and tp_dim >= dp_dim:
                     tp_dim = tp_dim + 1
 
-            if tp_dim is not None:
+            if tp_dim is not None and input_shape is not None:
                 in_axis[tp_dim] = tp_axis_name
                 assert input_shape[tp_dim] % tp_size == 0, \
                     f"The dimension of tensor parallel in input_shape should be a multiple of " \
