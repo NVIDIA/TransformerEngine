@@ -45,8 +45,7 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
     change sign so the last dimension becomes [-odd, +even]
     """
-    from einops import rearrange
-    x = rearrange(x, '... (j d) -> ... j d', j=2)
+    x = x.view(x.shape[:-1] + torch.Size((2, x.shape[-1] // 2)))
     x1, x2 = x.unbind(dim=-2)
     return torch.cat((-x2, x1), dim=-1)
 
