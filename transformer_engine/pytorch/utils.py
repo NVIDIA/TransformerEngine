@@ -187,6 +187,9 @@ def check_dim_for_fp8_forward_exec(*tensors: torch.Tensor) -> bool:
 
 
 def assert_dim_for_fp8_forward_exec(tensor: torch.Tensor) -> None:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
     # single tensor check so it's clear which tensor is triggering the assertion
     assert check_dim_for_fp8_forward_exec(tensor), (
         "Tensor dimensions are not compatible for FP8 execution: "
