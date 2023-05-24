@@ -433,7 +433,7 @@ class TransformerLayer(torch.nn.Module):
                                   otherwise be occupied to store the forward activations until
                                   backprop.
         rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
-                       Embedding tensors for query and key tensors for applied rotary positional
+                       Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
         """
 
