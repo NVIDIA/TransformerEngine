@@ -665,7 +665,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
 
-        bool enable_dropout = (dropout_probability != 0.0f);
+        bool enable_dropout = (dropout_probability != 0.0f) && (!is_training);
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -1262,7 +1262,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     using namespace transformer_engine;
 
     // Only is_training is verified
-    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
 
@@ -1341,7 +1340,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     using namespace transformer_engine;
 
     // Only is_training is verified
-    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
