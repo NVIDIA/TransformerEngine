@@ -442,11 +442,12 @@ def test_export_gemm(
         pytest.skip(reason_for_no_fp8)
 
     class TestFP8_GEMM(nn.Module):
-        def __init__(self, precision, use_bias, gelu, scale_factors):
+        def __init__(self, precision, use_bias, gelu, scale_factors, fake_bf16_io):
             super().__init__()
             self.use_bias = use_bias
             self.gelu = gelu
             self.precision = precision
+            self.fake_bf16_io = fake_bf16_io
 
             self.fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
             self.fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
@@ -490,6 +491,8 @@ def test_export_gemm(
                 bias=self.bias,
                 use_bias=self.use_bias,
                 use_split_accumulator=False)
+            if self.fake_bf16_io:
+                ret = ret.type(torch.float32)
             return ret
 
     class Test_GEMM(nn.Module):
@@ -531,8 +534,11 @@ def test_export_gemm(
     out_features = 128
     hidden_size = 256
     in_features = 64
-    inp = torch.randn(hidden_size, in_features, dtype=precision, device="cuda")
-    weight = torch.randn(out_features, in_features, dtype=precision, device="cuda")
+    fake_bf16_io = precision == torch.bfloat16
+    inp = torch.randn(hidden_size, in_features, device="cuda",
+        dtype=torch.float if fake_bf16_io else precision)
+    weight = torch.randn(out_features, in_features, device="cuda",
+        dtype=torch.float if fake_bf16_io else precision)
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     gelu_str = "_gelu" if use_gelu else ""
@@ -540,10 +546,8 @@ def test_export_gemm(
     fname = f"te.gemm{fp8_str}{bias_str}{gelu_str}{high_prec_str}.onnx"
     input_names = ['input', 'weight']
     if use_fp8:
-        model = TestFP8_GEMM(precision, use_bias, use_gelu, scale_factors)
+        model = TestFP8_GEMM(precision, use_bias, use_gelu, scale_factors, fake_bf16_io)
         do_export(model, (inp, weight), fname, use_fp8, input_names=input_names)
-        if precision == torch.bfloat16:
-            return
         validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2, is_fp8=True, input_names=input_names)
     else:
         model = Test_GEMM(precision, use_bias, use_gelu)
@@ -551,16 +555,24 @@ def test_export_gemm(
         validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2, input_names=input_names)
 
 
-@pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("scale_factor", [448, 112])
-@pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize(
+    "use_fp8, precision,      atol", [
+    [False,   torch.float32,  1e-7],
+    [False,   torch.float16,  1e-7],
+    [False,   torch.bfloat16, 1e-7],
+    [True,    torch.float32,  1e-7],
+    [True,    torch.float16,  1e-7],
+    [True,    torch.bfloat16, 1e-2]
+])
 def test_export_layernorm(
     seed_default_rng,
     use_fp8: bool,
     scale_factor: float,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    atol: float
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
@@ -568,13 +580,16 @@ def test_export_layernorm(
 
     # Set dimensions (these are arbitrary).
     inp_shape = [64, 32]
+    fake_bf16_io = precision == torch.bfloat16
 
     class Test_Layernorm(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             normalized_shape = torch.Size(inp.shape[1:])
-            self.weight = torch.randn(*normalized_shape, dtype=precision, device="cuda")
-            self.bias = torch.zeros(*normalized_shape, dtype=precision, device="cuda")
+            self.weight = torch.randn(*normalized_shape, device="cuda",
+                dtype=torch.float if fake_bf16_io else precision)
+            self.bias = torch.zeros(*normalized_shape, device="cuda",
+                dtype=torch.float if fake_bf16_io else precision)
             self.eps = 1e-6 # An arbitrary small value
 
         def forward(self, inp):
@@ -590,8 +605,10 @@ def test_export_layernorm(
         def __init__(self) -> None:
             super().__init__()
             normalized_shape = torch.Size(inp.shape[1:])
-            self.weight = torch.randn(*normalized_shape, dtype=precision, device="cuda")
-            self.bias = torch.zeros(*normalized_shape, dtype=precision, device="cuda")
+            self.weight = torch.randn(*normalized_shape, device="cuda",
+                dtype=torch.float32 if fake_bf16_io else precision)
+            self.bias = torch.zeros(*normalized_shape, device="cuda",
+                dtype=torch.float32 if fake_bf16_io else precision)
             self.eps = 1e-6 # An arbitrary small value
 
             self.fp8_tensor = tex.FP8FwdTensors.GEMM1_INPUT
@@ -614,18 +631,19 @@ def test_export_layernorm(
                 self.meta,
                 self.fp8_tensor,
                 self.fp8_type,
-                tex.DType.kFloat32 if precision == torch.float32 else tex.DType.kFloat16)
+                as_te_type(precision))
+            if fake_bf16_io:
+                ret = ret.type(torch.float32)
             return ret
 
-    inp = torch.randn(*inp_shape, device="cuda", dtype=precision)
+    inp = torch.randn(*inp_shape, device="cuda", dtype=torch.float32 if fake_bf16_io else precision)
     model = TestFP8_Layernorm() if use_fp8 else Test_Layernorm()
     high_prec_str = dtype2str(precision)
     fp8_str = f"_fp8-{scale_factor}" if use_fp8 else ""
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, use_fp8=use_fp8)
-    if precision not in (torch.bfloat16, ):
-        validate_result(
-            fname, inp, model, atol=1e-7, is_fp8=use_fp8, allow_cnt_errors=3)
+    validate_result(
+        fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3)
 
 
 @skip_FP8
@@ -639,12 +657,13 @@ def test_export_layernorm(
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
 def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision):
     class Test_Softmax(nn.Module):
-        def __init__(self, softmax_fn, mask_inp=False):
+        def __init__(self, softmax_fn, fake_bf16_io, mask_inp=False):
             super().__init__()
             self.softmax_fn = softmax_fn
             self.scale = 8 # arbitrary value
             self.mask_inp = mask_inp
             self.fused_scaled_softmax = None
+            self.fake_bf16_io = fake_bf16_io
             if self.softmax_fn == te.softmax.FusedScaleMaskSoftmax:
                 self.fused_scaled_softmax = te.softmax.FusedScaleMaskSoftmax(
                     attn_mask_type="causal",
@@ -660,6 +679,8 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                     ret = self.softmax_fn.apply(inp, mask, self.scale)
                 else:
                     ret = self.softmax_fn.apply(inp, self.scale)
+            if self.fake_bf16_io:
+                ret = ret.type(torch.float16)
             return ret
 
     # Set dimensions (these are arbitrary).
@@ -668,41 +689,43 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     mask = None
     input_names = ["input", "mask"]
     inp_shape = [hidden_size, in_features, in_features, in_features]
+    fake_bf16_io = precision == torch.bfloat16
     if softmax_fn == softmax_defs.ScaledUpperTriangMaskedSoftmax:
         inp_shape = [hidden_size, in_features, in_features]
         kernel_str = "ScaledUpperTriangMaskedSoftmax"
-        model = Test_Softmax(softmax_fn)
+        model = Test_Softmax(softmax_fn, fake_bf16_io)
     elif softmax_fn == softmax_defs.ScaledMaskedSoftmax:
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(hidden_size, 1, in_features, in_features, device="cuda", dtype=precision)
         mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
         kernel_str = "ScaledMaskedSoftmax"
-        model = Test_Softmax(softmax_fn, mask_inp=True)
+        model = Test_Softmax(softmax_fn, fake_bf16_io, mask_inp=True)
     elif softmax_fn == softmax_defs.ScaledSoftmax:
         kernel_str = "ScaledSoftmax"
-        model = Test_Softmax(softmax_fn)
+        model = Test_Softmax(softmax_fn, fake_bf16_io)
     elif softmax_fn == te.softmax.FusedScaleMaskSoftmax:
         kernel_str = "TorchSoftmax"
-        model = Test_Softmax(softmax_fn)
+        model = Test_Softmax(softmax_fn, fake_bf16_io)
     input_tensor = torch.randn(*inp_shape, device="cuda")
-    input_tensor = input_tensor.to(torch.bfloat16) if precision == torch.bfloat16 else input_tensor.half()
+    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
+    input_tensor = input_tensor.half()
     high_prec_str = dtype2str(precision)
     fname = f"{kernel_str}{high_prec_str}.onnx"
     inp = (input_tensor, mask)
     do_export(model, inp, fname, input_names=input_names)
-    if precision != torch.bfloat16:
-        validate_result(fname, inp, model, atol=1e-3, input_names=input_names)
+    validate_result(fname, inp, model, atol=1e-3, input_names=input_names)
 
 
 # Test dynamically generated softmax mask.
 # Softmax kernel only supports FP16 or BF16!
 @skip_FP8
-@pytest.mark.parametrize("precision", [torch.float16])
+@pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
 def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     class Test_Softmax(nn.Module):
-        def __init__(self, use_onnx_mask_fn: bool):
+        def __init__(self, use_onnx_mask_fn: bool, fake_bf16_io: bool):
             super().__init__()
             self.scale = 1 # arbitrary value
+            self.fake_bf16_io = fake_bf16_io
             # Use NVTE_MASKED_SOFTMAX_FUSION to force TE to use forward_torch_softmax
             # even when is_in_onnx_export_mode()==False.
             os.environ["NVTE_MASKED_SOFTMAX_FUSION"] = "0"
@@ -714,25 +737,29 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
 
         def forward(self, inp, mask):
             ret = self.fused_scaled_softmax(inp, mask, self.scale)
+            if self.fake_bf16_io:
+                ret = ret.type(torch.float16)
             return ret
 
     # Set dimensions (these are arbitrary).
     in_features = 64
     hidden_size = 256
     mask = None
+    fake_bf16_io = precision == torch.bfloat16
     inp_shape = [hidden_size, in_features, in_features, in_features]
     input_tensor = torch.randn(*inp_shape, device="cuda")
-    input_tensor = input_tensor.to(torch.bfloat16) if precision == torch.bfloat16 else input_tensor.half()
+    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
+    input_tensor = input_tensor.half()
     inp = (input_tensor, mask)
     high_prec_str = dtype2str(precision)
 
     # Compare the outputs of TE when using the default softmax mask
     # to the TE outputs produced when using the ONNX-compatible causal mask.
-    model = Test_Softmax(use_onnx_mask_fn=False)
+    model = Test_Softmax(use_onnx_mask_fn=False, fake_bf16_io=fake_bf16_io)
     te_outputs_default_mask = te_infer(model, inp, is_fp8=True)
     with te.onnx_export(True):
         # ONNX export mode forces use of the ONNX-compatible causal mask.
-        model_onnx_mask = Test_Softmax(use_onnx_mask_fn=True)
+        model_onnx_mask = Test_Softmax(use_onnx_mask_fn=True, fake_bf16_io=fake_bf16_io)
         te_outputs_onnx_mask = te_infer(model_onnx_mask, inp, is_fp8=True)
     compare_outputs(te_outputs_default_mask, te_outputs_onnx_mask,
         atol=0, rtol=0, max_errors_printed=10, allow_cnt_errors=0, fname="softmax masking")
@@ -760,7 +787,7 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     # Todo: cannot configure BF16 when bias is disabled (ORT issue?)
     (torch.bfloat16, False),
     # Todo: cannot configure BF16 when bias is enabled (ORT issue?)
-    # (torch.bfloat16, True),
+    (torch.bfloat16, True),
 ])
 def test_export_linear(
     seed_default_rng,

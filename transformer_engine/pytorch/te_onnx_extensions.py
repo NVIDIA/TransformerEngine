@@ -178,9 +178,13 @@ def onnx_te_gemm(
     is_fp16 = is_dtype_fp16(inputs)
     if input_type == int(tex.DType.kFloat8E4M3):
         inputs = dequantize(g, inputs, input_scale_inverse, input_fp8_tensor, out_type)
+        if out_type == int(tex.DType.kBFloat16):
+            inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
     if weight_type == int(tex.DType.kFloat8E4M3):
         weight = dequantize(g, weight, weight_scale_inverse, weight_fp8_tensor, out_type)
+        if out_type == int(tex.DType.kBFloat16):
+            weight = g.op("Cast", weight, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
     empty_tensor_size = [0]
     bias_empty = torch.onnx.symbolic_helper._get_tensor_sizes(bias) == empty_tensor_size
