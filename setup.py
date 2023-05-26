@@ -278,6 +278,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
+    if not found_ninja():
+        add_unique(setup_reqs, "ninja")
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
@@ -367,7 +369,7 @@ class CMakeBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-    def build_extensions(self) -> None:
+    def run(self) -> None:
 
         # Build CMake extensions
         for ext in self.extensions:
@@ -388,7 +390,7 @@ class CMakeBuildExtension(BuildExtension):
             ext for ext in self.extensions
             if not isinstance(ext, CMakeExtension)
         ]
-        super().build_extensions()
+        super().run()
         self.extensions = all_extensions
 
 def setup_common_extension() -> CMakeExtension:
@@ -424,7 +426,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     # Header files
     include_dirs = [
         root_path / "transformer_engine" / "common" / "include",
-        root_path / "pytorch" / "csrc",
+        root_path / "transformer_engine" / "pytorch" / "csrc",
         root_path / "3rdparty" / "cudnn-frontend" / "include",
     ]
 
