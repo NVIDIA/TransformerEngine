@@ -44,7 +44,7 @@ Execute the following command to install the latest stable version of Transforme
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect any installed deep learning frameworks and build support for them. To explicitly specify which frameworks to support, set `NVTE_FRAMEWORK` in the environment.
+This will automatically detect any installed deep learning frameworks and build support for them. Set `NVTE_FRAMEWORK` in the environment (as a comma-separated list) to explicitly specify which frameworks to support.
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -61,7 +61,7 @@ Execute the following command to install the latest development build of Transfo
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
-This will automatically detect any installed deep learning frameworks and build support for them. To explicitly specify which frameworks to support, set `NVTE_FRAMEWORK` in the environment.
+This will automatically detect any installed deep learning frameworks and build support for them. Set `NVTE_FRAMEWORK` in the environment (as a comma-separated list) to explicitly specify which frameworks to support.
 
 Installation (from source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -70,11 +70,12 @@ Execute the following commands to install Transformer Engine from source:
 
 .. code-block:: bash
 
-  git clone --recursive https://github.com/NVIDIA/TransformerEngine.git    # Clone repository and submodules
-  cd TransformerEngine                                                     # Enter TE directory
-  git checkout stable                                                      # Checkout correct branch
-  export NVTE_FRAMEWORK=pytorch                                            # Optionally set framework
-  pip install .                                                            # Build and install
+  # Clone repository, checkout stable branch, clone submodules
+  git clone --branch stable --recursive https://github.com/NVIDIA/TransformerEngine.git
+
+  cd TransformerEngine
+  export NVTE_FRAMEWORK=pytorch   # Optionally set framework
+  pip install .                   # Build and install
 
 If the Git repository has already been cloned, make sure to also clone the submodules:
 

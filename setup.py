@@ -52,6 +52,8 @@ def with_debug_build() -> bool:
         if arg == "--debug":
             sys.argv.remove(arg)
             return True
+    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
+        return True
     return False
 
 # Call once in global scope since this function manipulates the
@@ -204,14 +206,12 @@ def frameworks() -> List[str]:
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
-        for framework in os.getenv("NVTE_FRAMEWORK").split(","):
-            _frameworks.append(framework)
+        _frameworks.extend(os.getenv("NVTE_FRAMEWORK").split(","))
 
     # Check command-line arguments
     for arg in sys.argv.copy():
         if arg.startswith("--framework="):
-            framework = arg.replace("--framework=", "")
-            _frameworks.append(framework)
+            _frameworks.extend(arg.replace("--framework=", "").split(","))
             sys.argv.remove(arg)
 
     # Detect installed frameworks if not explicitly specified
