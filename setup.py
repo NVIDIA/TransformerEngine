@@ -367,7 +367,7 @@ class CMakeBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-    def run(self) -> None:
+    def build_extensions(self) -> None:
 
         # Build CMake extensions
         for ext in self.extensions:
@@ -388,7 +388,7 @@ class CMakeBuildExtension(BuildExtension):
             ext for ext in self.extensions
             if not isinstance(ext, CMakeExtension)
         ]
-        super().run()
+        super().build_extensions()
         self.extensions = all_extensions
 
 def setup_common_extension() -> CMakeExtension:
