@@ -8,7 +8,7 @@ Jax
 
 .. autoapiclass:: transformer_engine.jax.MajorShardingType
 .. autoapiclass:: transformer_engine.jax.ShardingType
-.. autoapiclass:: transformer_engine.jax.TransformerLayerType
+.. autoapiclass:: transformer_engine.jax.flax.TransformerLayerType
 .. autoapiclass:: transformer_engine.jax.ShardingResource(dp_resource=None, tp_resource=None)
 
 
