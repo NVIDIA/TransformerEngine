@@ -20,6 +20,32 @@ from setuptools.command.build_ext import build_ext
 root_path: Path = Path(__file__).resolve().parent
 
 @lru_cache(maxsize=1)
+def te_version() -> str:
+    """Transformer Engine version string
+
+    Includes Git commit as local version, unless suppressed with
+    NVTE_NO_LOCAL_VERSION environment variable.
+
+    """
+    with open(root_path / "VERSION", "r") as f:
+        version = f.readline().strip()
+    if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")):
+        try:
+            output = subprocess.run(
+                ["git", "rev-parse" , "--short", "HEAD"],
+                capture_output=True,
+                cwd=root_path,
+                check=True,
+                universal_newlines=True,
+            )
+        except (CalledProcessError, OSError):
+            pass
+        else:
+            commit = output.stdout.strip()
+            version += f"+{commit}"
+    return version
+
+@lru_cache(maxsize=1)
 def with_debug_build() -> bool:
     """Whether to build with a debug configuration"""
     for arg in sys.argv:
@@ -46,11 +72,13 @@ def found_cmake() -> bool:
         return False
 
     # Query CMake for version info
-    output = subprocess.check_output(
+    output = subprocess.run(
         [_cmake_bin, "--version"],
+        capture_output=True,
+        check=True,
         universal_newlines=True,
     )
-    match = re.search(r"version\s*([\d.]+)", output)
+    match = re.search(r"version\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     version = tuple(int(v) for v in version)
     return version >= (3, 18)
@@ -149,11 +177,13 @@ def cuda_version() -> Tuple[int, ...]:
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
     # Query NVCC for version info
-    output = subprocess.check_output(
+    output = subprocess.run(
         [nvcc_bin, "-V"],
+        capture_output=True,
+        check=True,
         universal_newlines=True,
     )
-    match = re.search(r"release\s*([\d.]+)", output)
+    match = re.search(r"release\s*([\d.]+)", output.stdout)
     version = match.group(1).split('.')
     return tuple(int(v) for v in version)
 
@@ -454,10 +484,6 @@ def setup_pytorch_extension() -> setuptools.Extension:
 
 def main():
 
-    # Version
-    with open(root_path / "VERSION", "r") as f:
-        version = f.readline()
-
     # Submodules to install
     packages = setuptools.find_packages(
         include=["transformer_engine", "transformer_engine.*"],
@@ -474,7 +500,7 @@ def main():
     # Configure package
     setuptools.setup(
         name="transformer_engine",
-        version=version,
+        version=te_version(),
         packages=packages,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
