@@ -335,8 +335,7 @@ static cudnn_frontend::Tensor createSoftmaxForward(
     int64_t afterReduction_dim[4] = {b, h, s_q, 1};
     int64_t afterReduction_stride[4] = {h * s_q, s_q, 1, 1};
 
-    cudnnDataType_t softmaxOutputType =
-        (enable_dropout || softmax_output_virtual) ? CUDNN_DATA_FLOAT : tensorType;
+    cudnnDataType_t softmaxOutputType = enable_dropout ? CUDNN_DATA_FLOAT : tensorType;
     uint64_t softmaxOutputName = softmax_output_virtual ? VIRTUAL_ID + 154 : S_ID;
 
     // max (x)
@@ -665,7 +664,13 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
 
-        bool enable_dropout = (dropout_probability != 0.0f) && (!is_training);
+        // softmax auxiliary is only used in the training mode
+        bool enable_dropout = is_training && (dropout_probability != 0.0f);
+
+        // two conditions that make softmax auxiliary in virtual
+        // 1. inference mode (not is_training)
+        // 2. dropout enabled: the auxiliary becomes the dropout output
+        bool softmax_output_virtual = !is_training || enable_dropout;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -683,8 +688,10 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
             // if bias, we need to memset the S buffer to correctly computate dbias
+            // WAR: causal_mask without bias needs memset the S buffer
+            // inference mode doesn't need the S auxiliary
             auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) && is_training;
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
@@ -699,8 +706,6 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
             NVTE_CHECK(dropout_probability != 1.0f, "Dropout probability cannot be 1.0.");
 
-            // TODO(rewang): check whether devPtrS can be removed
-            bool softmax_output_virtual = enable_dropout;  // || devPtrS == nullptr;
             auto softmax_output =
                 createSoftmaxForward(b, h, s_q, s_kv, d, layout, enable_dropout,
                                      softmax_output_virtual, tensorType, ops, mask_output);
@@ -786,7 +791,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         } else if (tensorType == CUDNN_DATA_BFLOAT16) {
             data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &bfloat_cast_scaling_factor));
         } else {
-            NVTE_ERROR("Not supported tensor type.");
+            NVTE_ERROR("Unsupported tensor type.");
         }
 
         data_ptrs.insert(std::pair<uint64_t, void *>(O_ID, devPtrO));
@@ -795,7 +800,9 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             data_ptrs.insert(std::pair<uint64_t, void *>(B_ID, devPtrBias));
         }
 
-        if (devPtrS != nullptr) {
+        // if enable_dropout, S is the result after dropout
+        // if not enable dropout, S is the result after softmax
+        if (enable_dropout || !softmax_output_virtual) {
             data_ptrs.insert(std::pair<uint64_t, void *>(S_ID, devPtrS));
         }
 
@@ -813,7 +820,7 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                 data_ptrs.insert(
                     std::pair<uint64_t, void *>(DROPOUT_CONST_ID, &bfloat16_cast_scale_dropout));
             } else {
-                NVTE_ERROR("Not supported tensor type.");
+                NVTE_ERROR("Unsupported tensor type.");
             }
             data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_SEED_ID, devPtrDropoutSeed));
             data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_OFFSET_ID, devPtrDropoutOffset));
@@ -1261,7 +1268,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    // Only is_training is verified
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
 
@@ -1339,7 +1345,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    // Only is_training is verified
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
