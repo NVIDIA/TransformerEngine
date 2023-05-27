@@ -9,9 +9,21 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <cstdint>
-#include <cassert>
+#include <cuda_fp8.h>
 
+#if !defined(__CUDACC_RTC__)
+#include <cstdint>
+#else
+// Importing C++ standard headers is a pain with NVRTC
+using uint8_t = unsigned char;
+using uint16_t = unsigned short int;  // NOLINT(*)
+using uint32_t = unsigned int;
+using uint64_t = unsigned long long int;  // NOLINT(*)
+static_assert(sizeof(uint8_t) == 1);
+static_assert(sizeof(uint16_t) == 2);
+static_assert(sizeof(uint32_t) == 4);
+static_assert(sizeof(uint64_t) == 8);
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -44,7 +56,7 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx) {
-    return __shfl_xor_sync(uint32_t(-1), x, idx);
+    return __shfl_xor_sync(static_cast<uint32_t>(-1), x, idx);
 }
 
 template<>
@@ -54,7 +66,7 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx) {
-    return __shfl_down_sync(uint32_t(-1), x, idx);
+    return __shfl_down_sync(static_cast<uint32_t>(-1), x, idx);
 }
 
 template<>
@@ -605,8 +617,8 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_ac
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
-    m_a = __shfl_sync(uint32_t(-1), m_a, 0);
-    m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
+    m_a = __shfl_sync(static_cast<uint32_t>(-1), m_a, 0);
+    m2_a = __shfl_sync(static_cast<uint32_t>(-1), m2_a, 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

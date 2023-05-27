@@ -7,6 +7,7 @@ Wrapper module for Transformer related layers with FP8 support.
 import functools
 from enum import Enum
 from math import sqrt
+import os
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 import warnings
 
@@ -165,8 +166,17 @@ def core_attention(query: Array,
     else:
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
+    # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
+    # In this case, the scale can not fused into the Softmax module.
+    if bias is not None:
+        attn_weights = attn_weights * scale_factor
+        fused_scale_factor = 1.
+    else:
+        # If no bias, the scale can be fused into Softmax module
+        fused_scale_factor = scale_factor
+
     attn_weights = Softmax(softmax_type=softmax_type,
-                           scale_factor=scale_factor,
+                           scale_factor=fused_scale_factor,
                            sharding_type=softmax_sharding_type)(attn_weights, mask, bias)
 
     if not deterministic and dropout_rate > 0.:
@@ -360,12 +370,13 @@ class MultiHeadAttention(nn.Module):
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
         fused_attn_supported_seqlen = [128, 256, 384, 512]
+        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
             q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
-            and is_fused_attn_kernel_available()
+            and is_fused_attn_kernel_available() and enable_fused_attn
 
-        if not use_fused_attn:
+        if enable_fused_attn and not use_fused_attn:
             reason = ""
             if decode:
                 reason += f"decode=False is required but got {decode}, "

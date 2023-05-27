@@ -41,6 +41,30 @@ _flash_attn_version_required = packaging.version.Version("1.0.2")
 __all__ = ["DotProductAttention"]
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """
+    change sign so the last dimension becomes [-odd, +even]
+    """
+    x = x.view(x.shape[:-1] + torch.Size((2, x.shape[-1] // 2)))
+    x1, x2 = x.unbind(dim=-2)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """
+    input tensor t is of shape [seq_length, ..., dim]
+    rotary positional embeding tensor `freqs` is of shape [seq_length, ..., dim]
+    """
+    rot_dim = freqs.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    return torch.cat((t, t_pass), dim=-1)
+
+
 class _SplitLastDim(torch.autograd.Function):
     """"""
 
@@ -281,9 +305,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            attn_mask_type == "causal"
-        ), 'FlashAttention currently only supports causal attention mask.'
 
         self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
@@ -296,7 +317,6 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -308,9 +328,6 @@ class FlashAttention(torch.nn.Module):
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'FlashAttention currently only supports CUDA tensors.'
-        assert (
-            attention_mask is None
-        ), 'FlashAttention currently does not support external attention mask.'
 
         # For now just 128, will make it more general in the future
 
@@ -428,7 +445,6 @@ class DotProductAttention(torch.nn.Module):
         self.device_compute_capability = get_device_compute_capability()
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and attn_mask_type == "causal"
             and self.device_compute_capability >= 8.0
         )
 
@@ -437,6 +453,7 @@ class DotProductAttention(torch.nn.Module):
             "attention_dropout_ctx": attention_dropout_ctx,
             "attn_mask_type": attn_mask_type,
         }
+        self.attn_mask_type = attn_mask_type
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
@@ -512,6 +529,9 @@ class DotProductAttention(torch.nn.Module):
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
         ):
+            use_flash_attention = False
+
+        if self.attn_mask_type == "padding" and attention_mask is not None:
             use_flash_attention = False
 
         if is_in_onnx_export_mode():
@@ -726,6 +746,7 @@ class MultiHeadAttention(torch.nn.Module):
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
+        rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
@@ -739,6 +760,7 @@ class MultiHeadAttention(torch.nn.Module):
         # Pre-allocate memory for key-values for inference.
         # =================================================
 
+        is_first_step = False
         if inference_params and self.layer_number is not None:
             if self.layer_number not in inference_params.key_value_memory_dict:
                 inf_max_seq_len = inference_params.max_sequence_len
@@ -753,6 +775,7 @@ class MultiHeadAttention(torch.nn.Module):
                     inference_key_memory,
                     inference_value_memory,
                 )
+                is_first_step = True
             else:
                 (
                     inference_key_memory,
@@ -865,6 +888,11 @@ class MultiHeadAttention(torch.nn.Module):
         # Adjust key and value for inference
         # ==================================
 
+        # duplicate the pos_emb for self attention
+        if rotary_pos_emb is not None:
+            if not isinstance(rotary_pos_emb, tuple):
+                rotary_pos_emb = ((rotary_pos_emb,) * 2)
+
         if inference_params and self.layer_number is not None:
             batch_start = inference_params.batch_size_offset
             batch_end = batch_start + key_layer.size(1)
@@ -884,9 +912,35 @@ class MultiHeadAttention(torch.nn.Module):
                 :sequence_end, batch_start:batch_end, ...
             ]
 
+            # adjust the key rotary positional embedding
+            if rotary_pos_emb is not None:
+                q_pos_emb, k_pos_emb = rotary_pos_emb
+                # need to cross check this condition during inference
+                # if not set_inference_key_value_memory:
+                if not is_first_step:
+                    # In inference, we compute one token at a time.
+                    # Select the correct positional embedding
+                    # (only the last token in the sequence)
+                    q_pos_emb = q_pos_emb[sequence_end - 1 : sequence_end]
+                else:
+                    # In the first forward pass of inference,
+                    # we use the entire provided prefix.
+                    # q_pos_emb here has the rope embeddings of the entire
+                    # prefix + to-be-generated output so
+                    # we slice to just the prefix.
+                    q_pos_emb = q_pos_emb[:sequence_end, :, :, :]
+                k_pos_emb = k_pos_emb[:sequence_end, :, :, :]
+                rotary_pos_emb = (q_pos_emb, k_pos_emb)
+
         # ==================================
         # core attention computation
         # ==================================
+
+        # apply relative positional encoding (rotary embedding)
+        if rotary_pos_emb is not None:
+            q_pos_emb, k_pos_emb = rotary_pos_emb
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
 
         context_layer = self.core_attention(
             query_layer,

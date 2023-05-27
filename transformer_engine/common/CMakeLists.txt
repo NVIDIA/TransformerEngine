@@ -24,6 +24,12 @@ list(APPEND transformer_engine_SOURCES
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
+     util/cuda_driver.cpp
+     util/cuda_runtime.cpp
+     util/rtc.cpp
+     util/system.cpp
+     fused_softmax/scaled_masked_softmax.cu
+     fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
@@ -33,12 +39,36 @@ target_include_directories(transformer_engine PUBLIC
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
+                      CUDA::cuda_driver
                       CUDA::cudart
+                      CUDA::nvrtc
                       CUDA::nvToolsExt
-		      CUDNN::cudnn)
+                      CUDNN::cudnn)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CMAKE_SOURCE_DIR}/../3rdparty/cudnn-frontend/include")
+
+# Make header files with C++ strings
+function(make_string_header STRING STRING_NAME)
+    configure_file(util/string_header.h.in
+                   "string_headers/${STRING_NAME}.h"
+                   @ONLY)
+endfunction()
+function(make_string_header_from_file file_ STRING_NAME)
+    file(READ "${file_}" STRING)
+    configure_file(util/string_header.h.in
+                   "string_headers/${STRING_NAME}.h"
+                   @ONLY)
+endfunction()
+list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
+make_string_header("${cuda_include_path}"
+                   string_path_cuda_include)
+make_string_header_from_file(utils.cuh
+                             string_code_utils_cuh)
+make_string_header_from_file(transpose/rtc/transpose.cu
+                             string_code_transpose_rtc_transpose_cu)
+target_include_directories(transformer_engine PRIVATE
+                           "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu

@@ -19,6 +19,7 @@ def onnx_export(
         with onnx_export(enabled=True):
             torch.onnx.export(model)
 
+    Parameters
     ----------
     enabled: bool, default = `False`
              whether or not to enable export

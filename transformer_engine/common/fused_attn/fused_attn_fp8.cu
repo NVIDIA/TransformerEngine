@@ -1016,7 +1016,7 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
               NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-      static CacheType fa_fprop_cache;
+      static thread_local CacheType fa_fprop_cache;
 
       // Get plan from cache if cache is available, otherwise create one
       auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -1332,7 +1332,7 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
               NVTE_Bias_Type::NVTE_NO_BIAS, NVTE_Mask_Type::NVTE_PADDING_MASK, tensorType};
 
       using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-      static CacheType fa_bprop_cache;
+      static thread_local CacheType fa_bprop_cache;
 
       // Get plan from cache if cache is available, otherwise create one
       auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
