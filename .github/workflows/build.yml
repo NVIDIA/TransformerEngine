@@ -22,7 +22,7 @@ jobs:
       - name: 'Build'
         run: |
           mkdir -p wheelhouse && \
-          NVTE_FRAMEWORK=pytorch pip wheel -w wheelhouse . -v
+          NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
       - name: 'Upload wheel'
         uses: actions/upload-artifact@v3
         with:

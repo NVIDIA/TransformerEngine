@@ -476,7 +476,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         name="transformer_engine_extensions",
         sources=sources,
         include_dirs=include_dirs,
-        # libraries=["transformer_engine"], ### TODO Debug linker errors
+        # libraries=["transformer_engine"], ### TODO (tmoon) Debug linker errors
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
