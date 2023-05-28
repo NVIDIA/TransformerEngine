@@ -781,7 +781,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
 
     // The number of rng_state could be 2 or 4, and the dtype is u32
-    // If there are 4 rng_state, see (0, 1), (2, 3) as 2 u32 rng_state respectively
+    // If there are 4 rng_state, treat (0, 1), (2, 3) as 2 u32 rng_state respectively
     NVTE_CHECK(num_rng_state == 2 || num_rng_state == 4);
     DType rng_state_type = num_rng_state == 4 ? DType::kInt64 : DType::kInt32;
     auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, rng_state_type);
@@ -803,12 +803,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     auto workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    // fused attn workspace size + casted rng state size
-    // size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
-
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    // void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
-    // CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
 
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
@@ -954,7 +949,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
 
     // The number of rng_state could be 2 or 4, and the dtype is u32
-    // If there are 4 rng_state, see (0, 1), (2, 3) as 2 u32 rng_state respectively
+    // If there are 4 rng_state, treat (0, 1), (2, 3) as 2 u32 rng_state respectively
     NVTE_CHECK(num_rng_state == 2 || num_rng_state == 4);
     DType rng_state_type = num_rng_state == 4 ? DType::kInt64 : DType::kInt32;
     auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, rng_state_type);
@@ -977,12 +972,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
 
     auto workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    // fused attn workspace size + casted rng state size
-    // size_t workspace_size = fused_attn_workspace_size + sizeof(int64_t) * 2;
-
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-    // void *casted_rng_state = static_cast<unsigned char *>(workspace) + fused_attn_workspace_size;
-    // CastAsync<int64_t, uint32_t>(casted_rng_state, rng_state, 2, stream);
 
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());

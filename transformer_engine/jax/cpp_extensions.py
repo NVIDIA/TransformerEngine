@@ -1981,15 +1981,18 @@ def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_ou
                                                           scale_factor=scale_factor)
 
 
-def _check_rng_state(rng_state):
+def _check_rng_state(rng_state, dropout_probability, is_training):
     # Jax can't bind None, create a dummy tensor for None
     if rng_state is None:
+        dropout_enabled = dropout_probability > 0 and is_training
+        assert not dropout_enabled, "rng_state is not allowed to be None when dropout is enabled."
         rng_state = jnp.zeros(2, dtype=jnp.uint32)
 
-    # Jax default use threefry PRNG, which generates 2 u32
     if rng_state.dtype != jnp.uint32:
-        warnings.warn(f"Requested {rng_state.dtype=} is not available, and will be "
-                      f"casted to dtype uint32.")
+        warnings.warn(
+            f"Requested {rng_state.dtype=} is not available, and will be "
+            f"casted to dtype uint32. "
+            f"Please use threefry/rbg/unsafe_rbg PRNG implementations to remove this warning.")
         rng_state = rng_state.astype(jnp.uint32)
 
     assert rng_state.dtype == jnp.uint32
@@ -2098,7 +2101,7 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
     Wrapper for TE self fused attention max seqlen 512 fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
-    rng_state = _check_rng_state(rng_state)
+    rng_state = _check_rng_state(rng_state, dropout_probability, is_training)
 
     if bias is None:
         assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
@@ -2182,19 +2185,14 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
         operand_shapes = [ir_qkv_shape, ir_softmax_aux_shape, ir_doutput_shape, ir_cu_seqlen_shape]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        # the dropout elements are encoded in the forward auxiliary tensor
+        # so rng_state is not needed in backward
+        num_rng_state = 0
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch,
-            num_head,
-            max_seqlen,
-            max_seqlen,
-            head_dim,
-            0,    # there is no rng_state in backward currently
-            scaling_factor,
-            dropout_probability,
-            attn_bias_type,
-            attn_mask_type,
-            jax_dtype_to_te_dtype(qkv_aval.dtype),
-            is_training)
+            batch, num_head, max_seqlen, max_seqlen, head_dim, num_rng_state, scaling_factor,
+            dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
         out = custom_caller(SelfFusedAttnMax512BwdPrimitive.name,
                             args,
@@ -2337,7 +2335,7 @@ def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: j
     Wrapper for TE cross fused attention max seqlen 512 fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
-    rng_state = _check_rng_state(rng_state)
+    rng_state = _check_rng_state(rng_state, dropout_probability, is_training)
 
     return _cross_fused_attn_max_512_fwd_p.bind(q,
                                                 kv,
@@ -2423,19 +2421,14 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        # the dropout elements are encoded in the forward auxiliary tensor
+        # so rng_state is not needed in backward
+        num_rng_state = 0
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch,
-            num_head,
-            q_max_seqlen,
-            kv_max_seqlen,
-            head_dim,
-            0,    # there is no rng_state in backward currently
-            scaling_factor,
-            dropout_probability,
-            attn_bias_type,
-            attn_mask_type,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            is_training)
+            batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, num_rng_state,
+            scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
+            jax_dtype_to_te_dtype(q_aval.dtype), is_training)
 
         out = custom_caller(CrossFusedAttnMax512BwdPrimitive.name,
                             args,
