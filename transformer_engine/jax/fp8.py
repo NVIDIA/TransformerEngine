@@ -346,9 +346,11 @@ def fp8_autocast(enabled: bool = False,
                     pjit(transformer.init, ...)(...)
 
     .. note::
-        We only support :attr:`margin`, :attr:`fp8_format`, :attr:`interval` and
-        :attr:`amax_history_len` in recipe.DelayedScaling currently. Other parameters
-        in recipe.DelayedScaling would be ignored, even if set.
+        We only support :attr:`margin`, :attr:`fp8_format`,
+        :attr:`interval`, :attr:`amax_history_len` and
+        :attr:`amax_compute_algo`(with value 'max' and 'most_recent')
+        in recipe.DelayedScaling currently. Other parameters in
+        recipe.DelayedScaling will trigger an assertion.
 
     Parameters
     ----------
@@ -358,10 +360,16 @@ def fp8_autocast(enabled: bool = False,
         Recipe used for FP8 training.
     sharding_resource: ShardingResource, default = None
         Specify the mesh axes for data and tensor parallelism to shard along.
-        If set to None, then ShardingResource() would be created.
+        If set to None, then no data or tensor parallelism will be used.
+
     """
     if fp8_recipe is None:
         fp8_recipe = DelayedScaling()
+
+    assert fp8_recipe.amax_compute_algo not in ["max", "most_recent"], "DelayedScaling amax_compute_algo only support max and most_recent."
+    assert fp8_recipe.scaling_factor_compute_algo is None, "DelayedScaling scaling_factor_compute_algo isn't supported."
+    assert fp8_recipe.override_linear_precision == (False, False, False), "DelayedScaling override_linear_precision isn't supported."
+    assert fp8_recipe.reduce_amax is True, "DelayedScaling reduce_amax isn't supported."
 
     if sharding_resource is None:
         sharding_resource = ShardingResource()
