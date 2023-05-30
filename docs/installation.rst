@@ -47,7 +47,7 @@ Execute the following command to install the latest stable version of Transforme
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect any installed deep learning frameworks and build support for them. Set `NVTE_FRAMEWORK` in the environment (as a comma-separated list) to explicitly specify which frameworks to support.
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list.
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ Execute the following command to install the latest development build of Transfo
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
-This will automatically detect any installed deep learning frameworks and build support for them. Set `NVTE_FRAMEWORK` in the environment (as a comma-separated list) to explicitly specify which frameworks to support.
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list.
 
 Installation (from source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
