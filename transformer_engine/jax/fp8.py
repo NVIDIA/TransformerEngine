@@ -367,7 +367,7 @@ def fp8_autocast(enabled: bool = False,
         fp8_recipe = DelayedScaling()
 
     assert fp8_recipe.amax_compute_algo in ["max", "most_recent"], (
-        "DelayedScaling amax_compute_algo only support max and most_recent.")
+        "DelayedScaling amax_compute_algo only supports max and most_recent.")
     assert fp8_recipe.scaling_factor_compute_algo is None, (
         "DelayedScaling scaling_factor_compute_algo isn't supported.")
     assert fp8_recipe.override_linear_precision == (False, False, False), (
