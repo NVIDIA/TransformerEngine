@@ -641,7 +641,10 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
-    def get_fp8_weights_scratchpad(self, is_first_microbatch) -> list:
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
         """
         Fetch the fp8 weight tensor placeholders if they exist (when
         `is_first_microbatch` is not `None`) or return empty fp8 weight
