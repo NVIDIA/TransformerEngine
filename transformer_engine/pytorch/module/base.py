@@ -809,5 +809,5 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     @abstractmethod
     def get_fp8_weights_scratchpad(self, is_first_microbatch) -> list:
-        """Needs override as this is slightly different for different modules"""
+        """Needs override."""
 
