@@ -1063,7 +1063,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             init.zeros_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
-    def get_fp8_weights_scratchpad(self, is_first_microbatch) -> list:
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
         """
         Fetch the fp8 weight tensor placeholders if they exist (when
         `is_first_microbatch` is not `None`) or return empty fp8 weight
