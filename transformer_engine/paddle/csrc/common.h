@@ -27,7 +27,7 @@ class FP8TensorMeta {
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
-enum FP8FwdTensors {
+enum class FP8FwdTensors {
     GEMM1_INPUT = 0,
     GEMM1_WEIGHT = 1,
     GEMM1_OUTPUT = 2,
@@ -38,7 +38,7 @@ enum FP8FwdTensors {
 
 // Used as named indices on the `scale`, `scale_inv`,
 // and `amax` tensors in the `FP8TensorMeta` class.
-enum FP8BwdTensors { GRAD_OUTPUT1 = 0, GRAD_INPUT1 = 1, GRAD_OUTPUT2 = 2, GRAD_INPUT2 = 3 };
+enum class FP8BwdTensors { GRAD_OUTPUT1 = 0, GRAD_INPUT1 = 1, GRAD_OUTPUT2 = 2, GRAD_INPUT2 = 3 };
 
 // Paddle Tensor Utils
 template <typename T>

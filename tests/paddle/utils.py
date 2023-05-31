@@ -25,9 +25,9 @@ def assert_allclose(actual,
                     equal_nan=True,
                     err_msg='',
                     verbose=True):
-    """Compare two input numpy arrays"""
-    if not isinstance(actual, float):
-        actual = actual.astype(np.float32)
-    if not isinstance(desired, float):
-        desired = desired.astype(np.float32)
+    """Compare two input paddle tensors"""
+    if isinstance(actual, paddle.Tensor):
+        actual = paddle.cast(actual, 'float32').numpy()
+    if isinstance(desired, paddle.Tensor):
+        desired = paddle.cast(desired, 'float32').numpy()
     np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)

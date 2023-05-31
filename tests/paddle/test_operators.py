@@ -31,7 +31,7 @@ def test_quantize_dequantize():
                           tex.FP8FwdTensors.GEMM1_OUTPUT,
                           itype=fp8_dtype,
                           otype=tex.DType.kFloat32)
-        assert_allclose(a.numpy(), b.numpy(), rtol=5e-2, atol=5e-2)
+        assert_allclose(a, b, rtol=5e-2, atol=5e-2)
 
 
 class TestGemm:
@@ -59,7 +59,7 @@ class TestGemm:
         actual_out, _, _ = gemm(b, a, paddle.bfloat16, workspace, False, None, False, False, "TN",
                                 None, None, False)
 
-        assert_allclose(actual_out.numpy(), ref_out.numpy())
+        assert_allclose(actual_out, ref_out)
 
     @staticmethod
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -67,17 +67,20 @@ class TestGemm:
         """
         Test "TN" BF16 GEMM, with accumulate=True
         """
+        min_val = -16
+        max_val = 16
         a = paddle.rand(shape=(m, k), dtype='bfloat16')
         b = paddle.rand(shape=(n, k), dtype='bfloat16')
+        c = paddle.cast(paddle.randint(min_val, max_val, shape=(m, n)), 'bfloat16')
         workspace = paddle.zeros(shape=[33_554_432], dtype='uint8')
 
-        ref_out = paddle.matmul(a, b.T)
+        ref_out = c + paddle.matmul(a, b.T)
 
-        actual_out = paddle.zeros(shape=(m, n), dtype='bfloat16')
+        actual_out = paddle.clone(c)
         _, _, _ = gemm(b, a, paddle.bfloat16, workspace, False, None, False, True, "TN", actual_out,
                        None, False)
 
-        assert_allclose(actual_out.numpy(), ref_out.numpy())
+        assert_allclose(actual_out, ref_out, rtol=5e-2, atol=5e-2)
 
     @staticmethod
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -104,4 +107,4 @@ class TestGemm:
                               fp8_dtype, a_casted, fp8_meta.scale_inv,
                               tex.FP8FwdTensors.GEMM1_INPUT, fp8_dtype, out_dtype, workspace)
 
-        assert_allclose(actual_out.numpy(), ref_out.numpy())
+        assert_allclose(actual_out, ref_out)
