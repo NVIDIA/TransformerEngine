@@ -774,7 +774,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Returns empty tensors to be later used to store fp8 version of weights
         and their transposes (for the bwd pass) for this batch (or microbatch).
         When `is_first_microbatch` is `None`, this is especially useful since
-        we then don't need to store the fp8 weights that's needed for one time
+        we then don't need to store the fp8 weights that are needed for one time
         only in the forward pass. Note that we still need to store the tensor
         for the fp8 weight transpose which is at least needed in the backward
         pass but that's taken care of by storing the transpose tensor in
