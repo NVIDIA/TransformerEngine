@@ -562,8 +562,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.set_activation_dtype(inp)
             self.fp8_init(num_gemms=num_gemms)
 
-            # Create persistent tensor placeholders for fp8 weights and their
-            # transposes only when `is_first_microbatch` is not None.
+            # Create persistent tensors for fp8 weights and their transposes
+            # only when fp8 weight caching is used.
             if is_first_microbatch is not None:
                 self.set_fp8_weights()
 
