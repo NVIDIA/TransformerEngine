@@ -769,7 +769,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
-    def get_fp8_weights_empty_tensors(self, is_first_microbatch) -> list:
+    def get_fp8_weights_empty_tensors(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
         """
         Returns empty tensors to be later used to store fp8 version of weights
         and their transposes (for the bwd pass) for this batch (or microbatch).
