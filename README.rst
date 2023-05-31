@@ -162,7 +162,13 @@ In the NGC container
 ^^^^^^^^^^^^^^^^^^^^
 
 Transformer Engine comes preinstalled in the PyTorch container on
-`NVIDIA GPU Cloud <https://ngc.nvidia.com>`_ (versions 22.09 and later).
+`NVIDIA GPU Cloud Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_ (versions 22.09 and later).
+
+.. code-block:: bash
+
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.04-py3
+
+Where 23.04 is the container version. For example, 23.04 for April 2023 release.
 
 From source
 ^^^^^^^^^^^
