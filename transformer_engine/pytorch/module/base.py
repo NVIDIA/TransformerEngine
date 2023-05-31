@@ -561,7 +561,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.set_activation_dtype(inp)
             self.fp8_init(num_gemms=num_gemms)
-            self.set_fp8_weights()
+
+            # Create persistent tensor placeholders for fp8 weights and their
+            # transposes only when `is_first_microbatch` is not None.
+            if is_first_microbatch is not None:
+                self.set_fp8_weights()
 
             update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
             if self.fp8 and self.sequence_parallel:
@@ -765,6 +769,45 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
+    def get_fp8_weights_empty_tensors(self, is_first_microbatch) -> list:
+        """
+        Returns empty tensors to be later used to store fp8 version of weights
+        and their transposes (for the bwd pass) for this batch (or microbatch).
+        When `is_first_microbatch` is `None`, this is especially useful since
+        we then don't need to store the fp8 weights that's needed for one time
+        only in the forward pass. Note that we still need to store the tensor
+        for the fp8 weight transpose which is at least needed in the backward
+        pass but that's taken care of by storing the transpose tensor in
+        `ctx.save_for_backward`.
+        """
+        assert is_first_microbatch is None, "Should only be here when "\
+                                            "`is_first_microbatch` is None!"
+        fp8_weight_tensors = []
+        for shape in self.fp8_weight_shapes:
+            fp8_weight_tensors.append(
+                torch.empty(
+                    shape,
+                    device=torch.cuda.current_device(),
+                    dtype=torch.uint8,
+                )
+            )
+
+            fp8_weight_tensors.append(
+                torch.empty(
+                    shape[1],
+                    shape[0],
+                    device=torch.cuda.current_device(),
+                    dtype=torch.uint8,
+                )
+            )
+        return fp8_weight_tensors
+
+
     @abstractmethod
     def forward(self):
         """Needs override."""
+
+    @abstractmethod
+    def get_fp8_weights_scratchpad(self, is_first_microbatch) -> list:
+        """Needs override as this is slightly different for different modules"""
+
