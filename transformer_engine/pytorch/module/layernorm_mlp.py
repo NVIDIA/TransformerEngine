@@ -32,7 +32,7 @@ from ..utils import (
     divide,
     get_default_init_method,
     cast_if_needed,
-    check_dim_for_fp8_forward_exec,
+    assert_dim_for_fp8_forward_exec,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -107,9 +107,10 @@ class _LayerNormMLP(torch.autograd.Function):
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
-        assert (
-            not fp8 or check_dim_for_fp8_forward_exec(inputmat, fc1_weight, fc2_weight)
-        ), "Input and weight dimensions are not compatible for FP8 execution."
+        if fp8:
+            assert_dim_for_fp8_forward_exec(inputmat)
+            assert_dim_for_fp8_forward_exec(fc1_weight)
+            assert_dim_for_fp8_forward_exec(fc2_weight)
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
