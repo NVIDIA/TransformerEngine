@@ -811,6 +811,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Needs override."""
 
     @abstractmethod
-    def get_fp8_weights_scratchpad(self, is_first_microbatch) -> list:
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
         """Needs override."""
 
