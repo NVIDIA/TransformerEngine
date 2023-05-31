@@ -130,17 +130,20 @@ float *nvte_tensor_scale(const NVTETensor tensor);
  */
 float *nvte_tensor_scale_inv(const NVTETensor tensor);
 
+/*! \struct NVTETensorPack
+    \brief Pack of tensors, generally used for auxiliary outputs.
+ */
 struct NVTETensorPack {
-  static const int MAX_SIZE = 10;  /*!< we expect <10 matrices in auxiliary outputs */
-  NVTETensor tensors[MAX_SIZE];  /*!< wrappers to tensors, do not hold memory */
-  size_t size = 0;  /*!< actual size of the tensor pack, 0 <= size <= MAX_SIZE */
+  static const int MAX_SIZE = 10;  /*!< Max number of tensors in the pack. Assumed <= 10. */
+  NVTETensor tensors[MAX_SIZE];  /*!< Wrappers of tensors. They do not hold the associated memory. */
+  size_t size = 0;  /*!< Actual number of tensors in the pack, 0 <= size <= MAX_SIZE. */
 };
 
-/*! \brief Create NVTETensors in NVTETensorPack.
+/*! \brief Create `tensors` in NVTETensorPack.
  */
 void nvte_tensor_pack_create(NVTETensorPack* pack);
 
-/*! \brief Destroy NVTETensors in NVTETensorPack.
+/*! \brief Destroy `tensors` in NVTETensorPack.
  */
 void nvte_tensor_pack_destroy(NVTETensorPack* pack);
 
