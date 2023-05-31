@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 add_library(CUDNN::cudnn_all INTERFACE IMPORTED)
 
 find_path(
@@ -14,7 +18,7 @@ function(find_cudnn_library NAME)
         HINTS $ENV{CUDNN_PATH} ${CUDNN_PATH} ${CUDAToolkit_LIBRARY_DIR}
         PATH_SUFFIXES lib64 lib/x64 lib
     )
-    
+
     if(${UPPERCASE_NAME}_LIBRARY)
         add_library(CUDNN::${NAME} UNKNOWN IMPORTED)
         set_target_properties(
@@ -48,7 +52,7 @@ if(CUDNN_INCLUDE_DIR AND CUDNN_LIBRARY)
 
     message(STATUS "cuDNN: ${CUDNN_LIBRARY}")
     message(STATUS "cuDNN: ${CUDNN_INCLUDE_DIR}")
-    
+
     set(CUDNN_FOUND ON CACHE INTERNAL "cuDNN Library Found")
 
 else()
@@ -73,6 +77,5 @@ target_link_libraries(
     CUDNN::cudnn_adv_infer
     CUDNN::cudnn_cnn_infer
     CUDNN::cudnn_ops_infer
-    CUDNN::cudnn 
+    CUDNN::cudnn
 )
-

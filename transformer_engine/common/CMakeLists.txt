@@ -77,3 +77,6 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             COMPILE_OPTIONS "--use_fast_math")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+# Install library
+install(TARGETS transformer_engine DESTINATION .)
