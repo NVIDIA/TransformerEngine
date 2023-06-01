@@ -134,10 +134,9 @@ def do_export(
 
 def to_numpy(tensor):
     if type(tensor) != np.ndarray:
-        tensor = tensor.detach().cpu()
-        if tensor.type() in ('torch.bfloat16', 'torch.BFloat16Tensor'):
+        if tensor.dtype == torch.bfloat16:
             tensor = tensor.type(torch.float32)
-        return tensor.numpy()
+        tensor = tensor.detach().cpu().numpy()
     return tensor
 
 
@@ -195,18 +194,14 @@ def compare_outputs(onnx_outputs, te_outputs, atol, rtol, max_errors_printed, al
 def serialize_inputs_outputs(
     fname: str,
     inputs: Union[Tuple[torch.Tensor], torch.Tensor],
-    model: torch.nn.Module,
-    is_fp8: bool=False,
+    te_outputs: List[torch.Tensor],
     input_names: List[str]=None,
-    te_outputs: List[torch.Tensor]=None,
     output_names: List[str]=None,
 ):
     if not SAVE_TEST_IO:
         return
 
-    # infer TE outputs
-    if not te_outputs:
-        te_outputs = te_infer(model, inputs, is_fp8)
+    fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
 
     input_names = input_names or ["input"]
     output_names = output_names or ["output"]
@@ -223,7 +218,6 @@ def serialize_inputs_outputs(
     custom_outputs.add([output_data], runner_name="custom_runner")
     custom_outputs.save(json_fname)
 
-    return te_outputs
 
 def validate_result(
     fname: str,
@@ -299,7 +293,10 @@ def create_meta(scale_factor: float, size: int=1):
     return meta
 
 
-def dtype2str(dtype: torch.dtype):
+def dtype2str(dtype: torch.dtype, fake_bf16_io=False):
+    if fake_bf16_io:
+        assert dtype == torch.bfloat16
+        return "_fake_bf16"
     return {
         torch.float32: "_fp32",
         torch.float16: "_fp16",
@@ -375,12 +372,13 @@ def test_export_cast_ops(seed_default_rng, scale_factor: float, atol: float, pre
     hidden_size = 256
     inp = torch.randn(hidden_size, in_features, device="cuda",
         dtype=torch.float if fake_bf16_io else precision)
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"te.cast_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_QDQ(fake_bf16_io)
 
     do_export(model, inp, fname)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=True)
+    te_outputs = te_infer(model, inp, is_fp8=True)
+    serialize_inputs_outputs(fname, inp, te_outputs)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(fname, inp, model, atol=atol, is_fp8=True, te_outputs=te_outputs)
 
@@ -426,14 +424,14 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     # Set dimensions (these are arbitrary).
     in_features = 64
     hidden_size = 256
-    fake_bf16_io = precision == torch.bfloat16
     inp = torch.randn(hidden_size, in_features, device="cuda",
         dtype=torch.float if fake_bf16_io else precision)
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"te.gelu_fp8_{scale_factor}{high_prec_str}.onnx"
     model = TestFP8_Gelu(fake_bf16_io)
     do_export(model, inp, fname)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=True)
+    te_outputs = te_infer(model, inp, is_fp8=True)
+    serialize_inputs_outputs(fname, inp, te_outputs)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(fname, inp, model, rtol=0, atol=atol, is_fp8=True, allow_cnt_errors=2, te_outputs=te_outputs)
 
@@ -567,7 +565,6 @@ def test_export_gemm(
     out_features = 128
     hidden_size = 256
     in_features = 64
-    fake_bf16_io = precision == torch.bfloat16
     inp = torch.randn(hidden_size, in_features, device="cuda",
         dtype=torch.float if fake_bf16_io else precision)
     weight = torch.randn(out_features, in_features, device="cuda",
@@ -575,20 +572,22 @@ def test_export_gemm(
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     gelu_str = "_gelu" if use_gelu else ""
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"te.gemm{fp8_str}{bias_str}{gelu_str}{high_prec_str}.onnx"
     input_names = ['input', 'weight']
     if use_fp8:
         model = TestFP8_GEMM(precision, use_bias, use_gelu, scale_factors, fake_bf16_io)
         do_export(model, (inp, weight), fname, use_fp8, input_names=input_names)
-        te_outputs = serialize_inputs_outputs(fname, (inp, weight), model, is_fp8=use_fp8)
+        te_outputs = te_infer(model, (inp, weight), is_fp8=use_fp8)
+        serialize_inputs_outputs(fname, (inp, weight), te_outputs, input_names=input_names)
         if fake_bf16_io or precision != torch.bfloat16:
             validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2,
                 is_fp8=True, input_names=input_names, te_outputs=te_outputs)
     else:
         model = Test_GEMM(precision, use_bias, use_gelu)
         do_export(model, (inp, weight), fname, use_fp8, input_names=input_names)
-        te_outputs = serialize_inputs_outputs(fname, (inp, weight), model, is_fp8=use_fp8)
+        te_outputs = te_infer(model, (inp, weight), is_fp8=use_fp8)
+        serialize_inputs_outputs(fname, (inp, weight), te_outputs, input_names=input_names)
         if fake_bf16_io or precision != torch.bfloat16:
             validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2,
                 input_names=input_names, te_outputs=te_outputs)
@@ -625,7 +624,6 @@ def test_export_layernorm(
 
     # Set dimensions (these are arbitrary).
     inp_shape = [64, 32]
-    fake_bf16_io = precision == torch.bfloat16
 
     class Test_Layernorm(nn.Module):
         def __init__(self) -> None:
@@ -683,11 +681,12 @@ def test_export_layernorm(
 
     inp = torch.randn(*inp_shape, device="cuda", dtype=torch.float32 if fake_bf16_io else precision)
     model = TestFP8_Layernorm() if use_fp8 else Test_Layernorm()
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fp8_str = f"_fp8-{scale_factor}" if use_fp8 else ""
     fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, use_fp8=use_fp8)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp, te_outputs)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(
         fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
@@ -740,7 +739,6 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     mask = None
     input_names = ["input", "mask"]
     inp_shape = [hidden_size, in_features, in_features, in_features]
-    fake_bf16_io = precision == torch.bfloat16
     if softmax_fn == softmax_defs.ScaledUpperTriangMaskedSoftmax:
         inp_shape = [hidden_size, in_features, in_features]
         kernel_str = "ScaledUpperTriangMaskedSoftmax"
@@ -760,11 +758,12 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     input_tensor = torch.randn(*inp_shape, device="cuda")
     # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
     input_tensor = input_tensor.half()
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"{kernel_str}{high_prec_str}.onnx"
     inp = (input_tensor, mask)
     do_export(model, inp, fname, input_names=input_names)
-    te_outputs = serialize_inputs_outputs(fname, inp, model)
+    te_outputs = te_infer(model, inp, is_fp8=False)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(fname, inp, model, atol=1e-3, input_names=input_names, te_outputs=te_outputs)
 
@@ -802,13 +801,12 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     in_features = 64
     hidden_size = 256
     mask = None
-    fake_bf16_io = precision == torch.bfloat16
     inp_shape = [hidden_size, in_features, in_features, in_features]
     input_tensor = torch.randn(*inp_shape, device="cuda")
     # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
     input_tensor = input_tensor.half()
     inp = (input_tensor, mask)
-    high_prec_str = dtype2str(precision)
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
 
     # Compare the outputs of TE when using the default softmax mask
     # to the TE outputs produced when using the ONNX-compatible causal mask.
@@ -827,7 +825,7 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     kernel_str = "FusedScaleMaskSoftmax"
     fname = f"{kernel_str}{high_prec_str}.onnx"
     do_export(model, inp, fname, input_names=input_names)
-    _ = serialize_inputs_outputs(fname, inp, model, te_outputs=te_outputs_default_mask)
+    serialize_inputs_outputs(fname, inp, te_outputs=te_outputs_default_mask, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(fname, inp, model_onnx_mask, atol=1e-3, input_names=input_names, te_outputs=te_outputs_default_mask)
 
@@ -901,7 +899,8 @@ def test_export_linear(
         if use_fp8:
             set_layer_scale(model.linear, scale_factor, num_gemms=1)
         do_export(model, inp, fname, use_fp8)
-        te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+        te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+        serialize_inputs_outputs(fname, inp, te_outputs)
 
         if precision in (torch.bfloat16, ):
             return
@@ -964,7 +963,8 @@ def test_export_layernorm_linear(
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=1)
         do_export(model, inp, fname, use_fp8)
-        te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+        te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+        serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16, ):
             return
         if not use_fp8:
@@ -1026,7 +1026,8 @@ def test_export_layernorm_mlp(
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=2)
         do_export(model, inp, fname, use_fp8)
-        te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+        te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+        serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16, ):
             return
         if not use_fp8:
@@ -1087,7 +1088,8 @@ def test_export_core_attention(
             fname,
             input_names=input_names,
             use_fp8=True)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=True)
+    te_outputs = te_infer(model, inp, is_fp8=True)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16, ):
         return
     validate_result(fname, inp, model, is_fp8=True, atol=1e-2, input_names=input_names, te_outputs=te_outputs)
@@ -1185,7 +1187,8 @@ def test_export_multihead_attention(
     do_export(model, inp_context, fname, use_fp8, input_names=input_names, output_names=output_names,
         dynamic_axes={"hidden_states": {0: "seq", 1:"bs"},
                       "attention_output": {0: "seq", 1:"bs"}})
-    te_outputs = serialize_inputs_outputs(fname, inp_context, model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp_context, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp_context, te_outputs, input_names=input_names, output_names=output_names)
     if precision in (torch.bfloat16, ):
         return
 
@@ -1269,7 +1272,8 @@ def test_export_transformer_layer(
         fuse_qkv_params=fuse_qkv_params,
         zero_centered_gamma=zero_centered_gamma).to(device='cuda')
     do_export(model, inp, fname, use_fp8, input_names=input_names)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16, ):
         return
     if not use_fp8:
@@ -1398,7 +1402,8 @@ def test_export_gemm_layernorm(
     fname = f"te.gemm_layernorm{fp8_str}{high_prec_str}.onnx"
     input_names = ['input', 'weight']
     do_export(model, (inp, weight), fname, use_fp8=use_fp8, input_names=input_names)
-    te_outputs = serialize_inputs_outputs(fname, (inp, weight), model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, (inp, weight), is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, (inp, weight), te_outputs, input_names=input_names)
     if precision not in (torch.bfloat16, ):
         validate_result(
             fname, (inp, weight), model, atol=5e-2, is_fp8=use_fp8, allow_cnt_errors=2,
@@ -1461,7 +1466,8 @@ def test_export_gpt_generation(
         input_names=input_names, output_names=output_names,
         dynamic_axes={"input": {0: "seq", 1:"bs"},
                       "output": {0: "seq", 1:"bs"}, })
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names, output_names=output_names)
     if precision not in (torch.bfloat16, ):
         validate_result(fname, inp, model, atol=5e-3, is_fp8=use_fp8, input_names=input_names,
             te_outputs=te_outputs)
@@ -1470,7 +1476,8 @@ def test_export_gpt_generation(
     sequence_length = 1 if not use_fp8 else 8
     input_tensor = torch.rand(sequence_length, batch_size, hidden_size, dtype=precision, device="cuda")
     inp = (input_tensor, attention_mask)
-    te_outputs = serialize_inputs_outputs(fname, inp, model, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision not in (torch.bfloat16, ):
         validate_result(fname, inp, model, atol=5e-3, is_fp8=use_fp8, input_names=input_names,
             te_outputs=te_outputs)
