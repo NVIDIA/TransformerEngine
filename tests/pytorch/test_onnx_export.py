@@ -133,9 +133,12 @@ def do_export(
 
 
 def to_numpy(tensor):
-    if tensor.dtype == torch.bfloat16:
-        tensor = tensor.type(torch.float32)
-    return tensor.cpu().numpy()
+    if type(tensor) != np.ndarray:
+        tensor = tensor.detach().cpu()
+        if tensor.type() in ('torch.bfloat16', 'torch.BFloat16Tensor'):
+            tensor = tensor.type(torch.float32)
+        return tensor.numpy()
+    return tensor
 
 
 def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
@@ -159,8 +162,7 @@ def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tens
         te_outputs = model(*inps if isinstance(inps, tuple) else (inps,))
         if not isinstance(te_outputs, tuple):
             te_outputs = (te_outputs,)
-        te_outputs_np = [to_numpy(te_output) for te_output in te_outputs]
-        return te_outputs_np
+        return te_outputs
 
 
 def compare_outputs(onnx_outputs, te_outputs, atol, rtol, max_errors_printed, allow_cnt_errors, fname):
@@ -169,6 +171,8 @@ def compare_outputs(onnx_outputs, te_outputs, atol, rtol, max_errors_printed, al
     # Compare ORT and PyTorch outputs.
     for onnx_output, te_output in zip(onnx_outputs, te_outputs):
         # np.isclose: abs(a - b) <= (atol + rtol * abs(b))
+        te_output = to_numpy(te_output)
+        onnx_output = to_numpy(onnx_output)
         ac = ~np.isclose(onnx_output, te_output, atol=atol, rtol=rtol)
         mismatches = ac.nonzero()
         mismatched_ids = [loc for loc in zip(*mismatches)]
@@ -208,17 +212,13 @@ def serialize_inputs_outputs(
     output_names = output_names or ["output"]
     inputs = inputs if isinstance(inputs, list) or isinstance(inputs, tuple) else (inputs,)
     named_inputs = zip(input_names, inputs)
-    input_data = [{k: to_numpy(v) for k, v in named_inputs if v is not None}]
+    input_data = [{k: v.cpu() for k, v in named_inputs if v is not None}]
     json_fname = fname[:-len(".onnx")] + "_inputs.json"
     save_json(input_data, json_fname, description="custom input data")
 
     json_fname = fname[:-len(".onnx")] + "_output.json"
     named_outputs = zip(output_names, te_outputs)
-    output_data = dict()
-    for out_name, outp in named_outputs:
-        if outp is not None:
-            assert out_name not in output_data
-            output_data[out_name] = outp
+    output_data = {k: v.cpu() for k, v in named_outputs if v is not None}
     custom_outputs = RunResults()
     custom_outputs.add([output_data], runner_name="custom_runner")
     custom_outputs.save(json_fname)
