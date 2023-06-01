@@ -4,7 +4,7 @@
 
 """LayerNormLinear API"""
 import os
-from typing import Union, Optional, Callable, Tuple, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 
 import torch
