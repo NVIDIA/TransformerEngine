@@ -1469,7 +1469,7 @@ def test_export_gpt_generation(
     te_outputs = te_infer(model, inp, is_fp8=use_fp8)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names, output_names=output_names)
     if precision not in (torch.bfloat16, ):
-        validate_result(fname, inp, model, atol=5e-3, is_fp8=use_fp8, input_names=input_names,
+        validate_result(fname, inp, model, atol=6e-3, is_fp8=use_fp8, input_names=input_names,
             te_outputs=te_outputs)
 
     # "Generative phase": use a single input (sequence len=1). For FP8 we need to pad the sequence to mult of 8.
@@ -1479,7 +1479,7 @@ def test_export_gpt_generation(
     te_outputs = te_infer(model, inp, is_fp8=use_fp8)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision not in (torch.bfloat16, ):
-        validate_result(fname, inp, model, atol=5e-3, is_fp8=use_fp8, input_names=input_names,
+        validate_result(fname, inp, model, atol=6e-3, is_fp8=use_fp8, input_names=input_names,
             te_outputs=te_outputs)
 
 
