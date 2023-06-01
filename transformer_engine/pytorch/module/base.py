@@ -816,4 +816,3 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         is_first_microbatch: Union[bool, None],
     ) -> List[torch.Tensor]:
         """Needs override."""
-
