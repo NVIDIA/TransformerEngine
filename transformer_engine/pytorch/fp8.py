@@ -4,11 +4,9 @@
 
 """FP8 utilities for TransformerEngine"""
 import os
-from importlib.metadata import version
 from contextlib import contextmanager
 from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
-from pkg_resources import packaging
 
 import torch
 import transformer_engine_extensions as tex
