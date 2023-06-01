@@ -16,6 +16,7 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
+from .jit import jit_fuser
 
 _FP8_ENABLED = False
 _FP8_CALIBRATION = False
@@ -36,10 +37,6 @@ _reason_for_no_fp8 = ""
 _dp_amax_reduce_interval = None
 _dp_amax_reduce_forward_idx = 0
 _dp_amax_reduce_backward_idx = 0
-
-jit_fuser = torch.jit.script
-if packaging.version.Version(version("torch")) >= packaging.version.Version("2"):
-    jit_fuser = torch.compile
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
