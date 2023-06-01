@@ -4,9 +4,11 @@
 
 """FP8 utilities for TransformerEngine"""
 import os
+from importlib.metadata import version
 from contextlib import contextmanager
 from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from pkg_resources import packaging
 
 import torch
 import transformer_engine_extensions as tex
@@ -34,6 +36,10 @@ _reason_for_no_fp8 = ""
 _dp_amax_reduce_interval = None
 _dp_amax_reduce_forward_idx = 0
 _dp_amax_reduce_backward_idx = 0
+
+jit_fuser = torch.jit.script
+if packaging.version.Version(version("torch")) >= packaging.version.Version("2"):
+    jit_fuser = torch.compile
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
@@ -368,7 +374,7 @@ def update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@torch.jit.script
+@jit_fuser
 def _default_get_amax(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
@@ -383,7 +389,7 @@ def _default_get_amax(
     return amax_history, amax
 
 
-@torch.jit.script
+@jit_fuser
 def _default_sf_compute(
     amax: torch.Tensor,
     scale: torch.Tensor,
@@ -400,7 +406,7 @@ def _default_sf_compute(
     return sf
 
 
-@torch.jit.script
+@jit_fuser
 def _compute_scaling_factor_inverse(
     scale: torch.Tensor,
     scale_inv: torch.Tensor,
@@ -413,7 +419,7 @@ def _compute_scaling_factor_inverse(
     return torch.where(non_weight_mask, 1.0 / scale, scale_inv)
 
 
-@torch.jit.script
+@jit_fuser
 def fused_amax_and_scale_update(
     amax_history: torch.Tensor,
     scale: torch.Tensor,

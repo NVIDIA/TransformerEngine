@@ -3,8 +3,14 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+from importlib.metadata import version
 from typing import Callable, Optional, Tuple
+from pkg_resources import packaging
 import torch
+
+jit_fuser = torch.jit.script
+if packaging.version.Version(version("torch")) >= packaging.version.Version("2"):
+    jit_fuser = torch.compile
 
 
 def set_jit_fusion_options() -> None:
@@ -29,14 +35,14 @@ def set_jit_fusion_options() -> None:
         torch._C._jit_override_can_fuse_on_gpu(True)
 
 
-@torch.jit.script
+@jit_fuser
 def bias_gelu_fused_(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Bias-GeLU fused"""
     x = inp + bias
     return x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
 
 
-@torch.jit.script
+@jit_fuser
 def gelu_fused_(inp: torch.Tensor) -> torch.Tensor:
     """
     GeLU fused, this is copy of bias_gelu_fused cause jit fusion doesn't allow conditioning.
@@ -48,7 +54,7 @@ def gelu_fused_(inp: torch.Tensor) -> torch.Tensor:
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
-@torch.jit.script
+@jit_fuser
 def bgrad_dgelu_fused_(
     grad_output: torch.Tensor, inp: torch.Tensor, bias: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -64,7 +70,7 @@ def bgrad_dgelu_fused_(
     return bgrad, dgelu
 
 
-@torch.jit.script
+@jit_fuser
 def dgelu_fused_(
     grad_output: torch.Tensor, inp: torch.Tensor
 ) -> torch.Tensor:
@@ -121,7 +127,7 @@ def get_bias_dropout_add(training: bool) -> Callable:
     return _bias_dropout_add
 
 
-@torch.jit.script
+@jit_fuser
 def bias_dropout_add_fused_train_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
@@ -138,7 +144,7 @@ def bias_dropout_add_fused_train(
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
-@torch.jit.script
+@jit_fuser
 def bias_dropout_add_fused_inference_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
