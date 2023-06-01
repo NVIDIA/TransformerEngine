@@ -4,7 +4,7 @@
 
 """LayerNormMLP API"""
 import os
-from typing import Union, Optional, Callable, Tuple, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -1063,6 +1063,31 @@ class LayerNormMLP(TransformerEngineBaseModule):
             init.zeros_(self.layer_norm_weight)
         init.zeros_(self.layer_norm_bias)
 
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
+        """
+        Fetch the fp8 weight tensor placeholders if they exist (when
+        `is_first_microbatch` is not `None`) or return empty fp8 weight
+        tensors (if `is_first_microbatch is None`)
+        """
+        if not self.fp8:
+            return [None, None, None, None]
+
+        if is_first_microbatch is None:
+            # Return empty weight placeholders for each fwd/bwd pass
+            fp8_weight_tensors = self.get_fp8_weights_empty_tensors(
+                is_first_microbatch
+            )
+        else:
+            # These persistent weight placeholders should've been created in
+            # `set_fp8_weights` method
+            fp8_weight_tensors = [self.weight1_fp8, self.weight1_t_fp8,
+                                  self.weight2_fp8, self.weight2_t_fp8]
+
+        return fp8_weight_tensors
+
     def forward(
         self, inp: torch.Tensor, is_first_microbatch: Optional[bool] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
@@ -1089,6 +1114,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
 
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
+            # Fetch the fp8 weights placeholders (for linear/gemm)
+            weight1_fp8, weight1_t_fp8, weight2_fp8, weight2_t_fp8 = \
+                self.get_fp8_weights_scratchpad(
+                        is_first_microbatch
+                )
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
@@ -1100,13 +1131,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 self.fc1_weight,
-                self.weight1_fp8 if self.fp8 else None,
-                self.weight1_t_fp8 if self.fp8 else None,
+                weight1_fp8,
+                weight1_t_fp8,
                 self.fc1_bias,
                 self.use_bias,
                 self.fc2_weight,
-                self.weight2_fp8 if self.fp8 else None,
-                self.weight2_t_fp8 if self.fp8 else None,
+                weight2_fp8,
+                weight2_t_fp8,
                 self.fc2_bias,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
