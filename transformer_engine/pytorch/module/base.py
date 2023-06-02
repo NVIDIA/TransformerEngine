@@ -7,7 +7,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Optional, Tuple, Dict, Any, List
+from typing import Generator, Union, Optional, Tuple, Dict, Any, List
 from functools import partial
 from contextlib import contextmanager
 
@@ -86,7 +86,7 @@ def _prepare_backward(
     tp_group: dist_group_type,
     tp_size: int,
     name: str = ""
-) -> None:
+) -> Generator[None, Any, None]:
     """Checks and prep for BWD."""
     if fp8:
         global _amax_reduce_handle_bwd
@@ -542,7 +542,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
         num_gemms: int = 1,
-    ) -> None:
+    ) -> Generator[torch.Tensor, Any, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
         if it's the last FP8 module in the forward autocast. It is useful

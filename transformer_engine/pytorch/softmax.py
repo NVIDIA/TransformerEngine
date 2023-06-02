@@ -344,4 +344,4 @@ class FusedScaleMaskSoftmax(nn.Module):
         batches_per_warp = 2 if pow2 <= 128 else 1
         warps_per_block = THREADS_PER_BLOCK / warp_size
         batches_per_block = warps_per_block * batches_per_warp
-        return batches_per_block
+        return int(batches_per_block)
