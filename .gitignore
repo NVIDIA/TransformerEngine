@@ -20,6 +20,7 @@ __pycache__
 .vscode
 .cache
 .hypothesis
+.devcontainer.json
 tests/cpp/build/
 docs/_build
 .ipynb_checkpoints
