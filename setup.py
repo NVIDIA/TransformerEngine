@@ -302,7 +302,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         add_unique(install_reqs, "tensorflow")
         add_unique(test_reqs, ["keras", "tensorflow_datasets"])
     if "paddle" in frameworks():
-        # add_unique(install_reqs, "paddle")
+        add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
 
     return setup_reqs, install_reqs, test_reqs
@@ -541,7 +541,6 @@ def setup_paddle_extension() -> setuptools.Extension:
     include_dirs = [
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "paddle" / "csrc",
-        root_path / "3rdparty" / "cudnn-frontend" / "include",
     ]
 
     # Compiler flags
