@@ -6,10 +6,10 @@
 import pytest
 import paddle
 
-from utils import assert_allclose, create_fp8_meta
-import transformer_engine_paddle as tex
 from transformer_engine.paddle.cpp_extensions import cast_to_fp8, cast_from_fp8, gemm, fp8_gemm
 from transformer_engine.paddle.fp8 import is_fp8_available
+from utils import assert_allclose, create_fp8_meta    # pylint: disable=wrong-import-order
+import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
 
 paddle.seed(10)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),

@@ -401,10 +401,21 @@ class CMakeBuildExtension(BuildExtension):
             ext for ext in self.extensions
             if not isinstance(ext, CMakeExtension)
         ]
+
+        if "paddle" in frameworks():
+            # Add linker search path for libtransformer_engine.so
+            self.extensions[0].library_dirs.append(self.build_lib)
+
         super().run()
 
         # Paddle needs to manually write stub
         if "paddle" in frameworks():
+            def find_transformer_engine(path):
+                """Finds the path for libtransformer_engine"""
+                for filename in os.listdir(path):
+                    if filename.startswith("libtransformer_engine"):
+                        return os.path.join(path, filename)
+
             from paddle.utils.cpp_extension.extension_utils import custom_write_stub
             module_name = self.extensions[0].name
             assert module_name[-4:] == '_pd_', "Expect module name end with '_pd_'"
@@ -415,6 +426,11 @@ class CMakeBuildExtension(BuildExtension):
                     self.build_lib, stub_name + '.py')
             print("Writing paddle stub for {} into file {}".format(
                     stub_name + ext, pyfile_path))
+            # Fixes undefined symbol error for paddle stub writing
+            import ctypes
+            ctypes.CDLL(find_transformer_engine(self.build_lib),
+                        mode=ctypes.RTLD_GLOBAL)
+
             custom_write_stub(stub_name + ext, pyfile_path)
 
         self.extensions = all_extensions
@@ -565,6 +581,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext = CUDAExtension(
         sources=sources,
         include_dirs=include_dirs,
+        libraries=["transformer_engine"],
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
