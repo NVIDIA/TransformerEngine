@@ -1501,9 +1501,9 @@ class SoftmaxPrimitive(BasePrimitive):
         pow2 = 1 << (k_seqlen - 1).bit_length()
         warp_size = pow2 if pow2 < threads_per_warp else threads_per_warp
         batches_per_warp = 2 if pow2 <= 128 else 1
-        warps_per_block = threads_per_block / warp_size
+        warps_per_block = threads_per_block // warp_size
         batches_per_block = warps_per_block * batches_per_warp
-        return int(batches_per_block)
+        return batches_per_block
 
     @staticmethod
     def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,

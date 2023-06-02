@@ -86,7 +86,7 @@ def _prepare_backward(
     tp_group: dist_group_type,
     tp_size: int,
     name: str = ""
-) -> Generator[None, Any, None]:
+) -> Generator[None, None, None]:
     """Checks and prep for BWD."""
     if fp8:
         global _amax_reduce_handle_bwd
@@ -542,7 +542,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         is_first_microbatch: Union[bool, None],
         num_gemms: int = 1,
-    ) -> Generator[torch.Tensor, Any, None]:
+    ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
         if it's the last FP8 module in the forward autocast. It is useful

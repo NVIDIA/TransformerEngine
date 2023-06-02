@@ -69,7 +69,7 @@ def get_default_fp8_recipe():
 def fp8_autocast(
     enabled: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
-) -> Generator[None, Any, None]:
+) -> Generator[None, None, None]:
     """
     Context manager for FP8 usage.
 
