@@ -399,9 +399,8 @@ class CMakeBuildExtension(BuildExtension):
         # Paddle requires linker search path for libtransformer_engine.so
         paddle_ext = None
         if "paddle" in frameworks():
-            from paddle.utils.cpp_extension import CUDAExtension as paddle_ext_type
             for ext in self.extensions:
-                if isinstance(ext, paddle_ext_type):
+                if "paddle" in ext.name:
                     ext.library_dirs.append(self.build_lib)
                     paddle_ext = ext
                     break
@@ -425,7 +424,7 @@ class CMakeBuildExtension(BuildExtension):
 
             # Figure out stub file path
             module_name = paddle_ext.name
-            assert module_name.endwith("_pd_"), \
+            assert module_name.endswith("_pd_"), \
                 "Expected Paddle extension module to end with '_pd_'"
             stub_name = module_name[:-4]  # remove '_pd_'
             stub_path = os.path.join(self.build_lib, stub_name + ".py")
