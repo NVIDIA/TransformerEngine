@@ -16,6 +16,10 @@ build/
 __pycache__
 .ycm_extra_conf.py
 .vimrc
+.vs
+.vscode
+.cache
+.hypothesis
 tests/cpp/build/
 docs/_build
 .ipynb_checkpoints
