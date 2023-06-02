@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import ctypes
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -395,45 +396,52 @@ class CMakeBuildExtension(BuildExtension):
                         install_dir=install_dir,
                     )
 
+        # Paddle requires linker search path for libtransformer_engine.so
+        paddle_ext = None
+        if "paddle" in frameworks():
+            from paddle.utils.cpp_extension import CUDAExtension as paddle_ext_type
+            for ext in self.extensions:
+                if isinstance(ext, paddle_ext_type):
+                    ext.library_dirs.append(self.build_lib)
+                    paddle_ext = ext
+                    break
+
         # Build non-CMake extensions as usual
         all_extensions = self.extensions
         self.extensions = [
             ext for ext in self.extensions
             if not isinstance(ext, CMakeExtension)
         ]
-
-        if "paddle" in frameworks():
-            # Add linker search path for libtransformer_engine.so
-            self.extensions[0].library_dirs.append(self.build_lib)
-
         super().run()
-
-        # Paddle needs to manually write stub
-        if "paddle" in frameworks():
-            def find_transformer_engine(path):
-                """Finds the path for libtransformer_engine"""
-                for filename in os.listdir(path):
-                    if filename.startswith("libtransformer_engine"):
-                        return os.path.join(path, filename)
-
-            from paddle.utils.cpp_extension.extension_utils import custom_write_stub
-            module_name = self.extensions[0].name
-            assert module_name[-4:] == '_pd_', "Expect module name end with '_pd_'"
-            stub_name = module_name[:-4] # remove '_pd_'
-            so_path = self.get_ext_fullpath(module_name)
-            _, ext = os.path.splitext(so_path)
-            pyfile_path = os.path.join(
-                    self.build_lib, stub_name + '.py')
-            print("Writing paddle stub for {} into file {}".format(
-                    stub_name + ext, pyfile_path))
-            # Fixes undefined symbol error for paddle stub writing
-            import ctypes
-            ctypes.CDLL(find_transformer_engine(self.build_lib),
-                        mode=ctypes.RTLD_GLOBAL)
-
-            custom_write_stub(stub_name + ext, pyfile_path)
-
         self.extensions = all_extensions
+
+        # Manually write stub file for Paddle extension
+        if paddle_ext is not None:
+
+            # Load libtransformer_engine.so to avoid linker errors
+            for path in Path(self.build_lib).iterdir():
+                if path.name.startswith("libtransformer_engine."):
+                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+
+            # Figure out stub file path
+            module_name = paddle_ext.name
+            assert module_name.endwith("_pd_"), \
+                "Expected Paddle extension module to end with '_pd_'"
+            stub_name = module_name[:-4]  # remove '_pd_'
+            stub_path = os.path.join(self.build_lib, stub_name + ".py")
+
+            # Figure out library name
+            # Note: This library doesn't actually exist. Paddle
+            # internally reinserts the '_pd_' suffix.
+            so_path = self.get_ext_fullpath(module_name)
+            _, so_ext = os.path.splitext(so_path)
+            lib_name = stub_name + so_ext
+
+            # Write stub file
+            print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
+            from paddle.utils.cpp_extension.extension_utils import custom_write_stub
+            custom_write_stub(lib_name, stub_path)
+
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
