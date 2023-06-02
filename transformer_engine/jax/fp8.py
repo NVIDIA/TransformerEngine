@@ -372,8 +372,8 @@ def fp8_autocast(enabled: bool = False,
         "DelayedScaling scaling_factor_compute_algo isn't supported by TE/JAX.")
     assert fp8_recipe.override_linear_precision == (False, False, False), (
         "DelayedScaling override_linear_precision isn't supported by TE/JAX.")
-    assert not fp8_recipe.reduce_amax, (
-        "DelayedScaling reduce_amax isn't supported by TE/JAX.")
+    assert fp8_recipe.reduce_amax, (
+        "DelayedScaling reduce_amax should be enabled for TE/JAX.")
 
     if sharding_resource is None:
         sharding_resource = ShardingResource()
