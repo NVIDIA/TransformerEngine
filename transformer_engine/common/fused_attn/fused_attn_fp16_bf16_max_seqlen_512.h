@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file fused_attn_fp16_bf16_max_seqlen_512.h
- *  \brief Functions for fused attention for F16 with seqlen <= 512
+ *  \brief Functions for fused attention for half precision with seqlen <= 512
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_MAX_512_H_
