@@ -134,9 +134,12 @@ float *nvte_tensor_scale_inv(const NVTETensor tensor);
     \brief Pack of tensors, generally used for auxiliary outputs.
  */
 struct NVTETensorPack {
-  static const int MAX_SIZE = 10;  /*!< Max number of tensors in the pack. Assumed <= 10. */
-  NVTETensor tensors[MAX_SIZE];  /*!< Wrappers of tensors. They do not hold the associated memory. */
-  size_t size = 0;  /*!< Actual number of tensors in the pack, 0 <= size <= MAX_SIZE. */
+  /*! Max number of tensors in the pack. Assumed <= 10. */
+  static const int MAX_SIZE = 10;
+  /*! Wrappers of tensors. They do not hold the associated memory. */
+  NVTETensor tensors[MAX_SIZE];
+  /*! Actual number of tensors in the pack, 0 <= size <= MAX_SIZE. */
+  size_t size = 0;
 };
 
 /*! \brief Create `tensors` in NVTETensorPack.
