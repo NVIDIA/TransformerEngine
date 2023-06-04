@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Utils for testing"""
+
 import paddle
 import numpy as np
 import transformer_engine    # pylint: disable=unused-import

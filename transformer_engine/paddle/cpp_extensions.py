@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """TE FP8 extensions and GEMMs"""
+
 from typing import Optional, Tuple, Union
 import paddle
 import transformer_engine_paddle as tex

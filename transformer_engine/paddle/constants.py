@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Constants"""
+
 import paddle
 import transformer_engine_paddle as tex
 """

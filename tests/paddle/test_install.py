@@ -8,10 +8,4 @@ def test_import():
     """
     Test if Paddle extension can be imported normally
     """
-    try:
-        import transformer_engine.paddle    # pylint: disable=unused-import
-        te_imported = True
-    except:    # pylint: disable=bare-except
-        te_imported = False
-
-    assert te_imported, 'transformer_engine import failed'
+    import transformer_engine.paddle    # pylint: disable=unused-import
