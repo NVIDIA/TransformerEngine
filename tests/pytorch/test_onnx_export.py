@@ -454,7 +454,6 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
     # When enabling bias we must use float16 or bfloat16 (because of kernel limitations)
     (torch.float16,         True,    True,     False),
     (torch.bfloat16,        True,    True,     False),
-    ("fake-torch.bfloat16", True,    True,     False),
 ])
 def test_export_gemm(
     seed_default_rng,
@@ -464,21 +463,16 @@ def test_export_gemm(
     use_gelu,
     scale_factors
 ):
-    fake_bf16_io = precision == "fake-torch.bfloat16"
-    # reset precision to torch.bfloat16 after capturing fake BF16 mode
-    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
-
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     class TestFP8_GEMM(nn.Module):
-        def __init__(self, precision, use_bias, gelu, scale_factors, fake_bf16_io):
+        def __init__(self, precision, use_bias, gelu, scale_factors):
             super().__init__()
             self.use_bias = use_bias
             self.gelu = gelu
             self.precision = precision
-            self.fake_bf16_io = fake_bf16_io
 
             self.fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
             self.fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
@@ -522,8 +516,6 @@ def test_export_gemm(
                 bias=self.bias,
                 use_bias=self.use_bias,
                 use_split_accumulator=False)
-            if self.fake_bf16_io:
-                ret = ret.type(torch.float32)
             return ret
 
     class Test_GEMM(nn.Module):
@@ -565,22 +557,20 @@ def test_export_gemm(
     out_features = 128
     hidden_size = 256
     in_features = 64
-    inp = torch.randn(hidden_size, in_features, device="cuda",
-        dtype=torch.float if fake_bf16_io else precision)
-    weight = torch.randn(out_features, in_features, device="cuda",
-        dtype=torch.float if fake_bf16_io else precision)
+    inp = torch.randn(hidden_size, in_features, device="cuda", dtype=precision)
+    weight = torch.randn(out_features, in_features, device="cuda", dtype=precision)
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     gelu_str = "_gelu" if use_gelu else ""
-    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
+    high_prec_str = dtype2str(precision)
     fname = f"te.gemm{fp8_str}{bias_str}{gelu_str}{high_prec_str}.onnx"
     input_names = ['input', 'weight']
     if use_fp8:
-        model = TestFP8_GEMM(precision, use_bias, use_gelu, scale_factors, fake_bf16_io)
+        model = TestFP8_GEMM(precision, use_bias, use_gelu, scale_factors)
         do_export(model, (inp, weight), fname, use_fp8, input_names=input_names)
         te_outputs = te_infer(model, (inp, weight), is_fp8=use_fp8)
         serialize_inputs_outputs(fname, (inp, weight), te_outputs, input_names=input_names)
-        if fake_bf16_io or precision != torch.bfloat16:
+        if precision != torch.bfloat16:
             validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2,
                 is_fp8=True, input_names=input_names, te_outputs=te_outputs)
     else:
@@ -588,7 +578,7 @@ def test_export_gemm(
         do_export(model, (inp, weight), fname, use_fp8, input_names=input_names)
         te_outputs = te_infer(model, (inp, weight), is_fp8=use_fp8)
         serialize_inputs_outputs(fname, (inp, weight), te_outputs, input_names=input_names)
-        if fake_bf16_io or precision != torch.bfloat16:
+        if precision != torch.bfloat16:
             validate_result(fname, (inp, weight), model, rtol=1e-2, atol=2e-2,
                 input_names=input_names, te_outputs=te_outputs)
 
