@@ -4,7 +4,8 @@
 """Utils for testing"""
 import paddle
 import numpy as np
-import transformer_engine_paddle as tex
+import transformer_engine    # pylint: disable=unused-import
+import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
 
 
 def create_fp8_meta(num_fp8_tensors, amax_history_len):
