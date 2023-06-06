@@ -29,7 +29,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 from torch import nn as nn
-from typing import Union, Tuple, List
+from typing import Optional, Union, Tuple, List
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_extensions as tex
@@ -133,7 +133,7 @@ def do_export(
 
 
 def to_numpy(tensor):
-    if type(tensor) != np.ndarray:
+    if isinstance(tensor, torch.Tensor)::
         if tensor.dtype == torch.bfloat16:
             tensor = tensor.type(torch.float32)
         tensor = tensor.detach().cpu().numpy()
@@ -152,10 +152,7 @@ def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
 
 
 def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool):
-    """Transformer Engine forward prpoagtation.
-
-    Return results after copying to the CPU and converting to numpy.
-    """
+    """Transformer Engine forward propagation."""
     fp8_recipe = create_fp8_recipe()
     with torch.inference_mode(), te.fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe), warnings.catch_warnings():
         te_outputs = model(*inps if isinstance(inps, tuple) else (inps,))
@@ -195,8 +192,8 @@ def serialize_inputs_outputs(
     fname: str,
     inputs: Union[Tuple[torch.Tensor], torch.Tensor],
     te_outputs: List[torch.Tensor],
-    input_names: List[str]=None,
-    output_names: List[str]=None,
+    input_names: Optional[List[str]] = None,
+    output_names: Optional[List[str]] = None,
 ):
     if not SAVE_TEST_IO:
         return
