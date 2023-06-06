@@ -4,6 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+/*! \file fused_attn_fp8.h
+ *  \brief Functions for fused attention for FP8 with seqlen <= 512
+ */
+
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
