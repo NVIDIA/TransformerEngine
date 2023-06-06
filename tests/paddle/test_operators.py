@@ -42,6 +42,8 @@ class TestGemm:
     """
 
     @staticmethod
+    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                        reason="BF16 GEMM requires Ampere+ GPU")
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_bf16(m, n, k):
         """
@@ -64,6 +66,8 @@ class TestGemm:
         assert_allclose(actual_out, ref_out)
 
     @staticmethod
+    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                        reason="BF16 GEMM requires Ampere+ GPU")
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_bf16_inplace(m, n, k):
         """
