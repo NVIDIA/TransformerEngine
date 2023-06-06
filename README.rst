@@ -38,7 +38,7 @@ degradation in accuracy. Although all major deep learning frameworks support FP1
 not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
-Model (LLM) libraries. It provides a Python library consisting of modules to easily build a Transformer
+Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
 layer as well as a framework agnostic library in C++ including structs and kernels needed for FP8 support.
 Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
 simplifying mixed precision training for users.
