@@ -281,7 +281,7 @@ class FP8Helper:
         return jnp.vstack([fp8_max_per_gemm] * num_of_gemm)
 
     @staticmethod
-    def get_fp8_meta_indices(gemm_idx: int) -> Tuple[int]:
+    def get_fp8_meta_indices(gemm_idx: int) -> Tuple[int, int, int]:
         """
         Obtain the index about FP8 metas by the given GEMM index.
         """
@@ -453,7 +453,7 @@ def get_delayed_scaling():
     """
     amax_compute_algo = "max" if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX \
                         else "most_recent"
-    return DelayedScaling(margin=FP8Helper.MARGIN,
+    return DelayedScaling(margin=int(FP8Helper.MARGIN),
                           interval=FP8Helper.UPDATE_FP8META_INTERVAL,
                           fp8_format=FP8Helper.FP8_FORMAT,
                           amax_history_len=FP8Helper.AMAX_HISTORY_LEN,

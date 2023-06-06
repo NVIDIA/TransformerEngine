@@ -4,7 +4,7 @@
 
 """FP8 utilies for TransformerEngine"""
 from contextlib import contextmanager
-from typing import Optional, Dict, Any
+from typing import Generator, Optional, Dict, Any
 
 import tensorflow as tf
 import transformer_engine_tensorflow as tex
@@ -69,7 +69,7 @@ def get_default_fp8_recipe():
 def fp8_autocast(
     enabled: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
-) -> None:
+) -> Generator[None, None, None]:
     """
     Context manager for FP8 usage.
 
