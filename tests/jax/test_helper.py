@@ -14,7 +14,7 @@ from utils import assert_allclose
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
-from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available, AmaxComputeAlgo
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import MajorShardingType
 from transformer_engine.jax.sharding import ShardingResource
