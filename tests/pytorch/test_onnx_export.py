@@ -133,7 +133,7 @@ def do_export(
 
 
 def to_numpy(tensor):
-    if isinstance(tensor, torch.Tensor)::
+    if isinstance(tensor, torch.Tensor):
         if tensor.dtype == torch.bfloat16:
             tensor = tensor.type(torch.float32)
         tensor = tensor.detach().cpu().numpy()
