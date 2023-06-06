@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import ctypes
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -202,7 +203,7 @@ def with_userbuffers() -> bool:
 def frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "tensorflow"]
+    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -234,6 +235,12 @@ def frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("tensorflow")
+        try:
+            import paddle
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("paddle")
 
     # Special framework names
     if "all" in _frameworks:
@@ -283,7 +290,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=1.0.2"])
+        add_unique(install_reqs, ["torch", "flash-attn==1.0.6"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
@@ -295,6 +302,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, "tensorflow")
         add_unique(test_reqs, ["keras", "tensorflow_datasets"])
+    if "paddle" in frameworks():
+        add_unique(install_reqs, "paddlepaddle-gpu")
+        add_unique(test_reqs, "numpy")
 
     return setup_reqs, install_reqs, test_reqs
 
@@ -359,6 +369,8 @@ class CMakeExtension(setuptools.Extension):
 # PyTorch extension modules require special handling
 if "pytorch" in frameworks():
     from torch.utils.cpp_extension import BuildExtension
+elif "paddle" in frameworks():
+    from paddle.utils.cpp_extension import BuildExtension
 else:
     from setuptools.command.build_ext import build_ext as BuildExtension
 
@@ -384,6 +396,15 @@ class CMakeBuildExtension(BuildExtension):
                         install_dir=install_dir,
                     )
 
+        # Paddle requires linker search path for libtransformer_engine.so
+        paddle_ext = None
+        if "paddle" in frameworks():
+            for ext in self.extensions:
+                if "paddle" in ext.name:
+                    ext.library_dirs.append(self.build_lib)
+                    paddle_ext = ext
+                    break
+
         # Build non-CMake extensions as usual
         all_extensions = self.extensions
         self.extensions = [
@@ -392,6 +413,34 @@ class CMakeBuildExtension(BuildExtension):
         ]
         super().run()
         self.extensions = all_extensions
+
+        # Manually write stub file for Paddle extension
+        if paddle_ext is not None:
+
+            # Load libtransformer_engine.so to avoid linker errors
+            for path in Path(self.build_lib).iterdir():
+                if path.name.startswith("libtransformer_engine."):
+                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+
+            # Figure out stub file path
+            module_name = paddle_ext.name
+            assert module_name.endswith("_pd_"), \
+                "Expected Paddle extension module to end with '_pd_'"
+            stub_name = module_name[:-4]  # remove '_pd_'
+            stub_path = os.path.join(self.build_lib, stub_name + ".py")
+
+            # Figure out library name
+            # Note: This library doesn't actually exist. Paddle
+            # internally reinserts the '_pd_' suffix.
+            so_path = self.get_ext_fullpath(module_name)
+            _, so_ext = os.path.splitext(so_path)
+            lib_name = stub_name + so_ext
+
+            # Write stub file
+            print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
+            from paddle.utils.cpp_extension.extension_utils import custom_write_stub
+            custom_write_stub(lib_name, stub_path)
+
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -484,6 +533,69 @@ def setup_pytorch_extension() -> setuptools.Extension:
     )
 
 
+def setup_paddle_extension() -> setuptools.Extension:
+    """Setup CUDA extension for Paddle support"""
+
+    # Source files
+    src_dir = root_path / "transformer_engine" / "paddle" / "csrc"
+    sources = [
+        src_dir / "extensions.cu",
+        src_dir / "common.cpp",
+        src_dir / "custom_ops.cu",
+    ]
+
+    # Header files
+    include_dirs = [
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "paddle" / "csrc",
+    ]
+
+    # Compiler flags
+    cxx_flags = ["-O3"]
+    nvcc_flags = [
+        "-O3",
+        "-gencode",
+        "arch=compute_70,code=sm_70",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--use_fast_math",
+    ]
+
+    # Version-dependent CUDA options
+    try:
+        version = cuda_version()
+    except FileNotFoundError:
+        print("Could not determine CUDA Toolkit version")
+    else:
+        if version >= (11, 2):
+            nvcc_flags.extend(["--threads", "4"])
+        if version >= (11, 0):
+            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+        if version >= (11, 8):
+            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+
+    # Construct Paddle CUDA extension
+    sources = [str(path) for path in sources]
+    include_dirs = [str(path) for path in include_dirs]
+    from paddle.utils.cpp_extension import CUDAExtension
+    ext = CUDAExtension(
+        sources=sources,
+        include_dirs=include_dirs,
+        libraries=["transformer_engine"],
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": nvcc_flags,
+        },
+    )
+    ext.name = "transformer_engine_paddle_pd_"
+    return ext
+
 def main():
 
     # Submodules to install
@@ -498,6 +610,9 @@ def main():
     ext_modules = [setup_common_extension()]
     if "pytorch" in frameworks():
         ext_modules.append(setup_pytorch_extension())
+
+    if "paddle" in frameworks():
+        ext_modules.append(setup_paddle_extension())
 
     # Configure package
     setuptools.setup(

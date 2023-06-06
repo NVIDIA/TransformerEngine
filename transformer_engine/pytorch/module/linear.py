@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
-from typing import Union, Optional, Callable, Tuple, Dict, Any
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -641,6 +641,30 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+    def get_fp8_weights_scratchpad(
+        self,
+        is_first_microbatch: Union[bool, None],
+    ) -> List[torch.Tensor]:
+        """
+        Fetch the fp8 weight tensor placeholders if they exist (when
+        `is_first_microbatch` is not `None`) or return empty fp8 weight
+        tensors (if `is_first_microbatch is None`)
+        """
+        if not self.fp8:
+            return [None, None]
+
+        if is_first_microbatch is None:
+            # Return empty weight placeholders for each fwd/bwd pass
+            fp8_weight_tensors = self.get_fp8_weights_empty_tensors(
+                is_first_microbatch
+            )
+        else:
+            # These persistent weight placeholders should've been created in
+            # `set_fp8_weights` method
+            fp8_weight_tensors = [self.weight1_fp8, self.weight1_t_fp8]
+
+        return fp8_weight_tensors
+
     def forward(
         self,
         inp: torch.Tensor,
@@ -691,6 +715,11 @@ class Linear(TransformerEngineBaseModule):
                 else self.noop_cat("weight_tensor", self.weight_names)
             )
 
+            # Fetch the fp8 weights placeholders (for linear/gemm)
+            weight1_fp8, weight1_t_fp8 = self.get_fp8_weights_scratchpad(
+                is_first_microbatch
+            )
+
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
                 args = []
@@ -699,8 +728,8 @@ class Linear(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 weight_tensor,
-                self.weight1_fp8 if self.fp8 else None,
-                self.weight1_t_fp8 if self.fp8 else None,
+                weight1_fp8,
+                weight1_t_fp8,
                 inp,
                 bias_tensor,
                 self.apply_bias and not self.gemm_bias_unfused_add,

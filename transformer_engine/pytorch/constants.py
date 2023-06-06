@@ -4,6 +4,7 @@
 
 """Enums for e2e transformer"""
 import torch
+import torch.distributed
 import transformer_engine_extensions as tex
 
 
@@ -29,4 +30,4 @@ LayerTypes = ("encoder", "decoder")
 
 GemmParallelModes = ("row", "column", None)
 
-dist_group_type = torch._C._distributed_c10d.ProcessGroup
+dist_group_type = torch.distributed.ProcessGroup
