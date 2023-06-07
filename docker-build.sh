@@ -45,8 +45,8 @@ Usage:
                  scan base image. Default is 'bd'. Either 'c', 'd' or 's' assume
                  that a base image exists in the local or remote registry.
   --framework    Framework extensions to build with Transformer Engine. Options
-                 include 'pytorch', 'jax', 'tensorflow', 'all'. Framework should
-                 already be installed in base image.
+                 include 'pytorch', 'jax', 'tensorflow', 'paddle', 'all'. Framework
+                 should already be installed in base image.
 
 
 EOF
