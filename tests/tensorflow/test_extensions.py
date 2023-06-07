@@ -12,18 +12,30 @@ import transformer_engine # pylint: disable=unused-import
 import transformer_engine_tensorflow as tex
 import tensorflow as tf
 
+from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 
 from transformer_engine.tensorflow import TE_DType
 from transformer_engine.tensorflow import get_stream_id
 
+def skip_test():
+    if not tf.test.is_gpu_available(True, (9, 0)):
+        return 'Fp8 requires Hopper+ GPU'
+    if len(context.context().list_physical_devices('GPU')) != 1:
+        return 'Only supports a single GPU'
+    return None
 
 class ExtensionsTest(test.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.skip_msg = skip_test()
+
     @test_util.run_gpu_only
     def testCastFp8(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         input_shape = (16, 32)
         x = tf.random.uniform(input_shape)
         scale, amax, scale_inv = tf.ones([]), tf.zeros([]), tf.ones([])
@@ -39,6 +51,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testTransposeFp8(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
 
         x = tf.constant(np.random.uniform(-128, 127, (16, 32)), dtype=tf.int8)
@@ -50,8 +65,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testMatmulFp8(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         out_dtype = tex.DType.kFloat32
@@ -91,8 +107,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormFwdFp8(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         N, H = (16, 32)
@@ -120,8 +137,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluForwardFp8(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E4M3
         M, N = (16, 32)
@@ -142,8 +160,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluForward(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         M, N = (16, 32)
 
@@ -156,8 +175,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testGeluBackwardFp8(self):
-        if not tf.test.is_gpu_available(True, (9, 0)):
-            self.skipTest('Fp8 requires Hopper+ GPU')
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         fp8_dtype = tex.DType.kFloat8E5M2
         M, K, N = (16, 32, 32)
@@ -187,6 +207,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledUpperTriangMaskedSoftmaxFwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, F = (16, 32)
         scale = 0.8
@@ -205,6 +228,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledUpperTriangMaskedSoftmaxBwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, F = (16, 32)
         scale = 0.8
@@ -231,6 +257,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledMaskedSoftmaxFwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, N, F = (16, 4, 32)
         scale = 0.8
@@ -250,6 +279,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledMaskedSoftmaxBwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, N, F = (16, 4, 32)
         scale = 0.8
@@ -273,6 +305,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledSoftmaxFwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, N, F = (16, 4, 32)
         scale = 0.8
@@ -287,6 +322,9 @@ class ExtensionsTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testScaledSoftmaxBwd(self):
+        if self.skip_msg:
+            self.skipTest(self.skip_msg)
+
         stream_id = get_stream_id()
         B, N, F = (16, 4, 32)
         scale = 0.8

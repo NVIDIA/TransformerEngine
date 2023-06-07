@@ -12,6 +12,7 @@ import transformer_engine.tensorflow as te
 
 from itertools import product
 from tensorflow.keras import initializers, layers
+from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 from transformer_engine.tensorflow import (
@@ -75,8 +76,15 @@ def get_adjusted_layernorm_dx(x, ln_dy, init):
 
 
 class LayersTest(test.TestCase):
+    def setUp(self):
+        super().setUp()
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+
     @test_util.run_gpu_only
     def testDenseFwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=1.)
         dense_kwargs = {
@@ -105,6 +113,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testDenseBwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=1.)
         dense_kwargs = {
@@ -148,6 +159,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testDenseSkipWeight(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=1.)
         dense_kwargs = {
@@ -174,6 +188,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testDenseBookkeeping(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         if not tf.test.is_gpu_available(True, (9, 0)):
             self.skipTest('Fp8 requires Hopper+ GPU')
         M, K, N = 16, 16, 32
@@ -242,6 +259,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormFwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, N = 4, 16, 32
         init = initializers.RandomNormal(mean=0., stddev=1.)
         # The keras layer norm actually uses fp32 computation in mixed precision
@@ -264,6 +284,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormBwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, N = 4, 16, 32
         init = initializers.RandomNormal(mean=0., stddev=1.)
         ln_kwargs = {
@@ -295,6 +318,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormDenseFwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=1.)
         ln_kwargs = {
@@ -340,6 +366,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormDenseBwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=.1)
         dy = tf.random.uniform((B, M, N), minval=0., maxval=1.)
@@ -409,6 +438,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormDenseSkipWeight(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N = 4, 8, 16, 32
         init = initializers.RandomUniform(minval=0., maxval=1.)
         ln_kwargs = {
@@ -445,6 +477,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormMLPFwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N, O = 4, 8, 16, 32, 64
         init = initializers.RandomUniform(minval=0., maxval=1.)
         ln_kwargs = {
@@ -496,6 +531,9 @@ class LayersTest(test.TestCase):
 
     @test_util.run_gpu_only
     def testLayerNormMLPBwd(self):
+        if len(context.context().list_physical_devices('GPU')) != 1:
+            self.skipTest('Only supports a single GPU')
+
         B, M, K, N, O = 4, 8, 16, 32, 64
         init = initializers.RandomUniform(minval=0., maxval=.1)
         dy = tf.random.uniform((B, M, O), minval=0., maxval=1.)
@@ -578,5 +616,4 @@ class LayersTest(test.TestCase):
 
 
 if __name__ == '__main__':
-    tf.keras.mixed_precision.set_global_policy('mixed_float16')
     test.main()
