@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file fused_attn_max_512.h
- *  \brief Functions for fused attention with seqlen <= 512
+/*! \file fused_attn_fp16_bf16_max_seqlen_512.h
+ *  \brief Functions for fused attention for half precision with seqlen <= 512
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_MAX_512_H_
