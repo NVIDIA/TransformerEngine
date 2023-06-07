@@ -3,11 +3,13 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+import os
 from typing import Callable, Optional, Tuple
+
 import torch
 
 jit_fuser = torch.jit.script
-if torch.__version__ >= "2":
+if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
 
 
