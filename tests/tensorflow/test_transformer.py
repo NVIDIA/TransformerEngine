@@ -40,14 +40,14 @@ def train_step(dy, x, x_mask, x_dec, x_dec_mask, model, use_fp8=False,
 
 class TransformerLayerTest(test.TestCase):
     def setUp(self):
+        num_gpus = len(context.context().list_physical_devices('GPU'))
+        if num_gpus != 1:
+            self.skipTest(f'Requires one single GPU. But got {num_gpus} GPUs.')
         super().setUp()
         tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
     @test_util.run_gpu_only
     def testTransformerSanity(self):
-        if len(context.context().list_physical_devices('GPU')) != 1:
-            self.skipTest('Only supports a single GPU')
-
         use_fp8 = tf.test.is_gpu_available(True, (9, 0))
         # F=seq_len, B=batch, H=hidden_states, N=num_heads
         F, B, H, N = 8, 4, 32, 2
