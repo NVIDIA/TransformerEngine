@@ -1131,23 +1131,24 @@ at::Tensor fp8_transpose(at::Tensor input,
 }
 
 
-at::Tensor fp8_gelu(at::Tensor input,
-                    at::Tensor scale,
-                    at::Tensor amax,
-                    at::Tensor scale_inv,
-                    transformer_engine::DType otype
+at::Tensor gelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
 ) {
   using namespace transformer_engine;
 
-  size_t M = static_cast<size_t>(input.size(0));
-  size_t N = static_cast<size_t>(input.size(1));
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
 
   auto output =
-            allocateTorchTensor(input.size(0),
-                                input.size(1),
-                                DType::kByte);
+            allocateTorchTensor(M,
+                                N,
+                                otype);
 
-  auto input_cu =  makeTransformerEngineTensor(input);
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
   auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype,
                                                amax.data_ptr(), scale.data_ptr(),
                                                scale_inv.data_ptr());
@@ -1157,6 +1158,238 @@ at::Tensor fp8_gelu(at::Tensor input,
   return output;
 }
 
+at::Tensor dgelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_dgelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor relu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = static_cast<size_t>(at::numel(input)) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype,
+                                               amax.data_ptr(), scale.data_ptr(),
+                                               scale_inv.data_ptr());
+
+  nvte_relu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor drelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_drelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor geglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N / 2,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype,
+                                               amax.data_ptr(), scale.data_ptr(),
+                                               scale_inv.data_ptr());
+
+  nvte_geglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor dgeglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_dgeglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor reglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N / 2,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype,
+                                               amax.data_ptr(), scale.data_ptr(),
+                                               scale_inv.data_ptr());
+
+  nvte_reglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor dreglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_dreglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor swiglu(at::Tensor input,
+                  at::Tensor scale,
+                  at::Tensor amax,
+                  at::Tensor scale_inv,
+                  transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N / 2,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype,
+                                               amax.data_ptr(), scale.data_ptr(),
+                                               scale_inv.data_ptr());
+
+  nvte_swiglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
+
+at::Tensor dswiglu(at::Tensor grad,
+                   at::Tensor input,
+                   transformer_engine::DType otype
+) {
+  using namespace transformer_engine;
+
+  size_t N = static_cast<size_t>(input.size(-1));
+  size_t M = numel(input) / N;
+
+  auto output =
+            allocateTorchTensor(M,
+                                N,
+                                otype);
+
+  auto itype = GetTransformerEngineDType(input.scalar_type());
+  auto gtype = GetTransformerEngineDType(grad.scalar_type());
+  auto input_cu =  makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
+  auto grad_cu =  makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
+  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+
+  nvte_dswiglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return output;
+}
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &x,
@@ -1982,7 +2215,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
-  m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
+  m.def("gelu", &gelu, "GeLU with FP8 output");
+  m.def("relu", &relu, "ReLU with FP8 output");
+  m.def("geglu", &geglu, "GeGLU with FP8 output");
+  m.def("reglu", &reglu, "ReGLU with FP8 output");
+  m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
+  m.def("dgelu", &dgelu, "Backward of GeLU");
+  m.def("drelu", &drelu, "Backward of ReLU");
+  m.def("dgeglu", &dgeglu, "Backward of GeGLU");
+  m.def("dreglu", &dreglu, "Backward of ReGLU");
+  m.def("dswiglu", &dswiglu, "Backward of SwiBackward of ReLUGLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
 

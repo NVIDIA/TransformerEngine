@@ -47,18 +47,128 @@ at::Tensor cast_from_fp8_ts(const at::Tensor &input,
   return output;
 }
 
-at::Tensor fp8_gelu_ts(at::Tensor input,
-                       at::Tensor scale,
-                       at::Tensor amax,
-                       at::Tensor scale_inv,
-                       int64_t fp8_tensor,
-                       int64_t otype) {
+at::Tensor gelu_ts(at::Tensor input,
+                   at::Tensor scale,
+                   at::Tensor amax,
+                   at::Tensor scale_inv,
+                   int64_t fp8_tensor,
+                   int64_t otype) {
   transformer_engine::DType otype_arg = reverse_map_dtype(otype);
-  at::Tensor output = fp8_gelu(input,
-                               scale[fp8_tensor],
-                               amax[0][fp8_tensor],
-                               scale_inv[fp8_tensor],
-                               otype_arg);
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  }
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  }
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  }
+  at::Tensor output = gelu(input,
+                           s,
+                           a,
+                           s_inv,
+                           otype_arg);
+  return output;
+}
+
+at::Tensor relu_ts(at::Tensor input,
+                   at::Tensor scale,
+                   at::Tensor amax,
+                   at::Tensor scale_inv,
+                   int64_t fp8_tensor,
+                   int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  }
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  }
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  }
+  at::Tensor output = relu(input,
+                           s,
+                           a,
+                           s_inv,
+                           otype_arg);
+  return output;
+}
+
+at::Tensor reglu_ts(at::Tensor input,
+                    at::Tensor scale,
+                    at::Tensor amax,
+                    at::Tensor scale_inv,
+                    int64_t fp8_tensor,
+                    int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  }
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  }
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  }
+  at::Tensor output = reglu(input,
+                            s,
+                            a,
+                            s_inv,
+                            otype_arg);
+  return output;
+}
+
+at::Tensor geglu_ts(at::Tensor input,
+                    at::Tensor scale,
+                    at::Tensor amax,
+                    at::Tensor scale_inv,
+                    int64_t fp8_tensor,
+                    int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  }
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  }
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  }
+  at::Tensor output = geglu(input,
+                            s,
+                            a,
+                            s_inv,
+                            otype_arg);
+  return output;
+}
+
+at::Tensor swiglu_ts(at::Tensor input,
+                     at::Tensor scale,
+                     at::Tensor amax,
+                     at::Tensor scale_inv,
+                     int64_t fp8_tensor,
+                     int64_t otype) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  at::Tensor s, a, s_inv;
+  if (scale.numel()) {
+      s = scale[fp8_tensor];
+  }
+  if (amax.numel()) {
+      a = amax[0][fp8_tensor];
+  }
+  if (scale_inv.numel()) {
+      s_inv = scale_inv[fp8_tensor];
+  }
+  at::Tensor output = swiglu(input,
+                             s,
+                             a,
+                             s_inv,
+                             otype_arg);
   return output;
 }
 
@@ -171,7 +281,11 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
 TORCH_LIBRARY(tex_ts, m) {
   m.def("cast_to_fp8_ts", &cast_to_fp8_ts);
   m.def("cast_from_fp8_ts", &cast_from_fp8_ts);
-  m.def("fp8_gelu_ts", &fp8_gelu_ts);
+  m.def("gelu_ts", &gelu_ts);
+  m.def("relu_ts", &relu_ts);
+  m.def("geglu_ts", &geglu_ts);
+  m.def("reglu_ts", &reglu_ts);
+  m.def("swiglu_ts", &swiglu_ts);
   m.def("te_gemm_ts", &te_gemm_ts);
   m.def("layernorm_fwd_fp8_inf_ts", &layernorm_fwd_fp8_inf_ts);
   m.def("layernorm_fwd_inf_ts", &layernorm_fwd_inf_ts);
