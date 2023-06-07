@@ -198,6 +198,8 @@ While the more granular modules in Transformer Engine allow building any Transfo
 the `TransformerLayer` API of Transformer Engine is flexible enough to build multiple major
 Transformer model architectures.
 
+Transformer Engine supports the following DL frameworks: PyTorch, JAX (Flax, Praxis), and TensorFlow.
+
 NOTE: For simplicity, we only show PyTorch examples below. For the usage of `TransformerLayer`
 of all supported frameworks, refer to `examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
 
@@ -255,12 +257,10 @@ Integrations
 
 Transformer Engine has been integrated with several popular open-source DL frameworks such as:
 
-* `Hugging Face Accelerate <https://github.com/huggingface/accelerate>`_ 
-* `MosaicML Composer <https://github.com/mosaicml/composer>`_ 
+* `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
+* `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
 * `Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
-* `ColossalAI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
-* `Lightning <https://github.com/Lightning-AI/lightning/>`_ - Coming soon!
-* `Periflow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
+* `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_ - Coming soon!
 
 Contributing
 ==================
