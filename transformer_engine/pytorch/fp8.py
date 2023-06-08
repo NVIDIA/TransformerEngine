@@ -14,6 +14,7 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
+from .jit import jit_fuser
 
 _FP8_ENABLED = False
 _FP8_CALIBRATION = False
@@ -368,7 +369,7 @@ def update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@torch.jit.script
+@jit_fuser
 def _default_get_amax(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
@@ -383,7 +384,7 @@ def _default_get_amax(
     return amax_history, amax
 
 
-@torch.jit.script
+@jit_fuser
 def _default_sf_compute(
     amax: torch.Tensor,
     scale: torch.Tensor,
@@ -400,7 +401,7 @@ def _default_sf_compute(
     return sf
 
 
-@torch.jit.script
+@jit_fuser
 def _compute_scaling_factor_inverse(
     scale: torch.Tensor,
     scale_inv: torch.Tensor,
@@ -413,7 +414,7 @@ def _compute_scaling_factor_inverse(
     return torch.where(non_weight_mask, 1.0 / scale, scale_inv)
 
 
-@torch.jit.script
+@jit_fuser
 def fused_amax_and_scale_update(
     amax_history: torch.Tensor,
     scale: torch.Tensor,
