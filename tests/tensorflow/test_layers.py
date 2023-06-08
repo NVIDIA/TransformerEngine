@@ -12,7 +12,6 @@ import transformer_engine.tensorflow as te
 
 from itertools import product
 from tensorflow.keras import initializers, layers
-from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 from transformer_engine.tensorflow import (
@@ -77,9 +76,6 @@ def get_adjusted_layernorm_dx(x, ln_dy, init):
 
 class LayersTest(test.TestCase):
     def setUp(self):
-        num_gpus = len(context.context().list_physical_devices('GPU'))
-        if num_gpus != 1:
-            self.skipTest(f'Requires one single GPU. But got {num_gpus} GPUs.')
         super().setUp()
         tf.keras.mixed_precision.set_global_policy('mixed_float16')
 

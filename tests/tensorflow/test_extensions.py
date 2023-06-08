@@ -12,7 +12,6 @@ import transformer_engine # pylint: disable=unused-import
 import transformer_engine_tensorflow as tex
 import tensorflow as tf
 
-from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 
@@ -21,12 +20,6 @@ from transformer_engine.tensorflow import get_stream_id
 
 
 class ExtensionsTest(test.TestCase):
-    def setUp(self):
-        num_gpus = len(context.context().list_physical_devices('GPU'))
-        if num_gpus != 1:
-            self.skipTest(f'Requires one single GPU. But got {num_gpus} GPUs.')
-        super().setUp()
-
     @test_util.run_gpu_only
     def testCastFp8(self):
         if not tf.test.is_gpu_available(True, (9, 0)):

@@ -11,7 +11,6 @@ import tensorflow as tf
 import transformer_engine.tensorflow as te
 
 from tensorflow.keras.layers import EinsumDense
-from tensorflow.python.eager import context
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 from transformer_engine.tensorflow import (
@@ -128,9 +127,6 @@ class MultiHeadAttentionKeras(tf.keras.Model):
 
 class MHATest(test.TestCase):
     def setUp(self):
-        num_gpus = len(context.context().list_physical_devices('GPU'))
-        if num_gpus != 1:
-            self.skipTest(f'Requires one single GPU. But got {num_gpus} GPUs.')
         super().setUp()
         tf.keras.mixed_precision.set_global_policy('mixed_float16')
 

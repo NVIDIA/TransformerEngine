@@ -5,4 +5,4 @@
 set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
-CUDA_VISIBLE_DEVICES=0 pytest -Wignore -v $TE_PATH/tests/tensorflow
+pytest -Wignore -v $TE_PATH/tests/tensorflow
