@@ -15,6 +15,7 @@
 #include "common/include/transformer_engine/transformer_engine.h"
 #include "common/include/transformer_engine/transpose.h"
 #include "tensorflow/c/eager/c_api_experimental.h"
+#include "tensorflow/c/eager/c_api_internal.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
 #include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
 #include "tensorflow/c/tf_status_internal.h"
@@ -200,6 +201,17 @@ TFE_Context* GetContext(TF_Status* status) {
   static TFE_Context* context = nullptr;
   if (context == nullptr) {
     TFE_ContextOptions* opts = TFE_NewContextOptions();
+
+    // Current TF-TE only supports a single GPU. Here we need to manually set
+    // the GPU number to 1 in case of the multi-GPU environment. Otherwise, the
+    // TF will still traverse all the valid GPUs (to get stream priority ranges)
+    // and eventually cudaSetDevice to the last one (This logic is defined in
+    // BaseGPUDeviceFactory::CreateDevices). This would cause the other pybind
+    // functions to be dispatched onto other GPUs, leading to bad results.
+    auto* device_count =
+        opts->session_options.options.config.mutable_device_count();
+    device_count->insert({"GPU", 1});
+
     context = TFE_NewContext(opts, status);
   }
   return context;
