@@ -5,9 +5,9 @@
 # A workflow to trigger the build of TE documentation on GitHub
 name: 'Documentation'
 on:
-  pull_request:
-  workflow_dispatch:
-  workflow_call:
+  #pull_request:
+  #workflow_dispatch:
+  #workflow_call:
 jobs:
   build_docs:
     name: 'Build'

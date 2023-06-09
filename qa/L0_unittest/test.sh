@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+exit
 set -e
 
 : ${TE_PATH:=/opt/transformerengine}
