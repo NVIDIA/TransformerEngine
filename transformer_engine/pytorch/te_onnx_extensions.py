@@ -176,6 +176,7 @@ def onnx_te_gemm(
     """ONNX graph for te_gemm"""
     # pylint: disable=unused-argument
     is_fp16 = is_dtype_fp16(inputs)
+    is_bf16 = is_dtype_bf16(inputs)
     if input_type == int(tex.DType.kFloat8E4M3):
         inputs = dequantize(g, inputs, input_scale_inverse, input_fp8_tensor, out_type)
 
@@ -200,6 +201,8 @@ def onnx_te_gemm(
     else:
         if is_fp16:
             output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
+        elif is_bf16:
+            output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.BFLOAT16)
     return output
 
 

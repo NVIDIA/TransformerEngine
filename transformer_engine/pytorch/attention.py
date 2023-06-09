@@ -173,7 +173,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            dtype=query_layer.dtype,
+            dtype=torch.float32,
             device=torch.cuda.current_device(),
         )
 
