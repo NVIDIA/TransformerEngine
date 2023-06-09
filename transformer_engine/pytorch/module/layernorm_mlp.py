@@ -556,7 +556,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
 
-                    if activation == 'gelu':
+                    if ctx.activation == 'gelu':
                         fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_dgelu_fused(
                             fc2_dgrad,
                             fc1_out,
