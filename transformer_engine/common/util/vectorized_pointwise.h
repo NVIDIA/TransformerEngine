@@ -509,18 +509,18 @@ void GatedActivationKernelLauncher(const InputType *input,
     switch (auto align = CheckAlignment(n, nvec, input, input + n, output)) {
       case Alignment::SAME_ALIGNED:
         gated_act_kernel<nvec, true, ComputeType, Param, Activation>
-		        <<<num_blocks, threads, 0, stream>>>(
+                        <<<num_blocks, threads, 0, stream>>>(
                         input, output, scale, amax, m, n, p, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
         gated_act_kernel<nvec, false, ComputeType, Param, Activation>
-		        <<<num_blocks, threads, 0, stream>>>(
+                        <<<num_blocks, threads, 0, stream>>>(
                         input, output, scale, amax, m, n, p, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         gated_act_kernel<1, true, ComputeType, Param, Activation>
-		        <<<num_blocks, threads, 0, stream>>>(
+                        <<<num_blocks, threads, 0, stream>>>(
                         input, output, scale, amax, m, n, p, n);
         break;
       }
