@@ -45,7 +45,9 @@ from .. import cpp_extensions as tex
 
 from ..constants import dist_group_type, TE_DType
 
+
 __all__ = ["LayerNormMLP"]
+
 
 def _act_func(activation: str):
     funcs = {
@@ -58,6 +60,7 @@ def _act_func(activation: str):
     if activation not in funcs:
         raise "Activation type " + activation + " is not supported!"
     return funcs[activation]
+
 
 class _LayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
