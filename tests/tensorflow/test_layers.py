@@ -75,6 +75,10 @@ def get_adjusted_layernorm_dx(x, ln_dy, init):
 
 
 class LayersTest(test.TestCase):
+    def setUp(self):
+        super().setUp()
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+
     @test_util.run_gpu_only
     def testDenseFwd(self):
         B, M, K, N = 4, 8, 16, 32
@@ -578,5 +582,4 @@ class LayersTest(test.TestCase):
 
 
 if __name__ == '__main__':
-    tf.keras.mixed_precision.set_global_policy('mixed_float16')
     test.main()
