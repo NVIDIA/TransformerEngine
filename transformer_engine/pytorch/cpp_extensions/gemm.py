@@ -2,10 +2,15 @@
 #
 # See LICENSE for license information.
 
-from .common import *
+"""Python interface for GEMM extensions"""
+from typing import Optional, Tuple, Union
 import torch
+import transformer_engine_extensions as tex
+from ..constants import TE_DType
+
 
 __all__ = ['gemm', 'fp8_gemm']
+
 
 def fp8_gemm(
     A: torch.Tensor,
@@ -217,4 +222,3 @@ def gemm(
     if return_output:
         return out, grad_bias, gelu_input
     return None, grad_bias, gelu_input
-

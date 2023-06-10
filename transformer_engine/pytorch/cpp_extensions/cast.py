@@ -1,10 +1,16 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from .common import *
+
+"""Python interface for cast extensions"""
+from typing import Optional, Union
+import torch
+import transformer_engine_extensions as tex
+
 
 __all__ = ['cast_to_fp8',
            'cast_from_fp8']
+
 
 def cast_to_fp8(
     inp: torch.Tensor,

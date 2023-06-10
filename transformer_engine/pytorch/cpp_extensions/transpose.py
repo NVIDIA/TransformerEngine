@@ -1,12 +1,19 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from .common import *
+
+"""Python interface for transpose extensions"""
+from typing import Optional, Tuple, Union
+import torch
+import transformer_engine_extensions as tex
+from ..constants import TE_DType
+
 
 __all__ = ['fp8_cast_transpose_fused',
            'fp8_cast_transpose_bgrad_fused',
            'fp8_cast_transpose_bgrad_dgelu_fused',
            'fp8_transpose_bgrad_fused']
+
 
 def fp8_cast_transpose_fused(
     inp: torch.Tensor,
@@ -91,4 +98,3 @@ def fp8_cast_transpose_bgrad_dgelu_fused(
         fp8_meta_tensor.scale_inv[fp8_tensor],
         otype,
     )
-

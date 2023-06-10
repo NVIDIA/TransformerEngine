@@ -2,13 +2,34 @@
 #
 # See LICENSE for license information.
 
-from .common import *
+"""Python interface for fused attention extensions"""
+import math
+from typing import Tuple, List, Union
 import torch
+import transformer_engine_extensions as tex
+
 
 __all__ = ['fused_attn_fwd_qkvpacked',
            'fused_attn_bwd_qkvpacked',
            'fused_attn_fwd_kvpacked',
            'fused_attn_bwd_kvpacked']
+
+
+TORCH_DType = {
+    tex.DType.kFloat8E4M3: torch.uint8,
+    tex.DType.kFloat8E5M2: torch.uint8,
+    tex.DType.kFloat16: torch.half,
+    tex.DType.kBFloat16: torch.bfloat16,
+    tex.DType.kFloat32: torch.float32,
+    tex.DType.kInt32: torch.int32,
+}
+
+
+def check_tensor(x: torch.Tensor):
+    """Check tensor properties."""
+    assert (x.is_cuda and x.is_contiguous()
+            ), "Tensor should be a GPU tensor and contiguous."
+
 
 def check_qkv(qkv: torch.Tensor, dtype: torch.dtype):
     """Check tensor properties."""
@@ -19,6 +40,7 @@ def check_qkv(qkv: torch.Tensor, dtype: torch.dtype):
             ), """QKV should be in [total_seqs, 3, num_heads, head_dim] shape
     and {dtype} dtype."""
 
+
 def check_q(q: torch.Tensor, dtype: torch.dtype):
     """Check tensor properties."""
     check_tensor(q)
@@ -26,6 +48,7 @@ def check_q(q: torch.Tensor, dtype: torch.dtype):
             and q.dim() == 3
             ), """Q should be in [total_seqs, num_heads, head_dim] shape
     and {dtype} dtype."""
+
 
 def check_kv(kv: torch.Tensor, dtype: torch.dtype):
     """Check tensor properties."""
@@ -36,6 +59,7 @@ def check_kv(kv: torch.Tensor, dtype: torch.dtype):
             ), """KV should be in [total_seqs, 2, num_heads, head_dim] shape
     and {dtype} dtype."""
 
+
 def check_o(o: torch.Tensor, dtype: torch.dtype):
     """Check tensor properties."""
     check_tensor(o)
@@ -43,6 +67,7 @@ def check_o(o: torch.Tensor, dtype: torch.dtype):
             and o.dim() == 3
             ), """O and dO should be in [total_seqs, num_heads, head_dim] shape
     and {dtype} dtype."""
+
 
 def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
     """Check tensor properties."""
@@ -52,6 +77,7 @@ def check_stats(stats: torch.Tensor, b: int, h: int, s: int):
             and stats.shape == torch.Size([b, h, s, 1])
             ), """M and ZInv should be in [batch_size, num_heads, max_seqlen_q, 1]
     shape and float32 dtype."""
+
 
 def check_cu_seqlens(cu_seqlens: torch.Tensor):
     """Check tensor properties."""
@@ -68,12 +94,14 @@ def check_scalar(scalar: torch.Tensor):
             and scalar.numel() == 1
             ), "amax/scale/descale tensors should be scalars in float32 dtype."
 
+
 def check_rng_state(rng_state: torch.Tensor):
     """Check tensor properties."""
     check_tensor(rng_state)
     assert (rng_state.dtype is torch.int64
             and rng_state.numel() == 2
             ), "rng_state should be [seed, offset] and in int64 dtype."
+
 
 def fused_attn_fwd_qkvpacked(
     is_training: bool,
@@ -736,4 +764,3 @@ def fused_attn_bwd_kvpacked(
     if bias_type == "no_bias":
         return output_tensors[:2]
     return output_tensors
-

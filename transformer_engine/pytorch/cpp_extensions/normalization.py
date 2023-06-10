@@ -1,11 +1,17 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from .common import *
+
+"""Python interface for normalization extensions"""
+from typing import Optional, Tuple, Union
+import torch
+import transformer_engine_extensions as tex
+
 
 __all__ = ['layernorm_fwd_fp8',
            'layernorm_fwd_fp8_inf',
            'layernorm_fwd_inf']
+
 
 def layernorm_fwd_fp8(
     inp: torch.Tensor,
@@ -93,4 +99,3 @@ def layernorm_fwd_inf(
         eps,
         zero_centered_gamma,
     )
-

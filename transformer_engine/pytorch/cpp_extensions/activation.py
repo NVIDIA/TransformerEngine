@@ -1,9 +1,15 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from .common import *
+
+"""Python interface for activation extensions"""
+from typing import Union
+import torch
+import transformer_engine_extensions as tex
+
 
 __all__ = ['gelu', 'relu', 'reglu', 'geglu', 'swiglu']
+
 
 def gelu(
     inp: torch.Tensor,
@@ -31,6 +37,7 @@ def gelu(
         otype,
     )
 
+
 def relu(
     inp: torch.Tensor,
     fp8_meta_tensor: tex.FP8TensorMeta,
@@ -55,6 +62,7 @@ def relu(
         fp8_tensor,
         otype,
     )
+
 
 def geglu(
     inp: torch.Tensor,
@@ -81,6 +89,7 @@ def geglu(
         otype,
     )
 
+
 def reglu(
     inp: torch.Tensor,
     fp8_meta_tensor: tex.FP8TensorMeta,
@@ -105,6 +114,7 @@ def reglu(
         fp8_tensor,
         otype,
     )
+
 
 def swiglu(
     inp: torch.Tensor,
