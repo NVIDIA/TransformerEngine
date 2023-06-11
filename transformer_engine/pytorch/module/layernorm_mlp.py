@@ -340,7 +340,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if bias_gelu_nvfusion:
                 fc1_out, _, _ = fc1_outputs
-
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
             else:
                 if activation == 'gelu':
@@ -681,6 +680,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         dgelu = activation_func(fc2_dgrad,
                                                 fc1_out,
                                                 TE_DType[fc2_dgrad.dtype])
+
+                    # For non-fp8 execution, FC1 bias gradient is fused with FC1 wgrad GEMM
+                    # and will not be calculated in case wgrad is not required.
+                    if not fc1_weight.requires_grad:
+                        fc1_bias_grad = dgelu.sum(dim=0)
 
                 fc1_dgrad_size = list(dgelu.size())
                 fc1_dgrad_size[1] = fc1_weight.size(1)
