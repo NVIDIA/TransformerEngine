@@ -343,12 +343,13 @@ _supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
 
 class TorchGLU(nn.Module):
     def __init__(self, activation: str):
+        super().__init__()
         self.act = _supported_act[activation]
 
     def forward(self, x):
         shape = x.size(-1)
-        a = x[:, :shape // 2]
-        b = x[:, (shape // 2):]
+        a = x[..., :shape // 2]
+        b = x[..., (shape // 2):]
         a = self.act(a)
         return a * b
 
@@ -881,7 +882,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("activation", all_activations)
-def test_layernorm_mlp_accuracy(dtype, bs, model):
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
     config = model_configs[model]
 
     te_ln_mlp = (
