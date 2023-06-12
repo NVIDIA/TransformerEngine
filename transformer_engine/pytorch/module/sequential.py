@@ -14,8 +14,7 @@ class Sequential(nn.Module):
     # from nn.Module
     _modules: dict[str, nn.Module]  # type: ignore[assignment]
 
-    _is_cache_valid: bool
-    _op_cache: ComputePipeline
+    _op_cache: ComputePipeline | None
 
     @overload
     def __init__(self, *modules: nn.Module) -> None:
@@ -46,7 +45,7 @@ class Sequential(nn.Module):
                 self.append(submodule, name=f"{name}.{submodule_name}")
         else:
             self.add_module(name, module)
-        self._is_cache_valid = False
+        self._op_cache = None
 
     def __len__(self):
         return len(self._modules)
@@ -64,7 +63,6 @@ class Sequential(nn.Module):
         return self * other
 
     def forward(self, x: Any):
-        if not self._is_cache_valid:
+        if self._op_cache is None:
             self._op_cache = ComputePipeline(*self._modules.values())
-            self._is_cache_valid = True
         return self._op_cache(x)
