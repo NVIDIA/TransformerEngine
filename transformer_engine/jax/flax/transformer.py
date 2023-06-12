@@ -245,9 +245,9 @@ class MultiHeadAttention(nn.Module):
     output_layernorm : bool, default = False
         Indicate if apply a layer normalization at the end of MHA.
     attn_type: Any, defult = None
-        Deprecated, will be ignored after v0.10 and be removed after v0.11.
+        *Deprecated*, will be ignored after v0.10 and be fully removed after v0.11.
         Please use `attn_mask_type` to config the attention mask.
-    attn_mask_type: {'causal', 'padding'}, default = `causal`
+    attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
 
     Optimization parameters
@@ -803,9 +803,9 @@ class TransformerLayer(nn.Module):
     .. warning::
 
         Arguments :attr:`self_attn_mask_type` is introduced in version 0.10.
-        Starting from version 0.11, the default value will be 'causal'.
+        Starting from version 0.11, the default value will be `"causal"`.
         However, to ensure compatibility with earlier versions, before 0.11,
-        the default value will be 'padding' for the encoder and 'causal' for the decoder.
+        the default value will be `"padding"` for the encoder and `"causal"` for the decoder.
 
     .. note::
 
@@ -872,7 +872,7 @@ class TransformerLayer(nn.Module):
         If set to TransformerLayerType.DECODER, an additional cross-attention block
         is added after self-attention.this can be used for structures like `T5`
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
-    self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+    self_attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
