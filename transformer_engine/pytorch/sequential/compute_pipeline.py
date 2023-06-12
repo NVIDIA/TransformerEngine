@@ -21,4 +21,4 @@ class ComputePipeline:
         ...
 
 
-__all__ = ["ComputePipeline"]
+__all__ = ["ComputePipeline", "COMPUTE_PIPELINE_CUSTOM_SERIALIZERS"]
