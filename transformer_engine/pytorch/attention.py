@@ -15,6 +15,15 @@ import torch
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
 import transformer_engine_extensions as tex
+from transformer_engine.pytorch.cpp_extensions import (
+    fused_attn_fwd_qkvpacked,
+    fused_attn_bwd_qkvpacked,
+    fused_attn_fwd_kvpacked,
+    fused_attn_bwd_kvpacked,
+    QKVLayout,
+    AttnBiasType,
+    AttnMaskType,
+)
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.utils import (
     divide,
@@ -26,6 +35,7 @@ from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
     dist_group_type,
+    TE_DType,
 )
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
@@ -267,9 +277,9 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
-def _check_if_interleaved(q, k, v):
-    data_ptr = q.storage().data_ptr()
-    check_ptrs = all(x.storage().data_ptr() == data_ptr for x in [q, k, v])
+def _check_if_interleaved_qkv(q, k, v):
+    data_ptr = q.untyped_storage().data_ptr()
+    check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
     if not check_ptrs:
         return False
 
@@ -288,9 +298,32 @@ def _check_if_interleaved(q, k, v):
                         for i, x in enumerate([q, k, v]))
     return check_offsets
 
+def _check_if_interleaved_kv(k, v):
+    data_ptr = k.untyped_storage().data_ptr()
+    check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
+    if not check_ptrs:
+        return False
+
+    stride = k.stride()
+    check_strides = all(stride == x.stride() for x in [k, v])
+    if not check_strides:
+        return False
+
+    shape = k.shape
+    check_shapes = all(shape == x.shape for x in [k, v])
+    if not check_shapes:
+        return False
+
+    last_dim_size = shape[-1]
+    check_offsets = all(i * last_dim_size == x.storage_offset()
+                        for i, x in enumerate([k, v]))
+    return check_offsets
+
+
 
 class FlashAttention(torch.nn.Module):
-    """Dot product attention implementation by using the flash-attn package.
+    """Dot product attention, using HazyResearch flash-attn package:
+    https://github.com/HazyResearch/flash-attention
     """
 
     def __init__(
@@ -321,9 +354,9 @@ class FlashAttention(torch.nn.Module):
         """flash-attn fprop"""
 
         assert (
-            (query_layer.dtype in [torch.float16, torch.bfloat16])
-            and (key_layer.dtype in [torch.float16, torch.bfloat16])
-            and (value_layer.dtype in [torch.float16, torch.bfloat16])
+            query_layer.dtype in [torch.float16, torch.bfloat16]
+            and key_layer.dtype in [torch.float16, torch.bfloat16]
+            and value_layer.dtype in [torch.float16, torch.bfloat16]
             ), 'FlashAttention currently only supports FP16 and BF16.'
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
@@ -333,7 +366,7 @@ class FlashAttention(torch.nn.Module):
 
         if (query_layer.shape[-1] == 128 and
             query_layer.shape[0] * query_layer.shape[1] >= 512 and
-            _check_if_interleaved(query_layer, key_layer, value_layer)):
+            _check_if_interleaved_qkv(query_layer, key_layer, value_layer)):
             query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
                                                                          key_layer,
                                                                          value_layer)
@@ -367,6 +400,286 @@ class FlashAttention(torch.nn.Module):
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+
+
+class FusedAttnFunc_qkvpacked(torch.autograd.Function):
+    """Function for FusedAttention with packed QKV input"""
+
+    @staticmethod
+    def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, attn_scale,
+                dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, fused_attention_backend):
+        out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
+            is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
+            fused_attention_backend, attn_bias,
+            None, None, None, None, None,
+            attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
+            rng_gen)
+
+        ctx.save_for_backward(qkv, out, cu_seqlens)
+        ctx.aux_ctx_tensors = aux_ctx_tensors
+        ctx.max_seqlen = max_seqlen
+        ctx.qkv_dtype = qkv_dtype
+        ctx.attn_scale = attn_scale
+        ctx.dropout_p = dropout_p
+        ctx.fast_zero_fill = fast_zero_fill
+        ctx.qkv_layout = qkv_layout
+        ctx.attn_bias_type = attn_bias_type
+        ctx.attn_mask_type = attn_mask_type
+        ctx.fused_attention_backend = fused_attention_backend
+
+        return out
+
+    @staticmethod
+    def backward(ctx, d_out):
+        qkv, out, cu_seqlens = ctx.saved_tensors
+        dqkv, *rest = fused_attn_bwd_qkvpacked(
+            ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
+            ctx.qkv_dtype, ctx.aux_ctx_tensors,
+            ctx.fused_attention_backend,
+            None, None, None, None, None, None, None, None, None,
+            ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+            ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+
+        # if no_bias, return dqkv
+        if ctx.attn_bias_type == "no_bias":
+            return (None, None, None, dqkv, None, None, None,
+                    None, None, None, None, None, None,
+                    None, None, None, None, None, None)
+        # else, return (dqkv, dbias)
+        return (None, None, None, dqkv, None, rest[0], None,
+                None, None, None, None, None, None,
+                None, None, None, None, None, None)
+
+class FusedAttnFunc_kvpacked(torch.autograd.Function):
+    """Function for FusedAttention with packed KV input"""
+
+    @staticmethod
+    def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
+                qkv_layout, attn_bias_type, attn_mask_type,
+                rng_gen, fused_attention_backend):
+        out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
+            is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+            q, kv, qkv_dtype, fused_attention_backend, attn_bias,
+            None, None, None, None, None,
+            attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
+            rng_gen)
+
+        ctx.save_for_backward(q, kv, out, cu_seqlens_q, cu_seqlens_kv)
+        ctx.aux_ctx_tensors = aux_ctx_tensors
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_kv = max_seqlen_kv
+        ctx.qkv_dtype = qkv_dtype
+        ctx.attn_scale = attn_scale
+        ctx.dropout_p = dropout_p
+        ctx.fast_zero_fill = fast_zero_fill
+        ctx.qkv_layout = qkv_layout
+        ctx.attn_bias_type = attn_bias_type
+        ctx.attn_mask_type = attn_mask_type
+        ctx.fused_attention_backend = fused_attention_backend
+
+        return out
+
+    @staticmethod
+    def backward(ctx, d_out):
+        q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        dq, dkv, *rest = fused_attn_bwd_kvpacked(
+            ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+            q, kv, out, d_out,
+            ctx.qkv_dtype, ctx.aux_ctx_tensors,
+            ctx.fused_attention_backend,
+            None, None, None, None, None, None, None, None, None,
+            ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+            ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+
+        # if no_bias, return dqkv
+        if ctx.attn_bias_type == "no_bias":
+            return (None, None, None, None, None, dq, dkv, None, None, None,
+                    None, None, None, None, None, None,
+                    None, None, None, None, None, None)
+        # else, return (dqkv, dbias)
+        return (None, None, None, None, None, dq, dkv, None, rest[0], None,
+                None, None, None, None, None, None,
+                None, None, None, None, None, None)
+
+class FusedAttention(torch.nn.Module):
+    """Dot product attention, with multiple backends:
+
+    1. FusedAttnBackend["F16_max512_seqlen"]
+       cuDNN based fused attention for FP16/BF16 and <=512 sequence length.
+    2. FusedAttnBackend["F16_arbitrary_seqlen"]
+       cuDNN based fused attention for FP16/BF16 and any sequence length.
+
+    Support matrix:
+
+    | backend       | 1                       | 2               |
+    | flash based   | no                      | yes             |
+    | cuDNN based   | yes                     | yes             |
+    | qkv dtype     | fp16/bf16               | fp16/bf16       |
+    | attn_type     | self/cross              | self            |
+    | qkv_layout    |                         |                 |
+    |  - qkv        | qkv_interleaved         | qkv_interleaved |
+    |  - (q,kv)     | kv_interleaved          |                 |
+    | mask_type     | causal/no_mask          | causal          |
+    | bias_type     | no_bias/post_scale_bias | no_bias         |
+    | dropout       | no                      | yes             |
+    | max_seqlen    | <=512                   | any             |
+    | head_dim      | 64                      | 64,128          |
+    | output dtype  | fp16/bf16               | fp16/bf16       |
+    """
+
+    def __init__(
+        self,
+        norm_factor: float,
+        attention_dropout: float = 0.0,
+        attention_dropout_ctx: Optional[Callable] = nullcontext,
+        attn_mask_type: str = "causal",
+        attention_type: str = "self",
+    ) -> None:
+        super().__init__()
+
+        self.norm_factor = norm_factor
+        self.attention_dropout = attention_dropout
+        self.attention_dropout_ctx = attention_dropout_ctx
+        self.attn_mask_type = attn_mask_type
+        self.attention_type = attention_type
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
+    ) -> torch.Tensor:
+        """fused attention fprop"""
+
+        assert (
+            (query_layer.dtype in [torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.float16, torch.bfloat16])
+            ), 'FusedAttention only supports FP16 and BF16 data types.'
+        assert (
+            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            ), 'FusedAttention only supports CUDA tensors.'
+
+        qkv_dtype = TE_DType[query_layer.dtype]
+        seqlen_q, batch_size = query_layer.shape[0], query_layer.shape[1]
+        seqlen_kv = key_layer.shape[0]
+        max_seqlen_q = seqlen_q
+        max_seqlen_kv = seqlen_kv
+
+        if self.attention_type == "self":
+            if _check_if_interleaved_qkv(query_layer, key_layer, value_layer):
+                query_layer = query_layer.unsqueeze(3)
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                # [s, b, h, 3, d]
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 3)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(2, 3).transpose(0, 1).contiguous()
+            else:
+                query_layer = query_layer.unsqueeze(2)
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                # [s, b, 3, h, d]
+                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 2)
+                # [b, s, 3, h, d]
+                mixed_layer = mixed_layer.transpose(0, 1).contiguous()
+
+            # [total_seqs, 3, h, d]
+            mixed_layer = mixed_layer.view(
+                mixed_layer.shape[0] * mixed_layer.shape[1], *mixed_layer.shape[2:]).contiguous()
+
+            qkv_layout = "qkv_interleaved"
+            max_seqlen = seqlen_q
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seqlen_q,
+                step=seqlen_q,
+                dtype=torch.int32,
+                device=query_layer.device)
+
+            with self.attention_dropout_ctx():
+                output = FusedAttnFunc_qkvpacked.apply(
+                    self.training,
+                    max_seqlen,
+                    cu_seqlens,
+                    mixed_layer,
+                    qkv_dtype,
+                    core_attention_bias,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    fast_zero_fill,
+                    qkv_layout,
+                    core_attention_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    fused_attention_backend,
+                )
+            output = output.view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous()
+
+        if self.attention_type == "cross":
+            if _check_if_interleaved_kv(key_layer, value_layer):
+                # [s, b, h, 2, d]
+                key_layer = key_layer.unsqueeze(3)
+                value_layer = value_layer.unsqueeze(3)
+                key_value = torch.cat([key_layer, value_layer], dim = 3)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(2, 3).transpose(0, 1).contiguous()
+            else:
+                # [s, b, 2, h, d]
+                key_layer = key_layer.unsqueeze(2)
+                value_layer = value_layer.unsqueeze(2)
+                key_value = torch.cat([key_layer, value_layer], dim = 2)
+                # [b, s, 2, h, d]
+                key_value = key_value.transpose(0, 1).contiguous()
+
+            # [total_seqs, 2, h, d]
+            query_layer = query_layer.transpose(0, 1).contiguous()
+            query_layer = query_layer.view(
+                    query_layer.shape[0] * query_layer.shape[1], *query_layer.shape[2:])
+            key_value = key_value.view([key_value.shape[0] * key_value.shape[1]]
+                + key_value.shape[2:]).contiguous()
+
+            qkv_layout = "kv_interleaved"
+            cu_seqlens_q = torch.arange(
+                0,
+                (batch_size + 1) * seqlen_q,
+                step=seqlen_q,
+                dtype=torch.int32,
+                device=query_layer.device)
+            cu_seqlens_kv = torch.arange(
+                0,
+                (batch_size + 1) * seqlen_kv,
+                step=seqlen_kv,
+                dtype=torch.int32,
+                device=key_layer.device)
+
+            with self.attention_dropout_ctx():
+                outputs = FusedAttnFunc_kvpacked.apply(
+                    self.training,
+                    max_seqlen_q, max_seqlen_kv,
+                    cu_seqlens_q, cu_seqlens_kv,
+                    query_layer, key_value,
+                    qkv_dtype,
+                    core_attention_bias,
+                    1.0/self.norm_factor,
+                    self.attention_dropout if self.training else 0.0,
+                    fast_zero_fill,
+                    qkv_layout,
+                    core_attention_bias_type,
+                    self.attn_mask_type,
+                    None, # rng_gen
+                    fused_attention_backend,
+                )
+
+            output = (outputs[0].view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous(),
+                    outputs[1].view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous())
+        return output
 
 
 class DotProductAttention(torch.nn.Module):
@@ -422,15 +735,16 @@ class DotProductAttention(torch.nn.Module):
         get_rng_state_tracker: Optional[Callable] = None,
         tp_group: Optional[dist_group_type] = None,
         layer_number: Optional[int] = None,
+        attention_type: str = "self",
     ) -> None:
         super().__init__()
 
-        tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
+        self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
 
         projection_size = kv_channels * num_attention_heads
-        self.hidden_size_per_partition = divide(projection_size, tp_size)
+        self.hidden_size_per_partition = divide(projection_size, self.tp_size)
         self.hidden_size_per_attention_head = divide(
             projection_size, num_attention_heads
         )
@@ -447,18 +761,28 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and self.device_compute_capability >= 8.0
         )
+        self.use_fused_attention = (
+            int(os.getenv("NVTE_FUSED_ATTN", "1"))
+            and self.device_compute_capability >= 8.0
+        )
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
             "attn_mask_type": attn_mask_type,
         }
+        self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
+        self.attention_dropout = attention_dropout
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
-        # Instantiating both types since use of flash-attn
+        # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
+        if self.use_fused_attention:
+            self.fused_attention = FusedAttention(
+                norm_factor, **attn_kwargs,
+                attention_type = attention_type)
         self.unfused_attention = UnfusedDotProductAttention(
             norm_factor, **attn_kwargs, layer_number=layer_number)
 
@@ -489,6 +813,9 @@ class DotProductAttention(torch.nn.Module):
         value_layer: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -506,6 +833,17 @@ class DotProductAttention(torch.nn.Module):
             (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
             * :attr:`kv_channels`) is returned.
 
+        .. note::
+
+            `DotProductAttention` supports three backends: 1) `FlashAttention` which calls
+            HazyResearch's FlashAttention PyTorch API, 2) `FusedAttention` which has multiple
+            fused attention implementations as its backends (see `FusedAttention` for
+            more details), and 3) `UnfusedDotProductAttention` which is the native PyTorch
+            implementation with fused scaled masked softmax. Users can use environment variables
+            `NVTE_FLASH_ATTN`, `NVTE_FUSED_ATTN`, and `NVTE_FUSED_ATTN_BACKEND` to control
+            which DotProductAttention backend, and FusedAttention backend if applicable, to use.
+            The default DotProductAttention backend is 1.
+
         Parameters
         ----------
         query_layer : torch.Tensor
@@ -521,9 +859,17 @@ class DotProductAttention(torch.nn.Module):
                                    during the backward pass in order to save memory that would
                                    otherwise be occupied to store the forward activations until
                                    backprop.
+        core_attention_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        core_attention_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        fast_zero_fill: bool, defautl = `True`
+                    Whether to use the fast path to set output tensors to 0 or not.
         """
 
         use_flash_attention = self.use_flash_attention
+        use_fused_attention = self.use_fused_attention
+
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
@@ -533,9 +879,24 @@ class DotProductAttention(torch.nn.Module):
 
         if self.attn_mask_type == "padding" and attention_mask is not None:
             use_flash_attention = False
+            use_fused_attention = False
 
         if is_in_onnx_export_mode():
             use_flash_attention = False
+            use_fused_attention = False
+
+        qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
+        fused_attention_backend = tex.is_fused_attn_available(
+            TE_DType[query_layer.dtype],
+            TE_DType[key_layer.dtype],
+            QKVLayout[qkv_layout],
+            AttnBiasType[core_attention_bias_type],
+            AttnMaskType[self.attn_mask_type],
+            self.attention_dropout,
+            query_layer.shape[0], key_layer.shape[0],
+            query_layer.shape[-1])
+        is_fused_attn_avail = int(fused_attention_backend) >= 0
+        use_fused_attention = use_fused_attention and is_fused_attn_avail
 
         if use_flash_attention:
             if checkpoint_core_attention:
@@ -544,6 +905,22 @@ class DotProductAttention(torch.nn.Module):
                                                             key_layer,
                                                             value_layer)
             return self.flash_attention(query_layer, key_layer, value_layer)
+
+        if use_fused_attention:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(self.fused_attention,
+                                                            query_layer,
+                                                            key_layer,
+                                                            value_layer,
+                                                            fused_attention_backend,
+                                                            core_attention_bias_type,
+                                                            core_attention_bias,
+                                                            fast_zero_fill)
+            return self.fused_attention(query_layer, key_layer, value_layer,
+                                                            fused_attention_backend,
+                                                            core_attention_bias_type,
+                                                            core_attention_bias,
+                                                            fast_zero_fill)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
@@ -747,6 +1124,9 @@ class MultiHeadAttention(torch.nn.Module):
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
@@ -947,7 +1327,10 @@ class MultiHeadAttention(torch.nn.Module):
             key_layer,
             value_layer,
             attention_mask,
-            checkpoint_core_attention=checkpoint_core_attention,
+            checkpoint_core_attention = checkpoint_core_attention,
+            core_attention_bias_type = core_attention_bias_type,
+            core_attention_bias = core_attention_bias,
+            fast_zero_fill = fast_zero_fill,
         )
 
         # =================

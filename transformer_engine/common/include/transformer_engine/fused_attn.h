@@ -94,6 +94,38 @@ enum NVTE_Mask_Type {
     NVTE_CAUSAL_MASK = 2,
 };
 
+enum NVTE_Fused_Attn_Backend {
+    /*!< No supported backend */
+    NVTE_No_Backend = -1,
+    /*!< cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
+    NVTE_F16_max512_seqlen = 0,
+    /*!< cuDNN-based FP16/BF16 fused attention for any sequence length */
+    NVTE_F16_arbitrary_seqlen = 1,
+    /*!< cuDNN-based FP8 fused attention for <= 512 sequence length */
+    NVTE_FP8 = 2,
+};
+
+/*! \brief Compute dot product attention with packed QKV input.
+ * 
+ *  \param[in]     q_dtype          The data type of Tensor Q.
+ *  \param[in]     kv_dtype         The data type of Tensors K, V.
+ *  \param[in]     qkv_layout       The layout of Tensors Q, K, V.
+ *  \param[in]     bias_type        The attention bias type.
+ *  \param[in]     attn_mask_type   The attention mask type.
+ *  \param[in]     dropout          The dropout probability.
+ *  \param[in]     max_seqlen_q     The sequence length of Q.
+ *  \param[in]     max_seqlen_kv    The sequence length of K, V.
+ *  \param[in]     head_dim         The head dimension of Q, K, V.
+ */
+NVTE_Fused_Attn_Backend select_fused_attn_backend(
+                transformer_engine::DType q_dtype,
+                transformer_engine::DType kv_dtype,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
+                float dropout, size_t max_seqlen_q,
+                size_t max_seqlen_kv, size_t head_dim);
+
 /*! \brief Compute dot product attention with packed QKV input.
  *
  * Computes:
@@ -104,36 +136,38 @@ enum NVTE_Mask_Type {
  *
  * Support Matrix:
    \verbatim
-   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | backend | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | 1       | FP16/BF16 | QKV_INTERLEAVED |         NO_BIAS         |    CAUSAL      |   Yes   |      > 512      |  64, 128 |
+   | 2       | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
- *  \param[in]     QKV                   The QKV tensor in packed format,
- *                                       [total_seqs, 3, num_heads, head_dim].
- *  \param[in]     Bias                  The Bias tensor.
- *  \param[in,out] S                     The S tensor.
- *  \param[out]    O                     The output O tensor.
- *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
- *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen            Max sequence length used for computing.
- *                                       It may be >= max(cu_seqlens).
- *  \param[in]     is_training           Whether this is in training mode or inference.
- *  \param[in]     attn_scale            Scaling factor for Q * K.T.
- *  \param[in]     dropout               Dropout probability.
- *  \param[in]     qkv_layout            QKV tensor's layout.
- *  \param[in]     bias_type             Bias type.
- *  \param[in]     attn_mask_type        Attention mask type.
- *  \param[in]     workspace             Workspace tensor.
- *  \param[in]     stream                CUDA stream used for this operation.
+ *  \param[in]     QKV                      The QKV tensor in packed format,
+ *                                          [total_seqs, 3, num_heads, head_dim].
+ *  \param[in]     Bias                     The Bias tensor.
+ *  \param[in,out] S                        The S tensor.
+ *  \param[out]    O                        The output O tensor.
+ *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
+ *  \param[in]     max_seqlen               Max sequence length used for computing,
+ *                                          it may be >= max(cu_seqlens). 
+ *  \param[in]     is_training              Whether this is in training mode or inference.
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensor's layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     workspace                Workspace tensor.
+ *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor Bias,
             NVTETensor S,
             NVTETensor O,
-            NVTETensorPack* Aux_Output_Tensors,
+            NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens,
             const NVTETensor rng_state,
             size_t max_seqlen,
@@ -147,30 +181,31 @@ void nvte_fused_attn_fwd_qkvpacked(
  *
  * Support Matrix:
    \verbatim
-   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | backend | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | 1       | FP16/BF16 | QKV_INTERLEAVED |         NO_BIAS         |    CAUSAL      |   Yes   |      > 512      |  64, 128 |
+   | 2       | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
- *  \param[in]     QKV                   The QKV tensor in packed format,
- *                                       [total_seqs, 3, num_heads, head_dim].
- *  \param[in]     O                     The O tensor from forward.
- *  \param[in]     dO                    The gradient of the O tensor.
- *  \param[in]     S                     The S tensor.
- *  \param[in,out] dP                    The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
- *  \param[out]    dQKV                  The gradient of the QKV tensor.
- *  \param[out]    dBias                 The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
- *  \param[in]     max_seqlen            Max sequence length used for computing.
- *                                       It may be >= max(cu_seqlens).
- *  \param[in]     attn_scale            Scaling factor for Q * K.T.
- *  \param[in]     dropout               Dropout probability.
- *  \param[in]     qkv_layout            QKV tensor's layout.
- *  \param[in]     bias_type             Bias type.
- *  \param[in]     attn_mask_type        Attention mask type.
- *  \param[in]     workspace             Workspace tensor.
- *  \param[in]     stream                CUDA stream used for this operation.
+ *  \param[in]     QKV                      The QKV tensor in packed format,
+ *                                          [total_seqs, 3, num_heads, head_dim].
+ *  \param[in]     O                        The O tensor from forward.
+ *  \param[in]     dO                       The gradient of the O tensor.
+ *  \param[in]     S                        The S tensor.
+ *  \param[in,out] dP                       The gradient of the P tensor.
+ *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[out]    dQKV                     The gradient of the QKV tensor.
+ *  \param[out]    dBias                    The gradient of the Bias tensor.
+ *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     max_seqlen               Max sequence length used for computing,
+ *                                          it may be >= max(cu_seqlens). 
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensor's layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     workspace                Workspace tensor.
  */
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
@@ -199,31 +234,32 @@ void nvte_fused_attn_bwd_qkvpacked(
  *
  * Support Matrix:
    \verbatim
-   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | backend | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
    \endverbatim
  *
- *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
- *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
- *  \param[in]     Bias                  The Bias tensor.
- *  \param[in,out] S                     The S tensor.
- *  \param[out]    O                     The output O tensor.
- *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
- *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen_q          Max sequence length used for computing
- *                                       for Q. It may be >= max(cu_seqlens_q).
- *  \param[in]     max_seqlen_kv         Max sequence length used for computing
- *                                       for KV. It may be >= max(cu_seqlens_kv).
- *  \param[in]     is_training           Whether this is in training mode or inference.
- *  \param[in]     attn_scale            Scaling factor for Q * K.T.
- *  \param[in]     dropout               Dropout probability.
- *  \param[in]     qkv_layout            QKV tensor's layout.
- *  \param[in]     bias_type             Bias type.
- *  \param[in]     attn_mask_type        Attention mask type.
- *  \param[in]     workspace             Workspace tensor.
- *  \param[in]     stream                CUDA stream used for this operation.
+ *  \param[in]     Q                        The Q tensor, [total_seqs_q, num_heads, head_dim].
+ *  \param[in]     KV                       The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     Bias                     The Bias tensor.
+ *  \param[in,out] S                        The S tensor.
+ *  \param[out]    O                        The output O tensor.
+ *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
+ *                                          it may be >= max(cu_seqlens_q). 
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.  
+ *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     is_training              Whether this is in training mode or inference.
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensor's layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     workspace                Workspace tensor.
+ *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor Q,
@@ -231,7 +267,7 @@ void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor Bias,
             NVTETensor S,
             NVTETensor O,
-            NVTETensorPack* Aux_Output_Tensors,
+            NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
             const NVTETensor rng_state,
@@ -246,33 +282,34 @@ void nvte_fused_attn_fwd_kvpacked(
  *
  * Support Matrix:
    \verbatim
-   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | backend | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
    \endverbatim
  *
- *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
- *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
- *  \param[in]     O                     The O tensor from forward.
- *  \param[in]     dO                    The gradient of the O tensor.
- *  \param[in]     S                     The S tensor.
- *  \param[in,out] dP                    The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors       Auxiliary tensors from forward when in training mode.
- *  \param[out]    dQ                    The gradient of the Q tensor.
- *  \param[out]    dKV                   The gradient of the KV tensor.
- *  \param[out]    dBias                 The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     max_seqlen_q          Max sequence length used for computing
- *                                       for Q. It may be >= max(cu_seqlens_q).
- *  \param[in]     max_seqlen_kv         Max sequence length used for computing
- *                                       for KV. It may be >= max(cu_seqlens_kv).
- *  \param[in]     attn_scale            Scaling factor for Q * K.T.
- *  \param[in]     dropout               Dropout probability.
- *  \param[in]     qkv_layout            QKV tensor's layout.
- *  \param[in]     bias_type             Bias type.
- *  \param[in]     attn_mask_type        Attention mask type.
- *  \param[in]     workspace             Workspace tensor.
- *  \param[in]     stream                CUDA stream used for this operation.
+ *  \param[in]     Q                        The Q tensor, [total_seqs_q, num_heads, head_dim].
+ *  \param[in]     KV                       The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     O                        The O tensor from forward.
+ *  \param[in]     dO                       The gradient of the O tensor.
+ *  \param[in]     S                        The S tensor.
+ *  \param[in,out] dP                       The gradient of the P tensor.
+ *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
+ *                                          e.g. M, ZInv, rng_state.
+ *  \param[out]    dQ                       The gradient of the Q tensor.
+ *  \param[out]    dKV                      The gradient of the KV tensor.
+ *  \param[out]    dBias                    The gradient of the Bias tensor.
+ *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
+ *                                          it may be >= max(cu_seqlens_q). 
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.  
+ *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     attn_scale               Scaling factor for Q * K.T.
+ *  \param[in]     dropout                  Dropout probability.
+ *  \param[in]     qkv_layout               QKV tensor's layout.
+ *  \param[in]     bias_type                Bias type.
+ *  \param[in]     attn_mask_type           Attention mask type.
+ *  \param[in]     workspace                Workspace tensor.
+ *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,

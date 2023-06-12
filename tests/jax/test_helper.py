@@ -8,7 +8,7 @@ import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental import maps
+from jax.sharding import Mesh
 
 from utils import assert_allclose
 from transformer_engine.common.recipe import DelayedScaling
@@ -218,7 +218,7 @@ class TestFP8Functions(unittest.TestCase):
         # TODO (Ming Huang): Suport multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
-        with maps.Mesh(devices, ('dp', 'tp')):
+        with Mesh(devices, ('dp', 'tp')):
             for sr, mst in srs:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, sharding_resource=sr):
                     self.assertTrue(FP8Helper.is_fp8_enabled())

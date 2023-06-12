@@ -250,6 +250,71 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
   }
 }
 
+// Host function for converting between FP32 and FP16
+half1 cpu_float2half_rn(float f) {
+    void* f_ptr = &f;
+    unsigned x = *(reinterpret_cast<int*>(f_ptr));
+    unsigned u = (x & 0x7fffffff), remainder, shift, lsb, lsb_s1, lsb_m1;
+    unsigned sign, exponent, mantissa;
+
+    __half_raw hr;
+
+    // Get rid of +NaN/-NaN case first.
+    if (u > 0x7f800000) {
+        hr.x = 0x7fffU;
+        // Add an indirection to get around type aliasing check
+        void* hr_ptr = &hr;
+        return *reinterpret_cast<half1*>(hr_ptr);
+    }
+
+    sign = ((x >> 16) & 0x8000);
+
+    // Get rid of +Inf/-Inf, +0/-0.
+    if (u > 0x477fefff) {
+        hr.x = static_cast<uint16_t> (sign | 0x7c00U);
+        // Add an indirection to get around type aliasing check
+        void* hr_ptr = &hr;
+        return *reinterpret_cast<half1*>(hr_ptr);
+    }
+    if (u < 0x33000001) {
+        hr.x = static_cast<uint16_t> (sign | 0x0000U);
+        // Add an indirection to get around type aliasing check
+        void* hr_ptr = &hr;
+        return *reinterpret_cast<half1*>(hr_ptr);
+    }
+
+    exponent = ((u >> 23) & 0xff);
+    mantissa = (u & 0x7fffff);
+
+    if (exponent > 0x70) {
+        shift = 13;
+        exponent -= 0x70;
+    } else {
+        shift = 0x7e - exponent;
+        exponent = 0;
+        mantissa |= 0x800000;
+    }
+    lsb = (1 << shift);
+    lsb_s1 = (lsb >> 1);
+    lsb_m1 = (lsb - 1);
+
+    // Round to nearest even.
+    remainder = (mantissa & lsb_m1);
+    mantissa >>= shift;
+    if (remainder > lsb_s1 || (remainder == lsb_s1 && (mantissa & 0x1))) {
+        ++mantissa;
+        if (!(mantissa & 0x3ff)) {
+            ++exponent;
+            mantissa = 0;
+        }
+    }
+
+    hr.x = static_cast<uint16_t>((sign | (exponent << 10) | mantissa));
+
+    // Add an indirection to get around type aliasing check
+    void* hr_ptr = &hr;
+    return *reinterpret_cast<half1*>(hr_ptr);
+}
 }  // namespace fused_attn
 
 // get cuDNN data type
