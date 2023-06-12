@@ -101,7 +101,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", self.bias_init),
             apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
             output_layernorm=self.output_layernorm,
-            attn_type=self.attn_type,
+            attn_mask_type=self.attn_mask_type,
             fuse_qkv=self.fuse_qkv,
             transpose_batch_sequence=self.transpose_batch_sequence,
             scale_attn_logits=self.scale_attn_logits,
