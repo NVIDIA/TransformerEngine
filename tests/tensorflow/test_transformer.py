@@ -38,6 +38,10 @@ def train_step(dy, x, x_mask, x_dec, x_dec_mask, model, use_fp8=False,
 
 
 class TransformerLayerTest(test.TestCase):
+    def setUp(self):
+        super().setUp()
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+
     @test_util.run_gpu_only
     def testTransformerSanity(self):
         use_fp8 = tf.test.is_gpu_available(True, (9, 0))
@@ -115,5 +119,4 @@ class TransformerLayerTest(test.TestCase):
 
 
 if __name__ == '__main__':
-    tf.keras.mixed_precision.set_global_policy('mixed_float16')
     test.main()
