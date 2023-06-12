@@ -5,14 +5,14 @@
 Praxis Modules related Transformer
 """
 from functools import partial
-from typing import Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 from praxis import pax_fiddle
 from praxis.base_layer import WeightInit
 from praxis.pytypes import JTensor
 
 from .module import TransformerEngineBaseLayer
-from ..flax.transformer import AttentionType, TransformerLayerType
+from ..flax.transformer import TransformerLayerType
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
@@ -73,7 +73,9 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     bias_init: WeightInit = WeightInit.Constant(0.0)
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
-    attn_type: AttentionType = AttentionType.PADDING
+    # TODO(rewang): remove attn_type and the related doc after v0.11
+    attn_type: Any = None
+    attn_mask_type: str = 'causal'
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = False
@@ -145,6 +147,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     output_layernorm: bool = False
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
+    self_attn_mask_type: str = None    # TODO(rewang): default to 'causal' after 0.11
     enable_relative_embedding: bool = True
     relative_embedding: pax_fiddle.Config[RelativePositionBiases] = pax_fiddle.template_field(None)
     drop_path: float = 0.0
@@ -201,6 +204,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             output_layernorm=self.output_layernorm,
             float32_attention_logits=self.float32_attention_logits,
             layer_type=self.layer_type,
+            self_attn_mask_type=self.self_attn_mask_type,
             enable_relative_embedding=self.enable_relative_embedding,
             relative_embedding=relative_embedding_flax_module,
             drop_path=self.drop_path,
