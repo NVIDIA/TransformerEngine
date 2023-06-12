@@ -1,13 +1,6 @@
 from typing import Any, OrderedDict, overload
 import torch.nn as nn
-
-
-class ComputePipeline:
-    def __init__(self, *modules: nn.Module) -> None:
-        ...
-
-    def __call__(self, x: Any) -> Any:
-        ...
+from .compute_pipeline import ComputePipeline
 
 
 class Sequential(nn.Module):
@@ -66,3 +59,6 @@ class Sequential(nn.Module):
         if self._op_cache is None:
             self._op_cache = ComputePipeline(*self._modules.values())
         return self._op_cache(x)
+
+
+__all__ = ["Sequential"]
