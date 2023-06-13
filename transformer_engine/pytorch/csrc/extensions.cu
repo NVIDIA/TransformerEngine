@@ -1140,7 +1140,7 @@ at::Tensor gelu(at::Tensor input,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1165,7 +1165,7 @@ at::Tensor dgelu(at::Tensor grad,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1192,7 +1192,7 @@ at::Tensor relu(at::Tensor input,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = static_cast<size_t>(at::numel(input)) / N;
+  size_t M = static_cast<size_t>(input.numel()) / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1217,7 +1217,7 @@ at::Tensor drelu(at::Tensor grad,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1244,7 +1244,7 @@ at::Tensor geglu(at::Tensor input,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1269,7 +1269,7 @@ at::Tensor dgeglu(at::Tensor grad,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1296,7 +1296,7 @@ at::Tensor reglu(at::Tensor input,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1321,7 +1321,7 @@ at::Tensor dreglu(at::Tensor grad,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1348,7 +1348,7 @@ at::Tensor swiglu(at::Tensor input,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -1373,7 +1373,7 @@ at::Tensor dswiglu(at::Tensor grad,
   using namespace transformer_engine;
 
   size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = numel(input) / N;
+  size_t M = input.numel() / N;
 
   auto output =
             allocateTorchTensor(M,
@@ -2224,7 +2224,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("drelu", &drelu, "Backward of ReLU");
   m.def("dgeglu", &dgeglu, "Backward of GeGLU");
   m.def("dreglu", &dreglu, "Backward of ReGLU");
-  m.def("dswiglu", &dswiglu, "Backward of SwiBackward of ReLUGLU");
+  m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
 
