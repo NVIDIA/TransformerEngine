@@ -40,7 +40,7 @@ param_types = [torch.float16]
 if torch.cuda.is_bf16_supported():
     param_types.append(torch.bfloat16)
 
-batch_sizes = [2]
+batch_sizes = [1, 2]
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -208,7 +208,7 @@ def _run_transformer_layer(dtype, bs, config, backend):
 model_configs_fp8 = {
     "test1": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
-batch_sizes_fp8 = [4]
+batch_sizes_fp8 = [1, 4]
 param_types_fp8 = [torch.float16]
 
 @pytest.mark.parametrize("dtype", param_types_fp8)

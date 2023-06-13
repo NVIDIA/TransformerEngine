@@ -1221,8 +1221,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         output_rng_state->data.dptr = rng_state->data.dptr;
     }
 
-    void* devPtrDropoutSeed = reinterpret_cast<void *>(
-                    reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+    void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
@@ -1283,8 +1282,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     void *devPtrSoftmaxStats = nullptr;
     devPtrSoftmaxStats = output_S->data.dptr;
 
-    void* devPtrDropoutSeed = reinterpret_cast<void *>(
-                    reinterpret_cast<uint64_t*>(rng_state->data.dptr));
+    void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 

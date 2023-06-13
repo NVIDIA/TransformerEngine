@@ -1399,8 +1399,7 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
 
     void *devPtrdBias = output_dBias->data.dptr;
 
-    void *devPtrS = nullptr;
-    devPtrS = output_S->data.dptr;
+    void *devPtrS = output_S->data.dptr;
 
     // devPtrdS reuses the memory of devPtrS
     void *devPtrdS = devPtrS;
@@ -1460,8 +1459,7 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
 
     void *devPtrdBias = output_dBias->data.dptr;
 
-    void *devPtrS = nullptr;
-    devPtrS = output_S->data.dptr;
+    void *devPtrS = output_S->data.dptr;
 
     // devPtrdS reuses the memory of devPtrS
     void *devPtrdS = devPtrS;
