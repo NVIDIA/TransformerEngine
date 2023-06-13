@@ -172,5 +172,4 @@ at::Tensor allocateTorchTensor(int M,
                                transformer_engine::DType dtype
 );
 
-
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
