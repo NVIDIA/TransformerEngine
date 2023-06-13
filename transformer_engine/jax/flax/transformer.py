@@ -204,7 +204,7 @@ class MultiHeadAttention(nn.Module):
 
     .. warning::
 
-        Arguments :attr:`attn_type` is deprecated and superseded by :attr:`attn_mask_type`.
+        Argument :attr:`attn_type` is deprecated and superseded by :attr:`attn_mask_type`.
         :attr:`attn_type` is ignored in version 0.10 and will be fully removed in version 0.11.
 
     Parameters
@@ -245,7 +245,7 @@ class MultiHeadAttention(nn.Module):
     output_layernorm : bool, default = False
         Indicate if apply a layer normalization at the end of MHA.
     attn_type: Any, defult = None
-        *Deprecated*, will be ignored after v0.10 and be fully removed after v0.11.
+        *Deprecated*, will be ignored in v0.10 and be fully removed in v0.11.
         Please use `attn_mask_type` to config the attention mask.
     attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
@@ -301,7 +301,7 @@ class MultiHeadAttention(nn.Module):
         if self.attn_type is not None:
             warnings.warn(
                 "The 'attn_type' argument in the 'MultiHeadAttention' is"
-                " deprecated after version 0.10 and will be removed after version 0.11."
+                " deprecated in version 0.10 and will be removed in version 0.11."
                 " Passing value in attn_type will be ignored, please use `attn_mask_type`"
                 " to config the attention mask type.",
                 category=DeprecationWarning)
@@ -802,7 +802,7 @@ class TransformerLayer(nn.Module):
 
     .. warning::
 
-        Arguments :attr:`self_attn_mask_type` is introduced in version 0.10.
+        Argument :attr:`self_attn_mask_type` is introduced in version 0.10.
         Starting from version 0.11, the default value will be `"causal"`.
         However, to ensure compatibility with earlier versions, before 0.11,
         the default value will be `"padding"` for the encoder and `"causal"` for the decoder.
