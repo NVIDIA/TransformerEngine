@@ -442,7 +442,7 @@ class TransformerLayer(torch.nn.Module):
                     Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T
-        fast_zero_fill: bool, defautl = `True`
+        fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         """
 

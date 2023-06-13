@@ -10,6 +10,7 @@
 #include "fused_attn_f16_max512_seqlen.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "fused_attn_fp8.h"
+#include "../util/cuda_runtime.h"
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
@@ -22,14 +23,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         size_t max_seqlen_kv, size_t head_dim) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-  cudaDeviceProp deviceProp;
-  int dev;
-  cudaGetDevice(&dev);
-  cudaGetDeviceProperties(&deviceProp, dev);
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
-          && (deviceProp.major >= 9)
-          && (deviceProp.minor >= 0)
+          && (sm_arch_ >= 90)
           && (max_seqlen_q == max_seqlen_kv)
           && (max_seqlen_q <= 512)
           && (head_dim == 64)
@@ -40,8 +38,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
     bool flag_m512 = false;
     bool flag_arb = false;
-    if ((deviceProp.major >= 8)
-            && (deviceProp.minor >= 0)
+    if ((sm_arch_ >= 80)
             && (head_dim == 64)
             && (dropout == 0.0)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
@@ -53,8 +50,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED))) {
       flag_m512 = true;
     }
-    if ((deviceProp.major >= 8)
-            && (deviceProp.minor >= 0)
+    if ((sm_arch_ >= 80)
             && (max_seqlen_q == max_seqlen_kv)
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
