@@ -102,9 +102,6 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
                 int32_t const * const kv_cu_seqlens,
                 int32_t *q_seqlens, int32_t *kv_seqlens);
 
-typedef __half half1;
-half1 cpu_float2half_rn(float f);
-
 }  // namespace fused_attn
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
