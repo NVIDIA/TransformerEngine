@@ -14,6 +14,8 @@ list(APPEND transformer_engine_SOURCES
      activation/gelu.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     activation/relu.cu
+     activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu

@@ -20,7 +20,6 @@ To run many repetitive tests use pytest-loop:
 For reproducability use: torch.manual_seed(0)
 """
 
-
 import os
 import tempfile
 import pytest
@@ -33,7 +32,7 @@ from typing import Optional, Union, Tuple, List
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.cpp_extensions import gemm, fp8_gemm, fp8_gelu, cast_to_fp8, cast_from_fp8
+from transformer_engine.pytorch.cpp_extensions import gemm, fp8_gemm, gelu, cast_to_fp8, cast_from_fp8
 from transformer_engine.pytorch.module.base import get_workspace
 import transformer_engine.pytorch.cpp_extensions as texcpp
 import transformer_engine.pytorch.softmax as softmax_defs
@@ -403,7 +402,7 @@ def test_export_gelu_fp8(scale_factor: float, precision: torch.dtype, atol: floa
             self.fake_bf16_io = fake_bf16_io
 
         def forward(self, inp):
-            ret = fp8_gelu(
+            ret = gelu(
                 inp,
                 self.meta,
                 self.fp8_tensor,

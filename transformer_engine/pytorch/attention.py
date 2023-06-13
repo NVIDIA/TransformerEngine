@@ -46,7 +46,7 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_version_required = packaging.version.Version("1.0.2")
+_flash_attn_version_required = packaging.version.Version("1.0.6")
 
 
 __all__ = ["DotProductAttention"]

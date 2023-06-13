@@ -136,6 +136,9 @@ class TransformerLayer(torch.nn.Module):
                             using :attr:`fuse_qkv_params=False`.
     bias : bool, default = `True`
           if set to `False`, the transformer layer will not learn any additive biases.
+    activation : str, default = 'gelu'
+          Type of activation used in MLP block.
+          Options are: 'gelu', 'relu', 'reglu', 'geglu' and 'swiglu'.
 
     Parallelism parameters
     ----------------------
@@ -214,6 +217,7 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
         bias: bool = True,
+        activation: str = 'gelu'
     ) -> None:
         super().__init__()
 
@@ -316,9 +320,11 @@ class TransformerLayer(torch.nn.Module):
                 bias=bias,
             )
 
-        # LayerNorm -> gelu(Linear + Bias) -> Linear
+        # LayerNorm -> activation(Linear + Bias) -> Linear
         # parallel_mode not supported for LayerNormMLP,
         # FC1 is CPL and FC2 is RPL
+        # In the case of GLU activation, FC1 handles both
+        # Linear layers before the activation
         self.layernorm_mlp = LayerNormMLP(
             hidden_size,
             ffn_hidden_size,
@@ -342,6 +348,7 @@ class TransformerLayer(torch.nn.Module):
             ub_bulk_dgrad=ub_bulk_dgrad,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
+            activation=activation,
         )
 
         self.hidden_dropout = hidden_dropout

@@ -180,14 +180,73 @@ at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 );
 
+/***************************************************************************************************
+ * Activations
+ **************************************************************************************************/
 
-at::Tensor fp8_gelu(at::Tensor input,
-                    at::Tensor scale,
-                    at::Tensor amax,
-                    at::Tensor scale_inv,
-                    transformer_engine::DType otype
+at::Tensor gelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
 );
 
+at::Tensor relu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+);
+
+at::Tensor geglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+);
+
+at::Tensor reglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+);
+
+at::Tensor swiglu(at::Tensor input,
+                  at::Tensor scale,
+                  at::Tensor amax,
+                  at::Tensor scale_inv,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dgelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+);
+
+at::Tensor drelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+);
+
+at::Tensor dgeglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dreglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dswiglu(at::Tensor grad,
+                   at::Tensor input,
+                   transformer_engine::DType otype
+);
+
+/***************************************************************************************************
+ * LayerNorm
+ **************************************************************************************************/
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &x,
