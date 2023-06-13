@@ -22,14 +22,14 @@ def _serializer(module: LayerNormMLP):
     layernorm_impostor.weight.shape = (hidden_size,)
     layernorm_impostor.eps = module.eps
     layernorm_impostor.zero_centered_gamma = module.zero_centered_gamma
-    layernorm_impostor._compute_pipeline_name = f"{module_name}.ln"
+    layernorm_impostor._compute_pipeline_name = f"{module_name}_ln"
     layernorm_graph = COMPUTE_PIPELINE_CUSTOM_SERIALIZERS[LayerNorm](layernorm_impostor)
 
     linear1_impostor = SimpleNamespace()
     linear1_impostor.in_features = hidden_size
     linear1_impostor.out_features = ffn_hidden_size
     linear1_impostor.use_bias = module.use_bias
-    linear1_impostor._compute_pipeline_name = f"{module_name}.fc1"
+    linear1_impostor._compute_pipeline_name = f"{module_name}_fc1"
     linear1_graph = COMPUTE_PIPELINE_CUSTOM_SERIALIZERS[Linear](linear1_impostor)
 
     gelu_graph = _gelu_graph()
@@ -38,7 +38,7 @@ def _serializer(module: LayerNormMLP):
     linear2_impostor.in_features = ffn_hidden_size
     linear2_impostor.out_features = hidden_size
     linear2_impostor.use_bias = module.use_bias
-    linear2_impostor._compute_pipeline_name = f"{module_name}.fc2"
+    linear2_impostor._compute_pipeline_name = f"{module_name}_fc2"
     linear2_graph = COMPUTE_PIPELINE_CUSTOM_SERIALIZERS[Linear](linear2_impostor)
 
     graph = OpGraph.combine_graphs(layernorm_graph, linear1_graph)
