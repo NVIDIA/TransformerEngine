@@ -3,9 +3,11 @@ from enum import Enum
 
 class ParamDescriptor:
     features: int
+    name: str
 
-    def __init__(self, features: int):
+    def __init__(self, features: int, name: str):
         self.features = features
+        self.name = name
 
 
 class Op:
@@ -71,9 +73,9 @@ class OpGraph:
         self.in_nodes.append(OpInputPlaceholder())
         return self.in_nodes[-1]
 
-    def param_(self, features: int) -> Op:
+    def param_(self, features: int, name: str) -> Op:
         """Adds a trainable parameter with the given number of features to the graph. Returns the parameter, so it can be used in further computations."""
-        self.trainable_parameters.append(ParamDescriptor(features))
+        self.trainable_parameters.append(ParamDescriptor(features, name))
         self.nodes.append(OpParam(self.trainable_parameters[-1]))
         return self.nodes[-1]
 
