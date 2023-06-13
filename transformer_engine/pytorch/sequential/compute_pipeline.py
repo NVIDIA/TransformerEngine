@@ -1,5 +1,6 @@
 import torch.nn as nn
 from typing import Any, Callable
+from .ops import OpGraph
 
 COMPUTE_PIPELINE_CUSTOM_SERIALIZERS: dict[type, Callable] = {}
 
@@ -15,7 +16,11 @@ class ComputePipeline:
                     raise TypeError(
                         f"A module of type {type(module)} was used with ComputePipeline, but it does not have a compute_pipeline_serialize method. You have to either add this method or register a custom serializer using the COMPUTE_PIPELINE_CUSTOM_SERIALIZERS dictionary."
                     )
-            serialized = serialize_func(module)
+            serialized: OpGraph = serialize_func(module)
+            if not hasattr(self, "_graph"):
+                self._graph = serialized
+            else:
+                self._graph = OpGraph.combine_graphs(self._graph, serialized)
 
     def __call__(self, x: Any) -> Any:
         ...
