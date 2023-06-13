@@ -13,7 +13,6 @@ from transformer_engine_extensions import (
     NVTE_Mask_Type,
     NVTE_Fused_Attn_Backend
 )
-from .constants import TE_DType
 
 
 __all__ = ['fused_attn_fwd_qkvpacked',
@@ -811,4 +810,3 @@ def fused_attn_bwd_kvpacked(
         return output_tensors
     # otherwise return (d_q, d_kv), d_bias
     return output_tensors[:2], output_tensors[2]
-
