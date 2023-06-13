@@ -260,7 +260,11 @@ Transformer Engine has been integrated with several popular open-source DL frame
 * `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
 * `Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
+* `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
+* `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_ - Coming soon!
+* `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
+
 
 Contributing
 ==================
