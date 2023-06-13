@@ -1,8 +1,8 @@
 import torch.nn as nn
-from typing import Any, Callable
+from typing import Any
 from .ops import OpGraph
-
-COMPUTE_PIPELINE_CUSTOM_SERIALIZERS: dict[type, Callable] = {}
+from . import serializers
+from .custom_serializer_holder import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
 
 
 class ComputePipeline:

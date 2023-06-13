@@ -1,2 +1,3 @@
+from .custom_serializer_holder import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
 from .sequential import Sequential
-from .compute_pipeline import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS, ComputePipeline
+from .compute_pipeline import ComputePipeline

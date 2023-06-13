@@ -1,4 +1,4 @@
-from .. import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
+from ..custom_serializer_holder import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
 from ...module import LayerNorm
 from ..ops import OpGraph
 
