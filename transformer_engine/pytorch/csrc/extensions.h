@@ -7,7 +7,7 @@
 #include "common.h"
 #include "../common.h"
 
-NVTE_Fused_Attn_Backend is_fused_attn_available(
+NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
                 NVTE_QKV_Layout qkv_layout,

@@ -105,7 +105,7 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_FP8 = 2,
 };
 
-/*! \brief Compute dot product attention with packed QKV input.
+/*! \brief Get fused attention backend based on input parameters.
  * 
  *  \param[in]     q_dtype          The data type of Tensor Q.
  *  \param[in]     kv_dtype         The data type of Tensors K, V.
@@ -117,9 +117,9 @@ enum NVTE_Fused_Attn_Backend {
  *  \param[in]     max_seqlen_kv    The sequence length of K, V.
  *  \param[in]     head_dim         The head dimension of Q, K, V.
  */
-NVTE_Fused_Attn_Backend select_fused_attn_backend(
-                transformer_engine::DType q_dtype,
-                transformer_engine::DType kv_dtype,
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
+                NVTEDType q_dtype,
+                NVTEDType kv_dtype,
                 NVTE_QKV_Layout qkv_layout,
                 NVTE_Bias_Type bias_type,
                 NVTE_Mask_Type attn_mask_type,
@@ -206,6 +206,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[in]     bias_type                Bias type.
  *  \param[in]     attn_mask_type           Attention mask type.
  *  \param[in]     workspace                Workspace tensor.
+ *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,

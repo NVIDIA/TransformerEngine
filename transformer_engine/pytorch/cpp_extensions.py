@@ -46,6 +46,7 @@ FusedAttnBackend = {
     "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
     "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
     "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
+    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
@@ -243,7 +244,7 @@ def fused_attn_fwd_qkvpacked(
         assert (attn_bias.dtype == qkv.dtype
                 ), "attn_bias tensor must be in the same dtype as qkv."
 
-    assert (fused_attention_backend in FusedAttnBackend.values()
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
 
     # BF16/FP16 fused attention API from fmha_v1 apex
@@ -401,7 +402,7 @@ def fused_attn_bwd_qkvpacked(
     rng_state = aux_ctx_tensors[-1]
     check_rng_state(rng_state)
 
-    assert (fused_attention_backend in FusedAttnBackend.values()
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
@@ -587,7 +588,7 @@ def fused_attn_fwd_kvpacked(
         assert (attn_bias.dtype == q.dtype
                 ), "attn_bias tensor must be in the same dtype as q and kv."
 
-    assert (fused_attention_backend in FusedAttnBackend.values()
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
 
     # BF16/FP16 fused attention API from fmha_v1 apex
@@ -751,7 +752,7 @@ def fused_attn_bwd_kvpacked(
     rng_state = aux_ctx_tensors[-1]
     check_rng_state(rng_state)
 
-    assert (fused_attention_backend in FusedAttnBackend.values()
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:

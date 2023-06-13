@@ -12,22 +12,22 @@
 #include "fused_attn_fp8.h"
 
 // select a backend for fused attention
-NVTE_Fused_Attn_Backend select_fused_attn_backend(
-        transformer_engine::DType q_dtype,
-        transformer_engine::DType kv_dtype,
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
+        NVTEDType q_dtype,
+        NVTEDType kv_dtype,
         NVTE_QKV_Layout qkv_layout,
         NVTE_Bias_Type bias_type,
         NVTE_Mask_Type attn_mask_type,
         float dropout, size_t max_seqlen_q,
         size_t max_seqlen_kv, size_t head_dim) {
   using namespace transformer_engine;
-  NVTE_Fused_Attn_Backend backend;
+  NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   cudaDeviceProp deviceProp;
   int dev;
   cudaGetDevice(&dev);
   cudaGetDeviceProperties(&deviceProp, dev);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
-  if ((q_dtype == DType::kFloat8E4M3) || (q_dtype == DType::kFloat8E5M2)
+  if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
           && (deviceProp.major >= 9)
           && (deviceProp.minor >= 0)
           && (max_seqlen_q == max_seqlen_kv)
@@ -37,7 +37,7 @@ NVTE_Fused_Attn_Backend select_fused_attn_backend(
           && (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)
           && (qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)) {
     backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
-  } else if ((q_dtype == DType::kFloat16) || (q_dtype == DType::kBFloat16)) {
+  } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
     bool flag_m512 = false;
     bool flag_arb = false;
     if ((deviceProp.major >= 8)
@@ -120,10 +120,10 @@ void nvte_fused_attn_fwd_qkvpacked(
   size_t d = input_QKV->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
-  const DType QKV_type = input_QKV->data.dtype;
+  const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
-              select_fused_attn_backend(
+              nvte_get_fused_attn_backend(
                           QKV_type, QKV_type,
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, max_seqlen, max_seqlen, d);
@@ -209,10 +209,10 @@ void nvte_fused_attn_bwd_qkvpacked(
   size_t d = input_QKV->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
-  const DType QKV_type = input_QKV->data.dtype;
+  const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
-              select_fused_attn_backend(
+              nvte_get_fused_attn_backend(
                           QKV_type, QKV_type,
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, max_seqlen, max_seqlen, d);
@@ -308,11 +308,11 @@ void nvte_fused_attn_fwd_kvpacked(
   size_t d = input_Q->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
-  const DType Q_type = input_Q->data.dtype;
-  const DType KV_type = input_KV->data.dtype;
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
-              select_fused_attn_backend(
+              nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, max_seqlen_q, max_seqlen_kv, d);
@@ -384,11 +384,11 @@ void nvte_fused_attn_bwd_kvpacked(
   size_t d = input_Q->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
-  const DType Q_type = input_Q->data.dtype;
-  const DType KV_type = input_KV->data.dtype;
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend =
-              select_fused_attn_backend(
+              nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
                           dropout, max_seqlen_q, max_seqlen_kv, d);

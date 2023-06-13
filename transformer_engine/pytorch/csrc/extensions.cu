@@ -12,8 +12,8 @@
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
 
-// check if there is a fused attention backend available
-NVTE_Fused_Attn_Backend is_fused_attn_available(
+// get the fused attention backend
+NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
                 const transformer_engine::DType kv_dtype,
                 NVTE_QKV_Layout qkv_layout,
@@ -22,7 +22,8 @@ NVTE_Fused_Attn_Backend is_fused_attn_available(
                 float p_dropout, size_t max_seqlen_q,
                 size_t max_seqlen_kv, size_t head_dim) {
   NVTE_Fused_Attn_Backend fused_attention_backend =
-          select_fused_attn_backend(q_dtype, kv_dtype,
+          nvte_get_fused_attn_backend(
+                          static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
                           qkv_layout, bias_type, attn_mask_type,
                           p_dropout, max_seqlen_q, max_seqlen_kv, head_dim);
   return fused_attention_backend;
@@ -1945,8 +1946,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_gelu", &fp8_gelu, "GeLU with FP8 output");
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("is_fused_attn_available", &is_fused_attn_available,
-                  "Check if there is a Fused Attention backend available");
+  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
@@ -2025,5 +2025,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
+      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
+      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
 }

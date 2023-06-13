@@ -23,6 +23,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    FusedAttnBackend,
 )
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.utils import (
@@ -886,7 +887,7 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
-        fused_attention_backend = tex.is_fused_attn_available(
+        fused_attention_backend = tex.get_fused_attn_backend(
             TE_DType[query_layer.dtype],
             TE_DType[key_layer.dtype],
             QKVLayout[qkv_layout],
@@ -895,8 +896,10 @@ class DotProductAttention(torch.nn.Module):
             self.attention_dropout,
             query_layer.shape[0], key_layer.shape[0],
             query_layer.shape[-1])
-        is_fused_attn_avail = int(fused_attention_backend) >= 0
-        use_fused_attention = use_fused_attention and is_fused_attn_avail
+        # DPA does not support FP8; for FP8, use cpp_extensions modules directly
+        is_backend_avail = (fused_attention_backend in
+            [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
+        use_fused_attention = use_fused_attention and is_backend_avail
 
         if use_flash_attention:
             if checkpoint_core_attention:
