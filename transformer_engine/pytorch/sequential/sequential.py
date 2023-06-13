@@ -35,7 +35,7 @@ class Sequential(nn.Module):
             name = str(len(self._modules))
         if isinstance(module, Sequential):
             for submodule_name, submodule in module._modules.items():
-                self.append(submodule, name=f"{name}.{submodule_name}")
+                self.append(submodule, name=f"{name}_{submodule_name}")
         else:
             self.add_module(name, module)
             module._compute_pipeline_name = name
