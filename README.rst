@@ -257,6 +257,7 @@ Integrations
 
 Transformer Engine has been integrated with several popular open-source DL frameworks such as:
 
+* `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_ 
 * `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
 * `Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
