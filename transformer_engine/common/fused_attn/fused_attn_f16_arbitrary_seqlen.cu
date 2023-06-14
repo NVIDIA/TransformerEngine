@@ -546,6 +546,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
+        if (!is_training) {
+          dropout_probability == 0.0f;
+        }
+
         FADescriptor descriptor{b,           h,
                                 s_q,         s_kv,
                                 d,           scaling_factor,
@@ -580,10 +584,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto sAfterMaskTensor = createCausalMask(
                                 b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
-            if (!is_training) {
-              NVTE_CHECK(dropout_probability == 0.0f,
-                                  "Dropout probability should be 0.0f for inference mode");
-            }
             NVTE_CHECK(dropout_probability != 1.0f,
                                 "Dropout probability cannot be 1.0");
 
