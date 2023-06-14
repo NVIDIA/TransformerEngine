@@ -561,7 +561,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-        static CacheType fmha_fprop_cache;
+        static thread_local CacheType fmha_fprop_cache;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -698,7 +698,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
-        static CacheType fmha_bprop_cache;
+        static thread_local CacheType fmha_bprop_cache;
 
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
             auto it = cache.find(descriptor);
