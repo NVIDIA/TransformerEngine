@@ -640,9 +640,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         std::set<std::pair<uint64_t, void*>> data_ptrs;
         // Add all the data pointers to be used in the variant pack
         float negInfinity = -1.0E+10f;
-        // needs to be bf16 (Please change)
-        __half scale_dropout = __float2half_rn(
-                                static_cast<float>(1/(1 - dropout_probability)));
+        float scale_dropout = 1.0f/(1.0f - dropout_probability);
 
         data_ptrs.insert(std::pair<uint64_t, void*>(Q_ID, devPtrQ));
         data_ptrs.insert(std::pair<uint64_t, void*>(K_ID, devPtrK));
@@ -1137,7 +1135,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
         float negInfinity = -1.0E+10f;
-        __half scale_dropout = __float2half_rn(static_cast<float>(1/(1 - dropout_probability)));
+        float scale_dropout = 1.0f/(1.0f - dropout_probability);
         data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ID, devPtrdQ));
         data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ACCUM_ID, devPtrdQAccumulator));
         data_ptrs.insert(std::pair<uint64_t, void*>(dK_ID, devPtrdK));
