@@ -69,6 +69,8 @@ ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
+supported_activations = ["gelu", "relu"]
+
 
 @pytest.fixture()
 def seed_default_rng():
@@ -974,6 +976,7 @@ def test_export_layernorm_linear(
     (torch.bfloat16, False),
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("activation", supported_activations)
 def test_export_layernorm_mlp(
     seed_default_rng,
     scale_factor: float,
@@ -982,7 +985,8 @@ def test_export_layernorm_mlp(
     return_bias: bool,
     return_layernorm_output: bool,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    activation: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
@@ -998,7 +1002,7 @@ def test_export_layernorm_mlp(
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
-    fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}.onnx"
+    fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}_{activation}.onnx"
     with te.fp8_autocast(enabled=use_fp8):
         model = te.LayerNormMLP(
             hidden_size,
@@ -1008,6 +1012,7 @@ def test_export_layernorm_mlp(
             return_layernorm_output=return_layernorm_output,
             params_dtype=precision,
             zero_centered_gamma=zero_centered_gamma,
+            activation=activation,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=2)
@@ -1211,6 +1216,7 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("activation", supported_activations)
 def test_export_transformer_layer(
     seed_default_rng,
     set_max_seq_len,
@@ -1220,7 +1226,8 @@ def test_export_transformer_layer(
     output_layernorm: bool,
     precision: torch.dtype,
     fuse_qkv_params: bool,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    activation: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
@@ -1256,7 +1263,8 @@ def test_export_transformer_layer(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        zero_centered_gamma=zero_centered_gamma).to(device='cuda')
+        zero_centered_gamma=zero_centered_gamma,
+        activation=activation).to(device='cuda')
     do_export(model, inp, fname, use_fp8, input_names=input_names)
     te_outputs = te_infer(model, inp, is_fp8=use_fp8)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
@@ -1400,12 +1408,14 @@ def test_export_gemm_layernorm(
 @pytest.mark.parametrize("use_fp8", [True, False])
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [True])
+@pytest.mark.parametrize("activation", supported_activations)
 def test_export_gpt_generation(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    activation: str,
 ):
     """Test that the ONNX model can correctly handle inputs with different shapes and that
     the attention mask it adjusted on-the-fly to different sequence lengths.
@@ -1441,7 +1451,8 @@ def test_export_gpt_generation(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        zero_centered_gamma=zero_centered_gamma).to(device='cuda')
+        zero_centered_gamma=zero_centered_gamma,
+        activation=activation).to(device='cuda')
 
     # "Context phase": use full input sequence length
     input_names = ["input"]

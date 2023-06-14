@@ -141,8 +141,20 @@ def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     # TE computes GELU using float32 precision so wrap the GELU subgraph with
     # conversion to/from float32.
     gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=True)
-    out = quantize(g, gelu, scale_inv, fp8_tensor)
-    return out
+    if scale_inv:
+        gelu = quantize(g, gelu, scale_inv, fp8_tensor)
+    return gelu
+
+
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
+def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for fp8_relu"""
+    # pylint: disable=unused-argument
+    wrapped_relu = lambda inps: torch.onnx.symbolic_opset9.relu(g, inps)
+    relu = compute_in_fp32(g, inputs, wrapped_relu, cast_outp=True)
+    if scale_inv:
+        relu = quantize(g, relu, scale_inv, fp8_tensor)
+    return relu
 
 
 @symbolic_helper.parse_args("v", "fs", "i", "i", "i",
@@ -255,6 +267,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
 register_custom_op_symbolic('tex_ts::cast_to_fp8_ts', onnx_cast_to_fp8, VER)
 register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
 register_custom_op_symbolic('tex_ts::gelu_ts', onnx_fp8_gelu, VER)
+register_custom_op_symbolic('tex_ts::relu_ts', onnx_fp8_relu, VER)
 register_custom_op_symbolic('tex_ts::te_gemm_ts', onnx_te_gemm, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_fp8_inf_ts', onnx_layernorm_fwd_fp8, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_inf_ts', onnx_layernorm_fwd, VER)
