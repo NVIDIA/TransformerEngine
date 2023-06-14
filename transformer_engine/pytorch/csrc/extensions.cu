@@ -2241,13 +2241,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
     .value("GEMM2_INPUT", transformer_engine::FP8FwdTensors::GEMM2_INPUT)
     .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT)
-    .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT);
+    .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT)
+    .value("GEMM3_INPUT", transformer_engine::FP8FwdTensors::GEMM3_INPUT)
+    .value("GEMM3_WEIGHT", transformer_engine::FP8FwdTensors::GEMM3_WEIGHT)
+    .value("GEMM3_OUTPUT", transformer_engine::FP8FwdTensors::GEMM3_OUTPUT);
 
   py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
     .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
     .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
     .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
-    .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2);
+    .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2)
+    .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
+    .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)

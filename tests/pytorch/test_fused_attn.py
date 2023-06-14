@@ -332,8 +332,8 @@ META_O    = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
 
-META_S    = 7
-META_DS   = 5
+META_S    = tex.FP8FwdTensors.GEMM3_WEIGHT
+META_DS   = tex.FP8BwdTensors.GRAD_INPUT3
 
 class _dpa_fp8(torch.autograd.Function):
     @staticmethod

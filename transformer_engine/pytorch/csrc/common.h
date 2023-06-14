@@ -58,7 +58,10 @@ enum FP8FwdTensors {
     GEMM1_OUTPUT = 2,
     GEMM2_INPUT  = 3,
     GEMM2_WEIGHT = 4,
-    GEMM2_OUTPUT = 5
+    GEMM2_OUTPUT = 5,
+    GEMM3_INPUT  = 6,
+    GEMM3_WEIGHT = 7,
+    GEMM3_OUTPUT = 8
 };
 
 // Used as named indices on the `scale`, `scale_inv`,
@@ -67,7 +70,9 @@ enum FP8BwdTensors {
     GRAD_OUTPUT1 = 0,
     GRAD_INPUT1 = 1,
     GRAD_OUTPUT2 = 2,
-    GRAD_INPUT2 = 3
+    GRAD_INPUT2 = 3,
+    GRAD_OUTPUT3 = 4,
+    GRAD_INPUT3 = 5
 };
 
 
