@@ -103,7 +103,13 @@ class OpGraph:
         assert node in self.out_nodes
         assert grad in self.in_nodes
 
-        node.grad = grad
+        def set_grad(node: Op, grad: Op):
+            if node.grad is None:
+                node.grad = grad
+            else:
+                node.grad = self.add_(node.grad, grad)
+
+        set_grad(node, grad)
         bfs = [node]
         while len(bfs) > 0:
             cur = bfs.pop()
@@ -111,7 +117,7 @@ class OpGraph:
             for name, param in params:
                 if isinstance(param, Op) and name != "grad":
                     param_grad_func = getattr(cur, f"backward_{name}")
-                    param.grad = param_grad_func(self, cur.grad)
+                    set_grad(param, param_grad_func(self, cur.grad))
                     bfs.append(param)
 
     @staticmethod
