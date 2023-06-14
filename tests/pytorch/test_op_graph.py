@@ -7,7 +7,7 @@ from transformer_engine.pytorch.sequential.ops.op_graph import (
     OpGraph,
 )
 
-seq = te.Sequential(te.Linear(1, 1), te.Linear(1, 1), te.Linear(1, 1), te.Linear(1, 1))
+seq = te.Sequential(te.LayerNormMLP(1, 1))
 c = ComputePipeline(*seq._modules.values())
 
 

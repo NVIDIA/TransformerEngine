@@ -61,7 +61,20 @@ class OpMul(Op):
 
     def backward_b(self, graph: "OpGraph", grad: Op):
         aT = graph.t_(self.a)
-        return graph.mul_(grad, aT)
+        return graph.mul_(aT, grad)
+
+
+class OpScale(Op):
+    def __init__(self, a: Op, b: Op):
+        super().__init__()
+        self.a = a
+        self.b = b
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        return graph.scale_(self.b, grad)
+
+    def backward_b(self, graph: "OpGraph", grad: Op):
+        return graph.scale_(self.a, grad)
 
 
 class OpTranspose(Op):
@@ -73,19 +86,35 @@ class OpTranspose(Op):
         return graph.t_(grad)
 
 
-class OpFLayerNorm(Op):
-    def __init__(
-        self, a: Op, gamma: Op, beta: Op, eps: float, zero_centered_gamma: bool
-    ):
+class OpFLayerNormCore(Op):
+    def __init__(self, a: Op, eps: float):
         super().__init__()
         self.a = a
-        self.gamma = gamma
-        self.beta = beta
         self.eps = eps
-        self.zero_centered_gamma = zero_centered_gamma
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        df = graph.df_layernorm_core_(self.a, self.eps)
+        return graph.mul_(df, grad)
+
+
+class OpDFLayerNormCore(Op):
+    def __init__(self, a: Op, eps: float):
+        super().__init__()
+        self.a = a
+        self.eps = eps
 
 
 class OpFGelu(Op):
+    def __init__(self, a: Op):
+        super().__init__()
+        self.a = a
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        df = graph.df_gelu_(self.a)
+        return graph.scale_(df, grad)
+
+
+class OpDFGelu(Op):
     def __init__(self, a: Op):
         super().__init__()
         self.a = a
@@ -130,16 +159,36 @@ class OpGraph:
         self.nodes.append(OpAdd(a, b))
         return self.nodes[-1]
 
+    def scale_(self, a: Op, b: Op) -> Op:
+        """Adds a scale (element-wise multiply) node to the graph. Returns the node with the result."""
+        self.nodes.append(OpScale(a, b))
+        return self.nodes[-1]
+
     def f_layernorm_(
         self, a: Op, gamma: Op, beta: Op, eps: float, zero_centered_gamma: bool
     ) -> Op:
         """Adds a layernorm node to the graph. Returns the node with the result."""
-        self.nodes.append(OpFLayerNorm(a, gamma, beta, eps, zero_centered_gamma))
+        self.nodes.append(OpFLayerNormCore(a, eps))
+        core = self.nodes[-1]
+        node = self.scale_(core, gamma)
+        if zero_centered_gamma:
+            node = self.add_(node, core)
+        node = self.add_(node, beta)
+        return node
+
+    def df_layernorm_core_(self, a: Op, eps: float) -> Op:
+        """Adds a layernorm' (derivative) node to the graph. Returns the node with the result."""
+        self.nodes.append(OpDFLayerNormCore(a, eps))
         return self.nodes[-1]
 
     def f_gelu_(self, a: Op) -> Op:
         """Adds a gelu node to the graph. Returns the node with the result."""
         self.nodes.append(OpFGelu(a))
+        return self.nodes[-1]
+
+    def df_gelu_(self, a: Op) -> Op:
+        """Adds a gelu' (derivative) node to the graph. Returns the node with the result."""
+        self.nodes.append(OpDFGelu(a))
         return self.nodes[-1]
 
     def t_(self, a: Op) -> Op:
