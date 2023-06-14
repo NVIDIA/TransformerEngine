@@ -127,8 +127,7 @@ createCausalMask(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     CUDNN_FRONTEND_UNUSED(layout);
     CUDNN_FRONTEND_UNUSED(tensorType);
 
-    cudnn_frontend::throw_if(ops->size() == 0,
-           "Padding Mask constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops->size() == 0, "Padding Mask constructed incorrectly as the first one");
 
     // subtraction output
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
@@ -341,9 +340,7 @@ createDropoutForward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
               const cudnn_frontend::Tensor& afterSoftmaxTensor) {
     CUDNN_FRONTEND_UNUSED(d);
 
-    cudnn_frontend::throw_if(ops->size() == 0,
-                            "Dropout DAG constructed incorrectly as the first one",
-                            CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops->size() == 0, "Dropout DAG constructed incorrectly as the first one");
 
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -428,9 +425,7 @@ createDropoutBackward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d
               const cudnn_frontend::Tensor& dropoutMaskTensor) {
     CUDNN_FRONTEND_UNUSED(d);
 
-    cudnn_frontend::throw_if(ops->size() == 0,
-                            "Dropout DAG constructed incorrectly as the first one",
-                            CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops->size() == 0, "Dropout DAG constructed incorrectly as the first one");
 
     int64_t afterBMM1_dim[4] = {b, h, s_q, s_kv};
     int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
@@ -508,9 +503,7 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
            NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops,
            cudnn_frontend::Tensor const &afterScaleDropoutTensor) {
-    cudnn_frontend::throw_if(ops->size() == 0,
-                            "BMM2 op constructed incorrectly as the first one",
-                            CUDNN_STATUS_BAD_PARAM);
+    NVTE_CHECK(ops->size() == 0, "BMM2 op constructed incorrectly as the first one");
 
     int64_t v_dim[4] =  {b, h, s_kv, d};
     int64_t v_stride[4];
@@ -587,12 +580,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto sAfterMaskTensor = createCausalMask(
                                 b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
-            cudnn_frontend::throw_if(dropout_probability != 0.0f && !is_training,
-                                "Dropout probability should be 0.0f for inference mode",
-                                CUDNN_STATUS_BAD_PARAM);
-            cudnn_frontend::throw_if(dropout_probability == 1.0f,
-                                "Dropout probability cannot be 1.0",
-                                CUDNN_STATUS_BAD_PARAM);
+            NVTE_CHECK(dropout_probability != 0.0f && !is_training,
+                                "Dropout probability should be 0.0f for inference mode");
+            NVTE_CHECK(dropout_probability == 1.0f,
+                                "Dropout probability cannot be 1.0");
 
             auto softmax_output = createSoftmaxForward(
                                 b, h, s_q, s_kv, is_training, &ops, sAfterMaskTensor);
