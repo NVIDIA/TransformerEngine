@@ -1,4 +1,10 @@
-from enum import Enum
+from .base import Op, OpInputPlaceholder
+from .add import OpAdd
+from .mul import OpMul
+from .transpose import OpTranspose
+from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
+from .gelu import OpFGelu, OpDFGelu
+from .scale import OpScale
 
 
 class ParamDescriptor:
@@ -10,114 +16,10 @@ class ParamDescriptor:
         self.name = name
 
 
-def _gen_node_id() -> int:
-    if "id" not in _gen_node_id.__dict__:
-        _gen_node_id.id = 0
-    _gen_node_id.id += 1
-    return _gen_node_id.id
-
-
-class Op:
-    grad: "Op | None" = None
-
-    def __init__(self):
-        self.id = _gen_node_id()
-
-
-class OpInputPlaceholder(Op):
-    def replace(self, op: Op):
-        self.__class__ = op.__class__
-        self.__dict__ = op.__dict__
-
-
 class OpParam(Op):
     def __init__(self, param: ParamDescriptor):
         super().__init__()
         self.param = param
-
-
-class OpAdd(Op):
-    def __init__(self, a: Op, b: Op):
-        super().__init__()
-        self.a = a
-        self.b = b
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        return grad
-
-    def backward_b(self, graph: "OpGraph", grad: Op):
-        return grad
-
-
-class OpMul(Op):
-    def __init__(self, a: Op, b: Op):
-        super().__init__()
-        self.a = a
-        self.b = b
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        bT = graph.t_(self.b)
-        return graph.mul_(bT, grad)
-
-    def backward_b(self, graph: "OpGraph", grad: Op):
-        aT = graph.t_(self.a)
-        return graph.mul_(aT, grad)
-
-
-class OpScale(Op):
-    def __init__(self, a: Op, b: Op):
-        super().__init__()
-        self.a = a
-        self.b = b
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        return graph.scale_(self.b, grad)
-
-    def backward_b(self, graph: "OpGraph", grad: Op):
-        return graph.scale_(self.a, grad)
-
-
-class OpTranspose(Op):
-    def __init__(self, a: Op):
-        super().__init__()
-        self.a = a
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        return graph.t_(grad)
-
-
-class OpFLayerNormCore(Op):
-    def __init__(self, a: Op, eps: float):
-        super().__init__()
-        self.a = a
-        self.eps = eps
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        df = graph.df_layernorm_core_(self.a, self.eps)
-        return graph.mul_(df, grad)
-
-
-class OpDFLayerNormCore(Op):
-    def __init__(self, a: Op, eps: float):
-        super().__init__()
-        self.a = a
-        self.eps = eps
-
-
-class OpFGelu(Op):
-    def __init__(self, a: Op):
-        super().__init__()
-        self.a = a
-
-    def backward_a(self, graph: "OpGraph", grad: Op):
-        df = graph.df_gelu_(self.a)
-        return graph.scale_(df, grad)
-
-
-class OpDFGelu(Op):
-    def __init__(self, a: Op):
-        super().__init__()
-        self.a = a
 
 
 class OpGraph:
