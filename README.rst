@@ -8,13 +8,23 @@
 Transformer Engine
 ==================
 
+`Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Model Support <#model-support>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
+
+Latest News
+==================
+
+* [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
+
+
+What is Transformer Engine?
+==================
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
 using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
 memory utilization in both training and inference. TE provides a collection of highly optimized
 building blocks for popular Transformer architectures and an automatic mixed precision-like API that
-can be used seamlessly with your own framework-specific code. TE also includes a framework agnostic
+can be used seamlessly with your framework-specific code. TE also includes a framework agnostic
 C++ API that can be integrated with other deep learning libraries to enable FP8 support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for
@@ -22,22 +32,29 @@ architectures such as BERT, GPT and T5 become very memory and compute intensive.
 frameworks train with FP32 by default. This is not essential, however, to achieve full accuracy for
 many deep learning models. Using mixed-precision training, which combines single-precision (FP32)
 with lower precision (e.g. FP16) format when training a model, results in significant speedups with
-minimal differences in accuracy as compared to FP32 training. With the introduction of Hopper GPU
+minimal differences in accuracy as compared to FP32 training. With Hopper GPU
 architecture FP8 precision was introduced, which offers improved performance over FP16 with no
 degradation in accuracy. Although all major deep learning frameworks support FP16, FP8 support is
-not available today.
+not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
-Model (LLM) libraries. It provides python layer consisting of modules to easily build Transformer
-layer as well as framework agnostic library in C++ including structs and kernels needed for FP8 support.
+Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
+layer as well as a framework agnostic library in C++ including structs and kernels needed for FP8 support.
 Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
-simplifying for the users.
+simplifying mixed precision training for users.
 
+Highlights
+----------
+
+* Easy-to-use modules for building Transformer layers with FP8 support 
+* Optimizations (e.g. fused kernels) for Transformer models 
+* Support for FP8 on NVIDIA Hopper (H100) and NVIDIA Ada (RTX 4 GPUs)
+* Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
---------
+----------
 
-pyTorch
+PyTorch
 ^^^^^^^
 
 .. code-block:: python
@@ -143,49 +160,47 @@ TensorFlow
   grads = tape.gradient(loss, model.trainable_variables)
   optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-
-Highlights
-----------
-
-* Easy-to-use modules enabling building of the Transformer layers with FP8 support
-  on H100 GPUs.
-* Optimizations (e.g. fused kernels) for Transformer models across all precisions and NVIDIA GPU
-  architectures.
-
 .. overview-end-marker-do-not-remove
 
 Installation
-------------
+----------
+.. installation
 
 In the NGC container
 ^^^^^^^^^^^^^^^^^^^^
 
-Transformer Engine comes preinstalled in the pyTorch container on
-`NVIDIA GPU Cloud <https://ngc.nvidia.com>`_ (versions 22.09 and later).
+The quickest way to get started with Transformer Engine is the NGC PyTorch container on
+`NVIDIA GPU Cloud Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_ (versions 22.09 and later).
+
+.. code-block:: bash
+
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.04-py3
+
+Where 23.04 is the container version. For example, 23.04 for April 2023 release.
+
+Pre-requisites
+^^^^^^^^^^^^^^^^^^^^
+* Linux x86_64
+* CUDA 11.8 or later
+* NVIDIA Driver supporting CUDA 11.8 or later
+* cuDNN 8.1 or later
+* For FP8 fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
 
 From source
 ^^^^^^^^^^^
 
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html>`_.
 
-
-User Guide and Examples
------------------------
-
-For examples, tutorials and API reference please refer to:
-
-* `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ for the last release.
-* `Development User Guide <https://nvidia.github.io/TransformerEngine/>`_ for the development version.
-* `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
-
-Transformer Architectures
--------------------------
+Model Support
+----------
 
 While the more granular modules in Transformer Engine allow building any Transformer architecture,
 the `TransformerLayer` API of Transformer Engine is flexible enough to build multiple major
-variations of Transformers.
+Transformer model architectures.
 
-NOTE: For simplicity, we only show pyTorch examples below. For the usage of `TransformerLayer`
+Transformer Engine supports the following DL frameworks: PyTorch, JAX (Flax, Praxis), and TensorFlow.
+
+NOTE: For simplicity, we only show PyTorch examples below. For the usage of `TransformerLayer`
 of all supported frameworks, refer to `examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
 
 GPT
@@ -237,20 +252,40 @@ the `MLP` layer. In TE this can be added by setting the `layer_type` to `decoder
           layer_type="decoder",
   )
 
-Contributing to Transformer Engine
-----------------------------------
+Integrations
+==================
 
-We welcome contributions to Transformer Engine. To contribute to TE and make pull requests,
-follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ document.
+Transformer Engine has been integrated with several popular open-source DL frameworks such as:
 
-Useful Links
-------------
+* `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_ 
+* `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
+* `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
+* `Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
+* `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
+* `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
+* `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_ - Coming soon!
+* `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
+
+
+Contributing
+==================
+
+We welcome contributions to Transformer Engine! To contribute to Transformer Engine and make pull requests,
+follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide. 
+
+Papers
+==================
 
 * `Attention original paper <https://proceedings.neurips.cc/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf>`_
-
 * `Megatron-LM tensor parallel <https://arxiv.org/pdf/1909.08053.pdf>`_
-
 * `Megatron-LM sequence parallel <https://arxiv.org/pdf/2205.05198.pdf>`_
+
+Videos
+==================
+
+* `FP8 Training with Transformer Engine <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51393>`_  
+* `FP8 for Deep Learning <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s52166/>`_  
+* `Inside the Hopper Architecture <https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s42663/>`_  
 
 .. |License| image:: https://img.shields.io/badge/License-Apache%202.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0

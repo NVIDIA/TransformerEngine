@@ -126,6 +126,10 @@ class MultiHeadAttentionKeras(tf.keras.Model):
 
 
 class MHATest(test.TestCase):
+    def setUp(self):
+        super().setUp()
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+
     @test_util.run_gpu_only
     def testMHAForward(self):
         use_fp8 = tf.test.is_gpu_available(True, (9, 0))
@@ -252,5 +256,4 @@ class MHATest(test.TestCase):
 
 
 if __name__ == '__main__':
-    tf.keras.mixed_precision.set_global_policy('mixed_float16')
     test.main()

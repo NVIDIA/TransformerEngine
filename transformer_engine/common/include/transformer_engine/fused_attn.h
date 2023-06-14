@@ -4,6 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+/*! \file fused_attn.h
+ *  \brief Enums and functions for fused attention.
+ */
+
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 
@@ -13,75 +17,97 @@
 extern "C" {
 #endif
 
+/*! \enum NVTE_QKV_Layout
+ *  \brief QKV matrix layouts
+ */
 enum NVTE_QKV_Layout {
-/*!< separate Q, K, V tensors:
-     Q: [total_seqs_q, num_heads, head_dim]
-                      | Q   Q   Q        ...       Q
-                      | \___________  _____________/
-        total_seqs_q <|             \/ 
-                      |   num_heads * head_dim
-     K: [total_seqs_kv, num_heads, head_dim]
-                       | K   K   K        ...       K
-                       | \___________  _____________/
-        total_seqs_kv <|             \/ 
-                       |   num_heads * head_dim
-     V: [total_seqs_kv, num_heads, head_dim]
-                       | V   V   V        ...       V
-                       | \___________  _____________/
-        total_seqs_kv <|             \/ 
-                       |   num_heads * head_dim
+/*! Separate Q, K, V tensors.
+    \verbatim
+      Q: [total_seqs_q, num_heads, head_dim]
+                          | Q   Q   Q        ...       Q
+                          | \___________  _____________/
+          total_seqs_q   <|             \/
+                          |   num_heads * head_dim
+      K: [total_seqs_kv, num_heads, head_dim]
+                          | K   K   K        ...       K
+                          | \___________  _____________/
+          total_seqs_kv  <|             \/
+                          |   num_heads * head_dim
+      V: [total_seqs_kv, num_heads, head_dim]
+                          | V   V   V        ...       V
+                          | \___________  _____________/
+          total_seqs_kv  <|             \/
+                          |   num_heads * head_dim
+    \endverbatim
  */
     NVTE_NOT_INTERLEAVED = 0,
 
-/*!< packed QKV tensor:
-     QKV: [total_seqs, 3, num_heads, head_dim]
-                 | Q   Q   Q        ...       Q K K K ... K V V V ... V 
-                 | \___________  _____________/
-     total_seqs <|             \/ 
-                 |   num_heads * head_dim
+/*! Packed QKV.
+    \verbatim
+      QKV: [total_seqs, 3, num_heads, head_dim]
+                          | Q   Q   Q        ...       Q K K K ... K V V V ... V
+                          | \___________  _____________/
+            total_seqs   <|             \/
+                          |   num_heads * head_dim
+    \endverbatim
  */
     NVTE_QKV_INTERLEAVED = 1,
 
-/*!< Q and packed KV tensor:
-     Q: [total_seqs_q, num_heads, head_dim]
-                      | Q   Q   Q        ...       Q
-                      | \___________  _____________/
-        total_seqs_q <|             \/ 
-                      |   num_heads * head_dim
-     KV: [total_seqs_kv, 2, num_heads, head_dim]
-                        | K   K   K        ...       K V V V ... V 
-                        | \___________  _____________/
-         total_seqs_kv <|             \/ 
-                        |   num_heads * head_dim
+ /*! Q and packed KV.
+     \verbatim
+       Q: [total_seqs_q, num_heads, head_dim]
+                          | Q   Q   Q        ...       Q
+                          | \___________  _____________/
+           total_seqs_q  <|             \/
+                          |   num_heads * head_dim
+       KV: [total_seqs_kv, 2, num_heads, head_dim]
+                          | K   K   K        ...       K V V V ... V
+                          | \___________  _____________/
+           total_seqs_kv <|             \/
+                          |   num_heads * head_dim
+    \endverbatim
  */
     NVTE_KV_INTERLEAVED = 2
 };
 
+/*! \enum NVTE_Bias_Type
+ *  \brief Bias types
+ */
 enum NVTE_Bias_Type {
-    NVTE_NO_BIAS = 0,  /*!< no bias */
-    NVTE_PRE_SCALE_BIAS = 1,  /*!< bias before scale */
-    NVTE_POST_SCALE_BIAS = 2  /*!< bias after scale */
+    /*! No bias */
+    NVTE_NO_BIAS = 0,
+    /*! Bias before scale */
+    NVTE_PRE_SCALE_BIAS = 1,
+    /*! Bias after scale */
+    NVTE_POST_SCALE_BIAS = 2
 };
 
+/*! \enum NVTE_Mask_Type
+ *  \brief Attention mask types
+ */
 enum NVTE_Mask_Type {
-    NVTE_PADDING_MASK = 0,  /*!< padding attention mask */
-    NVTE_CAUSAL_MASK = 1,  /*!< causal attention mask */
-    NVTE_NO_MASK = 2  /*!< no masking */
+    /*! No masking */
+    NVTE_NO_MASK = 0,
+    /*! Padding attention mask */
+    NVTE_PADDING_MASK = 1,
+    /*! Causal attention mask */
+    NVTE_CAUSAL_MASK = 2,
 };
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
  * Computes:
- *  - P = Q * K.T + Bias
+ *  - P = Q * Transpose(K) + Bias
  *  - S = ScaleMaskSoftmax(P)
  *  - D = Dropout(S)
- *  - O = D * V.T
+ *  - O = D * Transpose(V)
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
- *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
- *
+   \verbatim
+   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
+   \endverbatim
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
  *                                       [total_seqs, 3, num_heads, head_dim].
@@ -91,8 +117,8 @@ enum NVTE_Mask_Type {
  *  \param[out]    Aux_Output_Tensors    Auxiliary output tensors when training, e.g. M, ZInv.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen            Max sequence length used for computing,
- *                                       it may be >= max(cu_seqlens). 
+ *  \param[in]     max_seqlen            Max sequence length used for computing.
+ *                                       It may be >= max(cu_seqlens).
  *  \param[in]     is_training           Whether this is in training mode or inference.
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
  *  \param[in]     dropout               Dropout probability.
@@ -120,10 +146,11 @@ void nvte_fused_attn_fwd_qkvpacked(
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
- *  | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
- *
+   \verbatim
+   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
+   \endverbatim
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
  *                                       [total_seqs, 3, num_heads, head_dim].
@@ -135,8 +162,8 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[out]    dQKV                  The gradient of the QKV tensor.
  *  \param[out]    dBias                 The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens            Accumulative sequence lengths, [batch_size + 1].
- *  \param[in]     max_seqlen            Max sequence length used for computing,
- *                                       it may be >= max(cu_seqlens). 
+ *  \param[in]     max_seqlen            Max sequence length used for computing.
+ *                                       It may be >= max(cu_seqlens).
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
  *  \param[in]     dropout               Dropout probability.
  *  \param[in]     qkv_layout            QKV tensor's layout.
@@ -165,15 +192,16 @@ void nvte_fused_attn_bwd_qkvpacked(
 /*! \brief Compute dot product attention with packed KV input.
  *
  * Computes:
- *  - P = Q * K.T + Bias
+ *  - P = Q * Transpose(K) + Bias
  *  - S = ScaleMaskSoftmax(P)
  *  - D = Dropout(S)
- *  - O = D * V.T
+ *  - O = D * Transpose(V)
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
- *
+   \verbatim
+   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
+   \endverbatim
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
  *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
@@ -184,10 +212,10 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     rng_state             Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen_q          Max sequence length used for computing for Q.  
- *                                       it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv         Max sequence length used for computing for KV.  
- *                                       it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q          Max sequence length used for computing
+ *                                       for Q. It may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv         Max sequence length used for computing
+ *                                       for KV. It may be >= max(cu_seqlens_kv).
  *  \param[in]     is_training           Whether this is in training mode or inference.
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
  *  \param[in]     dropout               Dropout probability.
@@ -217,9 +245,10 @@ void nvte_fused_attn_fwd_kvpacked(
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
  * Support Matrix:
- *  | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
- *  | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
- *
+   \verbatim
+   | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
+   \endverbatim
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
  *  \param[in]     KV                    The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
@@ -233,10 +262,10 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dBias                 The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q          Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv         Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     max_seqlen_q          Max sequence length used for computing for Q.  
- *                                       it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv         Max sequence length used for computing for KV.  
- *                                       it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q          Max sequence length used for computing
+ *                                       for Q. It may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv         Max sequence length used for computing
+ *                                       for KV. It may be >= max(cu_seqlens_kv).
  *  \param[in]     attn_scale            Scaling factor for Q * K.T.
  *  \param[in]     dropout               Dropout probability.
  *  \param[in]     qkv_layout            QKV tensor's layout.

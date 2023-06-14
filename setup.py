@@ -2,61 +2,486 @@
 #
 # See LICENSE for license information.
 
-import atexit
+import ctypes
+from functools import lru_cache
 import os
-import sys
-import subprocess
-import io
+from pathlib import Path
 import re
-import copy
+import shutil
+import subprocess
+from subprocess import CalledProcessError
+import sys
 import tempfile
-from pkg_resources import packaging
-from setuptools import setup, find_packages, Extension
+from typing import List, Optional, Tuple, Union
+
+import setuptools
 from setuptools.command.build_ext import build_ext
-from shutil import copyfile
 
+# Project directory root
+root_path: Path = Path(__file__).resolve().parent
 
-path = os.path.dirname(os.path.realpath(__file__))
-with open(path + "/VERSION", "r") as f:
-    te_version = f.readline()
+@lru_cache(maxsize=1)
+def te_version() -> str:
+    """Transformer Engine version string
 
-CUDA_HOME = os.environ.get("CUDA_HOME", "/usr/local/cuda")
-NVTE_WITH_USERBUFFERS = int(os.environ.get("NVTE_WITH_USERBUFFERS", "0"))
-if NVTE_WITH_USERBUFFERS:
-    MPI_HOME = os.environ.get("MPI_HOME", "")
-    assert MPI_HOME, "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
+    Includes Git commit as local version, unless suppressed with
+    NVTE_NO_LOCAL_VERSION environment variable.
 
-def get_cuda_bare_metal_version(cuda_dir):
-    raw_output = subprocess.check_output(
-        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+    """
+    with open(root_path / "VERSION", "r") as f:
+        version = f.readline().strip()
+    if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")):
+        try:
+            output = subprocess.run(
+                ["git", "rev-parse" , "--short", "HEAD"],
+                capture_output=True,
+                cwd=root_path,
+                check=True,
+                universal_newlines=True,
+            )
+        except (CalledProcessError, OSError):
+            pass
+        else:
+            commit = output.stdout.strip()
+            version += f"+{commit}"
+    return version
+
+@lru_cache(maxsize=1)
+def with_debug_build() -> bool:
+    """Whether to build with a debug configuration"""
+    for arg in sys.argv:
+        if arg == "--debug":
+            sys.argv.remove(arg)
+            return True
+    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
+        return True
+    return False
+
+# Call once in global scope since this function manipulates the
+# command-line arguments. Future calls will use a cached value.
+with_debug_build()
+
+def found_cmake() -> bool:
+    """"Check if valid CMake is available
+
+    CMake 3.18 or newer is required.
+
+    """
+
+    # Check if CMake is available
+    try:
+        _cmake_bin = cmake_bin()
+    except FileNotFoundError:
+        return False
+
+    # Query CMake for version info
+    output = subprocess.run(
+        [_cmake_bin, "--version"],
+        capture_output=True,
+        check=True,
+        universal_newlines=True,
     )
-    output = raw_output.split()
-    release_idx = output.index("release") + 1
-    release = output[release_idx].split(".")
-    bare_metal_major = release[0]
-    bare_metal_minor = release[1][0]
-    return (int(bare_metal_major), int(bare_metal_minor))
+    match = re.search(r"version\s*([\d.]+)", output.stdout)
+    version = match.group(1).split('.')
+    version = tuple(int(v) for v in version)
+    return version >= (3, 18)
+
+def cmake_bin() -> Path:
+    """Get CMake executable
+
+    Throws FileNotFoundError if not found.
+
+    """
+
+    # Search in CMake Python package
+    _cmake_bin: Optional[Path] = None
+    try:
+        import cmake
+    except ImportError:
+        pass
+    else:
+        cmake_dir = Path(cmake.__file__).resolve().parent
+        _cmake_bin = cmake_dir / "data" / "bin" / "cmake"
+        if not _cmake_bin.is_file():
+            _cmake_bin = None
+
+    # Search in path
+    if _cmake_bin is None:
+        _cmake_bin = shutil.which("cmake")
+        if _cmake_bin is not None:
+            _cmake_bin = Path(_cmake_bin).resolve()
+
+    # Return executable if found
+    if _cmake_bin is None:
+        raise FileNotFoundError("Could not find CMake executable")
+    return _cmake_bin
+
+def found_ninja() -> bool:
+    """"Check if Ninja is available"""
+    return shutil.which("ninja") is not None
+
+def found_pybind11() -> bool:
+    """"Check if pybind11 is available"""
+
+    # Check if Python package is installed
+    try:
+        import pybind11
+    except ImportError:
+        pass
+    else:
+        return True
+
+    # Check if CMake can find pybind11
+    if not found_cmake():
+        return False
+    try:
+        subprocess.run(
+            [
+                "cmake",
+                "--find-package",
+                "-DMODE=EXIST",
+                "-DNAME=pybind11",
+                "-DCOMPILER_ID=CXX",
+                "-DLANGUAGE=CXX",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except (CalledProcessError, OSError):
+        pass
+    else:
+        return True
+    return False
+
+def cuda_version() -> Tuple[int, ...]:
+    """CUDA Toolkit version as a (major, minor) tuple
+
+    Throws FileNotFoundError if NVCC is not found.
+
+    """
+
+    # Try finding NVCC
+    nvcc_bin: Optional[Path] = None
+    if nvcc_bin is None and os.getenv("CUDA_HOME"):
+        # Check in CUDA_HOME
+        cuda_home = Path(os.getenv("CUDA_HOME"))
+        nvcc_bin = cuda_home / "bin" / "nvcc"
+    if nvcc_bin is None:
+        # Check if nvcc is in path
+        nvcc_bin = shutil.which("nvcc")
+        if nvcc_bin is not None:
+            nvcc_bin = Path(nvcc_bin)
+    if nvcc_bin is None:
+        # Last-ditch guess in /usr/local/cuda
+        cuda_home = Path("/usr/local/cuda")
+        nvcc_bin = cuda_home / "bin" / "nvcc"
+    if not nvcc_bin.is_file():
+        raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
+
+    # Query NVCC for version info
+    output = subprocess.run(
+        [nvcc_bin, "-V"],
+        capture_output=True,
+        check=True,
+        universal_newlines=True,
+    )
+    match = re.search(r"release\s*([\d.]+)", output.stdout)
+    version = match.group(1).split('.')
+    return tuple(int(v) for v in version)
+
+@lru_cache(maxsize=1)
+def with_userbuffers() -> bool:
+    """Check if userbuffers support is enabled"""
+    if int(os.getenv("NVTE_WITH_USERBUFFERS", "0")):
+        assert os.getenv("MPI_HOME"), \
+            "MPI_HOME must be set if NVTE_WITH_USERBUFFERS=1"
+        return True
+    return False
+
+@lru_cache(maxsize=1)
+def frameworks() -> List[str]:
+    """DL frameworks to build support for"""
+    _frameworks: List[str] = []
+    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
+
+    # Check environment variable
+    if os.getenv("NVTE_FRAMEWORK"):
+        _frameworks.extend(os.getenv("NVTE_FRAMEWORK").split(","))
+
+    # Check command-line arguments
+    for arg in sys.argv.copy():
+        if arg.startswith("--framework="):
+            _frameworks.extend(arg.replace("--framework=", "").split(","))
+            sys.argv.remove(arg)
+
+    # Detect installed frameworks if not explicitly specified
+    if not _frameworks:
+        try:
+            import torch
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("pytorch")
+        try:
+            import jax
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("jax")
+        try:
+            import tensorflow
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("tensorflow")
+        try:
+            import paddle
+        except ImportError:
+            pass
+        else:
+            _frameworks.append("paddle")
+
+    # Special framework names
+    if "all" in _frameworks:
+        _frameworks = supported_frameworks.copy()
+    if "none" in _frameworks:
+        _frameworks = []
+
+    # Check that frameworks are valid
+    _frameworks = [framework.lower() for framework in _frameworks]
+    for framework in _frameworks:
+        if framework not in supported_frameworks:
+            raise ValueError(
+                f"Transformer Engine does not support framework={framework}"
+            )
+
+    return _frameworks
+
+# Call once in global scope since this function manipulates the
+# command-line arguments. Future calls will use a cached value.
+frameworks()
+
+def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+    """Setup Python dependencies
+
+    Returns dependencies for build, runtime, and testing.
+
+    """
+
+    # Common requirements
+    setup_reqs: List[str] = []
+    install_reqs: List[str] = ["pydantic"]
+    test_reqs: List[str] = ["pytest"]
+
+    def add_unique(l: List[str], vals: Union[str, List[str]]) -> None:
+        """Add entry to list if not already included"""
+        if isinstance(vals, str):
+            vals = [vals]
+        for val in vals:
+            if val not in l:
+                l.append(val)
+
+    # Requirements that may be installed outside of Python
+    if not found_cmake():
+        add_unique(setup_reqs, "cmake>=3.18")
+    if not found_ninja():
+        add_unique(setup_reqs, "ninja")
+
+    # Framework-specific requirements
+    if "pytorch" in frameworks():
+        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=1.0.7"])
+        add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+    if "jax" in frameworks():
+        if not found_pybind11():
+            add_unique(setup_reqs, "pybind11")
+        add_unique(install_reqs, ["jax", "flax"])
+        add_unique(test_reqs, ["numpy", "praxis"])
+    if "tensorflow" in frameworks():
+        if not found_pybind11():
+            add_unique(setup_reqs, "pybind11")
+        add_unique(install_reqs, "tensorflow")
+        add_unique(test_reqs, ["keras", "tensorflow_datasets"])
+    if "paddle" in frameworks():
+        add_unique(install_reqs, "paddlepaddle-gpu")
+        add_unique(test_reqs, "numpy")
+
+    return setup_reqs, install_reqs, test_reqs
 
 
-def append_nvcc_threads(nvcc_extra_args):
-    cuda_major, cuda_minor = get_cuda_bare_metal_version(CUDA_HOME)
-    if cuda_major >= 11 and cuda_minor >= 2:
-        return nvcc_extra_args + ["--threads", "4"]
-    return nvcc_extra_args
+class CMakeExtension(setuptools.Extension):
+    """CMake extension module"""
+
+    def __init__(
+            self,
+            name: str,
+            cmake_path: Path,
+            cmake_flags: Optional[List[str]] = None,
+    ) -> None:
+        super().__init__(name, sources=[])  # No work for base class
+        self.cmake_path: Path = cmake_path
+        self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
+
+    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
+
+        # Make sure paths are str
+        _cmake_bin = str(cmake_bin())
+        cmake_path = str(self.cmake_path)
+        build_dir = str(build_dir)
+        install_dir = str(install_dir)
+
+        # CMake configure command
+        build_type = "Debug" if with_debug_build() else "Release"
+        configure_command = [
+            _cmake_bin,
+            "-S",
+            cmake_path,
+            "-B",
+            build_dir,
+            f"-DCMAKE_BUILD_TYPE={build_type}",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        ]
+        configure_command += self.cmake_flags
+        if found_ninja():
+            configure_command.append("-GNinja")
+        try:
+            import pybind11
+        except ImportError:
+            pass
+        else:
+            pybind11_dir = Path(pybind11.__file__).resolve().parent
+            pybind11_dir = pybind11_dir / "share" / "cmake" / "pybind11"
+            configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
+
+        # CMake build and install commands
+        build_command = [_cmake_bin, "--build", build_dir]
+        install_command = [_cmake_bin, "--install", build_dir]
+
+        # Run CMake commands
+        for command in [configure_command, build_command, install_command]:
+            print(f"Running command {' '.join(command)}")
+            try:
+                subprocess.run(command, cwd=build_dir, check=True)
+            except (CalledProcessError, OSError) as e:
+                raise RuntimeError(f"Error when running CMake: {e}")
 
 
-def extra_gencodes(cc_flag):
-    cuda_bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if cuda_bare_metal_version >= (11, 0):
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-    if cuda_bare_metal_version >= (11, 8):
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_90,code=sm_90")
+# PyTorch extension modules require special handling
+if "pytorch" in frameworks():
+    from torch.utils.cpp_extension import BuildExtension
+elif "paddle" in frameworks():
+    from paddle.utils.cpp_extension import BuildExtension
+else:
+    from setuptools.command.build_ext import build_ext as BuildExtension
 
 
-def extra_compiler_flags():
-    extra_flags = [
+class CMakeBuildExtension(BuildExtension):
+    """Setuptools command with support for CMake extension modules"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def run(self) -> None:
+
+        # Build CMake extensions
+        for ext in self.extensions:
+            if isinstance(ext, CMakeExtension):
+                print(f"Building CMake extension {ext.name}")
+                with tempfile.TemporaryDirectory() as build_dir:
+                    build_dir = Path(build_dir)
+                    package_path = Path(self.get_ext_fullpath(ext.name))
+                    install_dir = package_path.resolve().parent
+                    ext._build_cmake(
+                        build_dir=build_dir,
+                        install_dir=install_dir,
+                    )
+
+        # Paddle requires linker search path for libtransformer_engine.so
+        paddle_ext = None
+        if "paddle" in frameworks():
+            for ext in self.extensions:
+                if "paddle" in ext.name:
+                    ext.library_dirs.append(self.build_lib)
+                    paddle_ext = ext
+                    break
+
+        # Build non-CMake extensions as usual
+        all_extensions = self.extensions
+        self.extensions = [
+            ext for ext in self.extensions
+            if not isinstance(ext, CMakeExtension)
+        ]
+        super().run()
+        self.extensions = all_extensions
+
+        # Manually write stub file for Paddle extension
+        if paddle_ext is not None:
+
+            # Load libtransformer_engine.so to avoid linker errors
+            for path in Path(self.build_lib).iterdir():
+                if path.name.startswith("libtransformer_engine."):
+                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+
+            # Figure out stub file path
+            module_name = paddle_ext.name
+            assert module_name.endswith("_pd_"), \
+                "Expected Paddle extension module to end with '_pd_'"
+            stub_name = module_name[:-4]  # remove '_pd_'
+            stub_path = os.path.join(self.build_lib, stub_name + ".py")
+
+            # Figure out library name
+            # Note: This library doesn't actually exist. Paddle
+            # internally reinserts the '_pd_' suffix.
+            so_path = self.get_ext_fullpath(module_name)
+            _, so_ext = os.path.splitext(so_path)
+            lib_name = stub_name + so_ext
+
+            # Write stub file
+            print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
+            from paddle.utils.cpp_extension.extension_utils import custom_write_stub
+            custom_write_stub(lib_name, stub_path)
+
+
+def setup_common_extension() -> CMakeExtension:
+    """Setup CMake extension for common library
+
+    Also builds JAX, TensorFlow, and userbuffers support if needed.
+
+    """
+    cmake_flags = []
+    if "jax" in frameworks():
+        cmake_flags.append("-DENABLE_JAX=ON")
+    if "tensorflow" in frameworks():
+        cmake_flags.append("-DENABLE_TENSORFLOW=ON")
+    if with_userbuffers():
+        cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
+    return CMakeExtension(
+        name="transformer_engine",
+        cmake_path=root_path / "transformer_engine",
+        cmake_flags=cmake_flags,
+    )
+
+def setup_pytorch_extension() -> setuptools.Extension:
+    """Setup CUDA extension for PyTorch support"""
+
+    # Source files
+    src_dir = root_path / "transformer_engine" / "pytorch" / "csrc"
+    sources = [
+        src_dir / "extensions.cu",
+        src_dir / "common.cu",
+        src_dir / "ts_fp8_op.cpp",
+    ]
+
+    # Header files
+    include_dirs = [
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "pytorch" / "csrc",
+        root_path / "3rdparty" / "cudnn-frontend" / "include",
+    ]
+
+    # Compiler flags
+    cxx_flags = ["-O3"]
+    nvcc_flags = [
         "-O3",
         "-gencode",
         "arch=compute_70,code=sm_70",
@@ -66,369 +491,143 @@ def extra_compiler_flags():
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        "-I./transformer_engine/common/layer_norm/",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
-    if NVTE_WITH_USERBUFFERS:
-        extra_flags.append("-DNVTE_WITH_USERBUFFERS")
-    return extra_flags
 
-
-cc_flag = []
-extra_gencodes(cc_flag)
-
-
-def make_abs_path(l):
-    return [os.path.join(path, p) for p in l]
-
-
-pytorch_sources = [
-    "transformer_engine/pytorch/csrc/extensions.cu",
-    "transformer_engine/pytorch/csrc/common.cu",
-    "transformer_engine/pytorch/csrc/ts_fp8_op.cpp",
-]
-pytorch_sources = make_abs_path(pytorch_sources)
-
-all_sources = pytorch_sources
-
-supported_frameworks = {
-    "all": all_sources,
-    "pytorch": pytorch_sources,
-    "jax": None, # JAX use transformer_engine/CMakeLists.txt
-    "tensorflow": None, # tensorflow use transformer_engine/CMakeLists.txt
-}
-
-framework = os.environ.get("NVTE_FRAMEWORK", "pytorch")
-
-include_dirs = [
-    "transformer_engine/common/include",
-    "transformer_engine/pytorch/csrc",
-    "3rdparty/cudnn-frontend/include",
-]
-if NVTE_WITH_USERBUFFERS:
-    if MPI_HOME:
-        include_dirs.append(os.path.join(MPI_HOME, "include"))
-include_dirs = make_abs_path(include_dirs)
-
-args = sys.argv.copy()
-for s in args:
-    if s.startswith("--framework="):
-        framework = s.replace("--framework=", "")
-        sys.argv.remove(s)
-if framework not in supported_frameworks.keys():
-    raise ValueError("Unsupported framework " + framework)
-
-
-class CMakeExtension(Extension):
-    def __init__(self, name, cmake_path, sources, **kwargs):
-        super(CMakeExtension, self).__init__(name, sources=sources, **kwargs)
-        self.cmake_path = cmake_path
-
-class FrameworkBuilderBase:
-    def __init__(self, *args, **kwargs) -> None:
-        pass
-
-    def cmake_flags(self):
-        return []
-
-    def initialize_options(self):
-        pass
-
-    def finalize_options(self):
-        pass
-
-    def run(self, extensions):
-        pass
-
-    @staticmethod
-    def install_requires():
-        return []
-
-class PyTorchBuilder(FrameworkBuilderBase):
-    def __init__(self, *args, **kwargs) -> None:
-        pytorch_args = copy.deepcopy(args)
-        pytorch_kwargs = copy.deepcopy(kwargs)
-        from torch.utils.cpp_extension import BuildExtension
-        self.pytorch_build_extensions = BuildExtension(*pytorch_args, **pytorch_kwargs)
-
-    def initialize_options(self):
-        self.pytorch_build_extensions.initialize_options()
-
-    def finalize_options(self):
-        self.pytorch_build_extensions.finalize_options()
-
-    def run(self, extensions):
-        other_ext = [
-            ext for ext in extensions if not isinstance(ext, CMakeExtension)
-        ]
-        self.pytorch_build_extensions.extensions = other_ext
-        print("Building pyTorch extensions!")
-        self.pytorch_build_extensions.run()
-
-    def cmake_flags(self):
-        return []
-
-    @staticmethod
-    def install_requires():
-        return ["flash-attn>=1.0.2"]
-
-
-class TensorFlowBuilder(FrameworkBuilderBase):
-    def cmake_flags(self):
-        p = [d for d in sys.path if 'dist-packages' in d][0]
-        return ["-DENABLE_TENSORFLOW=ON", "-DCMAKE_PREFIX_PATH="+p]
-
-    def run(self, extensions):
-        print("Building TensorFlow extensions!")
-
-
-class JaxBuilder(FrameworkBuilderBase):
-    def cmake_flags(self):
-        p = [d for d in sys.path if 'dist-packages' in d][0]
-        return ["-DENABLE_JAX=ON", "-DCMAKE_PREFIX_PATH="+p]
-
-    def run(self, extensions):
-        print("Building jax extensions!")
-
-    def install_requires():
-        # TODO: find a way to install pybind11 and ninja directly.
-        return ['cmake', 'flax']
-
-ext_modules = []
-dlfw_builder_funcs = []
-
-ext_modules.append(
-    CMakeExtension(
-        name="transformer_engine",
-        cmake_path=os.path.join(path, "transformer_engine"),
-        sources=[],
-        include_dirs=include_dirs,
-    )
-)
-
-if framework in ("all", "pytorch"):
-    from torch.utils.cpp_extension import CUDAExtension
-    ext_modules.append(
-        CUDAExtension(
-            name="transformer_engine_extensions",
-            sources=supported_frameworks[framework],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": append_nvcc_threads(extra_compiler_flags() + cc_flag),
-            },
-            include_dirs=include_dirs,
-        )
-    )
-    dlfw_builder_funcs.append(PyTorchBuilder)
-
-if framework in ("all", "jax"):
-    dlfw_builder_funcs.append(JaxBuilder)
-    # Trigger a better error when pybind11 isn't present.
-    # Sadly, if pybind11 was installed with `apt -y install pybind11-dev`
-    # This doesn't install a python packages. So the line bellow is too strict.
-    # When it fail, we need to detect if cmake will find pybind11.
-    # import pybind11
-
-if framework in ("all", "tensorflow"):
-    dlfw_builder_funcs.append(TensorFlowBuilder)
-
-dlfw_install_requires = ['pydantic']
-for builder in dlfw_builder_funcs:
-    dlfw_install_requires = dlfw_install_requires + builder.install_requires()
-
-
-def get_cmake_bin():
-    cmake_bin = "cmake"
+    # Version-dependent CUDA options
     try:
-        out = subprocess.check_output([cmake_bin, "--version"])
-    except OSError:
-        cmake_installed_version = packaging.version.Version("0.0")
+        version = cuda_version()
+    except FileNotFoundError:
+        print("Could not determine CUDA Toolkit version")
     else:
-        cmake_installed_version = packaging.version.Version(
-            re.search(r"version\s*([\d.]+)", out.decode()).group(1)
-        )
+        if version >= (11, 2):
+            nvcc_flags.extend(["--threads", "4"])
+        if version >= (11, 0):
+            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+        if version >= (11, 8):
+            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
-    if cmake_installed_version < packaging.version.Version("3.18.0"):
-        print(
-            "Could not find a recent CMake to build Transformer Engine. "
-            "Attempting to install CMake 3.18 to a temporary location via pip.",
-            flush=True,
-        )
-        cmake_temp_dir = tempfile.TemporaryDirectory(prefix="nvte-cmake-tmp")
-        atexit.register(cmake_temp_dir.cleanup)
-        try:
-            _ = subprocess.check_output(
-                ["pip", "install", "--target", cmake_temp_dir.name, "cmake~=3.18.0"]
-            )
-        except Exception:
-            raise RuntimeError(
-                "Failed to install temporary CMake. "
-                "Please update your CMake to 3.18+."
-            )
-        cmake_bin = os.path.join(cmake_temp_dir.name, "bin", "run_cmake")
-        with io.open(cmake_bin, "w") as f_run_cmake:
-            f_run_cmake.write(
-                f"#!/bin/sh\nPYTHONPATH={cmake_temp_dir.name} {os.path.join(cmake_temp_dir.name, 'bin', 'cmake')} \"$@\""
-            )
-        os.chmod(cmake_bin, 0o755)
+    # userbuffers support
+    if with_userbuffers():
+        if os.getenv("MPI_HOME"):
+            mpi_home = Path(os.getenv("MPI_HOME"))
+            include_dirs.append(mpi_home / "include")
+        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
+        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
 
-    return cmake_bin
-
-
-class CMakeBuildExtension(build_ext, object):
-    def __init__(self, *args, **kwargs) -> None:
-        self.dlfw_flags = kwargs["dlfw_flags"]
-        super(CMakeBuildExtension, self).__init__(*args, **kwargs)
-
-    def build_extensions(self) -> None:
-        print("Building CMake extensions!")
-
-        cmake_bin = get_cmake_bin()
-        config = "Debug" if self.debug else "Release"
-
-        ext_name = self.extensions[0].name
-        build_dir = self.get_ext_fullpath(ext_name).replace(
-            self.get_ext_filename(ext_name), ""
-        )
-        build_dir = os.path.abspath(build_dir)
-
-        cmake_args = [
-            "-DCMAKE_BUILD_TYPE=" + config,
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(config.upper(), build_dir),
-        ]
-        try:
-            import ninja
-        except ImportError:
-            pass
-        else:
-            cmake_args.append("-GNinja")
-
-        cmake_args = cmake_args + self.dlfw_flags
-
-        cmake_build_args = ["--config", config]
-
-        cmake_build_dir = os.path.join(self.build_temp, config)
-        if not os.path.exists(cmake_build_dir):
-            os.makedirs(cmake_build_dir)
-
-        config_and_build_commands = [
-            [cmake_bin, self.extensions[0].cmake_path] + cmake_args,
-            [cmake_bin, "--build", "."] + cmake_build_args,
-        ]
-
-        if True:
-            print(f"Running CMake in {cmake_build_dir}:")
-            for command in config_and_build_commands:
-                print(" ".join(command))
-            sys.stdout.flush()
-
-        # Config and build the extension
-        try:
-            for command in config_and_build_commands:
-                subprocess.check_call(command, cwd=cmake_build_dir)
-        except OSError as e:
-            raise RuntimeError("CMake failed: {}".format(str(e)))
-
-class TEBuildExtension(build_ext, object):
-    def __init__(self, *args, **kwargs) -> None:
-
-        self.dlfw_builder = []
-        for functor in dlfw_builder_funcs:
-            self.dlfw_builder.append(functor(*args, **kwargs))
-
-        flags = []
-        if NVTE_WITH_USERBUFFERS:
-            flags.append('-DNVTE_WITH_USERBUFFERS=ON')
-        for builder in self.dlfw_builder:
-            flags = flags + builder.cmake_flags()
-
-        cmake_args = copy.deepcopy(args)
-        cmake_kwargs = copy.deepcopy(kwargs)
-        cmake_kwargs["dlfw_flags"] = flags
-        self.cmake_build_extensions = CMakeBuildExtension(*cmake_args, **cmake_kwargs)
-
-        self.all_outputs = None
-        super(TEBuildExtension, self).__init__(*args, **kwargs)
-
-    def initialize_options(self):
-        self.cmake_build_extensions.initialize_options()
-        for builder in self.dlfw_builder:
-            builder.initialize_options()
-        super(TEBuildExtension, self).initialize_options()
-
-    def finalize_options(self):
-        self.cmake_build_extensions.finalize_options()
-        for builder in self.dlfw_builder:
-            builder.finalize_options()
-        super(TEBuildExtension, self).finalize_options()
-
-    def run(self) -> None:
-        old_inplace, self.inplace = self.inplace, 0
-        cmake_ext = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
-        self.cmake_build_extensions.extensions = cmake_ext
-        self.cmake_build_extensions.run()
-
-        for builder in self.dlfw_builder:
-            builder.run(self.extensions)
-
-        self.all_outputs = []
-        for f in os.scandir(self.build_lib):
-            if f.is_file():
-                self.all_outputs.append(f.path)
-
-        self.inplace = old_inplace
-        if old_inplace:
-            self.copy_extensions_to_source()
-
-    def copy_extensions_to_source(self):
-        ext = self.extensions[0]
-        build_py = self.get_finalized_command("build_py")
-        fullname = self.get_ext_fullname(ext.name)
-        modpath = fullname.split(".")
-        package = ".".join(modpath[:-1])
-        package_dir = build_py.get_package_dir(package)
-
-        for f in os.scandir(self.build_lib):
-            if f.is_file():
-                src_filename = f.path
-                dest_filename = os.path.join(
-                    package_dir, os.path.basename(src_filename)
-                )
-                # Always copy, even if source is older than destination, to ensure
-                # that the right extensions for the current Python/platform are
-                # used.
-                copyfile(src_filename, dest_filename)
-
-    def get_outputs(self):
-        return self.all_outputs
+    # Construct PyTorch CUDA extension
+    sources = [str(path) for path in sources]
+    include_dirs = [str(path) for path in include_dirs]
+    from torch.utils.cpp_extension import CUDAExtension
+    return CUDAExtension(
+        name="transformer_engine_extensions",
+        sources=sources,
+        include_dirs=include_dirs,
+        # libraries=["transformer_engine"], ### TODO (tmoon) Debug linker errors
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": nvcc_flags,
+        },
+    )
 
 
-setup(
-    name="transformer_engine",
-    version=te_version,
-    packages=find_packages(
-        exclude=(
-            "build",
-            "csrc",
-            "include",
-            "tests",
-            "dist",
-            "docs",
-            "tests",
-            "examples",
-            "transformer_engine.egg-info",
-        )
-    ),
-    description="Transformer acceleration library",
-    ext_modules=ext_modules,
-    cmdclass={"build_ext": TEBuildExtension},
-    install_requires=dlfw_install_requires,
-    extras_require={
-        'test': ['pytest',
-                 'tensorflow_datasets'],
-        'test_pytest': ['onnxruntime',],
-    },
-    license_files=("LICENSE",),
-)
+def setup_paddle_extension() -> setuptools.Extension:
+    """Setup CUDA extension for Paddle support"""
+
+    # Source files
+    src_dir = root_path / "transformer_engine" / "paddle" / "csrc"
+    sources = [
+        src_dir / "extensions.cu",
+        src_dir / "common.cpp",
+        src_dir / "custom_ops.cu",
+    ]
+
+    # Header files
+    include_dirs = [
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine" / "paddle" / "csrc",
+    ]
+
+    # Compiler flags
+    cxx_flags = ["-O3"]
+    nvcc_flags = [
+        "-O3",
+        "-gencode",
+        "arch=compute_70,code=sm_70",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--use_fast_math",
+    ]
+
+    # Version-dependent CUDA options
+    try:
+        version = cuda_version()
+    except FileNotFoundError:
+        print("Could not determine CUDA Toolkit version")
+    else:
+        if version >= (11, 2):
+            nvcc_flags.extend(["--threads", "4"])
+        if version >= (11, 0):
+            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+        if version >= (11, 8):
+            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+
+    # Construct Paddle CUDA extension
+    sources = [str(path) for path in sources]
+    include_dirs = [str(path) for path in include_dirs]
+    from paddle.utils.cpp_extension import CUDAExtension
+    ext = CUDAExtension(
+        sources=sources,
+        include_dirs=include_dirs,
+        libraries=["transformer_engine"],
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": nvcc_flags,
+        },
+    )
+    ext.name = "transformer_engine_paddle_pd_"
+    return ext
+
+def main():
+
+    # Submodules to install
+    packages = setuptools.find_packages(
+        include=["transformer_engine", "transformer_engine.*"],
+    )
+
+    # Dependencies
+    setup_requires, install_requires, test_requires = setup_requirements()
+
+    # Extensions
+    ext_modules = [setup_common_extension()]
+    if "pytorch" in frameworks():
+        ext_modules.append(setup_pytorch_extension())
+
+    if "paddle" in frameworks():
+        ext_modules.append(setup_paddle_extension())
+
+    # Configure package
+    setuptools.setup(
+        name="transformer_engine",
+        version=te_version(),
+        packages=packages,
+        description="Transformer acceleration library",
+        ext_modules=ext_modules,
+        cmdclass={"build_ext": CMakeBuildExtension},
+        setup_requires=setup_requires,
+        install_requires=install_requires,
+        extras_require={"test": test_requires},
+        license_files=("LICENSE",),
+    )
+
+
+if __name__ == "__main__":
+    main()

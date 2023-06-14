@@ -8,13 +8,12 @@ import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental import maps
 
 from utils import assert_allclose
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
-from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
+from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available, AmaxComputeAlgo
 from transformer_engine.jax.sharding import infer_major_sharding_type
 from transformer_engine.jax.sharding import MajorShardingType
 from transformer_engine.jax.sharding import ShardingResource
@@ -63,6 +62,11 @@ class TestFP8Helper(unittest.TestCase):
         num_of_gemm = 10
         num_of_meta = FP8Helper.NUM_META_PER_GEMM * num_of_gemm
 
+        def select_amax(amaxes):
+            if FP8Helper.AMAX_COMPUTE_ALGO == AmaxComputeAlgo.MAX:
+                return jnp.max(amaxes, axis=1, keepdims=True)
+            return amaxes[:, 0:1]
+
         def get_fp8_scale(fp8_max, amax, scale):
             fp8_max = np.array(fp8_max)
             amax = np.array(amax)
@@ -77,11 +81,11 @@ class TestFP8Helper(unittest.TestCase):
         meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
         fp8_max_array = FP8Helper.generate_fp8_max_array(num_of_meta)
         fp8_amax_array1 = jax.random.uniform(key1, shape=meta_shape)
-        fp8_scale_array1 = get_fp8_scale(fp8_max_array, fp8_amax_array1[:, 0:1],
+        fp8_scale_array1 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array1),
                                          jnp.ones(meta_shape))
         fp8_scale_inv_array1 = 1 / fp8_scale_array1
         fp8_amax_array2 = jax.random.uniform(key2, shape=meta_shape)
-        fp8_scale_array2 = get_fp8_scale(fp8_max_array, fp8_amax_array2[:, 0:1],
+        fp8_scale_array2 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array2),
                                          jnp.ones(meta_shape))
         fp8_scale_inv_array2 = 1 / fp8_scale_array2
 
@@ -213,7 +217,7 @@ class TestFP8Functions(unittest.TestCase):
         # TODO (Ming Huang): Suport multi-GPUs testing. # pylint: disable=fixme
         mesh_shape = (1, 1)
         devices = np.asarray(jax.devices()[:1]).reshape(*mesh_shape)
-        with maps.Mesh(devices, ('dp', 'tp')):
+        with jax.sharding.Mesh(devices, ('dp', 'tp')):
             for sr, mst in srs:
                 with fp8_autocast(enabled=True, fp8_recipe=ds, sharding_resource=sr):
                     self.assertTrue(FP8Helper.is_fp8_enabled())
