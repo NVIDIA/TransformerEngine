@@ -10,6 +10,7 @@
 #include "fused_attn_f16_max512_seqlen.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "fused_attn_fp8.h"
+#include "../util/cuda_runtime.h"
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
