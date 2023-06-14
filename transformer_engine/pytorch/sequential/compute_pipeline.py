@@ -7,6 +7,7 @@ from .custom_serializer_holder import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
 
 class ComputePipeline:
     def __init__(self, *modules: nn.Module) -> None:
+        # Construct forward graph
         for module in modules:
             serialize_func = getattr(module, "compute_pipeline_serialize", None)
             if serialize_func is None or not callable(serialize_func):
@@ -21,6 +22,11 @@ class ComputePipeline:
                 self._graph = serialized
             else:
                 self._graph = OpGraph.combine_graphs(self._graph, serialized)
+        assert len(self._graph.out_nodes) == 1
+        self._in_grad_node = self._graph.in_()
+
+    def backward(self):
+        self._graph.create_backward_graph_(self._graph.out_nodes[0], self._in_grad_node)
 
     def __call__(self, x: Any) -> Any:
         ...

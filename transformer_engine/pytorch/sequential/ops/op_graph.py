@@ -10,14 +10,21 @@ class ParamDescriptor:
         self.name = name
 
 
+def _gen_node_id() -> int:
+    if "id" not in _gen_node_id.__dict__:
+        _gen_node_id.id = 0
+    _gen_node_id.id += 1
+    return _gen_node_id.id
+
+
 class Op:
-    ...
+    grad: "Op | None" = None
+
+    def __init__(self):
+        self.id = _gen_node_id()
 
 
 class OpInputPlaceholder(Op):
-    def __init__(self):
-        pass
-
     def replace(self, op: Op):
         self.__class__ = op.__class__
         self.__dict__ = op.__dict__
@@ -25,25 +32,52 @@ class OpInputPlaceholder(Op):
 
 class OpParam(Op):
     def __init__(self, param: ParamDescriptor):
+        super().__init__()
         self.param = param
 
 
 class OpAdd(Op):
     def __init__(self, a: Op, b: Op):
+        super().__init__()
         self.a = a
         self.b = b
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        return grad
+
+    def backward_b(self, graph: "OpGraph", grad: Op):
+        return grad
 
 
 class OpMul(Op):
     def __init__(self, a: Op, b: Op):
+        super().__init__()
         self.a = a
         self.b = b
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        bT = graph.t_(self.b)
+        return graph.mul_(bT, grad)
+
+    def backward_b(self, graph: "OpGraph", grad: Op):
+        aT = graph.t_(self.a)
+        return graph.mul_(grad, aT)
+
+
+class OpTranspose(Op):
+    def __init__(self, a: Op):
+        super().__init__()
+        self.a = a
+
+    def backward_a(self, graph: "OpGraph", grad: Op):
+        return graph.t_(grad)
 
 
 class OpFLayerNorm(Op):
     def __init__(
         self, a: Op, gamma: Op, beta: Op, eps: float, zero_centered_gamma: bool
     ):
+        super().__init__()
         self.a = a
         self.gamma = gamma
         self.beta = beta
@@ -53,6 +87,7 @@ class OpFLayerNorm(Op):
 
 class OpFGelu(Op):
     def __init__(self, a: Op):
+        super().__init__()
         self.a = a
 
 
@@ -106,6 +141,27 @@ class OpGraph:
         """Adds a gelu node to the graph. Returns the node with the result."""
         self.nodes.append(OpFGelu(a))
         return self.nodes[-1]
+
+    def t_(self, a: Op) -> Op:
+        """Adds a transpose node to the graph. Returns the node with the result."""
+        self.nodes.append(OpTranspose(a))
+        return self.nodes[-1]
+
+    def create_backward_graph_(self, node: Op, grad: Op):
+        """Creates the graph of the backward pass, assuming that grad is the gradient of the loss with respect to the node."""
+        assert node in self.out_nodes
+        assert grad in self.in_nodes
+
+        node.grad = grad
+        bfs = [node]
+        while len(bfs) > 0:
+            cur = bfs.pop()
+            params = cur.__dict__.items()
+            for name, param in params:
+                if isinstance(param, Op) and name != "grad":
+                    param_grad_func = getattr(cur, f"backward_{name}")
+                    param.grad = param_grad_func(self, cur.grad)
+                    bfs.append(param)
 
     @staticmethod
     def combine_graphs(a: "OpGraph", b: "OpGraph") -> "OpGraph":
