@@ -94,6 +94,7 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 def _disable_wgrads(block):
     for p in block.parameters():
@@ -368,7 +369,8 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad, skip_dgrad):
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
-def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad):
+@pytest.mark.parametrize("activation", all_activations)
+def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad, activation):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -386,6 +388,7 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             zero_centered_gamma=zero_centered_gamma,
+            activation=activation,
         )
         .to(dtype=dtype)
         .cuda()
@@ -400,7 +403,8 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, bias):
+@pytest.mark.parametrize("activation", all_activations)
+def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, bias, activation):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -425,6 +429,7 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamm
             output_layernorm=False,
             zero_centered_gamma=zero_centered_gamma,
             bias=bias,
+            activation=activation,
         )
         .to(dtype=dtype)
         .cuda()
