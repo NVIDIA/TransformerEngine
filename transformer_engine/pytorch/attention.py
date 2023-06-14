@@ -15,7 +15,7 @@ import torch
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.cpp_extensions import (
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,

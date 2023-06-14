@@ -317,8 +317,10 @@ from transformer_engine.pytorch import fp8_autocast
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule, _prepare_backward
 from transformer_engine.common import recipe
 from typing import Union, Dict, Any, Tuple, List
-from transformer_engine.pytorch.cpp_extensions import fused_attn_fwd_qkvpacked, fused_attn_bwd_qkvpacked
-from transformer_engine.pytorch.cpp_extensions import FusedAttnBackend
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+    fused_attn_fwd_qkvpacked,
+    fused_attn_bwd_qkvpacked,
+    FusedAttnBackend)
 
 _CUBLASLT_WORKSPACE_SIZE_BYTES = 33_554_432  # 32MiB
 _2X_ACC_FPROP = False
@@ -330,8 +332,8 @@ META_O    = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO   = tex.FP8BwdTensors.GRAD_INPUT2
 META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
 
-META_S    = 7 #tex.FP8FwdTensors.GEMM2_OUTPUT
-META_DS   = 5 #tex.FP8BwdTensors.GRAD_INPUT1
+META_S    = 7
+META_DS   = 5
 
 class _dpa_fp8(torch.autograd.Function):
     @staticmethod
