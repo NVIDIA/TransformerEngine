@@ -169,13 +169,13 @@ def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 @_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
 @_beartype.beartype
-def onnx_swiglu(g: jit_utils.GraphContext, input, dim):
+def onnx_swiglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for swiglu"""
-    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
     if dim_size is not None:
         assert dim_size % 2 == 0
 
-    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    first, second = g.op("Split", inp, axis_i=dim, outputs=2)
     return g.op("Mul", g.op("Sigmoid", first), second)
 
 
@@ -193,13 +193,13 @@ def onnx_fp8_swiglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 @_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
 @_beartype.beartype
-def onnx_reglu(g: jit_utils.GraphContext, input, dim):
+def onnx_reglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for reglu"""
-    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
     if dim_size is not None:
         assert dim_size % 2 == 0
 
-    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    first, second = g.op("Split", inp, axis_i=dim, outputs=2)
     return g.op("Mul", g.op("Relu", first), second)
 
 
@@ -217,13 +217,13 @@ def onnx_fp8_reglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 @_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
 @_beartype.beartype
-def onnx_geglu(g: jit_utils.GraphContext, input, dim):
+def onnx_geglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for geglu"""
-    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
     if dim_size is not None:
         assert dim_size % 2 == 0
 
-    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    first, second = g.op("Split", inp, axis_i=dim, outputs=2)
     first_gelu = torch.onnx.symbolic_opset9.gelu(g, first, "tanh")
     return g.op("Mul", first_gelu, second)
 
