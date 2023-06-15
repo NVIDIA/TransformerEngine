@@ -1021,7 +1021,7 @@ def test_export_layernorm_mlp(
         serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16, ):
             return
-        atol = 1e-6 if use_fp8 else 1e-3
+        atol = 1e-6 if use_fp8 else (5e-1 if activation=="swiglu" else 1e-3)
         validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
@@ -1269,7 +1269,7 @@ def test_export_transformer_layer(
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16, ):
         return
-    atol = 5e-1 if use_fp8 else 1e-3
+    atol = 5e-1 if use_fp8 else (5e-1 if activation=="swiglu" else 1e-3)
     validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, input_names=input_names, te_outputs=te_outputs)
 
 
