@@ -45,6 +45,38 @@ def _get_onnx_export_causal_mask(
     return derived_mask
 
 
+def get_TensorProtoDataType(t):
+    """Return the _C_onnx.TensorProtoDataType of the input tensor"""
+    try:
+        return {
+            "Float": _C_onnx.TensorProtoDataType.FLOAT,
+            "Half": _C_onnx.TensorProtoDataType.FLOAT16,
+            "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
+        }[t.type().scalarType()]
+    except KeyError as e:
+        raise TypeError(f"Onnx export for dtype {t.type().scalarType()} not supported.") from e
+
+
+def fp32_compute(onnx_symbolic_fn):
+    """A decorator that wraps an ONNX symoblic function with FP32 compute operators."""
+
+    def compute_in_fp32(g: torch.Graph, inp: torch._C.Value, scale: float, *args, **kwargs):
+        """Wrap subgraph with casts to/from FP32 so that its precision is FP32.
+
+        If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`;
+        then cast subgraphs's output back to `inp` data type.
+        """
+        inp_dtype = get_TensorProtoDataType(inp)
+        is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
+        if not is_fp32:
+            inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
+        sym_out = onnx_symbolic_fn(g, inp, scale, *args, **kwargs)
+        if not is_fp32:
+            sym_out = g.op("Cast", sym_out, to_i=inp_dtype)
+        return sym_out
+    return compute_in_fp32
+
+
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following three operations in sequence
@@ -77,6 +109,7 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         return input_grads, None
 
     @staticmethod
+    @fp32_compute
     def symbolic(g: torch.Graph, inputs: torch._C.Value, scale: float) -> torch._C.Value:
         """ScaledUpperTriangMaskedSoftmax symbolic method"""
         def triangular_mask():
@@ -88,8 +121,6 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
             return mask
 
         # Captures the logic of function scaled_upper_triang_masked_softmax_warp_forward
-        if inputs.type().scalarType() == "BFloat16":
-            inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         mask = triangular_mask()
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
         inv_mask = g.op("Sub", one, mask)
@@ -102,8 +133,6 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         masked_scaled = g.op("Mul", inv_mask, scaled)
         masked = g.op("Add", masked_scaled, softmax_mask)
         out = g.op("Softmax", masked)
-        if inputs.type().scalarType() == "BFloat16":
-            out = g.op("Cast", out, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         return out
 
 
@@ -139,6 +168,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         return input_grads, None, None
 
     @staticmethod
+    @fp32_compute
     def symbolic(
         g: torch.Graph,
         inputs: torch._C.Value,
@@ -151,8 +181,6 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         #   masked_scaled = (1 - mask)*(input*scale)
         #   softmax_mask = mask * -10000
         #   output = softmax(masked_scaled + softmax_mask)
-        if inputs.type().scalarType() == "BFloat16":
-            inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
         scaled = g.op("Mul", inputs, scale_input)
         one = g.op("Constant", value_t=torch.tensor(1, dtype=torch.int64))
@@ -163,8 +191,6 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         masked_scaled = g.op("Mul", inv_mask, scaled)
         masked = g.op("Add", masked_scaled, softmax_mask)
         out = g.op("Softmax", masked)
-        if inputs.type().scalarType() == "BFloat16":
-            out = g.op("Cast", out, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         return out
 
 
@@ -197,15 +223,12 @@ class ScaledSoftmax(torch.autograd.Function):
         return input_grads, None, None
 
     @staticmethod
+    @fp32_compute
     def symbolic(g: torch.Graph, inputs: torch._C.Value, scale: float) -> torch._C.Value:
         """ScaledSoftmax symbolic method"""
-        if inputs.type().scalarType() == "BFloat16":
-            inputs = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         scale_input = g.op("Constant", value_t=torch.tensor(scale, dtype=torch.float16))
         scaled = g.op("Mul", inputs, scale_input)
         out = g.op("Softmax", scaled)
-        if inputs.type().scalarType() == "BFloat16":
-            out = g.op("Cast", out, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
         return out
 
 

@@ -676,7 +676,7 @@ def test_export_layernorm(
     serialize_inputs_outputs(fname, inp, te_outputs)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(
-        fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
+            fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
 
 
 @skip_FP8
@@ -689,10 +689,6 @@ def test_export_layernorm(
 # Softmax kernel only supports FP16 or BF16!
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16, "fake-torch.bfloat16"])
 def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision):
-    fake_bf16_io = precision == "fake-torch.bfloat16"
-    # reset precision to torch.bfloat16 after capturing fake BF16 mode
-    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
-
     class Test_Softmax(nn.Module):
         def __init__(self, softmax_fn, fake_bf16_io, mask_inp=False):
             super().__init__()
@@ -709,6 +705,9 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                 )
 
         def forward(self, inp, mask):
+            if self.fake_bf16_io:
+                inp = inp.type(torch.bfloat16)
+
             if self.fused_scaled_softmax:
                 ret = self.fused_scaled_softmax(inp, mask, self.scale)
             else:
@@ -717,12 +716,14 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                 else:
                     ret = self.softmax_fn.apply(inp, self.scale)
             if self.fake_bf16_io:
-                ret = ret.type(torch.float16)
+                ret = ret.type(torch.float32)
             return ret
 
+    fake_bf16_io = precision == "fake-torch.bfloat16"
+    precision = torch.bfloat16 if fake_bf16_io else precision
+
     # Set dimensions (these are arbitrary).
-    in_features = 64
-    hidden_size = 256
+    in_features, hidden_size = 64, 256
     mask = None
     input_names = ["input", "mask"]
     inp_shape = [hidden_size, in_features, in_features, in_features]
@@ -742,17 +743,18 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     elif softmax_fn == te.softmax.FusedScaleMaskSoftmax:
         kernel_str = "TorchSoftmax"
         model = Test_Softmax(softmax_fn, fake_bf16_io)
-    input_tensor = torch.randn(*inp_shape, device="cuda")
-    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
-    input_tensor = input_tensor.half()
+
+    input_tensor = torch.randn(*inp_shape, device="cuda", dtype=torch.float32 if fake_bf16_io else precision)
     high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"{kernel_str}{high_prec_str}.onnx"
     inp = (input_tensor, mask)
+
     do_export(model, inp, fname, input_names=input_names)
     te_outputs = te_infer(model, inp, is_fp8=False)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
-        validate_result(fname, inp, model, atol=1e-3, input_names=input_names, te_outputs=te_outputs)
+        atol = 5e-2 if fake_bf16_io else 1e-3
+        validate_result(fname, inp, model, atol=atol, input_names=input_names, te_outputs=te_outputs)
 
 
 # Test dynamically generated softmax mask.
@@ -762,13 +764,13 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
 def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     fake_bf16_io = precision == "fake-torch.bfloat16"
     # reset precision to torch.bfloat16 after capturing fake BF16 mode
-    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
+    precision = torch.bfloat16 if fake_bf16_io else precision
 
     class Test_Softmax(nn.Module):
         def __init__(self, use_onnx_mask_fn: bool, fake_bf16_io: bool):
             super().__init__()
-            self.scale = 1 # arbitrary value
-            self.fake_bf16_io = fake_bf16_io
+            self.scale=1 # arbitrary value
+            self.fake_bf16_io=fake_bf16_io
             # Use NVTE_MASKED_SOFTMAX_FUSION to force TE to use forward_torch_softmax
             # even when is_in_onnx_export_mode()==False.
             os.environ["NVTE_MASKED_SOFTMAX_FUSION"] = "0"
@@ -779,9 +781,11 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
             )
 
         def forward(self, inp, mask):
+            if self.fake_bf16_io:
+                inp = inp.type(torch.bfloat16)
             ret = self.fused_scaled_softmax(inp, mask, self.scale)
             if self.fake_bf16_io:
-                ret = ret.type(torch.float16)
+                ret = ret.type(torch.float)
             return ret
 
     # Set dimensions (these are arbitrary).
@@ -789,9 +793,8 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     hidden_size = 256
     mask = None
     inp_shape = [hidden_size, in_features, in_features, in_features]
-    input_tensor = torch.randn(*inp_shape, device="cuda")
-    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
-    input_tensor = input_tensor.half()
+    input_tensor = torch.randn(
+            *inp_shape, device="cuda", dtype=torch.float if fake_bf16_io else precision)
     inp = (input_tensor, mask)
     high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
 
@@ -814,7 +817,10 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     do_export(model, inp, fname, input_names=input_names)
     serialize_inputs_outputs(fname, inp, te_outputs=te_outputs_default_mask, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
-        validate_result(fname, inp, model_onnx_mask, atol=1e-3, input_names=input_names, te_outputs=te_outputs_default_mask)
+        atol = 1e-2 if fake_bf16_io else 1e-3
+        validate_result(
+                fname, inp, model_onnx_mask, atol=atol,
+                input_names=input_names, te_outputs=te_outputs_default_mask)
 
 
 @pytest.mark.parametrize("scale_factor", [1])
