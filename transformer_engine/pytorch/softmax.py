@@ -11,6 +11,8 @@ import torch._C._onnx as _C_onnx
 from torch.onnx import _type_utils
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.te_onnx_extensions import get_TensorProtoDataType, compute_in_fp32
+
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
@@ -45,36 +47,11 @@ def _get_onnx_export_causal_mask(
     return derived_mask
 
 
-def get_TensorProtoDataType(t):
-    """Return the _C_onnx.TensorProtoDataType of the input tensor"""
-    try:
-        return {
-            "Float": _C_onnx.TensorProtoDataType.FLOAT,
-            "Half": _C_onnx.TensorProtoDataType.FLOAT16,
-            "BFloat16": _C_onnx.TensorProtoDataType.BFLOAT16,
-        }[t.type().scalarType()]
-    except KeyError as e:
-        raise TypeError(f"Onnx export for dtype {t.type().scalarType()} not supported.") from e
-
-
 def fp32_compute(onnx_symbolic_fn):
     """A decorator that wraps an ONNX symoblic function with FP32 compute operators."""
-
-    def compute_in_fp32(g: torch.Graph, inp: torch._C.Value, scale: float, *args, **kwargs):
-        """Wrap subgraph with casts to/from FP32 so that its precision is FP32.
-
-        If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`;
-        then cast subgraphs's output back to `inp` data type.
-        """
-        inp_dtype = get_TensorProtoDataType(inp)
-        is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
-        if not is_fp32:
-            inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
-        sym_out = onnx_symbolic_fn(g, inp, scale, *args, **kwargs)
-        if not is_fp32:
-            sym_out = g.op("Cast", sym_out, to_i=inp_dtype)
-        return sym_out
-    return compute_in_fp32
+    def wrapper(g: torch.Graph, inp: torch._C.Value, scale: float, *args, **kwargs):
+        return compute_in_fp32(g, inp, onnx_symbolic_fn, scale, *args, **kwargs)
+    return wrapper
 
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):

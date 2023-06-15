@@ -103,18 +103,18 @@ def dequantize(g, inputs, scale_inv, fp8_tensor, otype):
     return out
 
 
-def compute_in_fp32(g, inp, subgraph, cast_outp):
+def compute_in_fp32(g, inp, subgraph, *args, **kwargs):
     """Wrap subgraph with casts to/from FP32 so that its precision is FP32.
 
-    If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`.
-    Then, if `cast_output` is true, cast subgraphs's output back to `inp` data type.
+    If `inp` data type is not FP32, add a cast of `inp` to FP32 and feed that into `subgraph`;
+    then cast subgraphs's output back to `inp` data type.
     """
     inp_dtype = get_TensorProtoDataType(inp)
     is_fp32 = inp_dtype == _type_utils.JitScalarType.FLOAT
     if not is_fp32:
         inp = g.op("Cast", inp, to_i=_C_onnx.TensorProtoDataType.FLOAT)
-    sg_out = subgraph(inp)
-    if not is_fp32 and cast_outp:
+    sg_out = subgraph(g, inp, *args, **kwargs)
+    if not is_fp32:
         sg_out = g.op("Cast", sg_out, to_i=inp_dtype)
     return sg_out
 
@@ -137,10 +137,9 @@ def onnx_cast_from_fp8(g, inputs, scale_inv, fp8_tensor, itype, otype):
 def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_gelu"""
     # pylint: disable=unused-argument
-    wrapped_gelu = lambda inps: torch.onnx.symbolic_opset9.gelu(g, inps, "tanh")
     # TE computes GELU using float32 precision so wrap the GELU subgraph with
     # conversion to/from float32.
-    gelu = compute_in_fp32(g, inputs, wrapped_gelu, cast_outp=True)
+    gelu = compute_in_fp32(g, inputs, torch.onnx.symbolic_opset9.gelu, "tanh")
     out = quantize(g, gelu, scale_inv, fp8_tensor)
     return out
 
@@ -193,10 +192,9 @@ def onnx_te_gemm(
         output = g.op("Gemm", inputs, weight, transA_i=trans_input, transB_i=trans_weight)
     if not bias_empty:
         if not pre_gelu_out_empty:
-            wrapped_gelu = lambda inps: torch.onnx.symbolic_opset9.gelu(g, inps, "tanh")
             # TE computes GELU using float32 precision so wrap the GELU subgraph with
             # conversion to/from float32.
-            output = compute_in_fp32(g, output, wrapped_gelu, cast_outp=True)
+            output = compute_in_fp32(g, output, torch.onnx.symbolic_opset9.gelu, "tanh")
     else:
         if is_fp16:
             output = g.op("Cast", output, to_i=_C_onnx.TensorProtoDataType.FLOAT16)
