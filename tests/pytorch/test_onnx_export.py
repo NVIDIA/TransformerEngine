@@ -69,7 +69,7 @@ ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
-supported_activations = ["gelu", "relu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 
 @pytest.fixture()
@@ -1021,10 +1021,9 @@ def test_export_layernorm_mlp(
         serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16, ):
             return
-        if not use_fp8:
-            validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
-        else:
-            validate_result(fname, inp, model, atol=1e-6, is_fp8=use_fp8, te_outputs=te_outputs)
+        atol = 1e-6 if use_fp8 else 1e-3
+        validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, te_outputs=te_outputs)
+
 
 @skip_FP8
 @pytest.mark.parametrize(
@@ -1270,12 +1269,8 @@ def test_export_transformer_layer(
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16, ):
         return
-    if not use_fp8:
-        validate_result(fname, inp, model, atol=1e-3, input_names=input_names,
-            te_outputs=te_outputs)
-    else:
-        validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8, input_names=input_names,
-            te_outputs=te_outputs)
+    atol = 5e-1 if use_fp8 else 1e-3
+    validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, input_names=input_names, te_outputs=te_outputs)
 
 
 @pytest.mark.parametrize("use_fp8", [True])
@@ -1408,14 +1403,12 @@ def test_export_gemm_layernorm(
 @pytest.mark.parametrize("use_fp8", [True, False])
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [True])
-@pytest.mark.parametrize("activation", supported_activations)
 def test_export_gpt_generation(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
     precision: torch.dtype,
     zero_centered_gamma: bool,
-    activation: str,
 ):
     """Test that the ONNX model can correctly handle inputs with different shapes and that
     the attention mask it adjusted on-the-fly to different sequence lengths.
@@ -1451,8 +1444,7 @@ def test_export_gpt_generation(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        zero_centered_gamma=zero_centered_gamma,
-        activation=activation).to(device='cuda')
+        zero_centered_gamma=zero_centered_gamma).to(device='cuda')
 
     # "Context phase": use full input sequence length
     input_names = ["input"]

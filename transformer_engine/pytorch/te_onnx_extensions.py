@@ -24,13 +24,22 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
 """
 
 
+import functools
+
 import torch
 from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 import torch._C._onnx as _C_onnx
+
+# Monkey-patch graph manipulation methods on Graph, used for the ONNX symbolics
+from torch.onnx._internal import _beartype, jit_utils, registration
+
 import transformer_engine_extensions as tex
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
+
+
+_onnx_symbolic = functools.partial(registration.onnx_symbolic, opset=9)
 
 
 # Custom ops spec version
@@ -157,6 +166,79 @@ def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return relu
 
 
+@_onnx_symbolic("aten::glu")
+@symbolic_helper.parse_args("v", "i")
+@_beartype.beartype
+def onnx_swiglu(g: jit_utils.GraphContext, input, dim):
+    """ONNX graph for swiglu"""
+    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    if dim_size is not None:
+        assert dim_size % 2 == 0
+
+    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    return g.op("Mul", g.op("Sigmoid", first), second)
+
+
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
+def onnx_fp8_swiglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for fp8_swiglu"""
+    # pylint: disable=unused-argument
+    wrapped_swiglu = lambda inps: onnx_swiglu(g, inps, 1)
+    swiglu = compute_in_fp32(g, inputs, wrapped_swiglu, cast_outp=True)
+    if scale_inv:
+        swiglu = quantize(g, swiglu, scale_inv, fp8_tensor)
+    return swiglu
+
+
+@_onnx_symbolic("aten::glu")
+@symbolic_helper.parse_args("v", "i")
+@_beartype.beartype
+def onnx_reglu(g: jit_utils.GraphContext, input, dim):
+    """ONNX graph for reglu"""
+    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    if dim_size is not None:
+        assert dim_size % 2 == 0
+
+    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    return g.op("Mul", g.op("Relu", first), second)
+
+
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
+def onnx_fp8_reglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for fp8_reglu"""
+    # pylint: disable=unused-argument
+    wrapped_reglu = lambda inps: onnx_reglu(g, inps, 1)
+    reglu = compute_in_fp32(g, inputs, wrapped_reglu, cast_outp=True)
+    if scale_inv:
+        reglu = quantize(g, reglu, scale_inv, fp8_tensor)
+    return reglu
+
+
+@_onnx_symbolic("aten::glu")
+@symbolic_helper.parse_args("v", "i")
+@_beartype.beartype
+def onnx_geglu(g: jit_utils.GraphContext, input, dim):
+    """ONNX graph for geglu"""
+    dim_size = symbolic_helper._get_tensor_dim_size(input, dim)
+    if dim_size is not None:
+        assert dim_size % 2 == 0
+
+    first, second = g.op("Split", input, axis_i=dim, outputs=2)
+    first_gelu = torch.onnx.symbolic_opset9.gelu(g, first, "tanh")
+    return g.op("Mul", first_gelu, second)
+
+
+@symbolic_helper.parse_args("v", "v", "v", "fs", "i", "i")
+def onnx_fp8_geglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
+    """ONNX graph for fp8_geglu"""
+    # pylint: disable=unused-argument
+    wrapped_geglu = lambda inps: onnx_geglu(g, inps, 1)
+    geglu = compute_in_fp32(g, inputs, wrapped_geglu, cast_outp=True)
+    if scale_inv:
+        geglu = quantize(g, geglu, scale_inv, fp8_tensor)
+    return geglu
+
+
 @symbolic_helper.parse_args("v", "fs", "i", "i", "i",
                             "v", "fs", "i", "i", "i",
                             "v", "fs", "i", "fs", "v", "i", "v", "i",
@@ -268,6 +350,9 @@ register_custom_op_symbolic('tex_ts::cast_to_fp8_ts', onnx_cast_to_fp8, VER)
 register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
 register_custom_op_symbolic('tex_ts::gelu_ts', onnx_fp8_gelu, VER)
 register_custom_op_symbolic('tex_ts::relu_ts', onnx_fp8_relu, VER)
+register_custom_op_symbolic('tex_ts::reglu_ts', onnx_fp8_reglu, VER)
+register_custom_op_symbolic('tex_ts::geglu_ts', onnx_fp8_geglu, VER)
+register_custom_op_symbolic('tex_ts::swiglu_ts', onnx_fp8_swiglu, VER)
 register_custom_op_symbolic('tex_ts::te_gemm_ts', onnx_te_gemm, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_fp8_inf_ts', onnx_layernorm_fwd_fp8, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_inf_ts', onnx_layernorm_fwd, VER)
