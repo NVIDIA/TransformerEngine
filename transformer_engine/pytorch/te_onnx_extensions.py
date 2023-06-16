@@ -153,8 +153,7 @@ def onnx_fp8_gelu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
 def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_relu"""
     # pylint: disable=unused-argument
-    wrapped_relu = lambda inps: torch.onnx.symbolic_opset9.relu(g, inps)
-    relu = compute_in_fp32(g, inputs, wrapped_relu, cast_outp=True)
+    relu = compute_in_fp32(g, inputs, torch.onnx.symbolic_opset9.relu)
     if scale_inv:
         relu = quantize(g, relu, scale_inv, fp8_tensor)
     return relu
@@ -175,8 +174,7 @@ def onnx_swiglu(g: jit_utils.GraphContext, inp, dim):
 def onnx_fp8_swiglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_swiglu"""
     # pylint: disable=unused-argument
-    wrapped_swiglu = lambda inps: onnx_swiglu(g, inps, 1)
-    swiglu = compute_in_fp32(g, inputs, wrapped_swiglu, cast_outp=True)
+    swiglu = compute_in_fp32(g, inputs, onnx_swiglu, 1)
     if scale_inv:
         swiglu = quantize(g, swiglu, scale_inv, fp8_tensor)
     return swiglu
@@ -197,8 +195,7 @@ def onnx_reglu(g: jit_utils.GraphContext, inp, dim):
 def onnx_fp8_reglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_reglu"""
     # pylint: disable=unused-argument
-    wrapped_reglu = lambda inps: onnx_reglu(g, inps, 1)
-    reglu = compute_in_fp32(g, inputs, wrapped_reglu, cast_outp=True)
+    reglu = compute_in_fp32(g, inputs, onnx_reglu, 1)
     if scale_inv:
         reglu = quantize(g, reglu, scale_inv, fp8_tensor)
     return reglu
@@ -221,7 +218,7 @@ def onnx_fp8_geglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_geglu"""
     # pylint: disable=unused-argument
     wrapped_geglu = lambda inps: onnx_geglu(g, inps, 1)
-    geglu = compute_in_fp32(g, inputs, wrapped_geglu, cast_outp=True)
+    geglu = compute_in_fp32(g, inputs, onnx_geglu, 1)
     if scale_inv:
         geglu = quantize(g, geglu, scale_inv, fp8_tensor)
     return geglu
