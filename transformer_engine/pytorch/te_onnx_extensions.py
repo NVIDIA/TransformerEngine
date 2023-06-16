@@ -23,23 +23,18 @@ the following error when accessing a sepcific scale element (e.g. `scale_inv[fp8
     TypeError: 'torch._C.Value' object is not subscriptable
 """
 
-
-import functools
-
 import torch
 from torch.onnx import symbolic_helper, register_custom_op_symbolic, _type_utils
 import torch._C._onnx as _C_onnx
 
 # Monkey-patch graph manipulation methods on Graph, used for the ONNX symbolics
-from torch.onnx._internal import _beartype, jit_utils, registration
+from torch.onnx._internal import jit_utils
 
 import transformer_engine_extensions as tex
 
+
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []
-
-
-_onnx_symbolic = functools.partial(registration.onnx_symbolic, opset=9)
 
 
 # Custom ops spec version
@@ -166,9 +161,7 @@ def onnx_fp8_relu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return relu
 
 
-@_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
-@_beartype.beartype
 def onnx_swiglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for swiglu"""
     dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
@@ -190,9 +183,7 @@ def onnx_fp8_swiglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return swiglu
 
 
-@_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
-@_beartype.beartype
 def onnx_reglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for reglu"""
     dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
@@ -214,9 +205,7 @@ def onnx_fp8_reglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     return reglu
 
 
-@_onnx_symbolic("aten::glu")
 @symbolic_helper.parse_args("v", "i")
-@_beartype.beartype
 def onnx_geglu(g: jit_utils.GraphContext, inp, dim):
     """ONNX graph for geglu"""
     dim_size = symbolic_helper._get_tensor_dim_size(inp, dim)
