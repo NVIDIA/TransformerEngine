@@ -712,7 +712,7 @@ cast_transpose_dbias_dgelu_kernel(const Param param,
     for (unsigned int j = 0; j < nvec_out; ++j) {
 #pragma unroll
       for (unsigned int k = 0; k < nvec_in; ++k) {
-        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]) *
+        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {}) *
                                      CType(in[current_in ^ 1][j].data.elt[k]);
       }
     }
@@ -895,7 +895,7 @@ cast_transpose_dbias_dgelu_kernel_notaligned(const Param param,
     for (unsigned int j = 0; j < nvec_out; ++j) {
 #pragma unroll
       for (unsigned int k = 0; k < nvec_in; ++k) {
-        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]) *
+        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {}) *
                                      CType(in[current_in ^ 1][j].data.elt[k]);
       }
     }
@@ -1067,11 +1067,11 @@ dgeglu_cast_transpose_kernel(const IType * const input,
     for (unsigned int j = 0; j < nvec_out; ++j) {
 #pragma unroll
       for (unsigned int k = 0; k < nvec_in; ++k) {
-        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]) *
+        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {}) *
                                      CType(in[current_in ^ 1][j].data.elt[k]) *
                                      CType(gate_in[current_in ^ 1][j].data.elt[k]);
         after_dgate[j].data.elt[k] = CType(in[current_in ^ 1][j].data.elt[k]) *
-                                     gelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]);
+                                     gelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {});
       }
     }
     OVec out_trans_0[nvec_in];  // NOLINT(*)
@@ -1264,11 +1264,11 @@ dgeglu_cast_transpose_kernel_notaligned(const IType * const input,
     for (unsigned int j = 0; j < nvec_out; ++j) {
 #pragma unroll
       for (unsigned int k = 0; k < nvec_in; ++k) {
-        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]) *
+        after_dgelu[j].data.elt[k] = dgelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {}) *
                                      CType(in[current_in ^ 1][j].data.elt[k]) *
                                      CType(gate_in[current_in ^ 1][j].data.elt[k]);
         after_dgate[j].data.elt[k] = CType(in[current_in ^ 1][j].data.elt[k]) *
-                                     gelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k]);
+                                     gelu<CType>(gelu_in[current_in ^ 1][j].data.elt[k], {});
       }
     }
     OVec out_trans_0[nvec_in];  // NOLINT(*)

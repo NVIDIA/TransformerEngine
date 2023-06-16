@@ -11,7 +11,7 @@ import torch._C._onnx as _C_onnx
 from torch.onnx import _type_utils
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.te_onnx_extensions import get_TensorProtoDataType, compute_in_fp32
+from transformer_engine.pytorch.te_onnx_extensions import compute_in_fp32
 
 
 THREADS_PER_WARP = 32
