@@ -217,7 +217,6 @@ def onnx_geglu(g: jit_utils.GraphContext, inp, dim):
 def onnx_fp8_geglu(g, inputs, scale, amax, scale_inv, fp8_tensor, otype):
     """ONNX graph for fp8_geglu"""
     # pylint: disable=unused-argument
-    wrapped_geglu = lambda inps: onnx_geglu(g, inps, 1)
     geglu = compute_in_fp32(g, inputs, onnx_geglu, 1)
     if scale_inv:
         geglu = quantize(g, geglu, scale_inv, fp8_tensor)
