@@ -18,6 +18,7 @@ from .te_onnx_extensions import (
     onnx_cast_to_fp8,
     onnx_cast_from_fp8,
     onnx_fp8_gelu,
+    onnx_fp8_relu,
     onnx_te_gemm,
     onnx_layernorm_fwd_fp8,
     onnx_layernorm_fwd,
