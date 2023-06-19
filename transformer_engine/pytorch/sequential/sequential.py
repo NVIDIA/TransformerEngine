@@ -38,7 +38,7 @@ class Sequential(nn.Module):
                 self.append(submodule, name=f"{name}_{submodule_name}")
         else:
             self.add_module(name, module)
-            module._compute_pipeline_name = name
+            setattr(module, "_compute_pipeline_name", name)
         self._op_cache = None
 
     def __len__(self):

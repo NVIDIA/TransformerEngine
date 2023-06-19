@@ -1,4 +1,9 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
 from .base import Op
+
+if TYPE_CHECKING:
+    from .op_graph import OpGraph
 
 
 class OpMul(Op):
@@ -7,10 +12,10 @@ class OpMul(Op):
         self.a = a
         self.b = b
 
-    def backward_a(self, graph: "OpGraph", grad: Op):
+    def backward_a(self, graph: OpGraph, grad: Op):
         bT = graph.t_(self.b)
         return graph.mul_(bT, grad)
 
-    def backward_b(self, graph: "OpGraph", grad: Op):
+    def backward_b(self, graph: OpGraph, grad: Op):
         aT = graph.t_(self.a)
         return graph.mul_(aT, grad)

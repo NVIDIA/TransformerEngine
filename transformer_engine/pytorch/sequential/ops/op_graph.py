@@ -25,7 +25,7 @@ class OpParam(Op):
 class OpGraph:
     trainable_parameters: list[ParamDescriptor]
     nodes: list[Op]
-    in_nodes: list[Op]
+    in_nodes: list[OpInputPlaceholder]
     out_nodes: list[Op]
 
     def __init__(self):

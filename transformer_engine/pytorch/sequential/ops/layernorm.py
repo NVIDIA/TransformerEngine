@@ -1,4 +1,9 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
 from .base import Op
+
+if TYPE_CHECKING:
+    from .op_graph import OpGraph
 
 
 class OpFLayerNormCore(Op):
@@ -7,7 +12,7 @@ class OpFLayerNormCore(Op):
         self.a = a
         self.eps = eps
 
-    def backward_a(self, graph: "OpGraph", grad: Op):
+    def backward_a(self, graph: OpGraph, grad: Op):
         df = graph.df_layernorm_core_(self.a, self.eps)
         return graph.mul_(df, grad)
 

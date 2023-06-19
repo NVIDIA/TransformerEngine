@@ -1,8 +1,8 @@
 def _gen_node_id() -> int:
     if "id" not in _gen_node_id.__dict__:
-        _gen_node_id.id = 0
-    _gen_node_id.id += 1
-    return _gen_node_id.id
+        _gen_node_id.id = 0  # type: ignore
+    _gen_node_id.id += 1  # type: ignore
+    return _gen_node_id.id  # type: ignore
 
 
 class Op:

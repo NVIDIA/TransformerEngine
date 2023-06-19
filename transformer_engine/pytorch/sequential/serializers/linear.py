@@ -6,16 +6,17 @@ from ..ops import OpGraph
 def _serializer(module: Linear):
     module_name = module._compute_pipeline_name
     graph = OpGraph()
+
     in_ = graph.in_()
     weights = graph.param_(
         module.in_features * module.out_features, f"{module_name}.weight"
     )
+    y = graph.mul_(in_, weights)
+
     if module.use_bias:
         bias = graph.param_(module.out_features, f"{module_name}.bias")
-
-    y = graph.mul_(in_, weights)
-    if module.use_bias:
         y = graph.add_(y, bias)
+
     graph.out_(y)
     return graph
 
