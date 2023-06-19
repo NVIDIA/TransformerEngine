@@ -4,7 +4,7 @@ from ..ops import OpGraph
 
 
 def _serializer(module: Linear):
-    module_name = module._compute_pipeline_name
+    module_name: str = getattr(module, "_compute_pipeline_name")
     graph = OpGraph()
 
     in_ = graph.in_()
