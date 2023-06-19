@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 
 def _serializer(module: LayerNormLinear):
-    module_name = module._compute_pipeline_name
+    module_name: str = getattr(module, "_compute_pipeline_name")
 
     layernorm_impostor = SimpleNamespace()
     layernorm_impostor.weight = SimpleNamespace()

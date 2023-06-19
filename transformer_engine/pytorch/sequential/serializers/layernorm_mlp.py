@@ -15,7 +15,7 @@ def _gelu_graph():
 def _serializer(module: LayerNormMLP):
     hidden_size = module.layer_norm_weight.shape[0]
     ffn_hidden_size = module.size_per_partition * module.tp_size
-    module_name = module._compute_pipeline_name
+    module_name: str = getattr(module, "_compute_pipeline_name")
 
     layernorm_impostor = SimpleNamespace()
     layernorm_impostor.weight = SimpleNamespace()

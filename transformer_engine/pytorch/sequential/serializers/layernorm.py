@@ -4,7 +4,7 @@ from ..ops import OpGraph
 
 
 def _serializer(module: LayerNorm):
-    module_name = module._compute_pipeline_name
+    module_name: str = getattr(module, "_compute_pipeline_name")
     graph = OpGraph()
     in_ = graph.in_()
     hidden_size = module.weight.shape[0]
