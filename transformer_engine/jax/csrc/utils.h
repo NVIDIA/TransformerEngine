@@ -93,6 +93,23 @@ class cudaDevicePropertiesManager {
     cudaDeviceProp prop_;
 };
 
+class FusedAttnOffsetManager {
+ public:
+    static FusedAttnOffsetManager &Instance() {
+        static thread_local FusedAttnOffsetManager instance;
+        return instance;
+    }
+
+    size_t GetAndUpdateOffset(size_t increment) {
+        size_t ret = offset_;
+        offset_ += increment;
+        return ret;
+    }
+
+ private:
+    size_t offset_ = 0;
+};
+
 }  // namespace jax
 }  // namespace transformer_engine
 

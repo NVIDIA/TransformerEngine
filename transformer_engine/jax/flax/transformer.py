@@ -11,6 +11,7 @@ import os
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
@@ -569,6 +570,10 @@ class MultiHeadAttention(nn.Module):
             # TODO(rewang): make it configurable for pre_scale_bias
             attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
+            seed = None
+            if dropout_rng is not None:
+                seed = jax.random.split(dropout_rng, len(jax.devices()))
+
             if inputs_q is inputs_kv:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
                 qkv_sharding_constraint = ('batch', 'length', 'qkv_dim', 'heads', 'kv')
@@ -577,7 +582,7 @@ class MultiHeadAttention(nn.Module):
                 x = self_fused_attn(qkv_proj,
                                     bias,
                                     mask,
-                                    dropout_rng,
+                                    seed,
                                     attn_bias_type=attn_bias_type,
                                     attn_mask_type=self.attn_type.value,
                                     scaling_factor=scale_factor,
@@ -596,7 +601,7 @@ class MultiHeadAttention(nn.Module):
                 x = cross_fused_attn(query,
                                      kv_proj,
                                      mask,
-                                     dropout_rng,
+                                     seed,
                                      attn_bias_type=attn_bias_type,
                                      attn_mask_type=self.attn_type.value,
                                      scaling_factor=scale_factor,
