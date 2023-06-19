@@ -8,9 +8,12 @@
 #include <cublasLt.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
 #include <transformer_engine/logging.h>
+#include <transformer_engine/rmsnorm.h>
+#include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 #include <vector>
@@ -176,7 +179,8 @@ class cudaDevicePropertiesManager {
 };
 
 // NVTE Tensor Utils
-TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type);
+TensorWrapper MakeNvteTensor(const void *data_ptr, const std::vector<size_t> &shape,
+                             const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const NVTEShape &shape, const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type,
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);
