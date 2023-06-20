@@ -69,6 +69,8 @@ ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+
 
 @pytest.fixture()
 def seed_default_rng():
@@ -675,7 +677,7 @@ def test_export_layernorm(
     serialize_inputs_outputs(fname, inp, te_outputs)
     if fake_bf16_io or precision != torch.bfloat16:
         validate_result(
-        fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
+            fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
 
 
 @skip_FP8
@@ -688,10 +690,6 @@ def test_export_layernorm(
 # Softmax kernel only supports FP16 or BF16!
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16, "fake-torch.bfloat16"])
 def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision):
-    fake_bf16_io = precision == "fake-torch.bfloat16"
-    # reset precision to torch.bfloat16 after capturing fake BF16 mode
-    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
-
     class Test_Softmax(nn.Module):
         def __init__(self, softmax_fn, fake_bf16_io, mask_inp=False):
             super().__init__()
@@ -708,6 +706,9 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                 )
 
         def forward(self, inp, mask):
+            if self.fake_bf16_io:
+                inp = inp.type(torch.bfloat16)
+
             if self.fused_scaled_softmax:
                 ret = self.fused_scaled_softmax(inp, mask, self.scale)
             else:
@@ -716,12 +717,14 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                 else:
                     ret = self.softmax_fn.apply(inp, self.scale)
             if self.fake_bf16_io:
-                ret = ret.type(torch.float16)
+                ret = ret.type(torch.float32)
             return ret
 
+    fake_bf16_io = precision == "fake-torch.bfloat16"
+    precision = torch.bfloat16 if fake_bf16_io else precision
+
     # Set dimensions (these are arbitrary).
-    in_features = 64
-    hidden_size = 256
+    in_features, hidden_size = 64, 256
     mask = None
     input_names = ["input", "mask"]
     inp_shape = [hidden_size, in_features, in_features, in_features]
@@ -741,17 +744,18 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     elif softmax_fn == te.softmax.FusedScaleMaskSoftmax:
         kernel_str = "TorchSoftmax"
         model = Test_Softmax(softmax_fn, fake_bf16_io)
-    input_tensor = torch.randn(*inp_shape, device="cuda")
-    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
-    input_tensor = input_tensor.half()
+
+    input_tensor = torch.randn(*inp_shape, device="cuda", dtype=torch.float32 if fake_bf16_io else precision)
     high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
     fname = f"{kernel_str}{high_prec_str}.onnx"
     inp = (input_tensor, mask)
+
     do_export(model, inp, fname, input_names=input_names)
     te_outputs = te_infer(model, inp, is_fp8=False)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
-        validate_result(fname, inp, model, atol=1e-3, input_names=input_names, te_outputs=te_outputs)
+        atol = 5e-2 if fake_bf16_io else 1e-3
+        validate_result(fname, inp, model, atol=atol, input_names=input_names, te_outputs=te_outputs)
 
 
 # Test dynamically generated softmax mask.
@@ -761,13 +765,13 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
 def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     fake_bf16_io = precision == "fake-torch.bfloat16"
     # reset precision to torch.bfloat16 after capturing fake BF16 mode
-    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
+    precision = torch.bfloat16 if fake_bf16_io else precision
 
     class Test_Softmax(nn.Module):
         def __init__(self, use_onnx_mask_fn: bool, fake_bf16_io: bool):
             super().__init__()
-            self.scale = 1 # arbitrary value
-            self.fake_bf16_io = fake_bf16_io
+            self.scale=1 # arbitrary value
+            self.fake_bf16_io=fake_bf16_io
             # Use NVTE_MASKED_SOFTMAX_FUSION to force TE to use forward_torch_softmax
             # even when is_in_onnx_export_mode()==False.
             os.environ["NVTE_MASKED_SOFTMAX_FUSION"] = "0"
@@ -778,9 +782,11 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
             )
 
         def forward(self, inp, mask):
+            if self.fake_bf16_io:
+                inp = inp.type(torch.bfloat16)
             ret = self.fused_scaled_softmax(inp, mask, self.scale)
             if self.fake_bf16_io:
-                ret = ret.type(torch.float16)
+                ret = ret.type(torch.float)
             return ret
 
     # Set dimensions (these are arbitrary).
@@ -788,9 +794,8 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     hidden_size = 256
     mask = None
     inp_shape = [hidden_size, in_features, in_features, in_features]
-    input_tensor = torch.randn(*inp_shape, device="cuda")
-    # WAR for BF16 test as ORT doesn't support BF16 IO: FP16 input for both BF16 and FP16 precision types
-    input_tensor = input_tensor.half()
+    input_tensor = torch.randn(
+            *inp_shape, device="cuda", dtype=torch.float if fake_bf16_io else precision)
     inp = (input_tensor, mask)
     high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
 
@@ -813,7 +818,10 @@ def test_softmax_mask_fn(seed_default_rng, set_max_seq_len, precision):
     do_export(model, inp, fname, input_names=input_names)
     serialize_inputs_outputs(fname, inp, te_outputs=te_outputs_default_mask, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
-        validate_result(fname, inp, model_onnx_mask, atol=1e-3, input_names=input_names, te_outputs=te_outputs_default_mask)
+        atol = 1e-2 if fake_bf16_io else 1e-3
+        validate_result(
+                fname, inp, model_onnx_mask, atol=atol,
+                input_names=input_names, te_outputs=te_outputs_default_mask)
 
 
 @pytest.mark.parametrize("scale_factor", [1])
@@ -974,6 +982,7 @@ def test_export_layernorm_linear(
     (torch.bfloat16, False),
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("activation", supported_activations)
 def test_export_layernorm_mlp(
     seed_default_rng,
     scale_factor: float,
@@ -982,7 +991,8 @@ def test_export_layernorm_mlp(
     return_bias: bool,
     return_layernorm_output: bool,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    activation: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
@@ -998,7 +1008,7 @@ def test_export_layernorm_mlp(
     fp8_str = "_fp8" if use_fp8 else ""
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
-    fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}.onnx"
+    fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}_{activation}.onnx"
     with te.fp8_autocast(enabled=use_fp8):
         model = te.LayerNormMLP(
             hidden_size,
@@ -1008,6 +1018,7 @@ def test_export_layernorm_mlp(
             return_layernorm_output=return_layernorm_output,
             params_dtype=precision,
             zero_centered_gamma=zero_centered_gamma,
+            activation=activation,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=2)
@@ -1016,10 +1027,9 @@ def test_export_layernorm_mlp(
         serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16, ):
             return
-        if not use_fp8:
-            validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
-        else:
-            validate_result(fname, inp, model, atol=1e-6, is_fp8=use_fp8, te_outputs=te_outputs)
+        atol = 1e-6 if use_fp8 else (5e-1 if activation=="swiglu" else 1e-3)
+        validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, te_outputs=te_outputs)
+
 
 @skip_FP8
 @pytest.mark.parametrize(
@@ -1211,6 +1221,7 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("activation", supported_activations)
 def test_export_transformer_layer(
     seed_default_rng,
     set_max_seq_len,
@@ -1220,7 +1231,8 @@ def test_export_transformer_layer(
     output_layernorm: bool,
     precision: torch.dtype,
     fuse_qkv_params: bool,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    activation: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
@@ -1256,18 +1268,15 @@ def test_export_transformer_layer(
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
-        zero_centered_gamma=zero_centered_gamma).to(device='cuda')
+        zero_centered_gamma=zero_centered_gamma,
+        activation=activation).to(device='cuda')
     do_export(model, inp, fname, use_fp8, input_names=input_names)
     te_outputs = te_infer(model, inp, is_fp8=use_fp8)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16, ):
         return
-    if not use_fp8:
-        validate_result(fname, inp, model, atol=1e-3, input_names=input_names,
-            te_outputs=te_outputs)
-    else:
-        validate_result(fname, inp, model, atol=5e-1, is_fp8=use_fp8, input_names=input_names,
-            te_outputs=te_outputs)
+    atol = 5e-1 if use_fp8 else (5e-1 if activation=="swiglu" else 1e-3)
+    validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, input_names=input_names, te_outputs=te_outputs)
 
 
 @pytest.mark.parametrize("use_fp8", [True])
@@ -1405,7 +1414,7 @@ def test_export_gpt_generation(
     set_max_seq_len,
     use_fp8: bool,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
 ):
     """Test that the ONNX model can correctly handle inputs with different shapes and that
     the attention mask it adjusted on-the-fly to different sequence lengths.
