@@ -167,9 +167,7 @@ def dot_product_attention(query: Array,
         # T5 broadcasts along the "length" dim, but unclear which one that
         # corresponds to in positional dimensions here, assuming query dim.
         dropout_shape = list(attn_weights.shape)
-        dropout_shape[-2] = 1
         keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-        keep = jnp.broadcast_to(keep, attn_weights.shape)
         multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
         attn_weights = attn_weights * multiplier
 

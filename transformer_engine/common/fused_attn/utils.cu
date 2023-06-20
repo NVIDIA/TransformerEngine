@@ -256,6 +256,10 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
+    case DType::kInt32:
+      return CUDNN_DATA_INT32;
+    case DType::kInt64:
+      return CUDNN_DATA_INT64;
     case DType::kFloat16:
       return CUDNN_DATA_HALF;
     case DType::kFloat32:
