@@ -1,10 +1,10 @@
 from .base import Op, OpInputPlaceholder
 from .add import OpAdd
-from .mul import OpMul
+from .bmm import OpBMM
 from .transpose import OpTranspose
 from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
 from .gelu import OpFGelu, OpDFGelu
-from .scale import OpScale
+from .mul import OpMul
 
 
 class ParamDescriptor:
@@ -51,9 +51,9 @@ class OpGraph:
         self.out_nodes.append(op)
         return op
 
-    def mul_(self, a: Op, b: Op) -> Op:
-        """Adds a multiplication node to the graph. Returns the node with the result."""
-        self.nodes.append(OpMul(a, b))
+    def bmm_(self, a: Op, b: Op) -> Op:
+        """Adds a batched matrix multiplication node to the graph. Returns the node with the result."""
+        self.nodes.append(OpBMM(a, b))
         return self.nodes[-1]
 
     def add_(self, a: Op, b: Op) -> Op:
@@ -61,9 +61,9 @@ class OpGraph:
         self.nodes.append(OpAdd(a, b))
         return self.nodes[-1]
 
-    def scale_(self, a: Op, b: Op) -> Op:
-        """Adds a scale (element-wise multiply) node to the graph. Returns the node with the result."""
-        self.nodes.append(OpScale(a, b))
+    def mul_(self, a: Op, b: Op) -> Op:
+        """Adds an element-wise multiplication node to the graph. Returns the node with the result."""
+        self.nodes.append(OpMul(a, b))
         return self.nodes[-1]
 
     def f_layernorm_(
@@ -72,7 +72,7 @@ class OpGraph:
         """Adds a layernorm node to the graph. Returns the node with the result."""
         self.nodes.append(OpFLayerNormCore(a, eps))
         core = self.nodes[-1]
-        node = self.scale_(core, gamma)
+        node = self.mul_(core, gamma)
         if zero_centered_gamma:
             node = self.add_(node, core)
         node = self.add_(node, beta)

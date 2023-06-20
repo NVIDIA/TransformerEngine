@@ -2,6 +2,8 @@ from typing import Any, OrderedDict, overload
 import torch.nn as nn
 from .compute_pipeline import ComputePipeline
 
+from numpy import ndarray
+
 
 class Sequential(nn.Module):
     # from nn.Module

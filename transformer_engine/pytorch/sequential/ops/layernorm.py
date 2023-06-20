@@ -14,7 +14,7 @@ class OpFLayerNormCore(Op):
 
     def backward_a(self, graph: OpGraph, grad: Op):
         df = graph.df_layernorm_core_(self.a, self.eps)
-        return graph.mul_(df, grad)
+        return graph.bmm_(df, grad)
 
 
 class OpDFLayerNormCore(Op):

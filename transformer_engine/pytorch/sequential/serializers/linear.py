@@ -11,7 +11,7 @@ def _serializer(module: Linear):
     weights = graph.param_(
         module.in_features * module.out_features, f"{module_name}.weight"
     )
-    y = graph.mul_(in_, weights)
+    y = graph.bmm_(in_, weights)
 
     if module.use_bias:
         bias = graph.param_(module.out_features, f"{module_name}.bias")

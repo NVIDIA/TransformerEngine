@@ -13,7 +13,7 @@ class OpFGelu(Op):
 
     def backward_a(self, graph: OpGraph, grad: Op):
         df = graph.df_gelu_(self.a)
-        return graph.scale_(df, grad)
+        return graph.mul_(df, grad)
 
 
 class OpDFGelu(Op):
