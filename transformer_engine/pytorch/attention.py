@@ -524,7 +524,7 @@ class FusedAttention(torch.nn.Module):
     |  - (q,kv)     | kv_interleaved          |                 |
     | mask_type     | causal/no_mask          | causal          |
     | bias_type     | no_bias/post_scale_bias | no_bias         |
-    | dropout       | no                      | yes             |
+    | dropout       | yes                     | yes             |
     | max_seqlen    | <=512                   | any             |
     | head_dim      | 64                      | 64,128          |
     | output dtype  | fp16/bf16               | fp16/bf16       |
