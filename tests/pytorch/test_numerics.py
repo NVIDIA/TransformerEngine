@@ -57,6 +57,7 @@ batch_sizes = [1, 2]
 
 all_boolean = [True, False]
 
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
@@ -334,13 +335,37 @@ class TorchMHA(nn.Module):
     def forward(self, x, attn_mask=None):
         return self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
 
+_supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
+                  'gelu'  : nn.GELU(approximate="tanh"),
+                  'reglu'  : nn.ReLU(),
+                  'relu'  : nn.ReLU(),
+                  'swiglu' : nn.SiLU()}
+
+class TorchGLU(nn.Module):
+    def __init__(self, activation: str):
+        super().__init__()
+        self.act = _supported_act[activation]
+
+    def forward(self, x):
+        shape = x.size(-1)
+        a = x[..., :shape // 2]
+        b = x[..., (shape // 2):]
+        a = self.act(a)
+        return a * b
 
 class TorchLayerNormMLP(nn.Module):
-    def __init__(self, hidden_size: int, ffn_hidden_size: int, eps: float = 1e-5):
+    def __init__(self, hidden_size: int, ffn_hidden_size: int,
+                 eps: float = 1e-5, activation = 'gelu'):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
-        self.fc1 = nn.Linear(hidden_size, ffn_hidden_size)
-        self.gelu = nn.GELU(approximate="tanh")
+        if 'glu' in activation:
+            fc1_output_features = 2 * ffn_hidden_size
+            self.gelu = TorchGLU(activation)
+        else:
+            fc1_output_features = ffn_hidden_size
+            self.gelu = _supported_act[activation]
+
+        self.fc1 = nn.Linear(hidden_size, fc1_output_features)
         self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
 
     def forward(self, x):
@@ -856,13 +881,15 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_layernorm_mlp_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("activation", all_activations)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
     config = model_configs[model]
 
     te_ln_mlp = (
         LayerNormMLP(
             config.hidden_size,
             4 * config.hidden_size,
+            activation=activation,
         )
         .to(dtype=dtype)
         .cuda()
@@ -873,6 +900,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model):
         TorchLayerNormMLP(
             config.hidden_size,
             4 * config.hidden_size,
+            activation=activation,
         )
         .to(dtype=dtype)
         .cuda()
