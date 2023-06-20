@@ -106,7 +106,11 @@ class FusedAttnOffsetManager {
         return ret;
     }
 
+    FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+    void operator=(FusedAttnOffsetManager const &) = delete;
+
  private:
+    FusedAttnOffsetManager() {}
     size_t offset_ = 0;
 };
 

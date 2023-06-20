@@ -573,6 +573,8 @@ class MultiHeadAttention(nn.Module):
             seed = None
             if dropout_rng is not None:
                 seed = jax.random.split(dropout_rng, len(jax.devices()))
+                # ensure the old key never used
+                del dropout_rng
 
             if inputs_q is inputs_kv:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
