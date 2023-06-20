@@ -746,7 +746,7 @@ void _PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t 
     auto *offset_dst = static_cast<int64_t *>(rng_state_dst) + 1;
     cudaMemcpyAsync(seed_dst, seed, sizeof(int64_t), cudaMemcpyDeviceToDevice, stream);
     constexpr int threads_per_cta = 128;
-    const size_t increment = q_max_seqlen * kv_max_seqlen / threads_per_cta;
+    const size_t increment = (q_max_seqlen * kv_max_seqlen + threads_per_cta - 1) / threads_per_cta;
     auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
     cudaMemcpyAsync(offset_dst, &offset, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
 }
