@@ -20,7 +20,6 @@ from transformer_engine.jax.flax import MultiHeadAttention as flax_MultiHeadAtte
 from transformer_engine.jax.flax import RelativePositionBiases as flax_RelativePositionBiases
 from transformer_engine.jax.flax import TransformerLayer as flax_TransformerLayer
 from transformer_engine.jax.flax.module import Softmax
-from transformer_engine.jax.flax.transformer import AttentionType
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
 from transformer_engine.jax.praxis import LayerNorm
 from transformer_engine.jax.praxis import FusedSoftmax, LayerNorm
@@ -666,32 +665,32 @@ class MultiHeadAttnAttr:
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_TYPE: AttentionType.PADDING
+        ATTN_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_TYPE: AttentionType.PADDING
+        ATTN_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_TYPE: AttentionType.PADDING
+        ATTN_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_TYPE: AttentionType.CAUSAL
+        ATTN_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_TYPE: AttentionType.CAUSAL
+        ATTN_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_TYPE: AttentionType.CAUSAL
+        ATTN_TYPE: 'causal'
     }]
 
 
