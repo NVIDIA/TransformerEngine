@@ -22,7 +22,7 @@
 #define O_ID 4
 #define S_ID 5
 #define B_ID 6
-#define D_CONST_ID 7
+#define DROPOUT_CONST_ID 7
 #define S_CONST_ID 8
 #define Q_SEQLEN_ID 9
 #define K_SEQLEN_ID 10
@@ -33,6 +33,8 @@
 #define MASK_VAL_ID 15
 #define dS_ID 16
 #define dBias_ID 17
+#define DROPOUT_SEED_ID 18
+#define DROPOUT_OFFSET_ID 19
 
 #define VIRTUAL_ID 20
 
@@ -333,8 +335,7 @@ static cudnn_frontend::Tensor createSoftmaxForward(
     int64_t afterReduction_dim[4] = {b, h, s_q, 1};
     int64_t afterReduction_stride[4] = {h * s_q, s_q, 1, 1};
 
-    cudnnDataType_t softmaxOutputType =
-        (enable_dropout || softmax_output_virtual) ? CUDNN_DATA_FLOAT : tensorType;
+    cudnnDataType_t softmaxOutputType = enable_dropout ? CUDNN_DATA_FLOAT : tensorType;
     uint64_t softmaxOutputName = softmax_output_virtual ? VIRTUAL_ID + 154 : S_ID;
 
     // max (x)
@@ -427,7 +428,7 @@ static cudnn_frontend::Tensor createSoftmaxForward(
 }
 
 static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, int64_t s_kv,
-                                            int64_t d, int64_t seed, double probability,
+                                            int64_t d, double probability,
                                             cudnnDataType_t tensorType,
                                             // NOLINTNEXTLINE(runtime/references)
                                             std::vector<cudnn_frontend::Operation> &ops,
@@ -460,8 +461,9 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
             .setReorderType(reorder_type)
             .build();
     // scale after dropout
-    auto scaleDropoutTensor = tensor_create(tensorType, D_CONST_ID, scale_dim, scale_stride, false,
-                                            true);  // is by value
+    auto scaleDropoutTensor =
+        tensor_create(tensorType, DROPOUT_CONST_ID, scale_dim, scale_stride, false,
+                      true);  // is by value
     // after Scale
     auto afterScaleTensor = tensor_create(tensorType, VIRTUAL_ID + 201, afterBMM1_dim,
                                           afterBMM1_stride, true, false);  // is virtual
@@ -472,10 +474,16 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
                        .setBernoulliDistProbability(1.0 - probability)
                        .build();
 
+    auto dropoutSeed =
+        tensor_create(CUDNN_DATA_INT64, DROPOUT_SEED_ID, scale_dim, scale_stride, false, false);
+    auto dropoutOffset =
+        tensor_create(CUDNN_DATA_INT64, DROPOUT_OFFSET_ID, scale_dim, scale_stride, false, false);
+
     // Create a rng Node.
     auto rng_op = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_RNG_DESCRIPTOR)
                       .setyDesc(dropoutMaskTensor)
-                      .setSeed(seed)
+                      .setSeedDesc(dropoutSeed)
+                      .setOffsetDesc(dropoutOffset)
                       .setRngDesc(rngDesc)
                       .build();
 
@@ -624,16 +632,14 @@ static cudnn_frontend::Tensor createSoftmaxBackward(int64_t b, int64_t h, int64_
     return dxTensor;
 }
 
-void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-                                 bool is_training, float scaling_factor, float dropout_probability,
-                                 NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type,
-                                 NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK,
-                                 void *devPtrV, void *devPtrS, void *devPtrO, void *devPtrBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
-                                 size_t *workspace_size, cudnnDataType_t tensorType,
-                                 cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_max_512_fwd_impl(
+    int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d, bool is_training,
+    float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, void *devPtrQ, void *devPtrK, void *devPtrV,
+    void *devPtrS, void *devPtrO, void *devPtrBias, void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
+    void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *workspace, size_t *workspace_size,
+    cudnnDataType_t tensorType, cudaStream_t stream, cudnnHandle_t handle) {
     try {
-        constexpr int64_t seed = 0;  // TODO(rewang): replace this with device seed/offset
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
         FADescriptor descriptor{b,           h,
@@ -646,10 +652,13 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
 
-        bool enable_dropout = (dropout_probability != 0.0f);
+        // softmax auxiliary is only used in the training mode
+        bool enable_dropout = is_training && (dropout_probability != 0.0f);
 
-        NVTE_CHECK(!enable_dropout,
-                   "dropout probability > 0 in fused_attn_max_512 has not been implemented.");
+        // two conditions that make softmax auxiliary in virtual
+        // 1. inference mode (not is_training)
+        // 2. dropout enabled: the auxiliary becomes the dropout output
+        bool softmax_output_virtual = !is_training || enable_dropout;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_plan = [&](CacheType &cache, const FADescriptor &descriptor) {
@@ -667,8 +676,10 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             createScale(b, h, s_q, s_kv, d, layout, tensorType, ops);
 
             // if bias, we need to memset the S buffer to correctly computate dbias
+            // WAR: causal_mask without bias needs memset the S buffer
+            // inference mode doesn't need the S auxiliary
             auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) && is_training;
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
@@ -683,14 +694,12 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
             NVTE_CHECK(dropout_probability != 1.0f, "Dropout probability cannot be 1.0.");
 
-            // TODO(rewang): check whether devPtrS can be removed
-            bool softmax_output_virtual = enable_dropout;  // || devPtrS == nullptr;
             auto softmax_output =
                 createSoftmaxForward(b, h, s_q, s_kv, d, layout, enable_dropout,
                                      softmax_output_virtual, tensorType, ops, mask_output);
 
-            if (dropout_probability != 0.0f) {
-                auto dropout_output = createDropout(b, h, s_q, s_kv, d, seed, dropout_probability,
+            if (enable_dropout) {
+                auto dropout_output = createDropout(b, h, s_q, s_kv, d, dropout_probability,
                                                     tensorType, ops, softmax_output);
                 createBMM2(b, h, s_q, s_kv, d, layout, tensorType, ops, dropout_output);
             } else {
@@ -741,9 +750,10 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, static_cast<const int32_t *>(devCuSeqlenQ),
-            static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
-            static_cast<int32_t *>(devActualSeqlenK));
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         // change this if you have access to float_min
         float negInfinity = -1.0E+10;
@@ -758,16 +768,17 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         data_ptrs.insert(std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
         data_ptrs.insert(std::pair<uint64_t, void *>(MASK_VAL_ID, &negInfinity));
 
+        __half half_cast_scaling_factor{scaling_factor};
+        __nv_bfloat16 bfloat_cast_scaling_factor{scaling_factor};
+
         if (tensorType == CUDNN_DATA_FLOAT) {
             data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &scaling_factor));
         } else if (tensorType == CUDNN_DATA_HALF) {
-            __half cast_scaling_factor{scaling_factor};
-            data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &cast_scaling_factor));
+            data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &half_cast_scaling_factor));
         } else if (tensorType == CUDNN_DATA_BFLOAT16) {
-            __nv_bfloat16 cast_scaling_factor{scaling_factor};
-            data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &cast_scaling_factor));
+            data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &bfloat_cast_scaling_factor));
         } else {
-            std::cerr << "Not supported tensorType." << std::endl;
+            NVTE_ERROR("Unsupported tensor type.");
         }
 
         data_ptrs.insert(std::pair<uint64_t, void *>(O_ID, devPtrO));
@@ -776,12 +787,30 @@ void fused_attn_max_512_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             data_ptrs.insert(std::pair<uint64_t, void *>(B_ID, devPtrBias));
         }
 
-        if (devPtrS != nullptr) {
+        // if enable_dropout, S is the result after dropout
+        // if not enable dropout, S is the result after softmax
+        if (enable_dropout || !softmax_output_virtual) {
             data_ptrs.insert(std::pair<uint64_t, void *>(S_ID, devPtrS));
         }
 
+        __half half_cast_scale_dropout{scale_dropout};
+        __nv_bfloat16 bfloat16_cast_scale_dropout{scale_dropout};
+
         if (enable_dropout) {
-            data_ptrs.insert(std::pair<uint64_t, void *>(D_CONST_ID, &scale_dropout));
+            // TODO(rewang): make a util func
+            if (tensorType == CUDNN_DATA_FLOAT) {
+                data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_CONST_ID, &scale_dropout));
+            } else if (tensorType == CUDNN_DATA_HALF) {
+                data_ptrs.insert(
+                    std::pair<uint64_t, void *>(DROPOUT_CONST_ID, &half_cast_scale_dropout));
+            } else if (tensorType == CUDNN_DATA_BFLOAT16) {
+                data_ptrs.insert(
+                    std::pair<uint64_t, void *>(DROPOUT_CONST_ID, &bfloat16_cast_scale_dropout));
+            } else {
+                NVTE_ERROR("Unsupported tensor type.");
+            }
+            data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_SEED_ID, devPtrDropoutSeed));
+            data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_OFFSET_ID, devPtrDropoutOffset));
         }
 
         auto variantPack = cudnn_frontend::VariantPackBuilder()
@@ -802,7 +831,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
                                  NVTE_Bias_Type bias_type, void *devPtrQ, void *devPtrK,
                                  void *devPtrV, void *devPtrS, void *devPtrdQ, void *devPtrdK,
                                  void *devPtrdV, void *devPtrdO, void *devPtrdS, void *devPtrdBias,
-                                 void *devCuSeqlenQ, void *devCuSeqlenK, void *workspace,
+                                 void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV, void *workspace,
                                  size_t *workspace_size, cudnnDataType_t tensorType,
                                  cudaStream_t stream, cudnnHandle_t handle) {
     try {
@@ -915,7 +944,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             ops.push_back(std::move(reshape_op));
 
             // scale dropout
-            auto dropoutScaleTensor = tensor_create(CUDNN_DATA_FLOAT, D_CONST_ID, scale_dim,
+            auto dropoutScaleTensor = tensor_create(CUDNN_DATA_FLOAT, DROPOUT_CONST_ID, scale_dim,
                                                     scale_stride, false, true);  // is by value
             auto pAfterScaleTensor = tensor_create(tensorType, VIRTUAL_ID + 301, p_transpose_dim,
                                                    p_transpose_stride, true, false);
@@ -1160,9 +1189,10 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
         void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, static_cast<const int32_t *>(devCuSeqlenQ),
-            static_cast<const int32_t *>(devCuSeqlenK), static_cast<int32_t *>(devActualSeqlenQ),
-            static_cast<int32_t *>(devActualSeqlenK));
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
@@ -1183,13 +1213,10 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             data_ptrs.insert(std::pair<uint64_t, void *>(dBias_ID, devPtrdBias));
         }
 
-        NVTE_CHECK(dropout_probability == 0.f,
-                   "dropout probability > 0 in fused_attn_max_512 has not been implemented.");
-
         float zeroVal = 0.0f;
         float dropoutScale = 1.0f / (1.0f - dropout_probability);
 
-        data_ptrs.insert(std::pair<uint64_t, void *>(D_CONST_ID, &dropoutScale));
+        data_ptrs.insert(std::pair<uint64_t, void *>(DROPOUT_CONST_ID, &dropoutScale));
         data_ptrs.insert(std::pair<uint64_t, void *>(S_CONST_ID, &scaling_factor));
         data_ptrs.insert(std::pair<uint64_t, void *>(MASK_VAL_ID, &zeroVal));
 
@@ -1216,8 +1243,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    // Only is_training is verified
-    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
 
@@ -1246,23 +1271,22 @@ void fused_attn_max_512_fwd_qkvpacked(
         devPtrS = output_S->data.dptr;
     }
 
-    void *devCuSeqlen = cu_seqlens->data.dptr;
+    void *devPtrCuSeqlen = cu_seqlens->data.dptr;
 
-    // TODO(rewang): dropout seed
-    // void* devPtrDropoutSeed = reinterpret_cast<void *>(
-    //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr));
-    // void* devPtrDropoutOffset = reinterpret_cast<void *>(
-    //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+    const DType rng_state_type = rng_state->data.dtype;
+    NVTE_CHECK(rng_state_type == DType::kInt64);
+    void *devPtrDropoutSeed = rng_state->data.dptr;
+    void *devPtrDropoutOffset =
+        static_cast<void *>(static_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
     const DType QKV_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    // TODO(rewang): replace CPU seed
-    fused_attn_max_512_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim, is_training,
-                                attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ,
-                                devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias, devCuSeqlen,
-                                devCuSeqlen, workspace->data.dptr, &workspace_size,
-                                get_cudnn_dtype(QKV_type), stream, handle);
+    fused_attn_max_512_fwd_impl(
+        batch, num_head, max_seqlen, max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        devPtrCuSeqlen, devPtrCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset,
+        workspace->data.dptr, &workspace_size, get_cudnn_dtype(QKV_type), stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1288,8 +1312,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    // Only is_training is verified
-    NVTE_CHECK(is_training, "is_training=False is not implemented in fused_attn_max_512.");
     NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
                "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
@@ -1328,20 +1350,19 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     void *devQCuSeqlen = q_cu_seqlens->data.dptr;
     void *devKVCuSeqlen = kv_cu_seqlens->data.dptr;
 
-    // TODO(rewang): dropout seed
-    // void* devPtrDropoutSeed = reinterpret_cast<void *>(
-    //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr));
-    // void* devPtrDropoutOffset = reinterpret_cast<void *>(
-    //                 reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+    const DType rng_state_type = rng_state->data.dtype;
+    NVTE_CHECK(rng_state_type == DType::kInt64);
+    void *devPtrDropoutSeed = rng_state->data.dptr;
+    void *devPtrDropoutOffset =
+        static_cast<void *>(static_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
     size_t workspace_size = 0;
 
-    // TODO(rewang): replace CPU seed
-    fused_attn_max_512_fwd_impl(batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training,
-                                attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ,
-                                devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias, devQCuSeqlen,
-                                devKVCuSeqlen, workspace->data.dptr, &workspace_size,
-                                get_cudnn_dtype(q_type), stream, handle);
+    fused_attn_max_512_fwd_impl(
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        devQCuSeqlen, devKVCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
+        &workspace_size, get_cudnn_dtype(q_type), stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {

@@ -106,7 +106,7 @@ enum NVTE_Mask_Type {
    \verbatim
    | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
    | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
@@ -149,7 +149,7 @@ void nvte_fused_attn_fwd_qkvpacked(
    \verbatim
    | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
    | FP8       | QKV_INTERLEAVED |         NO_BIAS         |    PADDING     |   Yes   |     <= 512      |    64    |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     QKV                   The QKV tensor in packed format,
@@ -200,7 +200,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  * Support Matrix:
    \verbatim
    | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].
@@ -247,7 +247,7 @@ void nvte_fused_attn_fwd_kvpacked(
  * Support Matrix:
    \verbatim
    | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   No    |     <= 512      |    64    |
+   | FP16/BF16 | QKV_INTERLEAVED | NO_BIAS/POST_SCALE_BIAS | PADDING/CAUSAL |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     Q                     The Q tensor, [total_seqs_q, num_heads, head_dim].

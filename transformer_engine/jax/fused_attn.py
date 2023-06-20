@@ -46,7 +46,7 @@ class AttnMaskType(Enum):
 def self_fused_attn(qkv: jnp.ndarray,
                     bias: jnp.ndarray,
                     mask: jnp.ndarray,
-                    rng_state: jnp.ndarray,
+                    seed: jnp.ndarray,
                     attn_bias_type: AttnBiasType,
                     attn_mask_type: AttnMaskType,
                     scaling_factor: float,
@@ -63,7 +63,7 @@ def self_fused_attn(qkv: jnp.ndarray,
         output = _self_fused_attn_max_512(qkv,
                                           bias,
                                           mask,
-                                          rng_state,
+                                          seed,
                                           attn_bias_type=attn_bias_type,
                                           attn_mask_type=attn_mask_type,
                                           scaling_factor=scaling_factor,
@@ -73,13 +73,13 @@ def self_fused_attn(qkv: jnp.ndarray,
         dp_axis_name = "batch"
         tp_axis_name = "model"
 
-        inputs = [qkv, bias, mask, rng_state]
+        inputs = [qkv, bias, mask, seed]
         batch, seqlen, _, num_head, head_dim = qkv.shape
         output_shape = [batch, seqlen, num_head, head_dim]
         sharding_meta = get_fused_attn_sharding_meta(
             sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
-            dp_dims=([0, None, 0, None], [0]),
-            tp_dims=([3, 1, None, None], [2]),
+            dp_dims=([0, None, 0, 0], [0]),
+            tp_dims=([3, 1, None, 0], [2]),
             dp_axis_name=dp_axis_name,
             tp_axis_name=tp_axis_name)
 
@@ -104,13 +104,13 @@ def self_fused_attn(qkv: jnp.ndarray,
 
 @partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
 def _self_fused_attn_max_512(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
-                             rng_state: jnp.ndarray, attn_bias_type: AttnBiasType,
+                             seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                              attn_mask_type: AttnMaskType, scaling_factor: float,
                              dropout_probability: float, is_training: bool):
     output, _ = _self_fused_attn_max_512_fwd(qkv,
                                              bias,
                                              mask,
-                                             rng_state,
+                                             seed,
                                              attn_bias_type=attn_bias_type,
                                              attn_mask_type=attn_mask_type,
                                              scaling_factor=scaling_factor,
@@ -119,7 +119,7 @@ def _self_fused_attn_max_512(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndar
     return output
 
 
-def _self_fused_attn_max_512_fwd(qkv, bias, mask, rng_state, attn_bias_type, attn_mask_type,
+def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                  scaling_factor, dropout_probability, is_training):
 
     seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
@@ -129,7 +129,7 @@ def _self_fused_attn_max_512_fwd(qkv, bias, mask, rng_state, attn_bias_type, att
     output, softmax_aux = self_fused_attn_max_512_fwd(qkv,
                                                       bias,
                                                       cu_seqlen,
-                                                      rng_state,
+                                                      seed,
                                                       attn_bias_type=attn_bias_type.value,
                                                       attn_mask_type=attn_mask_type.value,
                                                       scaling_factor=scaling_factor,
@@ -163,7 +163,7 @@ _self_fused_attn_max_512.defvjp(_self_fused_attn_max_512_fwd, _self_fused_attn_m
 def cross_fused_attn(q: jnp.ndarray,
                      kv: jnp.ndarray,
                      mask: jnp.ndarray,
-                     rng_state: jnp.ndarray,
+                     seed: jnp.ndarray,
                      attn_bias_type: AttnBiasType,
                      attn_mask_type: AttnMaskType,
                      scaling_factor: float,
@@ -180,7 +180,7 @@ def cross_fused_attn(q: jnp.ndarray,
         output = _cross_fused_attn_max_512(q,
                                            kv,
                                            mask,
-                                           rng_state,
+                                           seed,
                                            attn_bias_type=attn_bias_type,
                                            attn_mask_type=attn_mask_type,
                                            scaling_factor=scaling_factor,
@@ -190,7 +190,7 @@ def cross_fused_attn(q: jnp.ndarray,
         dp_axis_name = "batch"
         tp_axis_name = "model"
 
-        inputs = [q, kv, mask, rng_state]
+        inputs = [q, kv, mask, seed]
         output_shape = q.shape
         sharding_meta = get_fused_attn_sharding_meta(
             sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
@@ -219,15 +219,14 @@ def cross_fused_attn(q: jnp.ndarray,
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
-def _cross_fused_attn_max_512(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray,
-                              rng_state: jnp.ndarray, attn_bias_type: AttnBiasType,
-                              attn_mask_type: AttnMaskType, scaling_factor: float,
-                              dropout_probability: float, is_training: bool):
+def _cross_fused_attn_max_512(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
+                              attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+                              scaling_factor: float, dropout_probability: float, is_training: bool):
 
     output, _ = _cross_fused_attn_max_512_fwd(q,
                                               kv,
                                               mask,
-                                              rng_state,
+                                              seed,
                                               attn_bias_type=attn_bias_type,
                                               attn_mask_type=attn_mask_type,
                                               scaling_factor=scaling_factor,
@@ -236,8 +235,8 @@ def _cross_fused_attn_max_512(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray
     return output
 
 
-def _cross_fused_attn_max_512_fwd(q, kv, mask, rng_state, attn_bias_type, attn_mask_type,
-                                  scaling_factor, dropout_probability, is_training):
+def _cross_fused_attn_max_512_fwd(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
+                                  dropout_probability, is_training):
 
     q_seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
     q_cu_seqlen = jnp.cumsum(q_seqlen)
@@ -251,7 +250,7 @@ def _cross_fused_attn_max_512_fwd(q, kv, mask, rng_state, attn_bias_type, attn_m
                                                        kv,
                                                        q_cu_seqlen,
                                                        kv_cu_seqlen,
-                                                       rng_state,
+                                                       seed,
                                                        attn_bias_type=attn_bias_type.value,
                                                        attn_mask_type=attn_mask_type.value,
                                                        scaling_factor=scaling_factor,

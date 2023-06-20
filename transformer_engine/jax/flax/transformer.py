@@ -11,6 +11,7 @@ import os
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
@@ -182,9 +183,8 @@ def core_attention(query: Array,
     if not deterministic and dropout_rate > 0.:
         keep_prob = 1.0 - dropout_rate
         dropout_shape = list(attn_weights.shape)
-        dropout_shape[-2] = 1
+        # TODO(rewang): add attention dropout broadcast dimension arguments for users
         keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-        keep = jnp.broadcast_to(keep, attn_weights.shape)
         multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
         attn_weights = attn_weights * multiplier
 
@@ -384,7 +384,7 @@ class MultiHeadAttention(nn.Module):
         fused_attn_supported_seqlen = [128, 256, 384, 512]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
-            self.dropout_rate == 0 and canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
+            canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
             q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
             and is_fused_attn_kernel_available() and (self.head_dim == 64) and enable_fused_attn
 
@@ -397,9 +397,6 @@ class MultiHeadAttention(nn.Module):
                           f"but got {self.transpose_batch_sequence}, "
             if not self.fuse_qkv:
                 reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
-            if self.dropout_rate != 0:
-                # TODO(rewang): add dropout support
-                reason += f"no dropout is required but got dropout_rate={self.dropout_rate}, "
             if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
                 reason += f"dtype in [BF16, FP16] is required " \
                           f"but got dtype={canonicalize_dtype}, "
@@ -583,6 +580,12 @@ class MultiHeadAttention(nn.Module):
             assert mask is not None and mask.ndim == 4    # (b, 1, s_q, s_kv)
             assert not self.transpose_batch_sequence
 
+            seed = None
+            if dropout_rng is not None:
+                seed = jax.random.split(dropout_rng, len(jax.devices()))
+                # ensure the old key never used
+                del dropout_rng
+
             # TODO(rewang): make it configurable for pre_scale_bias
             attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
 
@@ -607,7 +610,7 @@ class MultiHeadAttention(nn.Module):
                 x = self_fused_attn(qkv_proj,
                                     bias,
                                     mask,
-                                    dropout_rng,
+                                    seed,
                                     attn_bias_type=attn_bias_type,
                                     attn_mask_type=attn_mask_type,
                                     scaling_factor=scale_factor,
@@ -626,7 +629,7 @@ class MultiHeadAttention(nn.Module):
                 x = cross_fused_attn(query,
                                      kv_proj,
                                      mask,
-                                     dropout_rng,
+                                     seed,
                                      attn_bias_type=attn_bias_type,
                                      attn_mask_type=attn_mask_type,
                                      scaling_factor=scale_factor,
