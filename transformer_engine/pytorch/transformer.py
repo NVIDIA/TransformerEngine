@@ -161,7 +161,10 @@ class TransformerLayer(torch.nn.Module):
     -----------------------
     fuse_wgrad_accumulation : bool, default = 'False'
                              if set to `True`, enables fusing of creation and accumulation of
-                             the weight gradient.
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
     params_dtype : torch.dtype, default = `torch.float32`
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
