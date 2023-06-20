@@ -21,6 +21,9 @@ namespace jax {
 int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
+void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
+                           size_t kv_max_seqlen, cudaStream_t stream);
+
 class cublasLtMetaManager {
  public:
     static cublasLtMetaManager &Instance() {

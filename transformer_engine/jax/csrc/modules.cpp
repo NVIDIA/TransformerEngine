@@ -740,17 +740,6 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         desc.scale_factor, stream);
 }
 
-void _PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                            size_t kv_max_seqlen, cudaStream_t stream) {
-    auto *seed_dst = rng_state_dst;
-    auto *offset_dst = static_cast<int64_t *>(rng_state_dst) + 1;
-    cudaMemcpyAsync(seed_dst, seed, sizeof(int64_t), cudaMemcpyDeviceToDevice, stream);
-    constexpr int threads_per_cta = 128;
-    const size_t increment = (q_max_seqlen * kv_max_seqlen + threads_per_cta - 1) / threads_per_cta;
-    auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
-    cudaMemcpyAsync(offset_dst, &offset, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
-}
-
 void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
                                 size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
@@ -818,7 +807,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
     auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-    _PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
@@ -987,7 +976,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
 
     auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
     auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-    _PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
 
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
