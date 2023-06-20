@@ -1,3 +1,4 @@
+from typing import TypeVar
 from .base import Op, OpInputPlaceholder
 from .add import OpAdd
 from .bmm import OpBMM
@@ -5,6 +6,8 @@ from .transpose import OpTranspose
 from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
 from .gelu import OpFGelu, OpDFGelu
 from .mul import OpMul
+
+T = TypeVar("T", bound=Op)
 
 
 class ParamDescriptor:
@@ -34,37 +37,42 @@ class OpGraph:
         self.in_nodes = []
         self.out_nodes = []
 
-    def in_(self) -> Op:
+    def in_(self):
         """Adds an input node with the given number of features to the graph. Returns the node, so it can be used in further computations."""
-        self.in_nodes.append(OpInputPlaceholder())
-        return self.in_nodes[-1]
+        node = OpInputPlaceholder()
+        self.in_nodes.append(node)
+        return node
 
-    def param_(self, features: int, name: str) -> Op:
+    def param_(self, features: int, name: str):
         """Adds a trainable parameter with the given number of features to the graph. Returns the parameter, so it can be used in further computations."""
         self.trainable_parameters.append(ParamDescriptor(features, name))
-        self.nodes.append(OpParam(self.trainable_parameters[-1]))
-        return self.nodes[-1]
+        node = OpParam(self.trainable_parameters[-1])
+        self.nodes.append(node)
+        return node
 
-    def out_(self, op: Op) -> Op:
+    def out_(self, op: T) -> T:
         """Marks the given op as an output node of the graph. The op must be a node of the graph. Returns the op back."""
         assert op in self.nodes
         self.out_nodes.append(op)
         return op
 
-    def bmm_(self, a: Op, b: Op) -> Op:
+    def bmm_(self, a: Op, b: Op):
         """Adds a batched matrix multiplication node to the graph. Returns the node with the result."""
-        self.nodes.append(OpBMM(a, b))
-        return self.nodes[-1]
+        node = OpBMM(a, b)
+        self.nodes.append(node)
+        return node
 
-    def add_(self, a: Op, b: Op) -> Op:
+    def add_(self, a: Op, b: Op):
         """Adds an addition node to the graph. Returns the node with the result."""
-        self.nodes.append(OpAdd(a, b))
-        return self.nodes[-1]
+        node = OpAdd(a, b)
+        self.nodes.append(node)
+        return node
 
-    def mul_(self, a: Op, b: Op) -> Op:
+    def mul_(self, a: Op, b: Op):
         """Adds an element-wise multiplication node to the graph. Returns the node with the result."""
-        self.nodes.append(OpMul(a, b))
-        return self.nodes[-1]
+        node = OpMul(a, b)
+        self.nodes.append(node)
+        return node
 
     def f_layernorm_(
         self, a: Op, gamma: Op, beta: Op, eps: float, zero_centered_gamma: bool
@@ -78,25 +86,29 @@ class OpGraph:
         node = self.add_(node, beta)
         return node
 
-    def df_layernorm_core_(self, a: Op, eps: float) -> Op:
+    def df_layernorm_core_(self, a: Op, eps: float):
         """Adds a layernorm' (derivative) node to the graph. Returns the node with the result."""
-        self.nodes.append(OpDFLayerNormCore(a, eps))
-        return self.nodes[-1]
+        node = OpDFLayerNormCore(a, eps)
+        self.nodes.append(node)
+        return node
 
-    def f_gelu_(self, a: Op) -> Op:
+    def f_gelu_(self, a: Op):
         """Adds a gelu node to the graph. Returns the node with the result."""
-        self.nodes.append(OpFGelu(a))
-        return self.nodes[-1]
+        node = OpFGelu(a)
+        self.nodes.append(node)
+        return node
 
-    def df_gelu_(self, a: Op) -> Op:
+    def df_gelu_(self, a: Op):
         """Adds a gelu' (derivative) node to the graph. Returns the node with the result."""
-        self.nodes.append(OpDFGelu(a))
-        return self.nodes[-1]
+        node = OpDFGelu(a)
+        self.nodes.append(node)
+        return node
 
-    def t_(self, a: Op) -> Op:
+    def t_(self, a: Op):
         """Adds a transpose node to the graph. Returns the node with the result."""
-        self.nodes.append(OpTranspose(a))
-        return self.nodes[-1]
+        node = OpTranspose(a)
+        self.nodes.append(node)
+        return node
 
     def create_backward_graph_(self, node: Op, grad: Op):
         """Creates the graph of the backward pass, assuming that grad is the gradient of the loss with respect to the node."""
