@@ -183,7 +183,7 @@ def core_attention(query: Array,
     if not deterministic and dropout_rate > 0.:
         keep_prob = 1.0 - dropout_rate
         dropout_shape = list(attn_weights.shape)
-        # TODO(rewang): check if the dropout shape affects the convergence
+        # TODO(rewang): add attention dropout broadcast dimension arguments for users
         keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
         multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
         attn_weights = attn_weights * multiplier
