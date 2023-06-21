@@ -1258,7 +1258,7 @@ def test_export_transformer_layer(
     fuse_qkv_params_str = "_fused-qkv" if fuse_qkv_params else ""
     high_prec_str = dtype2str(precision)
     attn_mask_str = get_attn_mask_str(use_mask, attn_mask_type)
-    fname = f"te.transformer_layer{fp8_str}{attn_mask_str}{fuse_qkv_params_str}{high_prec_str}.onnx"
+    fname = f"te.transformer_layer{fp8_str}{attn_mask_str}{fuse_qkv_params_str}{high_prec_str}_{activation}.onnx"
 
     model = te.TransformerLayer(
         hidden_size,

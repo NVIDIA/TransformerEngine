@@ -21,6 +21,9 @@ namespace jax {
 int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
+void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
+                           size_t kv_max_seqlen, cudaStream_t stream);
+
 class cublasLtMetaManager {
  public:
     static cublasLtMetaManager &Instance() {
@@ -91,6 +94,27 @@ class cudaDevicePropertiesManager {
  private:
     bool prop_queried_ = false;
     cudaDeviceProp prop_;
+};
+
+class FusedAttnOffsetManager {
+ public:
+    static FusedAttnOffsetManager &Instance() {
+        static thread_local FusedAttnOffsetManager instance;
+        return instance;
+    }
+
+    size_t GetAndUpdateOffset(size_t increment) {
+        size_t ret = offset_;
+        offset_ += increment;
+        return ret;
+    }
+
+    FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+    void operator=(FusedAttnOffsetManager const &) = delete;
+
+ private:
+    FusedAttnOffsetManager() {}
+    size_t offset_ = 0;
 };
 
 }  // namespace jax

@@ -593,7 +593,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
     -----------------------
     fuse_wgrad_accumulation : bool, default = 'False'
                              if set to `True`, enables fusing of creation and accumulation of
-                             the weight gradient.
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
