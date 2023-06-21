@@ -1,11 +1,13 @@
 from types import EllipsisType
-from typing import TypeVar, overload
+from typing import TypeVar, overload, ContextManager
 from .base import Op, OpInputPlaceholder
 from .add import OpAdd
 from .bmm import OpBMM
 from .scale import OpScale
 from .view import OpView
 from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
+from .dropout import OpFDropout
+from .softmax import OpFSoftmax, OpDFSoftmax
 from .gelu import OpFGelu, OpDFGelu
 from .mul import OpMul
 
@@ -91,6 +93,24 @@ class OpGraph:
     def df_layernorm_core_(self, a: Op, eps: float):
         """Adds a layernorm' (derivative) node to the graph. Returns the node with the result."""
         node = OpDFLayerNormCore(a, eps)
+        self.nodes.append(node)
+        return node
+
+    def f_dropout_(self, a: Op, p: float, rng_ctx: ContextManager[None]):
+        """Adds a dropout node to the graph. Returns the node with the result"""
+        node = OpFDropout(a, p, rng_ctx)
+        self.nodes.append(node)
+        return node
+
+    def f_softmax_(self, a: Op):
+        """Adds a softmax node to the graph. Returns the node with the result"""
+        node = OpFSoftmax(a)
+        self.nodes.append(node)
+        return node
+
+    def df_softmax_(self, a: Op):
+        """Adds a softmax' (derivative) node to the graph. Returns the node with the result"""
+        node = OpDFSoftmax(a)
         self.nodes.append(node)
         return node
 
