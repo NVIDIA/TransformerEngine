@@ -608,7 +608,7 @@ def fused_attn_fwd_kvpacked(
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
+        rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
     # BF16/FP16 fused attention API from fmha_v2
