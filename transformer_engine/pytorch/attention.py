@@ -180,13 +180,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # preallocting result tensor: [b * np, sq, sk]
+        # WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
+        is_bf16 = query_layer.dtype == torch.bfloat16
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            dtype=query_layer.dtype,
+            dtype=torch.float32 if is_in_onnx_export_mode() and is_bf16 else query_layer.dtype,
             device=torch.cuda.current_device(),
         )
+
+        if is_in_onnx_export_mode() and is_bf16:
+            matmul_result = matmul_result.bfloat16()
 
         scale = self.norm_factor
         if apply_qk_layer_scaling:
