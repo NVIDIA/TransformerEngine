@@ -1273,8 +1273,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     } else if (Aux_CTX_Tensors->size == 2) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = rng_state->data.dptr;
     }
 
     void *devPtrCuSeqlen = cu_seqlens->data.dptr;
@@ -1355,8 +1353,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     } else if (Aux_CTX_Tensors->size == 2) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = rng_state->data.dptr;
     }
 
     void *devQCuSeqlen = q_cu_seqlens->data.dptr;
