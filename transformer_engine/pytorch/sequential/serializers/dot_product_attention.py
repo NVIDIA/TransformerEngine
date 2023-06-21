@@ -1,4 +1,5 @@
-from typing import ContextManager
+from math import sqrt
+from typing import ContextManager, Literal
 from ..custom_serializer_holder import COMPUTE_PIPELINE_CUSTOM_SERIALIZERS
 from ...attention import DotProductAttention
 from ..ops import OpGraph
@@ -6,8 +7,9 @@ from ..ops import OpGraph
 
 def _serializer(module: DotProductAttention):
     module_name: str = getattr(module, "_compute_pipeline_name")
-    attn_mask_type = module.attn_mask_type
-    layer_number = module.unfused_attention.layer_number
+    attn_mask_type: Literal["causal", "padding"] = module.attn_mask_type  # type: ignore[assignment]
+    hidden_size = module.hidden_size_per_attention_head
+    scale = sqrt(hidden_size) * (module.unfused_attention.layer_number or 1.0)
     dropout = module.unfused_attention.attention_dropout
     rng_ctx: ContextManager[None] = module.unfused_attention.attention_dropout_ctx  # type: ignore[assignment]
 
@@ -26,7 +28,10 @@ def _serializer(module: DotProductAttention):
 
     q = op_graph.view_(q, [1, 2, 0, 3])  # [b, np, sq, hn]
     k = op_graph.view_(k, [1, 2, 3, 0])  # [b, np, hn, sk]
+
     scores = op_graph.bmm_(q, k)  # [b, np, sq, sk]
+    scores = op_graph.scale_(scores, scale)  # [b, np, sq, sk]
+
     # TODO: causal masking, softmax, dropout
     v = op_graph.view_(v, [1, 2, 0, 3])  # [b, np, sk, hn]
     o = op_graph.bmm_(scores, v)  # [b, np, sq, hn]

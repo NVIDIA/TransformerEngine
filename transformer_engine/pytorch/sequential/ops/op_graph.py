@@ -1,8 +1,9 @@
 from types import EllipsisType
-from typing import TypeVar
+from typing import TypeVar, overload
 from .base import Op, OpInputPlaceholder
 from .add import OpAdd
 from .bmm import OpBMM
+from .scale import OpScale
 from .view import OpView
 from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
 from .gelu import OpFGelu, OpDFGelu
@@ -108,6 +109,25 @@ class OpGraph:
     def t_(self, a: Op):
         """Adds a transpose node to the graph. Returns the node with the result."""
         return self.view_(a, [..., -1, -2])
+
+    @overload
+    def scale_(self, a: float, b: Op) -> OpScale:
+        ...
+
+    @overload
+    def scale_(self, a: Op, b: float) -> OpScale:
+        ...
+
+    def scale_(self, a: Op | float, b: Op | float):
+        """Adds a scaling node to the graph. Returns the node with the result."""
+        if isinstance(a, float):
+            assert isinstance(b, Op)
+            node = OpScale(b, a)
+        else:
+            assert isinstance(b, float)
+            node = OpScale(a, b)
+        self.nodes.append(node)
+        return node
 
     def view_(self, a: Op, shape: list[int | EllipsisType]):
         """Adds a view node that permutes the order of dimensions of the Op. Returns the node with the result."""
