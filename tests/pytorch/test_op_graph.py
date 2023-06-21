@@ -7,7 +7,7 @@ from transformer_engine.pytorch.sequential.ops.op_graph import (
     OpGraph,
 )
 
-seq = te.Sequential(te.LayerNormMLP(1, 1))
+seq = te.Sequential(te.DotProductAttention(1, 1), te.LayerNormMLP(1, 1))
 c = ComputePipeline(*seq._modules.values())
 
 
@@ -37,6 +37,11 @@ c.backward()
 print()
 combined = render(c._graph).splitlines()
 
+fwd_nodes = set[str]()
+for line in fwd:
+    if not "->" in line:
+        fwd_nodes.add(line[: line.find("[")].strip())
+
 bwd = []
 for line in combined:
     if line not in fwd:
@@ -45,6 +50,8 @@ for line in combined:
             b, c = b.split(" [", 1)
             c = " [" + c
             line = f"{b} -> {a}{c}[dir=back]"
+            if a in fwd_nodes or b in fwd_nodes:
+                line += "[color=gray]"
         except:
             pass
         bwd.append(line)
@@ -52,6 +59,7 @@ for line in combined:
 s = ""
 s += ("digraph G {") + "\n"
 s += ("rankdir=LR") + "\n"
+s += ("newrank=true") + "\n"
 s += ("subgraph cluster_0 {") + "\n"
 s += ("\n".join(fwd)) + "\n"
 s += ("} subgraph cluster_1 {") + "\n"
