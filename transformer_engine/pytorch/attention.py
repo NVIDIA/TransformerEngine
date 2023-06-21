@@ -33,12 +33,26 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.jit import jit_fuser
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
 
 
 __all__ = ["DotProductAttention"]
+
+
+@jit_fuser
+def get_cu_seqlens(padding_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Given a padding mask of shape [seq_len, batch_size], returns an int32
+    tensor of shape [batch_size + 1,] containing the cumulative sequence
+    lengths of every sample in the batch.
+    """
+    reduced_mask = padding_mask.sum(dim=0)
+    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
+    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    return torch.cat((zero, cu_seqlens))
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -359,8 +373,13 @@ class FlashAttention(torch.nn.Module):
             assert (
                 attention_mask is not None
             ), "Boolean attention mask must be provided for padding."
-            # TODO(ksivaman): reduce mask here
-            cu_seqlens = None
+
+            mask_shape = torch.Size([seqlen, batch_size])
+            assert (
+                attention_mask.shape == mask_shape
+            ), f"Expected shape {mask_shape} for attenion mask but found {attention_mask.shape}."
+
+            cu_seqlens = get_cu_seqlens(attention_mask)
         else:
             cu_seqlens = torch.arange(
                 0,

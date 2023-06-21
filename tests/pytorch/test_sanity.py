@@ -256,6 +256,29 @@ def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     torch.cuda.synchronize()
 
 
+def _test_sanity_e2e_bert(block, bs, dtype, config, fp8_recipe, skip_wgrad):
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+
+    if dtype == torch.float32:
+        mask_shape = torch.Size([1, 1, config.seq_len, config.seq_len])
+    else:
+        mask_shape = torch.Size([config.seq_len, bs])
+
+    te_inp_attn_mask = torch.rand(mask_shape).cuda().bool()
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp_hidden_states, te_inp_attn_mask)
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+
 def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
@@ -468,12 +491,14 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
             apply_residual_connection_post_layernorm=True,
             output_layernorm=True,
             zero_centered_gamma=zero_centered_gamma,
+            self_attn_mask_type="padding",
+
         )
         .to(dtype=dtype)
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e_bert(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
