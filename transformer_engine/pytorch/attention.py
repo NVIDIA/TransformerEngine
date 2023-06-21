@@ -555,7 +555,7 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16] # pylint: disable=too-many-boolean-expressions
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
