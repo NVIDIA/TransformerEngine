@@ -8,6 +8,7 @@ from .view import OpView
 from .layernorm import OpFLayerNormCore, OpDFLayerNormCore
 from .dropout import OpFDropout
 from .softmax import OpFSoftmax, OpDFSoftmax
+from .causal_mask import OpFCausalMask, OpDFCausalMask
 from .gelu import OpFGelu, OpDFGelu
 from .mul import OpMul
 
@@ -111,6 +112,18 @@ class OpGraph:
     def df_softmax_(self, a: Op):
         """Adds a softmax' (derivative) node to the graph. Returns the node with the result"""
         node = OpDFSoftmax(a)
+        self.nodes.append(node)
+        return node
+
+    def f_causal_mask_(self, a: Op):
+        """Adds a causal mask node to the graph. Returns the node with the result"""
+        node = OpFCausalMask(a)
+        self.nodes.append(node)
+        return node
+
+    def df_causal_mask_(self, a: Op):
+        """Adds a causal mask' (derivative) node to the graph. Returns the node with the result"""
+        node = OpDFCausalMask(a)
         self.nodes.append(node)
         return node
 

@@ -27,15 +27,19 @@ def _serializer(module: DotProductAttention):
 
     q = op_graph.view_(q, [1, 2, 0, 3])  # [b, np, sq, hn]
     k = op_graph.view_(k, [1, 2, 3, 0])  # [b, np, hn, sk]
+    v = op_graph.view_(v, [1, 2, 0, 3])  # [b, np, sk, hn]
 
     scores = op_graph.bmm_(q, k)  # [b, np, sq, sk]
     scores = op_graph.scale_(scores, scale)  # [b, np, sq, sk]
-    # TODO: add masking
+
+    if attn_mask_type == "causal":
+        scores = op_graph.f_causal_mask_(scores)  # [b, np, sq, sk]
+    elif attn_mask_type == "padding":
+        raise NotImplementedError("Padding mask is not implemented yet")
+
     scores = op_graph.f_softmax_(scores)  # [b, np, sq, sk]
     scores = op_graph.f_dropout_(scores, dropout_p, rng_ctx)  # [b, np, sq, sk]
 
-    # TODO: causal masking, softmax, dropout
-    v = op_graph.view_(v, [1, 2, 0, 3])  # [b, np, sk, hn]
     o = op_graph.bmm_(scores, v)  # [b, np, sq, hn]
     o = op_graph.view_(o, [2, 0, 1, 3])  # [sq, b, np, hn]
 
