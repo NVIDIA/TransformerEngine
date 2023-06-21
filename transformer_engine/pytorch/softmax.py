@@ -215,14 +215,14 @@ class FusedScaleMaskSoftmax(nn.Module):
     fused operation: scaling + mask + softmax
 
     Arguments:
-        attn_mask_type: attention mask type (pad or causal)
+        attn_mask_type: attention mask type ('padding', 'causal', or None)
         mask_func: mask function to be applied.
         softmax_in_fp32: if true, softmax in performed at fp32 precision.
     """
 
     def __init__(
         self,
-        attn_mask_type: str,
+        attn_mask_type: Union[str, None],
         mask_func: Callable,
         softmax_in_fp32: bool = True,
     ) -> None:
@@ -271,7 +271,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         attn_batches = b * np
 
         if (
-            self.scaled_masked_softmax_fusion  # user want to fuse
+            self.scaled_masked_softmax_fusion  # user wants to fuse
             and self.input_in_float16  # input must be fp16
             and 16 < sk <= 4096  # sk must be 16 ~ 2048
             and sq % 4 == 0  # sq must be divisor of 4
@@ -303,7 +303,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
             return probs.view(b, np, sq, sk)
         # input is 4D tensor (b, np, sq, sk)
-        if mask is not None:
+        if mask is not None and self.attn_mask_type:
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
 
@@ -325,7 +325,9 @@ class FusedScaleMaskSoftmax(nn.Module):
             else:
                 mask = _get_default_causal_mask(inp.size(2))
 
-        mask_output = self.mask_func(inp, mask) if mask is not None else inp
+        mask_output = inp
+        if mask is not None and self.attn_mask_type:
+            mask_output = self.mask_func(inp, mask)
         probs = torch.nn.Softmax(dim=-1)(mask_output)
 
         if self.input_in_float16 and self.softmax_in_fp32:

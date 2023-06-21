@@ -76,7 +76,7 @@ class TransformerLayer(torch.nn.Module):
     .. note::
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`self_attn_mask_type` is set to `"causal"`.
+        :attr:`self_attn_mask_type` is set to `"causal"` or `None`.
 
     Parameters
     ----------
@@ -119,7 +119,7 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+    self_attn_mask_type: {'causal', 'padding', None}, default = `causal`
                         type of attention mask passed into softmax operation.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
@@ -199,7 +199,7 @@ class TransformerLayer(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
-        self_attn_mask_type: str = "causal",
+        self_attn_mask_type: Optional[str] = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: torch.dtype = torch.float32,
@@ -410,7 +410,7 @@ class TransformerLayer(torch.nn.Module):
         .. note::
 
             Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
-            is set to `"causal"`.
+            is set to `"causal"` or `None`.
 
         Parameters
         ----------
@@ -454,7 +454,7 @@ class TransformerLayer(torch.nn.Module):
                 hidden_states.shape[0] == self.seq_length // self.tp_size
             ), "Sequence dimension must be split across TP group when using sequence parallel."
 
-        if self.self_attn_mask_type != "causal" and attention_mask is not None:
+        if self.self_attn_mask_type == "padding" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"

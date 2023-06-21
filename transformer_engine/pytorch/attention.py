@@ -119,7 +119,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = "causal",
         layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -298,7 +298,7 @@ class FlashAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = "causal",
     ) -> None:
         super().__init__()
 
@@ -306,7 +306,7 @@ class FlashAttention(torch.nn.Module):
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
 
-        self.attn_causal_mask = attn_mask_type == "causal"
+        self.attn_mask_type = attn_mask_type
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
@@ -317,6 +317,7 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -330,7 +331,6 @@ class FlashAttention(torch.nn.Module):
             ), 'FlashAttention currently only supports CUDA tensors.'
 
         # For now just 128, will make it more general in the future
-
         if (query_layer.shape[-1] == 128 and
             query_layer.shape[0] * query_layer.shape[1] >= 512 and
             _check_if_interleaved(query_layer, key_layer, value_layer)):
@@ -350,18 +350,25 @@ class FlashAttention(torch.nn.Module):
         ]
 
         max_seqlen = seqlen
-        cu_seqlens = torch.arange(
-            0,
-            (batch_size + 1) * seqlen,
-            step=seqlen,
-            dtype=torch.int32,
-            device=query_layer.device)
+        if self.attn_mask_type == "padding":
+            assert (
+                attention_mask is not None
+            ), "Boolean attention mask must be provided for padding."
+            # TODO(ksivaman): reduce mask here
+            cu_seqlens = None
+        else:
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seqlen,
+                step=seqlen,
+                dtype=torch.int32,
+                device=query_layer.device)
 
         with self.attention_dropout_ctx():
             output = flash_attn_unpadded_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
+                softmax_scale=1.0/self.norm_factor, causal=self.attn_mask_type=="causal",
                 deterministic=self.deterministic,
             )
 
@@ -377,7 +384,7 @@ class DotProductAttention(torch.nn.Module):
     .. note::
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`attn_mask_type` is set to `"causal"`.
+        :attr:`attn_mask_type` is set to `"causal"` or `None`.
 
     .. warning::
 
@@ -395,7 +402,7 @@ class DotProductAttention(torch.nn.Module):
                 number of key-value channels.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: {'causal', 'padding'}, default = `causal`
+    attn_mask_type: {'causal', 'padding', None}, default = `causal`
                    type of attention mask passed into softmax operation.
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
@@ -416,7 +423,7 @@ class DotProductAttention(torch.nn.Module):
         num_attention_heads: int,
         kv_channels: int,
         attention_dropout: float = 0.0,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -496,7 +503,7 @@ class DotProductAttention(torch.nn.Module):
         .. note::
 
             Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
-            is set to `"causal"`.
+            is set to `"causal"` or `None`.
 
         .. note::
 
@@ -528,32 +535,21 @@ class DotProductAttention(torch.nn.Module):
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
+            or is_in_onnx_export_mode()
         ):
             use_flash_attention = False
 
-        if self.attn_mask_type == "padding" and attention_mask is not None:
-            use_flash_attention = False
-
-        if is_in_onnx_export_mode():
-            use_flash_attention = False
-
-        if use_flash_attention:
-            if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.flash_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer)
-            return self.flash_attention(query_layer, key_layer, value_layer)
+        attention_func = self.flash_attention if use_flash_attention else self.unfused_attention
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
-                self.unfused_attention,
+                attention_func,
                 query_layer,
                 key_layer,
                 value_layer,
                 attention_mask,
             )
-        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
+        return attention_func(query_layer, key_layer, value_layer, attention_mask)
 
 
 class MultiHeadAttention(torch.nn.Module):
@@ -571,7 +567,7 @@ class MultiHeadAttention(torch.nn.Module):
         init_method: Callable,
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         fuse_wgrad_accumulation: bool = False,
@@ -751,7 +747,7 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
-        if self.attn_mask_type != "causal" and attention_mask is not None:
+        if self.attn_mask_type == "padding" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
