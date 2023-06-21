@@ -63,7 +63,7 @@ s += ("newrank=true") + "\n"
 s += ("subgraph cluster_0 {") + "\n"
 s += ("\n".join(fwd)) + "\n"
 s += ("} subgraph cluster_1 {") + "\n"
-s += ("\n".join(bwd).replace("op", "opbwd").replace("param", "parambwd")) + "\n"
+s += ("\n".join(bwd).replace("=op", "=opbwd").replace("param", "parambwd")) + "\n"
 s += ("}") + "\n"
 s += ("}") + "\n"
 print(s)
