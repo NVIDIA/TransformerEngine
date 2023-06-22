@@ -14,6 +14,7 @@ def test(modules: tuple[nn.Module, ...], targets: tuple[nn.Module, ...]):
         isinstance(pipeline.module[i], type(targets[i]))
         for i in range(max(len(pipeline.module), len(targets)))
     )
+    print(f"Passed: {modules} -> {targets}")
 
 
 torch.set_default_device("cuda")

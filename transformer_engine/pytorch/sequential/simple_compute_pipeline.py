@@ -162,6 +162,7 @@ def layerNormMLP(layerNormLinear: LayerNormLinear, act: str, linear: Linear):
             tp_size,
             init_method,
             bias,
+            act,
             output_layer_init_method,
             fuse_wgrad_accumulation,
             params_dtype,
