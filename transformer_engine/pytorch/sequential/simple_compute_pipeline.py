@@ -1,5 +1,6 @@
 from typing import Any, Callable
-from torch import dtype, nn
+from sympy import sequence
+from torch import device, dtype, nn
 import torch
 
 from ..module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
@@ -11,22 +12,41 @@ def linear(linear: nn.Linear):
     bias = linear.get_parameter("bias") is not None  # type: ignore
     dtype = linear.weight.dtype
 
-    if linear.weight.device != torch.cuda.current_device():  # type: ignore
+    if linear.weight.device != device("cuda", torch.cuda.current_device()):
         return [linear]
 
     return [Linear(in_features, out_features, bias=bias, params_dtype=dtype)]
 
 
 def layerNorm(layerNorm: nn.LayerNorm):
-    normalized_shape = layerNorm.normalized_shape
-    eps = layerNorm.eps
-    elementwise_affine = layerNorm.elementwise_affine
-    dtype = layerNorm.weight.dtype
-
-    if len(normalized_shape) != 1 or elementwise_affine:
+    # TODO: technically, te.Linear doesn't support elementwise_affine
+    # as it initializes its parameters differently
+    # but it should converge at some point any way.
+    # It doesn't support the no-parameters mode, though
+    if len(layerNorm.normalized_shape) != 1 or not layerNorm.elementwise_affine:
         return [layerNorm]
 
-    return [LayerNorm(normalized_shape[0], eps, params_dtype=dtype)]
+    hidden_size = layerNorm.normalized_shape[0]
+    eps = layerNorm.eps
+
+    # TODO: check if this is correct behavior
+    # it is supposed to only increase performance
+    sequence_parallel = True
+
+    params_dtype = layerNorm.weight.dtype
+
+    # TODO: this is an approximation of the elementwise_affine mode
+    zero_centered_gamma = True
+
+    return [
+        LayerNorm(
+            hidden_size,
+            eps,
+            sequence_parallel,
+            params_dtype,
+            zero_centered_gamma,
+        )
+    ]
 
 
 def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
@@ -60,8 +80,8 @@ def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
     skip_weight_param_allocation = not hasattr(linear, "weight_tensor")
     parameters_split = linear.parameters_split
     zero_centered_gamma = layerNorm.zero_centered_gamma
-    ub_bulk_wgrad = True
-    ub_bulk_dgrad = True
+    ub_bulk_wgrad = False
+    ub_bulk_dgrad = False
     ub_split_ag = linear.ub_split_ag
 
     return [
@@ -188,11 +208,13 @@ class ComputePipeline:
 
     @staticmethod
     def _replace(list: list[nn.Module], pattern: tuple[type, ...], replacer: Callable):
-        for startPos in range(len(list) - len(pattern)):
+        for startPos in range(len(list) - len(pattern) + 1):
             if all(
                 isinstance(list[startPos + i], pattern[i]) for i in range(len(pattern))
             ):
-                list[startPos : startPos + len(pattern)] = replacer(*pattern)
+                list[startPos : startPos + len(pattern)] = replacer(
+                    *list[startPos : startPos + len(pattern)]
+                )
 
     def __call__(self, x: Any) -> Any:
         return self.module(x)
