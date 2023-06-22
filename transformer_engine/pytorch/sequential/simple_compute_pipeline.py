@@ -7,31 +7,31 @@ from ..module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ..attention import DotProductAttention
 
 
-def linear(linear: nn.Linear) -> nn.Linear | Linear:
+def linear(linear: nn.Linear):
     in_features = linear.in_features
     out_features = linear.out_features
     bias = linear.get_parameter("bias") is not None  # type: ignore
     dtype = linear.weight.dtype
 
     if linear.weight.device != torch.cuda.current_device():  # type: ignore
-        return linear
+        return [linear]
 
-    return Linear(in_features, out_features, bias=bias, params_dtype=dtype)
+    return [Linear(in_features, out_features, bias=bias, params_dtype=dtype)]
 
 
-def layerNorm(layerNorm: nn.LayerNorm) -> nn.LayerNorm | LayerNorm:
+def layerNorm(layerNorm: nn.LayerNorm):
     normalized_shape = layerNorm.normalized_shape
     eps = layerNorm.eps
     elementwise_affine = layerNorm.elementwise_affine
     dtype = layerNorm.weight.dtype
 
     if len(normalized_shape) != 1 or elementwise_affine:
-        return layerNorm
+        return [layerNorm]
 
-    return LayerNorm(normalized_shape[0], eps, params_dtype=dtype)
+    return [LayerNorm(normalized_shape[0], eps, params_dtype=dtype)]
 
 
-def layerNormLinear(layerNorm: LayerNorm, linear: Linear) -> LayerNormLinear:
+def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
     in_features = layerNorm.weight.shape[0]
     out_features = linear.out_features
     eps = layerNorm.eps
@@ -64,46 +64,104 @@ def layerNormLinear(layerNorm: LayerNorm, linear: Linear) -> LayerNormLinear:
     ub_bulk_dgrad = True
     ub_split_ag = linear.ub_split_ag
 
-    return LayerNormLinear(
-        in_features,
-        out_features,
-        eps,
-        sequence_parallel,
-        fuse_wgrad_accumulation,
-        tp_group,
-        tp_size,
-        get_rng_state_tracker,
-        init_method,
-        bias,
-        return_bias,
-        params_dtype,
-        parallel_mode,
-        return_layernorm_output,
-        skip_weight_param_allocation,
-        parameters_split,
-        zero_centered_gamma,
-        ub_bulk_wgrad,
-        ub_bulk_dgrad,
-        ub_split_ag,
+    return [
+        LayerNormLinear(
+            in_features,
+            out_features,
+            eps,
+            sequence_parallel,
+            fuse_wgrad_accumulation,
+            tp_group,
+            tp_size,
+            get_rng_state_tracker,
+            init_method,
+            bias,
+            return_bias,
+            params_dtype,
+            parallel_mode,
+            return_layernorm_output,
+            skip_weight_param_allocation,
+            parameters_split,
+            zero_centered_gamma,
+            ub_bulk_wgrad,
+            ub_bulk_dgrad,
+            ub_split_ag,
+        )
+    ]
+
+
+def layerNormMLP(layerNormLinear: LayerNormLinear, act: str, linear: Linear):
+    if (layerNormLinear.in_features != linear.out_features) or (
+        layerNormLinear.tp_group != linear.tp_group
+    ):
+        activation = nn.GELU if act == "gelu" else nn.ReLU
+        return [layerNormLinear, activation, linear]
+
+    hidden_size = layerNormLinear.in_features
+    ffn_hidden_size = linear.in_features
+    eps = layerNormLinear.eps
+    sequence_parallel = layerNormLinear.sequence_parallel and linear.sequence_parallel
+    return_bias = linear.return_bias
+    get_rng_state_tracker = (
+        None  # get_rng_state_tracker cannot be recovered, assume it is None
     )
+    tp_group = linear.tp_group
+    tp_size = linear.tp_size
+    init_method = None  # init_method cannot be recovered, assume it is None
+    bias = linear.use_bias
+    output_layer_init_method = (
+        None  # output_layer_init_method cannot be recovered, assume it is None
+    )
+    fuse_wgrad_accumulation = linear.fuse_wgrad_accumulation
+    params_dtype = (
+        linear.weight_tensor.dtype
+        if linear.weight_tensor.dtype == layerNormLinear.weight.dtype
+        else None
+    )
+    return_layernorm_output = False
+    seq_length = None
+    micro_batch_size = None
+    set_parallel_mode = False
+    zero_centered_gamma = layerNormLinear.zero_centered_gamma
+    ub_bulk_wgrad = layerNormLinear.ub_bulk_wgrad
+    ub_bulk_dgrad = layerNormLinear.ub_bulk_dgrad
+    ub_split_rs = linear.ub_split_rs
+    ub_split_ag = layerNormLinear.ub_split_ag and linear.ub_split_ag
+
+    return [
+        LayerNormMLP(
+            hidden_size,
+            ffn_hidden_size,
+            eps,
+            sequence_parallel,
+            return_bias,
+            get_rng_state_tracker,
+            tp_group,
+            tp_size,
+            init_method,
+            bias,
+            output_layer_init_method,
+            fuse_wgrad_accumulation,
+            params_dtype,
+            return_layernorm_output,
+            seq_length,
+            micro_batch_size,
+            set_parallel_mode,
+            zero_centered_gamma,
+            ub_bulk_wgrad,
+            ub_bulk_dgrad,
+            ub_split_rs,
+            ub_split_ag,
+        )
+    ]
 
 
-def layerNormMLP(
-    layerNormLinear: LayerNormLinear, act: str, linear: Linear
-) -> LayerNormMLP:
-
-
-
-def layerNormMLPGELU(
-    layerNormLinear: LayerNormLinear, gelu: nn.GELU, linear: Linear
-) -> LayerNormMLP:
+def layerNormMLPGELU(layerNormLinear: LayerNormLinear, gelu: nn.GELU, linear: Linear):
     del gelu  # unused
     return layerNormMLP(layerNormLinear, "gelu", linear)
 
 
-def layerNormMLPReLU(
-    layerNormLinear: LayerNormLinear, relu: nn.ReLU, linear: Linear
-) -> LayerNormMLP:
+def layerNormMLPReLU(layerNormLinear: LayerNormLinear, relu: nn.ReLU, linear: Linear):
     del relu  # unused
     return layerNormMLP(layerNormLinear, "relu", linear)
 
@@ -132,7 +190,7 @@ class ComputePipeline:
             if all(
                 isinstance(list[startPos + i], pattern[i]) for i in range(len(pattern))
             ):
-                list[startPos : startPos + len(pattern)] = [replacer(*pattern)]
+                list[startPos : startPos + len(pattern)] = replacer(*pattern)
 
     def __call__(self, x: Any) -> Any:
         return self.module(x)
