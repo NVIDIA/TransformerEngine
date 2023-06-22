@@ -249,7 +249,6 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
   }
 }
-
 }  // namespace fused_attn
 
 // get cuDNN data type

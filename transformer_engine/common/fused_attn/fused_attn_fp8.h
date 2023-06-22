@@ -13,7 +13,7 @@
 namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with packed QKV
-void fused_attn_fwd_fp8_qkvpacked(
+void fused_attn_fp8_fwd_qkvpacked(
             size_t b, size_t max_seqlen,
             size_t h, size_t d,
             bool is_training, float attn_scale,
@@ -21,7 +21,7 @@ void fused_attn_fwd_fp8_qkvpacked(
             const Tensor *input_QKV,
             Tensor *input_output_S,
             Tensor *output_O,
-            NVTETensorPack* Aux_Output_Tensors,
+            NVTETensorPack* Aux_CTX_Tensors,
             const Tensor *cu_seqlens,
             const Tensor *rng_state,
             Tensor *workspace,
@@ -29,7 +29,7 @@ void fused_attn_fwd_fp8_qkvpacked(
             cudnnHandle_t handle);
 
 // fused attention BWD FP8 with packed QKV
-void fused_attn_bwd_fp8_qkvpacked(
+void fused_attn_fp8_bwd_qkvpacked(
             size_t b, size_t max_seqlen,
             size_t h, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
