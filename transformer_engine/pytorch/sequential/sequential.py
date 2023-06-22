@@ -1,6 +1,6 @@
 from typing import Any, OrderedDict, overload
 import torch.nn as nn
-from .compute_pipeline import ComputePipeline
+from .simple_compute_pipeline import ComputePipeline
 
 from numpy import ndarray
 
