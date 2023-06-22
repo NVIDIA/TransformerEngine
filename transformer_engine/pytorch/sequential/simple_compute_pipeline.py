@@ -2,9 +2,7 @@ from typing import Any, Callable
 from torch import dtype, nn
 import torch
 
-from transformer_engine.jax import layernorm
 from ..module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
-from ..attention import DotProductAttention
 
 
 def linear(linear: nn.Linear):
@@ -35,7 +33,9 @@ def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
     in_features = layerNorm.weight.shape[0]
     out_features = linear.out_features
     eps = layerNorm.eps
-    sequence_parallel = linear.sequence_parallel and layerNorm.weight.sequence_parallel  # type: ignore
+    sequence_parallel = (
+        linear.sequence_parallel and layerNorm.weight.sequence_parallel
+    )  # type: ignore
     fuse_wgrad_accumulation = linear.fuse_wgrad_accumulation
     tp_group = linear.tp_group
     tp_size = linear.tp_size
@@ -56,8 +56,8 @@ def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
     params_dtype = linear_dtype if linear_dtype == layernorm_dtype else None
 
     parallel_mode = linear.parallel_mode
-    return_layernorm_output = True
-    skip_weight_param_allocation = hasattr(linear, "weight_tensor")
+    return_layernorm_output = False
+    skip_weight_param_allocation = not hasattr(linear, "weight_tensor")
     parameters_split = linear.parameters_split
     zero_centered_gamma = layerNorm.zero_centered_gamma
     ub_bulk_wgrad = True
@@ -91,8 +91,10 @@ def layerNormLinear(layerNorm: LayerNorm, linear: Linear):
 
 
 def layerNormMLP(layerNormLinear: LayerNormLinear, act: str, linear: Linear):
-    if (layerNormLinear.in_features != linear.out_features) or (
-        layerNormLinear.tp_group != linear.tp_group
+    if (
+        layerNormLinear.in_features != linear.out_features
+        or layerNormLinear.tp_group != linear.tp_group
+        or layerNormLinear.use_bias != linear.use_bias
     ):
         activation = nn.GELU if act == "gelu" else nn.ReLU
         return [layerNormLinear, activation, linear]
