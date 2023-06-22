@@ -910,7 +910,6 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         if self.attn_mask_type == "padding" and attention_mask is not None:
-            use_flash_attention = False
             use_fused_attention = False
 
         if is_in_onnx_export_mode():
@@ -937,8 +936,9 @@ class DotProductAttention(torch.nn.Module):
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
                                                             key_layer,
-                                                            value_layer)
-            return self.flash_attention(query_layer, key_layer, value_layer)
+                                                            value_layer,
+                                                            attention_mask)
+            return self.flash_attention(query_layer, key_layer, value_layer, attention_mask)
 
         if use_fused_attention:
             if checkpoint_core_attention:
@@ -1164,15 +1164,6 @@ class MultiHeadAttention(torch.nn.Module):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
-
-        if self.attn_mask_type == "padding":
-            assert (
-                attention_mask is not None
-            ), "Boolean attention mask must be provided for padding."
-
-            assert (
-                attention_mask.dtype == torch.bool
-            ), "Attention mask must be a boolean tensor."
 
         # =================================================
         # Pre-allocate memory for key-values for inference.
