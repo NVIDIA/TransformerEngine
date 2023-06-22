@@ -208,3 +208,133 @@ def cast_from_fp8(
         int(itype),
         int(otype),
     )
+
+
+def transpose(
+    inp: paddle.Tensor,
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """Transpose input"""
+    return tex.te_transpose(
+        inp,
+        int(otype),
+    )
+
+
+def cast_transpose(
+    inp: paddle.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+) -> Union[Tuple[paddle.Tensor, paddle.Tensor], None]:
+    """Cast + Transpose with FP8 output"""
+    cast_out, transpose_out, _, _ = tex.te_cast_transpose(
+        inp,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        int(fp8_tensor),
+        int(otype),
+    )
+
+    return cast_out, transpose_out
+
+
+def te_gelu(
+    inp: paddle.Tensor,
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """Non FP8 GELU"""
+    return tex.te_gelu(
+        inp,
+        int(otype),
+    )
+
+
+def gelu_fp8(
+    inp: paddle.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+) -> paddle.Tensor:
+    """GELU + FP8 cast"""
+    out, _, _ = tex.te_gelu_fp8(
+        inp,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        int(fp8_tensor),
+        int(otype),
+    )
+
+    return out
+
+
+def dgelu_cast_transpose_bgrad_fp8(
+    grad_output: paddle.Tensor,
+    gelu_input: paddle.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """
+    Fused dgelu + cast / transpose / reduce the result of
+    the GELU backward along the first dimension
+    """
+    cast_dgelu, transpose_dgelu, dbias, _, _ = tex.te_cast_transpose_bgrad_dgelu(
+        grad_output,
+        gelu_input,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        int(fp8_tensor),
+        int(otype),
+    )
+
+    return cast_dgelu, transpose_dgelu, dbias
+
+
+def layernorm_fwd_fp8(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    bias: paddle.Tensor,
+    eps: float,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """LayerNorm with FP8 output"""
+    out, mu, rsigma, _, _ = tex.te_layernorm_fwd_fp8(inp, weight, bias, fp8_meta_tensor.scale,
+                                                     fp8_meta_tensor.amax_history,
+                                                     fp8_meta_tensor.scale_inv, eps,
+                                                     int(fp8_tensor), int(otype), sm_margin,
+                                                     zero_centered_gamma)
+    return out, mu, rsigma
+
+
+def layernorm_fwd(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    bias: paddle.Tensor,
+    eps: float,
+    otype: tex.DType,
+    sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 LayerNorm forward"""
+    return tex.te_layernorm_fwd(inp, weight, bias, eps, int(otype), sm_margin, zero_centered_gamma)
+
+
+def layernorm_bwd(
+    dz: paddle.Tensor,
+    x: paddle.Tensor,
+    mu: paddle.Tensor,
+    rsigma: paddle.Tensor,
+    gamma: paddle.Tensor,
+    sm_margin: int = 0,
+    zero_centered_gamma: bool = False,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 LayerNorm backward"""
+    return tex.te_layernorm_bwd(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma)
