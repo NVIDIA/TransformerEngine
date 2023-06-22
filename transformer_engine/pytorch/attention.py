@@ -771,10 +771,14 @@ class MultiHeadAttention(torch.nn.Module):
         """MultiHeadAttention FWD"""
         # hidden_states: [sq, b, h]
 
-        if self.attn_mask_type == "padding" and attention_mask is not None:
+        if self.attn_mask_type == "padding":
+            assert (
+                attention_mask is not None
+            ), "Boolean attention mask must be provided for padding."
+
             assert (
                 attention_mask.dtype == torch.bool
-            ), "Attention mask must be a boolean tensor"
+            ), "Attention mask must be a boolean tensor."
 
         # =================================================
         # Pre-allocate memory for key-values for inference.

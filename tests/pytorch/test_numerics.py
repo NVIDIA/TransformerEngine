@@ -401,11 +401,10 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     te_out = block(
         te_inp_hidden_states,
-        te_inp_attn_mask,
+        None,
         checkpoint_core_attention=recompute,
     )
     loss = te_out.sum()
@@ -461,7 +460,6 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     if recompute:
         te_out = te_checkpoint(
@@ -470,13 +468,13 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
             get_dummy_cuda_rng_tracker,
             None,  # tp_group
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
             checkpoint_core_attention=False,
         )
     else:
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
             checkpoint_core_attention=False,
         )
     loss = te_out.sum()
@@ -556,14 +554,13 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     block = _test_e2e_checkpointing_get_model(config, dtype)
 
     for _ in range(steps // 2):
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
         )
         loss = te_out.sum()
         loss.backward()
@@ -594,7 +591,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     for _ in range(steps // 2):
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
         )
         loss = te_out.sum()
         loss.backward()
