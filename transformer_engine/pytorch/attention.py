@@ -133,7 +133,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: Optional[str] = "causal",
+        attn_mask_type: str = "causal",
         layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -317,7 +317,7 @@ class FlashAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: Optional[str] = "causal",
+        attn_mask_type: str = "causal",
     ) -> None:
         super().__init__()
 
@@ -408,7 +408,7 @@ class DotProductAttention(torch.nn.Module):
     .. note::
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`attn_mask_type` is set to `"causal"` or `None`.
+        :attr:`attn_mask_type` is set to `"causal"` or `"no_mask"`.
 
     .. warning::
 
@@ -426,7 +426,7 @@ class DotProductAttention(torch.nn.Module):
                 number of key-value channels.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: {'causal', 'padding', None}, default = `causal`
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation.
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
@@ -447,7 +447,7 @@ class DotProductAttention(torch.nn.Module):
         num_attention_heads: int,
         kv_channels: int,
         attention_dropout: float = 0.0,
-        attn_mask_type: Optional[str] = "causal",
+        attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -527,7 +527,7 @@ class DotProductAttention(torch.nn.Module):
         .. note::
 
             Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
-            is set to `"causal"` or `None`.
+            is set to `"causal"` or `"no_mask"`.
 
         .. note::
 
@@ -591,7 +591,7 @@ class MultiHeadAttention(torch.nn.Module):
         init_method: Callable,
         output_layer_init_method: Callable,
         layer_number: Optional[int] = None,
-        attn_mask_type: Optional[str] = "causal",
+        attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         fuse_wgrad_accumulation: bool = False,

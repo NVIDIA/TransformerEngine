@@ -222,7 +222,7 @@ class FusedScaleMaskSoftmax(nn.Module):
 
     def __init__(
         self,
-        attn_mask_type: Union[str, None],
+        attn_mask_type: str,
         mask_func: Callable,
         softmax_in_fp32: bool = True,
     ) -> None:
@@ -303,7 +303,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
             return probs.view(b, np, sq, sk)
         # input is 4D tensor (b, np, sq, sk)
-        if mask is not None and self.attn_mask_type is not None:
+        if mask is not None and self.attn_mask_type != "no_mask":
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
 
@@ -326,7 +326,7 @@ class FusedScaleMaskSoftmax(nn.Module):
                 mask = _get_default_causal_mask(inp.size(2))
 
         mask_output = inp
-        if mask is not None and self.attn_mask_type is not None:
+        if mask is not None and self.attn_mask_type != "no_mask":
             mask_output = self.mask_func(inp, mask)
         probs = torch.nn.Softmax(dim=-1)(mask_output)
 
