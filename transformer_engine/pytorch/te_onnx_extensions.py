@@ -305,10 +305,10 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     """ONNX graph for layernorm_fwd"""
     # pylint: disable=unused-argument
 
-    def ones_like(input, dtype):
+    def ones_like(inp, dtype):
         """Returns a tensor filled with the scalar value 1, with the same size as input and
         with dtype data-type"""
-        shape = g.op("Shape", input)
+        shape = g.op("Shape", inp)
         # WAR ONNX spec: ConstantOfShape accepts all data types except for BF16. To WAR
         # create a ConstantOfShape with type FP32 and then add a Cast to BF16.
         is_bf16 = dtype == torch.bfloat16
