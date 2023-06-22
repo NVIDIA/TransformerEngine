@@ -403,6 +403,9 @@ class TransformerLayer(torch.nn.Module):
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -445,6 +448,12 @@ class TransformerLayer(torch.nn.Module):
         rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
                        Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
+        core_attention_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        core_attention_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        fast_zero_fill: bool, default = `True`
+                    Whether to set output tensors to 0 or not before use.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -468,6 +477,9 @@ class TransformerLayer(torch.nn.Module):
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
             rotary_pos_emb=rotary_pos_emb,
+            core_attention_bias_type=core_attention_bias_type,
+            core_attention_bias=core_attention_bias,
+            fast_zero_fill=fast_zero_fill,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -511,6 +523,9 @@ class TransformerLayer(torch.nn.Module):
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
+                fast_zero_fill=fast_zero_fill,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs

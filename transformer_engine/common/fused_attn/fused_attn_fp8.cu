@@ -991,7 +991,7 @@ static cudnn_frontend::Tensor createdSQBMM(
 }
 
 // fused attention FWD FP8
-void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
+void fused_attn_fp8_fwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
             bool isTraining, float attnScale,
             float dropoutProbability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
@@ -1303,7 +1303,7 @@ void fa_fwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 }
 
 // fused attention BWD FP8
-void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
+void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
             float attnScale, float dropoutProbability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
             void* devPtrM, void* devPtrZInv,
@@ -1858,7 +1858,7 @@ void fa_bwd_fp8(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
 
 #if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with packed QKV
-void fused_attn_fwd_fp8_qkvpacked(
+void fused_attn_fp8_fwd_qkvpacked(
             size_t b, size_t max_seqlen,
             size_t h, size_t d,
             bool is_training, float attn_scale,
@@ -1866,7 +1866,7 @@ void fused_attn_fwd_fp8_qkvpacked(
             const Tensor *input_QKV,
             Tensor *input_output_S,
             Tensor *output_O,
-            NVTETensorPack* Aux_Output_Tensors,
+            NVTETensorPack* Aux_CTX_Tensors,
             const Tensor *cu_seqlens,
             const Tensor *rng_state,
             Tensor *workspace,
@@ -1888,23 +1888,29 @@ void fused_attn_fwd_fp8_qkvpacked(
 
   void* devPtrM = nullptr;
   void* devPtrZInv = nullptr;
-  if (Aux_Output_Tensors->size == 0) {
+  if (Aux_CTX_Tensors->size == 0) {
     if (is_training) {
-      Aux_Output_Tensors->size = 2;
-      Tensor *output_M = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
-      Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[1]);
+      Aux_CTX_Tensors->size = 3;
+      Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       output_M->data.dptr = nullptr;
       output_M->data.shape = {b, h, max_seqlen, 1};
       output_M->data.dtype = DType::kFloat32;
       output_ZInv->data.dptr = nullptr;
       output_ZInv->data.shape = {b, h, max_seqlen, 1};
       output_ZInv->data.dtype = DType::kFloat32;
+      output_rng_state->data.dptr = nullptr;
+      output_rng_state->data.shape = {2};
+      output_rng_state->data.dtype = DType::kInt64;
     }
-  } else if (Aux_Output_Tensors->size == 2) {
-    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[0]);
-    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_Output_Tensors->tensors[1]);
+  } else if (Aux_CTX_Tensors->size == 3) {
+    Tensor *output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
+    output_rng_state->data.dptr = rng_state->data.dptr;
   }
 
   void* devPtrAmaxS = input_output_S->amax.dptr;
@@ -1921,7 +1927,7 @@ void fused_attn_fwd_fp8_qkvpacked(
   const DType QKV_type = input_QKV->data.dtype;
   size_t workspace_size = 0;
 
-  fused_attn::fa_fwd_fp8(
+  fused_attn::fused_attn_fp8_fwd_impl(
                   b, max_seqlen, max_seqlen, h, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
@@ -1948,7 +1954,7 @@ void fused_attn_fwd_fp8_qkvpacked(
   }
 }
 // fused attention BWD FP8 with packed QKV
-void fused_attn_bwd_fp8_qkvpacked(
+void fused_attn_fp8_bwd_qkvpacked(
             size_t b, size_t max_seqlen,
             size_t h, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
@@ -2011,7 +2017,7 @@ void fused_attn_bwd_fp8_qkvpacked(
   const DType QKV_type = input_QKV->data.dtype;
   size_t workspace_size = 0;
 
-  fused_attn::fa_bwd_fp8(
+  fused_attn::fused_attn_fp8_bwd_impl(
                   b, max_seqlen, max_seqlen, h, d,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,

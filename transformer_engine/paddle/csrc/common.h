@@ -6,10 +6,13 @@
 #pragma once
 
 #include <cublasLt.h>
+#include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/layer_norm.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/transpose.h>
 #include <vector>
 
 #include "paddle/extension.h"
@@ -88,6 +91,9 @@ inline std::vector<size_t> GetShapeArray(const paddle::Tensor &x) {
     return shapes;
 }
 
+paddle::Tensor AllocateSpace(const NVTEShape &shape, const DType type, const paddle::Place &place,
+                             bool init_to_zeros = 0);
+
 // DType Utils
 inline paddle::DataType Nvte2PaddleDType(DType t) {
     switch (t) {
@@ -136,10 +142,45 @@ inline DType Int2NvteDType(int64_t dtype) {
     }
 }
 
+// CUDA Utils
+class cudaDevicePropertiesManager {
+ public:
+    static cudaDevicePropertiesManager &Instance() {
+        static thread_local cudaDevicePropertiesManager instance;
+        return instance;
+    }
+
+    int GetMultiProcessorCount() {
+        if (!prop_queried_) {
+            int device_id;
+            NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+            cudaGetDeviceProperties(&prop_, device_id);
+            prop_queried_ = true;
+        }
+        return prop_.multiProcessorCount;
+    }
+
+    int GetMajor() {
+        if (!prop_queried_) {
+            int device_id;
+            NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+            cudaGetDeviceProperties(&prop_, device_id);
+            prop_queried_ = true;
+        }
+        return prop_.major;
+    }
+
+ private:
+    bool prop_queried_ = false;
+    cudaDeviceProp prop_;
+};
+
 // NVTE Tensor Utils
 TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type);
+TensorWrapper MakeNvteTensor(void *data_ptr, const NVTEShape &shape, const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type,
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);
+TensorWrapper MakeNvteTensor(paddle::Tensor &tensor);  // NOLINT
 TensorWrapper MakeNvteTensor(const paddle::Tensor &tensor);
 
 }  // namespace paddle_ext
