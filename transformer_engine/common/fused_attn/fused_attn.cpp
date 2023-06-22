@@ -40,7 +40,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool flag_arb = false;
     if ((sm_arch_ >= 80)
             && (head_dim == 64)
-            && (dropout == 0.0)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
