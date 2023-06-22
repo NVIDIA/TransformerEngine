@@ -234,7 +234,7 @@ def fused_attn_fwd_qkvpacked(
                        ZInv: torch.Tensor
                            1/sum(e^(x - max(x))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen, 1], dtype float32
-                rng_state: torch.Tensor
+                rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
     """
@@ -412,13 +412,14 @@ def fused_attn_bwd_qkvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (len(aux_ctx_tensors) >= 1
-            ), "aux_ctx_tensors must contain rng_state as its last element."
-    rng_state = aux_ctx_tensors[-1]
-    check_rng_state(rng_state)
-
     assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
+
+    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+        assert (len(aux_ctx_tensors) >= 1
+                ), "aux_ctx_tensors must contain rng_state as its last element."
+        rng_state = aux_ctx_tensors[-1]
+        check_rng_state(rng_state)
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
         assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."
@@ -570,7 +571,7 @@ def fused_attn_fwd_kvpacked(
                        ZInv: torch.Tensor
                            1/sum(e^(x - max(x))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                rng_state: torch.Tensor
+                rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
     """
@@ -762,13 +763,14 @@ def fused_attn_bwd_kvpacked(
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (len(aux_ctx_tensors) >= 1
-            ), "aux_ctx_tensors must contain rng_state as its last element."
-    rng_state = aux_ctx_tensors[-1]
-    check_rng_state(rng_state)
-
     assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
             ), "Fused attention does not support this input combination."
+
+    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+        assert (len(aux_ctx_tensors) >= 1
+                ), "aux_ctx_tensors must contain rng_state as its last element."
+        rng_state = aux_ctx_tensors[-1]
+        check_rng_state(rng_state)
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
         assert (d_scale_qkv is not None), "d_scale_qkv is required for FP8 fused attention."

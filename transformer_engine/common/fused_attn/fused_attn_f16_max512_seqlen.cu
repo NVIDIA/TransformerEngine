@@ -1261,16 +1261,12 @@ void fused_attn_max_512_fwd_qkvpacked(
     void *devPtrS = nullptr;
 
     if (Aux_CTX_Tensors->size == 0) {
-        Aux_CTX_Tensors->size = 2;
+        Aux_CTX_Tensors->size = 1;
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         output_S->data.dptr = nullptr;
         output_S->data.shape = {batch, num_head, max_seqlen, max_seqlen};
         output_S->data.dtype = input_QKV->data.dtype;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = nullptr;
-        output_rng_state->data.shape = {2};
-        output_rng_state->data.dtype = DType::kInt64;
-    } else if (Aux_CTX_Tensors->size == 2) {
+    } else if (Aux_CTX_Tensors->size == 1) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
     }
@@ -1341,16 +1337,12 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     NVTE_CHECK(q_type == kv_type, "data type of Q must be equal to data type of KV.");
 
     if (Aux_CTX_Tensors->size == 0) {
-        Aux_CTX_Tensors->size = 2;
+        Aux_CTX_Tensors->size = 1;
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         output_S->data.dptr = nullptr;
         output_S->data.shape = {batch, num_head, q_max_seqlen, kv_max_seqlen};
         output_S->data.dtype = q_type;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = nullptr;
-        output_rng_state->data.shape = {2};
-        output_rng_state->data.dtype = DType::kInt64;
-    } else if (Aux_CTX_Tensors->size == 2) {
+    } else if (Aux_CTX_Tensors->size == 1) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
     }
