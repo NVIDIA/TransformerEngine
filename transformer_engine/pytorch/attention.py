@@ -555,25 +555,36 @@ class DotProductAttention(torch.nn.Module):
         """
 
         use_flash_attention = self.use_flash_attention
-        if (query_layer.dtype not in [torch.bfloat16, torch.float16] # pylint: disable=too-many-boolean-expressions
+        if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
             or (self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64)
-            or is_in_onnx_export_mode()
         ):
             use_flash_attention = False
 
-        attention_func = self.flash_attention if use_flash_attention else self.unfused_attention
+        if self.attn_mask_type == "padding" and attention_mask is not None:
+            use_flash_attention = False
+
+        if is_in_onnx_export_mode():
+            use_flash_attention = False
+
+        if use_flash_attention:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(self.flash_attention,
+                                                            query_layer,
+                                                            key_layer,
+                                                            value_layer)
+            return self.flash_attention(query_layer, key_layer, value_layer)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
-                attention_func,
+                self.unfused_attention,
                 query_layer,
                 key_layer,
                 value_layer,
                 attention_mask,
             )
-        return attention_func(query_layer, key_layer, value_layer, attention_mask)
+        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
 
 
 class MultiHeadAttention(torch.nn.Module):
