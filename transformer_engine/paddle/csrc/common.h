@@ -81,17 +81,17 @@ inline void *GetOptionalDataPtr(paddle::optional<paddle::Tensor> &x) {  // NOLIN
     return x ? x->data() : nullptr;
 }
 
-inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
-    if (x) return GetShapeArray(x.get());
-    return {0};
-}
-
 inline std::vector<size_t> GetShapeArray(const paddle::Tensor &x) {
     std::vector<size_t> shapes;
     for (auto dim : x.shape()) {
         shapes.push_back(static_cast<size_t>(dim));
     }
     return shapes;
+}
+
+inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
+    if (x) return GetShapeArray(x.get());
+    return {0};
 }
 
 paddle::Tensor AllocateSpace(const NVTEShape &shape, const DType type, const paddle::Place &place,
