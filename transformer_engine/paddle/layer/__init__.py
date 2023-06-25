@@ -1,7 +1,6 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Transformer Engine bindings for Paddle"""
+"""Layer level Paddle APIs"""
 
-from .layer import Linear
-from .fp8 import fp8_autocast
+from .linear import Linear
