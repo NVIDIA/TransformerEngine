@@ -687,6 +687,8 @@ class TestFusedAttn:
 
         return fwd_out, q_grad, k_grad, v_grad
 
+    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                        reason="cuDNN fMHA requires Ampere+ GPU")
     @pytest.mark.parametrize('b, s, h, d', SELF_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True, False])
@@ -702,6 +704,8 @@ class TestFusedAttn:
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
+    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                        reason="cuDNN fMHA requires Ampere+ GPU")
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     def test_cross_attn_forward_backward(self, b, s_q, s_kv, h, d, dtype):
