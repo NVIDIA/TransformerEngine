@@ -136,6 +136,9 @@ class TransformerLayer(torch.nn.Module):
                             using :attr:`fuse_qkv_params=False`.
     bias : bool, default = `True`
           if set to `False`, the transformer layer will not learn any additive biases.
+    activation : str, default = 'gelu'
+          Type of activation used in MLP block.
+          Options are: 'gelu', 'relu', 'reglu', 'geglu' and 'swiglu'.
 
     Parallelism parameters
     ----------------------
@@ -158,7 +161,10 @@ class TransformerLayer(torch.nn.Module):
     -----------------------
     fuse_wgrad_accumulation : bool, default = 'False'
                              if set to `True`, enables fusing of creation and accumulation of
-                             the weight gradient.
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
     params_dtype : torch.dtype, default = `torch.float32`
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
@@ -214,6 +220,7 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
         bias: bool = True,
+        activation: str = 'gelu'
     ) -> None:
         super().__init__()
 
@@ -316,9 +323,11 @@ class TransformerLayer(torch.nn.Module):
                 bias=bias,
             )
 
-        # LayerNorm -> gelu(Linear + Bias) -> Linear
+        # LayerNorm -> activation(Linear + Bias) -> Linear
         # parallel_mode not supported for LayerNormMLP,
         # FC1 is CPL and FC2 is RPL
+        # In the case of GLU activation, FC1 handles both
+        # Linear layers before the activation
         self.layernorm_mlp = LayerNormMLP(
             hidden_size,
             ffn_hidden_size,
@@ -342,6 +351,7 @@ class TransformerLayer(torch.nn.Module):
             ub_bulk_dgrad=ub_bulk_dgrad,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
+            activation=activation,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -393,6 +403,9 @@ class TransformerLayer(torch.nn.Module):
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -435,6 +448,12 @@ class TransformerLayer(torch.nn.Module):
         rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
                        Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
+        core_attention_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        core_attention_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        fast_zero_fill: bool, default = `True`
+                    Whether to set output tensors to 0 or not before use.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -463,6 +482,9 @@ class TransformerLayer(torch.nn.Module):
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
             rotary_pos_emb=rotary_pos_emb,
+            core_attention_bias_type=core_attention_bias_type,
+            core_attention_bias=core_attention_bias,
+            fast_zero_fill=fast_zero_fill,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -506,6 +528,9 @@ class TransformerLayer(torch.nn.Module):
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
+                fast_zero_fill=fast_zero_fill,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs

@@ -10,5 +10,10 @@ pytest -Wignore -v $TE_PATH/tests/jax
 
 pip install -r $TE_PATH/examples/jax/mnist/requirements.txt
 pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
-pytest -Wignore -v $TE_PATH/examples/jax --ignore=$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
+
+pytest -Wignore -v $TE_PATH/examples/jax/mnist
+
+# Make encoder tests to have run-to-run deterministic to have the stable CI results
+export XLA_FLAGS="--xla_gpu_deterministic_ops"
+pytest -Wignore -v $TE_PATH/examples/jax/encoder --ignore=$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
 pytest -Wignore -v $TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py

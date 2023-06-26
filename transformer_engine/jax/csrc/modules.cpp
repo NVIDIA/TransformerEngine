@@ -749,7 +749,7 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     void *qkv = buffers[0];
     void *bias = buffers[1];
     void *cu_seqlens = buffers[2];
-    void *rng_state = buffers[3];
+    void *seed = buffers[3];
 
     // output
     void *output = buffers[4];
@@ -778,29 +778,36 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
+
+    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
     TensorWrapper query_workspace_tensor;
 
-    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
-                                  o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
-                                  rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
-                                  descriptor.scaling_factor, descriptor.dropout_probability,
-                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
-                                  descriptor.mask_type, query_workspace_tensor.data(), stream);
+    nvte_fused_attn_fwd_qkvpacked(
+        qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        &aux_output_tensors, cu_seqlens_tensor.data(), dummy_rng_state_tensor.data(), q_max_seqlen,
+        descriptor.is_training, descriptor.scaling_factor, descriptor.dropout_probability,
+        NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        query_workspace_tensor.data(), stream);
 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    size_t workspace_size =
+    // fused attn workspace + workspace for rng_state
+    auto plan_workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-
+    auto rng_workspace_size = 2 * sizeof(int64_t);
+    auto total_workspace_size = plan_workspace_size + rng_workspace_size;
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
@@ -907,7 +914,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     void *kv = buffers[1];
     void *q_cu_seqlens = buffers[2];
     void *kv_cu_seqlens = buffers[3];
-    void *rng_state = buffers[4];
+    void *seed = buffers[4];
 
     // output
     void *output = buffers[5];
@@ -939,7 +946,8 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{1}, DType::kInt64);
+
+    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -949,7 +957,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
         descriptor.scaling_factor, descriptor.dropout_probability,
         NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
         query_workspace_tensor.data(), stream);
@@ -957,12 +965,18 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    size_t workspace_size =
+    // fused attn workspace + workspace for rng_state
+    auto plan_workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-
+    auto rng_workspace_size = 2 * sizeof(int64_t);
+    auto total_workspace_size = plan_workspace_size + rng_workspace_size;
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
 
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),

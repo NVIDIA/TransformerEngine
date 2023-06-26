@@ -7,17 +7,22 @@
 #include "common.h"
 #include "../common.h"
 
-NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout);
-
-NVTE_Bias_Type get_nvte_bias_type(const std::string bias_type);
-
-NVTE_Mask_Type get_nvte_mask_type(const std::string mask_type);
+NVTE_Fused_Attn_Backend get_fused_attn_backend(
+                const transformer_engine::DType q_dtype,
+                const transformer_engine::DType kv_dtype,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
+                float p_dropout, size_t max_seqlen_q,
+                size_t max_seqlen_kv, size_t head_dim);
 
 std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 size_t b, size_t max_seqlen, size_t total_seqs,
-                size_t h, size_t d,
-                bool is_training, float attn_scale, float p_dropout, bool set_zero,
-                std::string qkv_layout, std::string bias_type, std::string attn_mask_type,
+                size_t h, size_t d, bool is_training,
+                float attn_scale, float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens,
                 const at::Tensor QKV,
                 const transformer_engine::DType qkv_type,
@@ -27,13 +32,16 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
                 c10::optional<at::Tensor> amax_S,
                 c10::optional<at::Tensor> amax_O,
                 const c10::optional<at::Tensor> Bias,
-                const c10::optional<at::Generator> rng_gen);
+                const c10::optional<at::Generator> rng_gen,
+                size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
                 size_t b, size_t max_seqlen, size_t total_seqs,
-                size_t h, size_t d,
-                float attn_scale, float p_dropout, bool set_zero,
-                std::string qkv_layout, std::string bias_type, std::string attn_mask_type,
+                size_t h, size_t d, float attn_scale,
+                float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens,
                 const at::Tensor QKV,
                 const at::Tensor O,
@@ -53,9 +61,11 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
 std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t total_seqs_q, size_t total_seqs_kv,
-                size_t h, size_t d,
-                bool is_training, float attn_scale, float p_dropout, bool set_zero,
-                std::string qkv_layout, std::string bias_type, std::string attn_mask_type,
+                size_t h, size_t d, bool is_training,
+                float attn_scale, float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens_q,
                 const at::Tensor cu_seqlens_kv,
                 const at::Tensor Q,
@@ -67,14 +77,17 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
                 c10::optional<at::Tensor> amax_S,
                 c10::optional<at::Tensor> amax_O,
                 const c10::optional<at::Tensor> Bias,
-                const c10::optional<at::Generator> rng_gen);
+                const c10::optional<at::Generator> rng_gen,
+                size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t total_seqs_q, size_t total_seqs_kv,
-                size_t h, size_t d,
-                float attn_scale, float p_dropout, bool set_zero,
-                std::string qkv_layout, std::string bias_type, std::string attn_mask_type,
+                size_t h, size_t d, float attn_scale,
+                float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens_q,
                 const at::Tensor cu_seqlens_kv,
                 const at::Tensor Q,
@@ -167,14 +180,73 @@ at::Tensor fp8_transpose(at::Tensor input,
                          transformer_engine::DType otype
 );
 
+/***************************************************************************************************
+ * Activations
+ **************************************************************************************************/
 
-at::Tensor fp8_gelu(at::Tensor input,
-                    at::Tensor scale,
-                    at::Tensor amax,
-                    at::Tensor scale_inv,
-                    transformer_engine::DType otype
+at::Tensor gelu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
 );
 
+at::Tensor relu(at::Tensor input,
+                at::Tensor scale,
+                at::Tensor amax,
+                at::Tensor scale_inv,
+                transformer_engine::DType otype
+);
+
+at::Tensor geglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+);
+
+at::Tensor reglu(at::Tensor input,
+                 at::Tensor scale,
+                 at::Tensor amax,
+                 at::Tensor scale_inv,
+                 transformer_engine::DType otype
+);
+
+at::Tensor swiglu(at::Tensor input,
+                  at::Tensor scale,
+                  at::Tensor amax,
+                  at::Tensor scale_inv,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dgelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+);
+
+at::Tensor drelu(at::Tensor grad,
+                 at::Tensor input,
+                 transformer_engine::DType otype
+);
+
+at::Tensor dgeglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dreglu(at::Tensor grad,
+                  at::Tensor input,
+                  transformer_engine::DType otype
+);
+
+at::Tensor dswiglu(at::Tensor grad,
+                   at::Tensor input,
+                   transformer_engine::DType otype
+);
+
+/***************************************************************************************************
+ * LayerNorm
+ **************************************************************************************************/
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &x,
