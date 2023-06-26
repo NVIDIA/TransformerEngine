@@ -249,13 +249,16 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b,
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
   }
 }
-
 }  // namespace fused_attn
 
 // get cuDNN data type
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {
+    case DType::kInt32:
+      return CUDNN_DATA_INT32;
+    case DType::kInt64:
+      return CUDNN_DATA_INT64;
     case DType::kFloat16:
       return CUDNN_DATA_HALF;
     case DType::kFloat32:
