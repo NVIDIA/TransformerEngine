@@ -944,7 +944,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        params_dtype: torch.dtype = torch.get_default_dtype(),
+        params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
@@ -957,6 +957,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
+        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.activation = activation

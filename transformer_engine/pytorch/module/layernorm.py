@@ -4,7 +4,7 @@
 
 """LayerNorm API"""
 import os
-from typing import Union, Tuple, Any, Mapping
+from typing import Union, Tuple, Any, Mapping, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -96,10 +96,11 @@ class LayerNorm(torch.nn.Module):
         hidden_size: int,
         eps: float = 1e-5,
         sequence_parallel: bool = False,
-        params_dtype: torch.dtype = torch.get_default_dtype(),
+        params_dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
+        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
         self.weight = Parameter(

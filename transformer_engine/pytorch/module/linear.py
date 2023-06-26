@@ -509,7 +509,7 @@ class Linear(TransformerEngineBaseModule):
         init_method: Optional[Callable] = None,
         bias: bool = True,
         return_bias: bool = False,
-        params_dtype: torch.dtype = torch.get_default_dtype(),
+        params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
@@ -517,6 +517,8 @@ class Linear(TransformerEngineBaseModule):
         ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
+
+        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
