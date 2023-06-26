@@ -915,7 +915,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.float32`
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
@@ -944,7 +944,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
@@ -957,6 +957,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
+        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.use_bias = bias
         self.activation = activation

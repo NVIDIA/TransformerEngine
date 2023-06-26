@@ -988,7 +988,7 @@ class MultiHeadAttention(torch.nn.Module):
         fuse_wgrad_accumulation: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",
@@ -1009,7 +1009,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.tp_group = tp_group
         self.return_layernorm_output = return_layernorm_output
-        self.params_dtype = params_dtype
+        self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.init_method = init_method
         self.attn_mask_type = attn_mask_type
 
@@ -1034,7 +1034,7 @@ class MultiHeadAttention(torch.nn.Module):
             "tp_size": tp_size,
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": sequence_parallel,
-            "params_dtype": params_dtype,
+            "params_dtype": self.params_dtype,
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
