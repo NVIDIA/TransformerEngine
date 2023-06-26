@@ -78,7 +78,7 @@ class LayerNorm(torch.nn.Module):
         a value added to the denominator of layer normalization for numerical stability.
     sequence_parallel : bool, default = `False`
                         if set to `True`, uses sequence parallelism.
-    params_dtype : torch.dtype, default = `torch.float32`
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
                     it controls the type used to allocate the initial parameters. Useful when
                     the model is trained with lower precision and the original FP32 parameters
                     would not fit in GPU memory.
@@ -96,7 +96,7 @@ class LayerNorm(torch.nn.Module):
         hidden_size: int,
         eps: float = 1e-5,
         sequence_parallel: bool = False,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: torch.dtype = torch.get_default_dtype(),
         zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()

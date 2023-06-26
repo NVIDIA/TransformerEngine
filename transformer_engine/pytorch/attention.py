@@ -962,7 +962,7 @@ class MultiHeadAttention(torch.nn.Module):
         fuse_wgrad_accumulation: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: torch.dtype = torch.get_default_dtype(),
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",

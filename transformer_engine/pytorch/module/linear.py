@@ -491,7 +491,7 @@ class Linear(TransformerEngineBaseModule):
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
-    params_dtype : torch.dtype, default = `torch.float32`
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
@@ -509,7 +509,7 @@ class Linear(TransformerEngineBaseModule):
         init_method: Optional[Callable] = None,
         bias: bool = True,
         return_bias: bool = False,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: torch.dtype = torch.get_default_dtype(),
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,

@@ -165,7 +165,7 @@ class TransformerLayer(torch.nn.Module):
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
-    params_dtype : torch.dtype, default = `torch.float32`
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
@@ -202,7 +202,7 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
-        params_dtype: torch.dtype = torch.float32,
+        params_dtype: torch.dtype = torch.get_default_dtype(),
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
         apply_query_key_layer_scaling: bool = False, # pylint: disable=unused-argument
