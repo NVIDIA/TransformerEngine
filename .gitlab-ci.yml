@@ -454,7 +454,7 @@ upload_logs:
             --data PIPELINE_ID="${CI_PIPELINE_ID}" \
             --data githubData="${githubData}" \
             --data COMMIT_SHA="${GIT_SHA}" \
-            "https://blossom.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
+            "https://prod.blsm.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
           echo "\n" | cat ${tmp_file} -
           rm ${tmp_file}
           test $CURL_RESULT && exit 0
