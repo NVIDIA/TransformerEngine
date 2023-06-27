@@ -9,6 +9,7 @@
 
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
+#include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/transpose.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/logging.h>
