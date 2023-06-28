@@ -412,8 +412,8 @@ class TransformerLayer(torch.nn.Module):
 
         .. note::
 
-        Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
-        is `"padding"`.
+            Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
+            is `"padding"`.
 
         Parameters
         ----------

@@ -694,15 +694,15 @@ class DotProductAttention(torch.nn.Module):
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: str, default = `causal`
-                   type of attention mask passed into softmax operation, one of
-                   {`causal`, `padding`, `unpadding`, `no_mask`}.
-                   `causal`   : An upper triangular mask calculated in TransformerEngine.
-                   `Padding`  : An arbitrary user defined mask broadcastable to the shape of softmax
-                                input passed in via :attr:`attention_mask` in the `forward` call.
-                   `unpadding`: Used for padding packed inputs for the `FlashAttention` backend.
-                                :attr:`cu_seqlens` must be passed in by the user to indicate the
-                                cumulative sequence lengths for every sample in the batch.
-                   `no_mask`  : No mask is applied.
+                   type of attention mask passed into softmax operation, one of "`causal`",
+                   "`padding`", "`unpadding`", "`no_mask`". For the "`causal`" mask,
+                   TransformerEngine calculates and applies an upper triangular mask to
+                   the softmax input. A "`padding`" mask is an arbitrary user defined mask
+                   broadcastable to the shape of softmax input passed in via :attr:`attention_mask`
+                   in the `forward` call. The `unpadding` mask is used for padding packed inputs
+                   for the `FlashAttention` backend. For this case, :attr:`cu_seqlens` must be
+                   passed in by the user to indicate the cumulative sequence lengths for every
+                   sample in the batch. No mask is applied for the "`no_mask`" option.
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
@@ -891,12 +891,12 @@ class DotProductAttention(torch.nn.Module):
         if self.device_compute_capability == 8.6 and key_layer.shape[-1] > 64:
             use_flash_attention = False
 
-        # ONNX export filter
+        # Filter: ONNX export.
         if is_in_onnx_export_mode():
             use_flash_attention = False
             use_fused_attention = False
 
-        # Filter: attn_mask_type
+        # Filter: Attention mask type.
         # attn_mask_type |         supported backends
         # ------------------------------------------------
         #   causal       |     All
