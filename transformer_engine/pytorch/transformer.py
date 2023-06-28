@@ -25,7 +25,6 @@ from transformer_engine.pytorch.utils import (
     get_default_init_method,
 )
 from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
     LayerTypes,
     dist_group_type,
 )
@@ -75,8 +74,8 @@ class TransformerLayer(torch.nn.Module):
 
     .. note::
 
-        Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`self_attn_mask_type` is set to `"causal"` or `"no_mask"`.
+        Argument :attr:`attention_mask` in the `forward` call is only used when
+        :attr:`self_attn_mask_type` is `"padding"`.
 
     Parameters
     ----------
@@ -119,8 +118,9 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                        type of attention mask passed into softmax operation.
+    self_attn_mask_type: str, default = `causal`
+                        type of attention mask passed into softmax operation. For more details
+                        and available mask types, see `DotProductAttention`.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -249,9 +249,7 @@ class TransformerLayer(torch.nn.Module):
             apply_residual_connection_post_layernorm
         )
         self.self_attn_mask_type = self_attn_mask_type
-        assert (
-            self_attn_mask_type in AttnMaskTypes
-        ), f"self_attn_mask_type {self_attn_mask_type} not supported"
+
         assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
 
         if not fuse_qkv_params:
@@ -407,14 +405,15 @@ class TransformerLayer(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
 
         .. note::
 
-            Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
-            is set to `"causal"` or `"no_mask"`.
+        Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
+        is `"padding"`.
 
         Parameters
         ----------
@@ -455,6 +454,9 @@ class TransformerLayer(torch.nn.Module):
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        cu_seqlens : Optional[torch.Tensor], default = `None`
+                    Tensor containing cumulative sequence lengths for every sample in the batch
+                    when using packed inputs. Only used when :attr:`attn_mask_type` is `unpadding`.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -481,6 +483,7 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             fast_zero_fill=fast_zero_fill,
+            cu_seqlens=cu_seqlens,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
