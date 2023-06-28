@@ -45,6 +45,7 @@ class ShardingResource:
     """
     dp_resource: str = None
     tp_resource: str = None
+    fsdp_resource: str = None
 
 
 _GLOBAL_SHARD_RESOURCE = ShardingResource()
