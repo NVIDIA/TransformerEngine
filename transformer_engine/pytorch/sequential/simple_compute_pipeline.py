@@ -1,5 +1,4 @@
 from typing import Any, Callable
-from sympy import sequence
 from torch import device, dtype, nn
 import torch
 
