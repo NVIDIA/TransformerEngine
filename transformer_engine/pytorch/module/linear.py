@@ -3,10 +3,13 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import os
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+
 
 import torch
 from torch.nn.parameter import Parameter
+from torch.nn import init
 
 import transformer_engine_extensions as tex
 
@@ -39,9 +42,13 @@ from ..cpp_extensions import (
     fp8_gemm,
     gemm,
     fp8_cast_transpose_fused,
+    layernorm_fwd_fp8,
+    layernorm_fwd_fp8_inf,
+    layernorm_fwd_inf,
     cast_to_fp8,
+    cast_from_fp8,
 )
-from ..constants import GemmParallelModes, dist_group_type
+from ..constants import GemmParallelModes, dist_group_type, TE_DType
 
 
 __all__ = ["Linear"]
@@ -55,10 +62,10 @@ class _Linear(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
+        inp: torch.Tensor,
         weight: torch.Tensor,
         weight_fp8: Union[torch.Tensor, None],
         weight_t_fp8: Union[torch.Tensor, None],
-        inp: torch.Tensor,
         bias: torch.Tensor,
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
@@ -150,8 +157,7 @@ class _Linear(torch.autograd.Function):
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
-                        fp8_dtype_forward,
-                    )
+                        fp8_dtype_forward)
 
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
@@ -529,7 +535,7 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
 
-        if ub_split_rs or ub_split_ag:
+        if self.ub_split_rs or self.ub_split_ag:
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
@@ -723,16 +729,16 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if torch.is_grad_enabled():
-                linear_fn = _Linear.apply
+                fwd_fn = _Linear.apply
                 args = []
             else:
-                linear_fn = _Linear.forward
+                fwd_fn = _Linear.forward
                 args = [None]
             args += (
+                inp,
                 weight_tensor,
                 weight1_fp8,
                 weight1_t_fp8,
-                inp,
                 bias_tensor,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
@@ -750,7 +756,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_split_rs,
                 self.ub_split_ag,
             )
-            out = linear_fn(*args)
+            out = fwd_fn(*args)
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
