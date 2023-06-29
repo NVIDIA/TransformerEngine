@@ -1422,53 +1422,11 @@ std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           const int sm_margin,
                                           const bool zero_centered_gamma
 ) {
-    using namespace transformer_engine;
-
-    size_t N = static_cast<size_t>(input.size(0));
-    size_t H = static_cast<size_t>(input.size(1));
-
-    DType itype = GetTransformerEngineDType(input.scalar_type());
-
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(otype)));
-    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-    auto input_cu     = makeTransformerEngineTensor(input);
-    auto gamma_cu     = makeTransformerEngineTensor(weight);
-    auto beta_cu      = makeTransformerEngineTensor(bias);
-    auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
-                                                    amax.data_ptr(), scale.data_ptr(),
-                                                    scale_inv.data_ptr());
-    auto mu_cu        = makeTransformerEngineTensor(mu);
-    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
-    transformer_engine::TensorWrapper workspace, barrier;
-
-    // This call populates workspace and barrier tensors with the required config
-    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-         workspace.data(), barrier.data());
-
-    // Fill workspace and barrier
-    auto workspace_data = allocateSpace(workspace.shape(),
-                                        workspace.dtype());
-    auto barrier_data = allocateSpace(barrier.shape(),
-                                      barrier.dtype(),
-                                      true);
-    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
-                                            workspace.shape(),
-                                            workspace.dtype());
-    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
-                                            barrier.shape(),
-                                            barrier.dtype());
-
-    // Actual call to fwd kernel
-    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-         workspace.data(), barrier.data());
-
-    return {ln_out, mu, rsigma};
+    
+    return layernorm_fwd_fp8_noalloc(input, weight, bias, eps, scale,
+                                     ln_out, amax, scale_inv, otype,
+                                     sm_margin, zero_centered_gamma);
 }
 
 
@@ -1558,51 +1516,10 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const int sm_margin,
                                       const bool zero_centered_gamma
 ) {
-    using namespace transformer_engine;
-
-    size_t N = static_cast<size_t>(input.size(0));
-    size_t H = static_cast<size_t>(input.size(1));
-
-    DType itype = GetTransformerEngineDType(input.scalar_type());
-
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
-    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-    auto input_cu     = makeTransformerEngineTensor(input);
-    auto gamma_cu     = makeTransformerEngineTensor(weight);
-    auto beta_cu      = makeTransformerEngineTensor(bias);
-    auto z_cu         = makeTransformerEngineTensor(ln_out);
-    auto mu_cu        = makeTransformerEngineTensor(mu);
-    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
-    transformer_engine::TensorWrapper workspace, barrier;
 
-    // This call populates workspace and barrier tensors with the required config
-    const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-         workspace.data(), barrier.data());
-
-    // Fill workspace and barrier
-    auto workspace_data = allocateSpace(workspace.shape(),
-                                        workspace.dtype());
-    auto barrier_data = allocateSpace(barrier.shape(),
-                                      barrier.dtype(),
-                                      true);
-    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(),
-                                            workspace.shape(),
-                                            workspace.dtype());
-    barrier   = makeTransformerEngineTensor(barrier_data.data_ptr(),
-                                            barrier.shape(),
-                                            barrier.dtype());
-
-    // Actual call to fwd kernel
-    func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-         workspace.data(), barrier.data());
-
-    return {ln_out, mu, rsigma};
+    return layernorm_fwd_noalloc(input, weight, bias, ln_out, eps,
+                                 sm_margin, zero_centered_gamma);
 }
 
 
