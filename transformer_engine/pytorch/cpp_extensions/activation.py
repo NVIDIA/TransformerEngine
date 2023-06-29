@@ -8,7 +8,7 @@ import torch
 import transformer_engine_extensions as tex
 
 
-__all__ = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+__all__ = []
 
 
 def register_activation(name: str):
