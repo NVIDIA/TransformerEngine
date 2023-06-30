@@ -213,8 +213,11 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward)
 
+            dim_size = list(inputmat_total.size())
+            dim_size[1] = weight.size(0)
+            out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
-            out = fp8_gemm(
+            _ = fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -228,6 +231,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
+                out=out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
@@ -245,13 +249,17 @@ class _LayerNormLinear(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
                     torch.amax(weight).float()
 
-            out, _, _ = gemm(
+            dim_size = list(inputmat_total.size())
+            dim_size[1] = weight.size(0)
+            out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+            _, _, _ = gemm(
                 weight,
                 ln_out_total,
                 activation_dtype,
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
+                out=out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
@@ -304,7 +312,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx, *grad_outputs: Tuple[torch.Tensor, ...]
+        ctx, *grad_outputs: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         with _prepare_backward(
             ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
@@ -531,8 +539,6 @@ class _LayerNormLinear(torch.autograd.Function):
             None,                                                       # ub_bulk_wgrad:            bool
             None,                                                       # ub_bulk_dgrad:            bool
             None,                                                       # ub_split_ag:              bool
-            None,                                                       # ???
-            None,                                                       # ???
         )
 
 

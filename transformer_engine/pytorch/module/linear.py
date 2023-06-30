@@ -261,7 +261,9 @@ class _Linear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
+
+        return out
 
 
     @staticmethod
