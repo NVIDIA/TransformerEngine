@@ -88,11 +88,11 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_split_ag: bool,
-    ) -> Tuple[torch.Tensor, ...] | torch.Tensor:    
+    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
+        in_features = ln_weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
@@ -366,7 +366,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj_dgrad = get_ub("qkv_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
-                dgrad = torch.empty (dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
@@ -505,34 +505,34 @@ class _LayerNormLinear(torch.autograd.Function):
                 grad_bias = None
 
         return (
-            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-            dgamma,
-            dbeta,
-            wgrad if weight.requires_grad else None,
-            None,
-            None,
-            grad_bias,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,  # inp:                      torch.Tensor
+            dgamma,                                                     # ln_weight:                torch.Tensor
+            dbeta,                                                      # ln_bias:                  torch.Tensor
+            wgrad if weight.requires_grad else None,                    # weight:                   torch.Tensor
+            None,                                                       # weight_fp8:               Union[torch.Tensor, None]
+            None,                                                       # weight_t_fp8:             Union[torch.Tensor, None]
+            grad_bias,                                                  # bias:                     torch.Tensor
+            None,                                                       # use_bias:                 bool
+            None,                                                       # eps:                      float
+            None,                                                       # is_first_microbatch:      Union[bool, None]
+            None,                                                       # fp8:                      bool
+            None,                                                       # fp8_calibration:          bool
+            None,                                                       # fp8_meta:                 Dict[str, Any]
+            None,                                                       # fuse_wgrad_accumulation:  bool
+            None,                                                       # tp_group:                 Union[dist_group_type, None]
+            None,                                                       # tp_size:                  int
+            None,                                                       # sequence_parallel:        bool
+            None,                                                       # tensor_parallel:          bool
+            None,                                                       # activation_dtype:         torch.dtype
+            None,                                                       # parallel_mode:            Union[str, None]
+            None,                                                       # return_layernorm_output:  bool
+            None,                                                       # is_grad_enabled:          bool
+            None,                                                       # zero_centered_gamma:      bool
+            None,                                                       # ub_bulk_wgrad:            bool
+            None,                                                       # ub_bulk_dgrad:            bool
+            None,                                                       # ub_split_ag:              bool
+            None,                                                       # ???
+            None,                                                       # ???
         )
 
 
@@ -814,9 +814,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Apply layer normalization to the input followed by a linear transformation.
+        Apply layer normalization followed by linear transformation to the input.
 
         Parameters
         ----------

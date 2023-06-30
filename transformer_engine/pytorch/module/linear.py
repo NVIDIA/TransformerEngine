@@ -318,6 +318,10 @@ class _Linear(torch.autograd.Function):
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
+            dgrad_size = list(grad_output.size())
+            dgrad_size[1] = weight.size(1)
+            dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
                     ctx.fp8_meta["recipe"], fprop_tensor=True
@@ -328,7 +332,7 @@ class _Linear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
-                    dgrad = fp8_gemm(
+                    _ = fp8_gemm(
                         weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -339,16 +343,18 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_backward,
                         ctx.activation_dtype,
                         get_workspace(),
+                        out=dgrad,
                         use_split_accumulator=_2X_ACC_DGRAD,
                         ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                     )
                 else:
-                    dgrad, _, _ = gemm(
+                    _, _, _ = gemm(
                         weight,
                         grad_output,
                         ctx.activation_dtype,
                         get_workspace(),
+                        out=dgrad,
                         layout="NN",
                         grad=True,
                         ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
@@ -418,26 +424,26 @@ class _Linear(torch.autograd.Function):
                 grad_bias = None
 
         return (
-            wgrad if weight.requires_grad else None,
-            None,
-            None,
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-            grad_bias,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            wgrad if weight.requires_grad else None,                    # inp:                      torch.Tensor
+            None,                                                       # weight:                   torch.Tensor
+            None,                                                       # weight_fp8:               Union[torch.Tensor, None]
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,  # weight_t_fp8:             Union[torch.Tensor, None]
+            grad_bias,                                                  # bias:                     torch.Tensor
+            None,                                                       # use_bias:                 bool
+            None,                                                       # is_first_microbatch:      Union[bool, None]
+            None,                                                       # fp8:                      bool
+            None,                                                       # fp8_calibration:          bool
+            None,                                                       # fp8_meta:                 Dict[str, Any]
+            None,                                                       # fuse_wgrad_accumulation:  bool
+            None,                                                       # tp_group:                 Union[dist_group_type, None]
+            None,                                                       # tp_size:                  int
+            None,                                                       # sequence_parallel:        bool
+            None,                                                       # tensor_parallel:          bool
+            None,                                                       # activation_dtype:         torch.dtype
+            None,                                                       # parallel_mode:            Union[str, None]
+            None,                                                       # is_grad_enabled:          bool
+            None,                                                       # ub_split_rs:              bool
+            None,                                                       # ub_split_ag:              bool
         )
 
 
@@ -679,9 +685,9 @@ class Linear(TransformerEngineBaseModule):
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply the linear transformation to the input.
+        Apply linear transformation to the input.
 
         Parameters
         ----------
