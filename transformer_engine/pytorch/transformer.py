@@ -75,7 +75,7 @@ class TransformerLayer(torch.nn.Module):
     .. note::
 
         Argument :attr:`attention_mask` in the `forward` call is only used when
-        :attr:`self_attn_mask_type` is `"padding"`.
+        :attr:`self_attn_mask_type` includes `"padding"` or `"arbitrary"`.
 
     Parameters
     ----------
@@ -405,7 +405,6 @@ class TransformerLayer(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
-        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -413,7 +412,7 @@ class TransformerLayer(torch.nn.Module):
         .. note::
 
             Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
-            is `"padding"`.
+            includes `"padding"` or `"arbitrary"`.
 
         Parameters
         ----------
@@ -454,9 +453,6 @@ class TransformerLayer(torch.nn.Module):
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
-        cu_seqlens : Optional[torch.Tensor], default = `None`
-                    Tensor containing cumulative sequence lengths for every sample in the batch
-                    when using packed inputs. Only used when :attr:`attn_mask_type` is `unpadding`.
         """
 
         hidden_states = hidden_states.contiguous()
@@ -483,7 +479,6 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             fast_zero_fill=fast_zero_fill,
-            cu_seqlens=cu_seqlens,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
