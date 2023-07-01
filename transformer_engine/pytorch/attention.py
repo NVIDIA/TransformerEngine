@@ -7,7 +7,7 @@ import os
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 from pkg_resources import packaging
 
 import torch
@@ -54,50 +54,60 @@ __all__ = ["DotProductAttention"]
 
 
 @jit_fuser
-def get_cu_seqlens(padding_mask: torch.Tensor) -> torch.Tensor:
+def get_cu_seqlens_and_indices(
+    mask: torch.Tensor,
+    nheads: int,
+    kv_channels: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Given a padding mask of shape [seq_len, batch_size], returns an int32
     tensor of shape [batch_size + 1,] containing the cumulative sequence
-    lengths of every sample in the batch.
+    lengths of every sample in the batch and the indices containing valid
+    samples.
     """
-    reduced_mask = padding_mask.sum(dim=0)
+    reduced_mask = mask.sum(dim=0)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
-    return torch.cat((zero, cu_seqlens))
-
-
-@jit_fuser
-def pack_tensor(t: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Packs the tensor along the zeroth dim according to the specified mask.
-    t      : [b * max_s, nheads, kv_channels]
-    mask   : [max_s, b]
-    output : [cu_seqlen, nheads, kv_channels]
-    """
-    _, nheads, kv_channels = t.shape
+    cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.t()
     mask = mask.reshape(-1)
     indices = mask.nonzero()
     indices = indices.unsqueeze(-1)
     indices = indices.repeat(1, nheads, kv_channels)
-    packed = torch.gather(t, 0, indices)
-    return packed, indices
+    return cu_seqlens, indices
+
+
+def pack_tensor(unpacked: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """
+    Packs the tensor along the zeroth dim according to the specified mask.
+    unpacked : [b * max_s, nheads, kv_channels]
+    mask     : [max_s, b]
+    output   : [cu_seqlen, nheads, kv_channels]
+    """
+    return torch.gather(unpacked, 0, indices)
 
 
 @jit_fuser
-def unpack_tensor(t: torch.Tensor, mask: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+def unpack_tensor(packed: torch.Tensor, indices: torch.Tensor, b: int, s: int) -> torch.Tensor:
     """
     Inverse of `pack_tensor`
     """
-    max_seqlen, bs = mask.shape
-    _, nheads, kv_channels = t.shape
-
-    unpacked = torch.zeros(bs * max_seqlen, nheads, kv_channels, dtype=t.dtype, device=t.device)
-
-    unpacked.scatter_(0, indices, t)
-    unpacked = unpacked.view(-1, nheads, kv_channels)
+    unpacked = torch.zeros(
+        b * s, packed.shape[1], packed.shape[2], dtype=packed.dtype, device=packed.device)
+    unpacked.scatter_(0, indices, packed)
     return unpacked
+
+
+@jit_fuser
+def pack_tensors(
+    unpacked: List[torch.Tensor],
+    indices: torch.Tensor,
+) -> List[torch.Tensor]:
+    packed = []
+    for t in unpacked:
+        packed.append(pack_tensor(t, indices))
+    return packed
 
 
 def _unpack_attn_mask_type(attn_mask_type: str) -> Tuple[str, bool]:
@@ -230,7 +240,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -433,7 +443,7 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -475,9 +485,28 @@ class FlashAttention(torch.nn.Module):
                 query_layer, key_layer, value_layer
             )
         else:
-            # TODO(ksivaman) generate cu_seqlens using attention_mask
-            # Packed 
-            pass
+            if self.attention_type == "self":
+                assert (
+                    max_seqlen_q == max_seqlen_kv
+                ), "Maximum sequence length for Q and KV should be the same."
+                cu_seqlens_q, indices = get_cu_seqlens_and_indices(
+                    attention_mask, query_layer.shape[1], query_layer.shape[2]
+                )
+                cu_seqlens_kv = cu_seqlens_q
+                query_layer_packed, key_layer_packed, value_layer_packed = pack_tensors(
+                    [query_layer, key_layer, value_layer], indices
+                )
+            else:
+                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
+                    attention_mask[0], query_layer.shape[1], query_layer.shape[2]
+                )
+                cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(
+                    attention_mask[1], key_layer.shape[1], key_layer.shape[2]
+                )
+                query_layer_packed = pack_tensors((query_layer), indices_q)
+                key_layer_packed, value_layer_packed = pack_tensors(
+                    [key_layer, value_layer], indices_kv
+                )
 
         with self.attention_dropout_ctx():
             output = flash_attn_unpadded_func(
@@ -487,6 +516,9 @@ class FlashAttention(torch.nn.Module):
                 softmax_scale=1.0/self.norm_factor, causal=self.causal,
                 deterministic=self.deterministic,
             )
+
+        if self.attn_mask_type == 'padding':
+            output = unpack_tensor(output, indices_q, batch_size, max_seqlen_q)
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
@@ -802,6 +834,8 @@ class DotProductAttention(torch.nn.Module):
                    mask can also be applied in conjunction with "`padding`" mask by passing
                    in multiple mask type as a comma separated string, for example,
                    `attn_mask_type="causal,padding"`.
+    attention_type: str, default = `self`
+                   type of attention, either "`self`" and "`cross`".
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
@@ -858,6 +892,10 @@ class DotProductAttention(torch.nn.Module):
             and self.device_compute_capability >= 8.0
         )
 
+        assert (
+            attention_type in AttnTypes
+        ), f"attention_type {attention_type} not supported"
+
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
         self.attn_mask_type, self.causal_mask = _unpack_attn_mask_type(attn_mask_type)
@@ -907,7 +945,7 @@ class DotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1248,7 +1286,7 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         encoder_output: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
