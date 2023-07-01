@@ -135,17 +135,18 @@ def _self_fused_attn_max_512_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mas
                                                       scaling_factor=scaling_factor,
                                                       dropout_probability=dropout_probability,
                                                       is_training=is_training)
-    return output, (qkv, softmax_aux, cu_seqlen)
+    return output, (qkv, softmax_aux, output, cu_seqlen)
 
 
 def _self_fused_attn_max_512_bwd(attn_bias_type, attn_mask_type, scaling_factor,
                                  dropout_probability, is_training, ctx, grad):
-    qkv, softmax_aux, cu_seqlen = ctx
+    qkv, softmax_aux, output, cu_seqlen = ctx
 
     doutput = grad
 
     grad_qkv, grad_bias = self_fused_attn_max_512_bwd(qkv,
                                                       softmax_aux,
+                                                      output,
                                                       doutput,
                                                       cu_seqlen,
                                                       attn_bias_type=attn_bias_type.value,

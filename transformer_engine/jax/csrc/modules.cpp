@@ -827,13 +827,14 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
     // input
     void *qkv = buffers[0];
     void *softmax_aux = buffers[1];
-    void *doutput = buffers[2];
-    void *cu_seqlens = buffers[3];
+    void *output = buffers[2];
+    void *doutput = buffers[3];
+    void *cu_seqlens = buffers[4];
 
     // output
-    void *dqkv = buffers[4];
+    void *dqkv = buffers[5];
     void *dp = softmax_aux;
-    void *dbias = buffers[5];
+    void *dbias = buffers[6];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -850,10 +851,10 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
-    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
     // It's a little trick that the flash attn needs fwd output
     // But when seqlen <= 512, it is not needed
-    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, dtype);
+    auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
     // FP16/BF16 doesn't use this tensor
     auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
 
@@ -863,13 +864,13 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
     auto cu_seqlens_tensor =
         TensorWrapper(cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     // Currently, no rng_state required for bwd
-    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
+    // auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     // TODO: needs to think about how to pass aux_output_tensors
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 1;
+    aux_output_tensors.size = 2;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.shape = std::vector<size_t>{batch, num_head, q_max_seqlen, kv_max_seqlen};
     output_s->data.dptr = softmax_aux;
@@ -885,12 +886,18 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
                                   NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
                                   descriptor.mask_type, query_workspace_tensor.data(), stream);
 
-    size_t workspace_size =
+    size_t plan_workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
-
+    auto rng_workspace_size = 2 * sizeof(int64_t);
+    auto total_workspace_size = plan_workspace_size + rng_workspace_size;
+    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
+
+    auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
+    auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
+    rng_state_tensor->data.shape = std::vector<size_t>{2};
+    rng_state_tensor->data.dptr = rng_state;
 
     nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                   s_tensor.data(),  // not used for FP16/BF16

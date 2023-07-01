@@ -2126,6 +2126,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     def abstract(
             qkv,
             softmax_aux,
+            output,    # pylint: disable=unused-argument
             doutput,
             cu_seqlen,    # pylint: disable=unused-argument
             *,
@@ -2151,18 +2152,21 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
             ShapedArray(bias_shape, bias_dtype, named_shape=qkv.named_shape))
 
     @staticmethod
-    def lowering(ctx, qkv, softmax_aux, doutput, cu_seqlen, *, attn_bias_type, attn_mask_type,
-                 scaling_factor, dropout_probability, is_training):
+    def lowering(ctx, qkv, softmax_aux, output, doutput, cu_seqlen, *, attn_bias_type,
+                 attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Self fused attention max seqlen 512 bwd lowering rules
         """
-        qkv_aval, _, _, _ = ctx.avals_in
+        qkv_aval, _, _, _, _ = ctx.avals_in
 
         ir_qkv_type = ir.RankedTensorType(qkv.type)
         ir_qkv_shape = ir_qkv_type.shape
 
         ir_softmax_aux_type = ir.RankedTensorType(softmax_aux.type)
         ir_softmax_aux_shape = ir_softmax_aux_type.shape
+
+        ir_output_type = ir.RankedTensorType(output.type)
+        ir_output_shape = ir_output_type.shape
 
         ir_doutput_type = ir.RankedTensorType(doutput.type)
         ir_doutput_shape = ir_doutput_type.shape
@@ -2179,8 +2183,11 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(ir_qkv_shape, ir_qkv_type.element_type),
             ir.RankedTensorType.get(dbias_shape, dbias_dtype)
         ]
-        operands = [qkv, softmax_aux, doutput, cu_seqlen]
-        operand_shapes = [ir_qkv_shape, ir_softmax_aux_shape, ir_doutput_shape, ir_cu_seqlen_shape]
+        operands = [qkv, softmax_aux, output, doutput, cu_seqlen]
+        operand_shapes = [
+            ir_qkv_shape, ir_softmax_aux_shape, ir_output_shape, ir_doutput_shape,
+            ir_cu_seqlen_shape
+        ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
@@ -2201,16 +2208,18 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
 _self_fused_attn_max_512_bwd_p = register_primitive(SelfFusedAttnMax512BwdPrimitive)
 
 
-def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, doutput: jnp.ndarray,
-                                cu_seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                                attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                                dropout_probability: float, is_training: bool):
+def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, output: jnp.ndarray,
+                                doutput: jnp.ndarray, cu_seqlen: jnp.ndarray,
+                                attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                                scaling_factor: float, dropout_probability: float,
+                                is_training: bool):
     """
     Wrapper for TE self fused attention max seqlen 512 bwd
     Return the gradients of self fused attention with packed qkv input
     """
     return _self_fused_attn_max_512_bwd_p.bind(qkv,
                                                softmax_aux,
+                                               output,
                                                doutput,
                                                cu_seqlen,
                                                attn_bias_type=attn_bias_type,
