@@ -60,32 +60,22 @@ def get_cu_seqlens_and_indices(
     kv_channels: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Given a padding mask of shape [seq_len, batch_size], returns an int32
+    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
     tensor of shape [batch_size + 1,] containing the cumulative sequence
     lengths of every sample in the batch and the indices containing valid
     samples.
     """
-    reduced_mask = mask.sum(dim=0)
+    mask = mask.squeeze(1).squeeze(1)
+    reduced_mask = mask.sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
-    mask = mask.t()
     mask = mask.reshape(-1)
     indices = mask.nonzero()
     indices = indices.unsqueeze(-1)
     indices = indices.repeat(1, nheads, kv_channels)
     return cu_seqlens, indices
-
-
-def pack_tensor(unpacked: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-    """
-    Packs the tensor along the zeroth dim according to the specified mask.
-    unpacked : [b * max_s, nheads, kv_channels]
-    mask     : [max_s, b]
-    output   : [cu_seqlen, nheads, kv_channels]
-    """
-    return torch.gather(unpacked, 0, indices)
 
 
 @jit_fuser
@@ -109,7 +99,7 @@ def pack_tensors(
     """
     packed = []
     for t in unpacked:
-        packed.append(pack_tensor(t, indices))
+        packed.append(torch.gather(t, 0, indices))
     return packed
 
 
@@ -492,12 +482,12 @@ class FlashAttention(torch.nn.Module):
                 assert (
                     max_seqlen_q == max_seqlen_kv
                 ), "Maximum sequence length for Q and KV should be the same."
-                cu_seqlens_q, indices = get_cu_seqlens_and_indices(
+                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
                     attention_mask, query_layer.shape[1], query_layer.shape[2]
                 )
                 cu_seqlens_kv = cu_seqlens_q
                 query_layer_packed, key_layer_packed, value_layer_packed = pack_tensors(  # pylint: disable=unbalanced-tuple-unpacking
-                    [query_layer, key_layer, value_layer], indices
+                    [query_layer, key_layer, value_layer], indices_q
                 )
             else:
                 cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
@@ -830,8 +820,8 @@ class DotProductAttention(torch.nn.Module):
                    TransformerEngine calculates and applies an upper triangular mask to
                    the softmax input. An "`arbitrary`" mask is an arbitrary user defined mask
                    broadcastable to the shape of softmax input. The "`padding`" mask is used
-                   for providing locations of padded tokens in the batch, which should
-                   be of the shape [seq_len, batch_size]. No mask is applied for the "`no_mask`"
+                   for providing locations of padded tokens in the batch, which should be of
+                   the shape [batch_size, 1, 1, seq_len]. No mask is applied for the "`no_mask`"
                    option. For the `"arbitrary"` and `"padding"` mask types, the argument
                    :attr:`attention_mask` must be passed into `forward` call. The "`causal`"
                    mask can also be applied in conjunction with "`padding`" mask by passing
@@ -989,8 +979,9 @@ class DotProductAttention(torch.nn.Module):
                    Key tensor.
         value_layer : torch.Tensor
                      Value tensor.
-        attention_mask : Optional[torch.Tensor], default = `None`
+        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
+                        Can be a tuple of 2 masks for cross attention with padding masks.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would

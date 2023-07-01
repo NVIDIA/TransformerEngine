@@ -225,7 +225,7 @@ def _test_sanity_e2e_bert(block, bs, dtype, config, fp8_recipe, skip_wgrad):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
 
-    te_inp_attn_mask = torch.rand(torch.Size([bs, 1, config.seq_len, config.seq_len])).cuda().bool()
+    te_inp_attn_mask = torch.rand(torch.Size([bs, 1, 1, config.seq_len])).cuda().bool()
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -243,7 +243,7 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
 
-    enc_dec_attn_mask = torch.rand(torch.Size([bs, 1, config.seq_len, config.seq_len])).cuda().bool()
+    enc_dec_attn_mask = torch.rand(torch.Size([bs, 1, 1, config.seq_len])).cuda().bool()
 
     if skip_wgrad:
         _disable_wgrads(block)

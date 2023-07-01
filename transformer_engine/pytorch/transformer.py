@@ -418,8 +418,9 @@ class TransformerLayer(torch.nn.Module):
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : Optional[torch.Tensor], default = `None`
-             Boolean tensor used to mask out self-attention softmax input.
+        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                        Boolean tensor used to mask out softmax input when not using flash-attn.
+                        Can be a tuple of 2 masks for cross attention with padding masks.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
