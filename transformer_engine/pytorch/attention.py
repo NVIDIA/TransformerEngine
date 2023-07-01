@@ -104,6 +104,9 @@ def pack_tensors(
     unpacked: List[torch.Tensor],
     indices: torch.Tensor,
 ) -> List[torch.Tensor]:
+    """
+    Fused packing of multiple tensors.
+    """
     packed = []
     for t in unpacked:
         packed.append(pack_tensor(t, indices))
@@ -130,10 +133,10 @@ def _unpack_attn_mask_type(attn_mask_type: str) -> Tuple[str, bool]:
 
     if len(mask_types) == 0:  # Only apply causal mask.
         return "causal", True
-    elif len(mask_types) == 1 and causal_mask:  # Causal + padding masks
+    if len(mask_types) == 1 and causal_mask:  # Causal + padding masks
         assert mask_types[0] == "padding", f"Causal + {mask_types[0]} masking not supported."
         return "padding", True
-    elif len(mask_types) == 1:  # Arbitrary or padding or no_mask
+    if len(mask_types) == 1:  # Arbitrary or padding or no_mask
         return mask_types[0], False
     raise RuntimeError("Unsupported combination of mask types.")
 
@@ -493,7 +496,7 @@ class FlashAttention(torch.nn.Module):
                     attention_mask, query_layer.shape[1], query_layer.shape[2]
                 )
                 cu_seqlens_kv = cu_seqlens_q
-                query_layer_packed, key_layer_packed, value_layer_packed = pack_tensors(
+                query_layer_packed, key_layer_packed, value_layer_packed = pack_tensors(  # pylint: disable=unbalanced-tuple-unpacking
                     [query_layer, key_layer, value_layer], indices
                 )
             else:
@@ -504,7 +507,7 @@ class FlashAttention(torch.nn.Module):
                     attention_mask[1], key_layer.shape[1], key_layer.shape[2]
                 )
                 query_layer_packed = pack_tensors((query_layer), indices_q)
-                key_layer_packed, value_layer_packed = pack_tensors(
+                key_layer_packed, value_layer_packed = pack_tensors(  # pylint: disable=unbalanced-tuple-unpacking
                     [key_layer, value_layer], indices_kv
                 )
 

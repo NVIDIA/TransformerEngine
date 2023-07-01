@@ -270,7 +270,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if (
+        if (  # pylint: disable=too-many-boolean-expressions
             self.scaled_masked_softmax_fusion  # user wants to fuse
             and self.input_in_float16  # input must be fp16
             and 16 < sk <= 4096  # sk must be 16 ~ 2048
