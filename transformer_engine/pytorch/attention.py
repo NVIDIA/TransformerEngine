@@ -79,28 +79,32 @@ def get_cu_seqlens_and_indices(
 
 
 @jit_fuser
-def unpack_tensor(packed: torch.Tensor, indices: torch.Tensor, b: int, s: int) -> torch.Tensor:
-    """
-    Inverse of `pack_tensor`
-    """
-    unpacked = torch.zeros(
-        b * s, packed.shape[1], packed.shape[2], dtype=packed.dtype, device=packed.device)
-    unpacked.scatter_(0, indices, packed)
-    return unpacked
-
-
-@jit_fuser
 def pack_tensors(
     unpacked: List[torch.Tensor],
     indices: torch.Tensor,
 ) -> List[torch.Tensor]:
     """
     Fused packing of multiple tensors.
+    unpacked: List of tensors shaped [b * max_seqlen, nheads, kv]
+    indices:  As returned by `get_cu_seqlens_and_indices`
     """
     packed = []
     for t in unpacked:
         packed.append(torch.gather(t, 0, indices))
     return packed
+
+
+@jit_fuser
+def unpack_tensor(packed: torch.Tensor, indices: torch.Tensor, b: int, s: int) -> torch.Tensor:
+    """
+    Inverse of `pack_tensors`.
+    packed:   List of tensors shaped [cu_seqlens, nheads, kv]
+    indices:  As returned by `get_cu_seqlens_and_indices`
+    """
+    unpacked = torch.zeros(
+        b * s, packed.shape[1], packed.shape[2], dtype=packed.dtype, device=packed.device)
+    unpacked.scatter_(0, indices, packed)
+    return unpacked
 
 
 def _unpack_attn_mask_type(attn_mask_type: str) -> Tuple[str, bool]:
