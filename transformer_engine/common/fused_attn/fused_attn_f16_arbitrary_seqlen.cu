@@ -547,7 +547,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
         if (!is_training) {
-          dropout_probability == 0.0f;
+          dropout_probability = 0.0f;
         }
 
         FADescriptor descriptor{b,           h,
