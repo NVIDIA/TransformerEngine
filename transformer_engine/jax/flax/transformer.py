@@ -369,12 +369,20 @@ class MultiHeadAttention(nn.Module):
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
-        fused_attn_supported_seqlen = [128, 256, 384, 512]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+
+        def _check_seqlen(seqlen):
+            return seqlen % 64 == 0
+
+        def _check_head_dim(head_dim):
+            return head_dim in [64, 128]
+
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
-            q_seqlen in fused_attn_supported_seqlen and kv_seqlen in fused_attn_supported_seqlen \
-            and is_fused_attn_kernel_available() and (self.head_dim == 64) and enable_fused_attn
+            _check_seqlen(q_seqlen) and _check_seqlen(kv_seqlen) and \
+            _check_head_dim(self.head_dim) and \
+            is_fused_attn_kernel_available() and \
+            enable_fused_attn
 
         if enable_fused_attn and not use_fused_attn:
             reason = ""
@@ -388,16 +396,16 @@ class MultiHeadAttention(nn.Module):
             if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
                 reason += f"dtype in [BF16, FP16] is required " \
                           f"but got dtype={canonicalize_dtype}, "
-            if q_seqlen not in fused_attn_supported_seqlen:
-                reason += f"q_seqlen in {fused_attn_supported_seqlen} is required " \
+            if not _check_seqlen(q_seqlen):
+                reason += f"q_seqlen % 64 == 0 is required " \
                           f"but got {q_seqlen=}, "
-            if kv_seqlen not in fused_attn_supported_seqlen:
-                reason += f"kv_seqlen in {fused_attn_supported_seqlen} is required " \
+            if not _check_seqlen(kv_seqlen):
+                reason += f"kv_seqlen % 64 == 0 is required " \
                           f"but got {kv_seqlen=}, "
+            if not _check_head_dim(self.head_dim):
+                reason += f"head_dim should be 64 or 128 but got {self.head_dim}, "
             if not is_fused_attn_kernel_available():
                 reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
-            if self.head_dim != 64:
-                reason += f"head_dim should be 64 but got {self.head_dim}, "
 
             warnings.warn(
                 f"Fused attention is not enabled, " \
