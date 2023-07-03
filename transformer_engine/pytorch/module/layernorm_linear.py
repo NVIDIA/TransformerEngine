@@ -655,7 +655,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_split_rs = ub_bulk_wgrad or ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
 
-        self.return_layernorm_output = return_layernorm_output\
+        self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
