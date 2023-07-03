@@ -7,7 +7,7 @@ import os
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 from pkg_resources import packaging
 
 import torch
