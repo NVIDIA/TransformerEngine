@@ -86,7 +86,10 @@ def divide(numerator: int, denominator: int) -> int:
 
 
 def split_tensor_along_dim(
-    tensor: torch.Tensor, dim: int, num_partitions: int, contiguous_split_chunks: bool = False
+    tensor: torch.Tensor,
+    dim: int,
+    num_partitions: int,
+    contiguous_split_chunks: bool = False,
 ) -> Tuple[torch.Tensor, ...]:
     """Split a tensor along its last dimension.
     Arguments:
@@ -181,14 +184,14 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 def check_dim_for_fp8_forward_exec(tensor: torch.Tensor) -> bool:
     """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    that dim0 is divisible by 8 and dim1 is divisible by 16.
     """
-    return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
+    return tensor.shape[0] % 8 == 0 and tensor.shape[1] % 16 == 0
 
 
 def assert_dim_for_fp8_forward_exec(tensor: torch.Tensor) -> None:
     """For fp8 fprop (TN layout), inputs and weights must be such
-       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    that dim0 is divisible by 8 and dim1 is divisible by 16.
     """
     # single tensor check so it's clear which tensor is triggering the assertion
     assert check_dim_for_fp8_forward_exec(tensor), (
