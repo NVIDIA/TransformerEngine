@@ -1672,7 +1672,7 @@ bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
 #endif
 }
 
-void placeholder() {}  // TODO(ksivamani) clean this up
+class placeholder {};  // TODO(ksivamani) clean this up
 
 namespace flash_attention {
 
@@ -1872,9 +1872,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
 #else  // NVTE_WITH_USERBUFFERS
-  m.def("UbufOverlapAlgo", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufCommOverlap", &placeholder, "Dummy function for python side annotations");
-  m.def("UbufP2PCommOverlap", &placeholder, "Dummy function for python side annotations");
+  py::class_<placeholder>(m, "UbufOverlapAlgo");
+  py::class_<placeholder>(m, "UbufCommOverlap");
+  py::class_<placeholder>(m, "UbufP2PCommOverlap");
 #endif  // NVTE_WITH_USERBUFFERS
 
   py::enum_<transformer_engine::DType>(m, "DType", py::module_local())

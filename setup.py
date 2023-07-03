@@ -15,7 +15,6 @@ import tempfile
 from typing import List, Optional, Tuple, Union
 
 import setuptools
-from setuptools.command.build_ext import build_ext
 
 # Project directory root
 root_path: Path = Path(__file__).resolve().parent
@@ -290,7 +289,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=1.0.7"])
+        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=1.0.7", "pybind11-stubgen==0.16.1"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
@@ -374,6 +373,17 @@ elif "paddle" in frameworks():
 else:
     from setuptools.command.build_ext import build_ext as BuildExtension
 
+pybind11_stubgen = r"""
+import ctypes
+ctypes.CDLL("__TRANSFORMER_ENGINE_PATH__", mode=ctypes.RTLD_GLOBAL)
+
+import re
+import sys
+from pybind11_stubgen.__init__ import main
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(main())
+"""
 
 class CMakeBuildExtension(BuildExtension):
     """Setuptools command with support for CMake extension modules"""
@@ -395,15 +405,15 @@ class CMakeBuildExtension(BuildExtension):
                         build_dir=build_dir,
                         install_dir=install_dir,
                     )
+        
+        first_of = lambda pred, iterable: next((item for item in iterable if pred(item)), None)
+
+        paddle_ext = first_of(lambda ext: "paddle" in ext.name, self.extensions)
+        transformer_engine_extensions_ext = first_of(lambda ext: "transformer_engine_extensions" in ext.name, self.extensions)
 
         # Paddle requires linker search path for libtransformer_engine.so
-        paddle_ext = None
-        if "paddle" in frameworks():
-            for ext in self.extensions:
-                if "paddle" in ext.name:
-                    ext.library_dirs.append(self.build_lib)
-                    paddle_ext = ext
-                    break
+        if paddle_ext is not None:
+            paddle_ext.library_dirs.append(self.build_lib)
 
         # Build non-CMake extensions as usual
         all_extensions = self.extensions
@@ -414,13 +424,14 @@ class CMakeBuildExtension(BuildExtension):
         super().run()
         self.extensions = all_extensions
 
+        # Get Transformer Engine .so/.dll path
+        transformer_engine_path = first_of(lambda path: path.name.startswith("libtransformer_engine."), Path(self.build_lib).iterdir())
+
         # Manually write stub file for Paddle extension
         if paddle_ext is not None:
 
             # Load libtransformer_engine.so to avoid linker errors
-            for path in Path(self.build_lib).iterdir():
-                if path.name.startswith("libtransformer_engine."):
-                    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+            ctypes.CDLL(str(transformer_engine_path), mode=ctypes.RTLD_GLOBAL)
 
             # Figure out stub file path
             module_name = paddle_ext.name
@@ -441,6 +452,22 @@ class CMakeBuildExtension(BuildExtension):
             from paddle.utils.cpp_extension.extension_utils import custom_write_stub
             custom_write_stub(lib_name, stub_path)
 
+        if transformer_engine_extensions_ext is not None:
+            with tempfile.TemporaryDirectory() as tmpdirname:
+                # Generate stubs with pybind11-stubgen
+                subprocess.run([
+                    sys.executable,
+                    "-c",
+                    pybind11_stubgen.replace("__TRANSFORMER_ENGINE_PATH__",str(transformer_engine_path)),
+                    "-o",
+                    tmpdirname,
+                    "transformer_engine_extensions"
+                ], check=True)
+
+                # Write stub file
+                src = os.path.join(tmpdirname, "transformer_engine_extensions-stubs", "__init__.pyi")
+                dst = os.path.join(self.build_lib, transformer_engine_extensions_ext.name + ".py")
+                shutil.copyfile(src, dst)
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
@@ -530,6 +557,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        package_data={"transformer_engine_extensions": ["py.typed"]}
     )
 
 
