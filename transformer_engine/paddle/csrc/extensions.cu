@@ -12,8 +12,6 @@ namespace paddle_ext {
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 
 PYBIND11_MODULE(transformer_engine_paddle, m) {
-    // Misc
-    m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
     // Data structures
     py::class_<FP8TensorMeta>(m, "FP8TensorMeta")
         .def(py::init<>())
@@ -43,6 +41,8 @@ PYBIND11_MODULE(transformer_engine_paddle, m) {
         .value("GRAD_INPUT1", FP8BwdTensors::GRAD_INPUT1)
         .value("GRAD_OUTPUT2", FP8BwdTensors::GRAD_OUTPUT2)
         .value("GRAD_INPUT2", FP8BwdTensors::GRAD_INPUT2);
+    // Misc
+    m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
 }
 }  // namespace paddle_ext
 }  // namespace transformer_engine

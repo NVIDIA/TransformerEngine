@@ -1842,66 +1842,6 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  // Softmax functions
-  m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
-  m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD");
-  m.def("scaled_masked_softmax_forward", &scaled_masked_softmax_forward,
-                                                    "Scaled Masked Softmax FWD");
-  m.def("scaled_masked_softmax_backward", &scaled_masked_softmax_backward,
-                                                    "Scaled Masked Softmax BWD");
-  m.def("scaled_upper_triang_masked_softmax_forward",
-            &scaled_upper_triang_masked_softmax_forward,
-            "Scaled Upper-Triangular Masked Softmax FWD");
-  m.def("scaled_upper_triang_masked_softmax_backward",
-            &scaled_upper_triang_masked_softmax_backward,
-            "Scaled Upper-Triangular Masked Softmax BWD");
-
-  // Other granular functions
-  m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
-  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
-  m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
-  m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
-  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
-  m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
-  m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
-                                              "Fused Cast + Transpose + BGRAD");
-  m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
-                                              "Fused FP8 Transpose + BGRAD");
-  m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
-                                              "Fused Cast + Transpose + BGRAD + DGELU");
-  m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
-                                              "Fused Multi-tensor Cast + Transpose");
-  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
-  m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
-  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
-  m.def("te_gemm", &te_gemm, "CublasLt GEMM");
-  m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
-                  "Fused Attention FP8/BF16/FP16 FWD with packed QKV");
-  m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
-                  "Fused Attention FP8/BF16/FP16 BWD with packed QKV");
-  m.def("fused_attn_fwd_kvpacked", &fused_attn_fwd_kvpacked,
-                  "Fused Attention FP8/BF16/FP16 FWD with packed KV");
-  m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
-                  "Fused Attention FP8/BF16/FP16 BWD with packed KV");
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
-  m.def("gelu", &gelu, "GeLU with FP8 output");
-  m.def("relu", &relu, "ReLU with FP8 output");
-  m.def("geglu", &geglu, "GeGLU with FP8 output");
-  m.def("reglu", &reglu, "ReGLU with FP8 output");
-  m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
-  m.def("dgelu", &dgelu, "Backward of GeLU");
-  m.def("drelu", &drelu, "Backward of ReLU");
-  m.def("dgeglu", &dgeglu, "Backward of GeGLU");
-  m.def("dreglu", &dreglu, "Backward of ReGLU");
-  m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
-
-  // Misc
-  m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
-  m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
-
   // Data structures
   py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
     .def(py::init<>())
@@ -1982,4 +1922,64 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
+
+  // Softmax functions
+  m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD");
+  m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD");
+  m.def("scaled_masked_softmax_forward", &scaled_masked_softmax_forward,
+                                                    "Scaled Masked Softmax FWD");
+  m.def("scaled_masked_softmax_backward", &scaled_masked_softmax_backward,
+                                                    "Scaled Masked Softmax BWD");
+  m.def("scaled_upper_triang_masked_softmax_forward",
+            &scaled_upper_triang_masked_softmax_forward,
+            "Scaled Upper-Triangular Masked Softmax FWD");
+  m.def("scaled_upper_triang_masked_softmax_backward",
+            &scaled_upper_triang_masked_softmax_backward,
+            "Scaled Upper-Triangular Masked Softmax BWD");
+
+  // Other granular functions
+  m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
+  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
+  m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
+  m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
+  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
+  m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");
+  m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad,
+                                              "Fused Cast + Transpose + BGRAD");
+  m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad,
+                                              "Fused FP8 Transpose + BGRAD");
+  m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
+                                              "Fused Cast + Transpose + BGRAD + DGELU");
+  m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
+                                              "Fused Multi-tensor Cast + Transpose");
+  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
+  m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
+  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
+  m.def("te_gemm", &te_gemm, "CublasLt GEMM");
+  m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
+                  "Fused Attention FP8/BF16/FP16 FWD with packed QKV");
+  m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
+                  "Fused Attention FP8/BF16/FP16 BWD with packed QKV");
+  m.def("fused_attn_fwd_kvpacked", &fused_attn_fwd_kvpacked,
+                  "Fused Attention FP8/BF16/FP16 FWD with packed KV");
+  m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
+                  "Fused Attention FP8/BF16/FP16 BWD with packed KV");
+  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
+  m.def("gelu", &gelu, "GeLU with FP8 output");
+  m.def("relu", &relu, "ReLU with FP8 output");
+  m.def("geglu", &geglu, "GeGLU with FP8 output");
+  m.def("reglu", &reglu, "ReGLU with FP8 output");
+  m.def("swiglu", &swiglu, "SwiGLU with FP8 output");
+  m.def("dgelu", &dgelu, "Backward of GeLU");
+  m.def("drelu", &drelu, "Backward of ReLU");
+  m.def("dgeglu", &dgeglu, "Backward of GeGLU");
+  m.def("dreglu", &dreglu, "Backward of ReGLU");
+  m.def("dswiglu", &dswiglu, "Backward of SwiGLU");
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention");
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention");
+  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
+
+  // Misc
+  m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
+  m.def("userbuf_comm_available", &userbuf_comm_available, "If userbuf backend is available");
 }

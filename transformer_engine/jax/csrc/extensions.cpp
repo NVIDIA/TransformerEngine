@@ -55,17 +55,6 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
-    m.def("registrations", &Registrations);
-    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor);
-    m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
-    m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
-    m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-    m.def("get_cublasLt_version", &cublasLtGetVersion);
-    m.def("get_cuda_version", &GetCudaRuntimeVersion);
-    m.def("get_device_compute_capability", &GetDeviceComputeCapability);
-    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
-    m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
-
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
         .value("kInt32", DType::kInt32)
@@ -85,6 +74,17 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
         .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
         .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+
+    m.def("registrations", &Registrations);
+    m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor);
+    m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
+    m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
+    m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
+    m.def("get_cublasLt_version", &cublasLtGetVersion);
+    m.def("get_cuda_version", &GetCudaRuntimeVersion);
+    m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+    m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
+    m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
 }
 
 }  // namespace jax
