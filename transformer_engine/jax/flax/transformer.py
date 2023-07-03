@@ -102,8 +102,15 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
             rules_map[key] = [val]
 
     gsr = global_shard_resource()
+
+    batch_dim_rule = []
+    if gsr.dp_resource is not None:
+        batch_dim_rule.append(gsr.dp_resource)
+    if gsr.fsdp_resource is not None and gsr.dp_resource != gsr.fsdp_resource:
+        batch_dim_rule.append(gsr.fsdp_resource)
+
     te_logical_axis_rules = (
-        (BATCH_AXES, gsr.dp_resource),
+        (BATCH_AXES, tuple(batch_dim_rule)),
         (SEQLEN_AXES, None),
         (HEAD_AXES, gsr.tp_resource),
         (HIDDEN_AXES, None),

@@ -1016,6 +1016,59 @@ def get_fused_attn_sharding_meta(stype: ShardingType,
                                                               tp_axis_name)
 
 
+def extend_dp_sharding_meta(sharding_meta: ShardingMeta, dp_dim: int = 0) -> ShardingMeta:
+    """
+    extend_dp_sharding_meta
+    """
+    mst = infer_major_sharding_type()
+    if mst is MajorShardingType.SINGLE:
+        return sharding_meta
+
+    gsr = global_shard_resource()
+    dp_mesh_axis = gsr.dp_resource
+    fsdp_mesh_axis = gsr.fsdp_resource
+
+    if fsdp_mesh_axis == dp_mesh_axis:
+        return sharding_meta
+    if fsdp_mesh_axis is None:
+        return sharding_meta
+
+    fsdp_dim, _ = _get_mesh_info(fsdp_mesh_axis)
+    fsdp_axis_name = "fsdp"
+    # Assume 0-idx in the tensor with inputs
+    idx_to_extend = dp_dim + 1 if is_dp_enabled(mst) else dp_dim
+    input_shape = sharding_meta.input_shapes[0]
+    remain_batch_size = input_shape[idx_to_extend]
+    assert remain_batch_size == -1 or remain_batch_size % fsdp_dim == 0
+    remain_batch_size = -1 if remain_batch_size == -1 else remain_batch_size // fsdp_dim
+    new_input_shape = tuple([
+        *input_shape[:idx_to_extend], fsdp_dim, remain_batch_size, *input_shape[idx_to_extend + 1:]
+    ])
+    sharding_meta.input_shapes = (new_input_shape, *sharding_meta.input_shapes[1:])
+
+    new_in_axes_for_input = {}
+    for key in sharding_meta.in_axes[0]:
+        if key < idx_to_extend:
+            new_in_axes_for_input[key] = sharding_meta.in_axes[0][key]
+        else:
+            new_in_axes_for_input[key + 1] = sharding_meta.in_axes[0][key]
+    new_in_axes_for_input[idx_to_extend] = fsdp_axis_name
+    sharding_meta.in_axes = (new_in_axes_for_input, *sharding_meta.in_axes[1:])
+
+    assert isinstance(sharding_meta.out_axes, dict)
+    new_out_axes_for_input = {}
+    for key in sharding_meta.out_axes:
+        if key < idx_to_extend:
+            new_out_axes_for_input[key] = sharding_meta.out_axes[key]
+        else:
+            new_out_axes_for_input[key + 1] = sharding_meta.out_axes[key]
+    new_out_axes_for_input[idx_to_extend] = fsdp_axis_name
+    sharding_meta.out_axes = new_out_axes_for_input
+
+    sharding_meta.axis_resources[fsdp_axis_name] = fsdp_mesh_axis
+    return sharding_meta
+
+
 def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
                 out_axes: Union[Dict, Tuple[str, ...], Tuple[Union[Dict, Tuple], ...]],
                 axis_resources: Dict, inputs: Tuple):
@@ -1033,10 +1086,12 @@ def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
     # Collectives in manually partitioned computations are only supported
     # when all mesh axes are partitioned manually (no partial automatic
     # sharding). Make sure that you mention all mesh axes in axis_resources!"
-    for i, mesh_axis_names in enumerate(mesh.axis_names):
+    fake_idx_counter = 0
+    for _, mesh_axis_names in enumerate(mesh.axis_names):
         if mesh_axis_names not in axis_resources.values():
-            fake_axis_name = f"{mesh_axis_names}_fake_{i}"
-            fake_in_axes[i] = fake_axis_name
+            fake_idx_counter += 1
+            fake_axis_name = f"{mesh_axis_names}_fake_{fake_idx_counter}"
+            fake_in_axes[fake_idx_counter] = fake_axis_name
             fake_axis_resource[fake_axis_name] = mesh_axis_names
 
     fake_input = jnp.zeros(tuple(64 for _ in range(len(fake_in_axes) + 1)))

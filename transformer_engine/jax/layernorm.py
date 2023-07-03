@@ -18,7 +18,7 @@ from .fp8 import FP8Helper, FP8GemmPackage
 from .sharding import ShardingType, get_elementwise_sharding_meta
 from .sharding import get_dot_sharding_meta, get_fp8_meta_sharding_meta
 from .sharding import is_dp_enabled, is_tp_enabled, merge_axis_resources
-from .sharding import xmap_runner
+from .sharding import xmap_runner, extend_dp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -44,6 +44,16 @@ def layernorm(inputs: jnp.ndarray,
     """
     Layernorm wrapper
     """
+
+    # inputs_ = jnp.asarray(inputs, jnp.float32)
+    # mean = jnp.mean(inputs_, axis=-1, keepdims=True)
+    # var = jnp.mean(jnp.square(inputs_ - mean), axis=-1, keepdims=True)
+    # normed_input = (inputs_ - mean) * jax.lax.rsqrt(var + epsilon)
+    # # Align TE implementation
+    # if zero_centered_gamma:
+    #     return jnp.asarray(normed_input * (gamma + 1) + beta).astype(inputs.dtype)
+    # return jnp.asarray(normed_input * gamma + beta).astype(inputs.dtype)
+
     assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
         "layernorm does not support row-split tensor parallelism currently."
 
@@ -67,6 +77,8 @@ def layernorm(inputs: jnp.ndarray,
         tp_axis_name = "model"
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, gamma.shape,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
+
+        sharding_meta = extend_dp_sharding_meta(sharding_meta, dp_dim_index)
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         gamma_ = jnp.reshape(gamma, sharding_meta.input_shapes[1])    # 1 for gamma
         beta_ = beta
@@ -88,6 +100,34 @@ def layernorm(inputs: jnp.ndarray,
                              sharding_meta.axis_resources, (inputs_, gamma_, beta_))
 
         output = jnp.reshape(output, sharding_meta.output_shapes[0])
+
+        # inputs_ = jnp.reshape(inputs, (2, 2, 8, 128, 1024))
+        # gamma_ = gamma
+        # beta_ = beta
+
+        # in_axes = (
+        #     {0: "batch", 1:"fsdp"},
+        #     {}, {}
+        # )
+
+        # out_axes = {0: "batch", 1:"fsdp"}
+
+        # axis_resources = {
+        #     "batch":"replica",
+        #     "fsdp":"fsdp"
+        # }
+
+        # partial_ln = partial(_layernorm,
+        #                      layernorm_type=layernorm_type,
+        #                      zero_centered_gamma=zero_centered_gamma,
+        #                      epsilon=epsilon,
+        #                      sharding_type=sharding_type,
+        #                      dp_axis_name=dp_axis_name)
+
+        # output = xmap_runner(partial_ln, in_axes, out_axes,
+        #                      axis_resources, (inputs_, gamma_, beta_))
+
+        # output = jnp.reshape(output, (32, 128, 1024))
 
     return output
 

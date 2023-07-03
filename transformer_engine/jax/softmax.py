@@ -18,8 +18,8 @@ from .cpp_extensions import scaled_upper_triang_masked_softmax_bwd
 from .cpp_extensions import ScaledSoftmaxFwdPrimitive
 from .cpp_extensions import ScaledMaskedSoftmaxFwdPrimitive
 from .cpp_extensions import ScaledUpperTriangMaskedSoftmaxFwdPrimitive
-from .sharding import get_softmax_sharding_meta, ShardingType
-from .sharding import xmap_runner
+from .sharding import get_softmax_sharding_meta, ShardingType, ShardingMeta
+from .sharding import xmap_runner, extend_dp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -78,6 +78,8 @@ def softmax(inputs: jnp.ndarray,
                                                   dp_axis_name=dp_axis_name,
                                                   tp_axis_name=tp_axis_name)
 
+        sharding_meta = extend_dp_sharding_meta(sharding_meta, dp_dim_index)
+
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         mask_ = mask
         mask_in_axis = {}
@@ -92,8 +94,12 @@ def softmax(inputs: jnp.ndarray,
                                                                tp_dim=tp_dim_index,
                                                                dp_axis_name=dp_axis_name,
                                                                tp_axis_name=tp_axis_name)
-                mask_ = jnp.reshape(mask_, mask_sharding_meta.input_shapes[0])
-                mask_in_axis = mask_sharding_meta.in_axes[0]
+            else:
+                mask_sharding_meta = ShardingMeta([{}], {}, {}, [mask_.shape], mask_.shape)
+
+            mask_sharding_meta = extend_dp_sharding_meta(mask_sharding_meta, dp_dim_index)
+            mask_ = jnp.reshape(mask_, mask_sharding_meta.input_shapes[0])
+            mask_in_axis = mask_sharding_meta.in_axes[0]
 
         partial_softmax = partial(_softmax, scale_factor=scale_factor, softmax_type=softmax_type)
 
@@ -102,6 +108,24 @@ def softmax(inputs: jnp.ndarray,
                               sharding_meta.axis_resources, (inputs_, mask_))
 
         outputs = jnp.reshape(outputs, sharding_meta.output_shapes[0])
+
+        # inputs_ = jnp.reshape(inputs, (2, 2, 8, 2, 8, 128, 128))
+        # mask_ = jnp.reshape(mask, (2, 2, 8, 1, 128, 128))
+        # in_axes = (
+        #     {0: "batch", 1:"fsdp", 3:"model"},
+        #     {0: "batch", 1:"fsdp"},
+        # )
+        # out_axes = {0: "batch", 1:"fsdp", 3:"model"}
+        # axis_resources = {
+        #     "batch":"replica",
+        #     "fsdp":"fsdp",
+        #     "model":"mdl"
+        # }
+        # partial_softmax = partial(_softmax, scale_factor=scale_factor, softmax_type=softmax_type)
+        # outputs = xmap_runner(partial_softmax, in_axes, out_axes,
+        #                       axis_resources, (inputs_, mask_))
+
+        # outputs = jnp.reshape(outputs, (32, 16, 128, 128))
 
     return outputs
 
