@@ -621,7 +621,7 @@ class FlashAttention(torch.nn.Module):
             )
 
         if self.attn_mask_type == 'padding':
-            output = UnpackTensor(indices_q, batch_size * max_seqlen_q, output)
+            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
