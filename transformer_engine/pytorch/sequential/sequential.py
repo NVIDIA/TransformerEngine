@@ -36,7 +36,7 @@ class Sequential(nn.Module):
         if name is None:
             name = str(len(self._modules))
         if isinstance(module, Sequential) or isinstance(module, nn.Sequential):
-            for submodule_name, submodule in module._modules.items():
+            for submodule_name, submodule in module._modules.items():  # type: ignore[private-attr-access]
                 self.append(submodule, name=f"{name}_{submodule_name}")
         else:
             self.add_module(name, module)
