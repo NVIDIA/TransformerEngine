@@ -1317,6 +1317,8 @@ std::vector<at::Tensor> layernorm_fwd(const at::Tensor &input,
                                       const int sm_margin,
                                       const bool zero_centered_gamma
 ) {
+    using namespace transformer_engine;
+
     DType itype = GetTransformerEngineDType(input.scalar_type());
     auto ln_out = at::empty_like(input, at::CUDA(GetATenDType(itype)));
 
