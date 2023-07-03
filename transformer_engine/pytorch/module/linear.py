@@ -123,12 +123,15 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                     )
             else:
-                inputmat, inputmat_t = cast_to_fp8(
-                    inputmat,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                ), None
+                inputmat, inputmat_t = (
+                    cast_to_fp8(
+                        inputmat,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM1_INPUT,
+                        fp8_dtype_forward,
+                    ),
+                    None,
+                )
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
@@ -160,7 +163,8 @@ class _Linear(torch.autograd.Function):
                         weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
-                        fp8_dtype_forward)
+                        fp8_dtype_forward,
+                    )
 
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
@@ -168,11 +172,15 @@ class _Linear(torch.autograd.Function):
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight.size(0)
-                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                rs_out = torch.empty(
+                    dim_size, dtype=activation_dtype, device=inputmat_total.device
+                )
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
-                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                out = torch.empty(
+                    dim_size, dtype=activation_dtype, device=inputmat_total.device
+                )
 
             _ = fp8_gemm(
                 weight_fp8,
@@ -200,11 +208,13 @@ class _Linear(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of input
-                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(inputmat_total).float()
+                fp8_meta["scaling_fwd"].amax_history[0][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ] = torch.amax(inputmat_total).float()
                 # amax of weight
-                fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(weight).float()
+                fp8_meta["scaling_fwd"].amax_history[0][
+                    tex.FP8FwdTensors.GEMM1_WEIGHT
+                ] = torch.amax(weight).float()
 
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
@@ -212,11 +222,15 @@ class _Linear(torch.autograd.Function):
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight.size(0)
-                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                rs_out = torch.empty(
+                    dim_size, dtype=activation_dtype, device=inputmat_total.device
+                )
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
-                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                out = torch.empty(
+                    dim_size, dtype=activation_dtype, device=inputmat_total.device
+                )
 
             _, _, _ = gemm(
                 weight,
@@ -268,7 +282,6 @@ class _Linear(torch.autograd.Function):
 
         return out
 
-
     @staticmethod
     def backward(
         ctx, grad_output: torch.Tensor
@@ -304,7 +317,10 @@ class _Linear(torch.autograd.Function):
             # Column Parallel Linear
             # Overlap input AG with dgrad
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+                if (
+                    ctx.fp8
+                    and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad
+                ):
                     inputmat_t_total, handle = gather_along_last_dim(
                         inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
                     )
@@ -325,7 +341,9 @@ class _Linear(torch.autograd.Function):
 
             dgrad_size = list(grad_output.size())
             dgrad_size[1] = weight.size(1)
-            dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+            dgrad = torch.empty(
+                dgrad_size, dtype=ctx.activation_dtype, device=weight.device
+            )
 
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
@@ -350,7 +368,9 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         out=dgrad,
                         use_split_accumulator=_2X_ACC_DGRAD,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG
+                        if ctx.ub_split_ag
+                        else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                     )
                 else:
@@ -362,7 +382,9 @@ class _Linear(torch.autograd.Function):
                         out=dgrad,
                         layout="NN",
                         grad=True,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
+                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG
+                        if ctx.ub_split_ag
+                        else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
                     )
 
@@ -380,7 +402,9 @@ class _Linear(torch.autograd.Function):
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_split_ag:
-                            grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                            grad_output_t = tex.fp8_transpose(
+                                grad_output_c, fp8_dtype_backward
+                            )
                         wgrad = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
@@ -393,7 +417,9 @@ class _Linear(torch.autograd.Function):
                             ctx.activation_dtype,
                             get_workspace(),
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                            out=weight.main_grad
+                            if ctx.fuse_wgrad_accumulation
+                            else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
                     else:
@@ -405,7 +431,9 @@ class _Linear(torch.autograd.Function):
                             layout="NT",
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                            out=weight.main_grad
+                            if ctx.fuse_wgrad_accumulation
+                            else None,
                         )
                 else:
                     # WGRAD
@@ -422,7 +450,11 @@ class _Linear(torch.autograd.Function):
                     )
 
             # Column Parallel Linear
-            if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
+            if (
+                ctx.parallel_mode == "column"
+                and ctx.tensor_parallel
+                and handle is not None
+            ):
                 handle.wait()
 
             if not ctx.use_bias:
@@ -535,7 +567,7 @@ class Linear(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
-        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        params_dtype = params_dtype or torch.get_default_dtype()
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -576,13 +608,16 @@ class Linear(TransformerEngineBaseModule):
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
         if not skip_weight_param_allocation:
-            self.register_buffer("weight_tensor",
-                                 torch.empty(
-                                    self.out_features,
-                                    self.in_features,
-                                    device=torch.cuda.current_device(),
-                                    dtype=params_dtype),
-                                 persistent=False)
+            self.register_buffer(
+                "weight_tensor",
+                torch.empty(
+                    self.out_features,
+                    self.in_features,
+                    device=torch.cuda.current_device(),
+                    dtype=params_dtype,
+                ),
+                persistent=False,
+            )
 
             initialize_affine_weight_gpu(
                 self.weight_tensor,
@@ -593,17 +628,23 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if self.use_bias:
-                self.register_buffer("bias_tensor",
-                                     torch.empty(
-                                         self.out_features,
-                                         device=torch.cuda.current_device(),
-                                         dtype=params_dtype),
-                                     persistent=False)
+                self.register_buffer(
+                    "bias_tensor",
+                    torch.empty(
+                        self.out_features,
+                        device=torch.cuda.current_device(),
+                        dtype=params_dtype,
+                    ),
+                    persistent=False,
+                )
             else:
-                self.register_buffer("bias_tensor",
-                                     torch.Tensor().to(dtype=params_dtype,
-                                                       device=torch.cuda.current_device()),
-                                     persistent=False)
+                self.register_buffer(
+                    "bias_tensor",
+                    torch.Tensor().to(
+                        dtype=params_dtype, device=torch.cuda.current_device()
+                    ),
+                    persistent=False,
+                )
 
             with torch.no_grad():
                 self.bias_tensor.zero_()
@@ -625,7 +666,10 @@ class Linear(TransformerEngineBaseModule):
                 bname = pname + "bias"
 
                 self.register_parameter(
-                    wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                    wname,
+                    Parameter(
+                        self.weight_tensor[i * split_size : (i + 1) * split_size]
+                    ),
                 )
 
                 set_tensor_model_parallel_attributes(
@@ -637,16 +681,24 @@ class Linear(TransformerEngineBaseModule):
 
                 if self.use_bias:
                     self.register_parameter(
-                        bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                        bname,
+                        Parameter(
+                            self.bias_tensor[i * split_size : (i + 1) * split_size]
+                        ),
                     )
                 else:
-                    self.register_buffer(bname,
-                                         torch.Tensor().to(dtype=params_dtype,
-                                                           device=torch.cuda.current_device()),
-                                         persistent=False)
+                    self.register_buffer(
+                        bname,
+                        torch.Tensor().to(
+                            dtype=params_dtype, device=torch.cuda.current_device()
+                        ),
+                        persistent=False,
+                    )
 
                 if parallel_mode == "column":
-                    set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
+                    set_tensor_model_parallel_attributes(
+                        getattr(self, bname), True, 0, 1
+                    )
 
                 self.weight_names.append(wname)
                 self.bias_names.append(bname)
@@ -674,9 +726,7 @@ class Linear(TransformerEngineBaseModule):
 
         if is_first_microbatch is None:
             # Return empty weight placeholders for each fwd/bwd pass
-            fp8_weight_tensors = self.get_fp8_weights_empty_tensors(
-                is_first_microbatch
-            )
+            fp8_weight_tensors = self.get_fp8_weights_empty_tensors(is_first_microbatch)
         else:
             # These persistent weight placeholders should've been created in
             # `set_fp8_weights` method
@@ -722,15 +772,21 @@ class Linear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
-                bias if bias is not None
-                else self.bias if self.parameters_split is None
-                else self.bias_tensor if not torch.is_grad_enabled()
+                bias
+                if bias is not None
+                else self.bias
+                if self.parameters_split is None
+                else self.bias_tensor
+                if not torch.is_grad_enabled()
                 else self.noop_cat("bias_tensor", self.bias_names)
             )
             weight_tensor = (
-                weight if weight is not None
-                else self.weight if self.parameters_split is None
-                else self.weight_tensor if not torch.is_grad_enabled()
+                weight
+                if weight is not None
+                else self.weight
+                if self.parameters_split is None
+                else self.weight_tensor
+                if not torch.is_grad_enabled()
                 else self.noop_cat("weight_tensor", self.weight_names)
             )
 
