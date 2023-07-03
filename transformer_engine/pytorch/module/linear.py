@@ -84,9 +84,12 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
-        in_features = weight.shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        assert inp.shape[-1] == weight.shape[-1]
+        assert len(weight.shape) in [1, 2]
+
+        in_features = inp.shape[-1]
         inputmat = inp.view((-1, in_features))
+
         if fp8:
             assert_dim_for_fp8_forward_exec(inputmat)
             assert_dim_for_fp8_forward_exec(weight)
@@ -742,7 +745,7 @@ class Linear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _Linear.forward
                 args = [None]
-            args += (
+            args += [
                 inp,
                 weight_tensor,
                 weight1_fp8,
@@ -763,7 +766,7 @@ class Linear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.ub_split_rs,
                 self.ub_split_ag,
-            )
+            ]
             out = fwd_fn(*args)
 
         if self.gemm_bias_unfused_add:

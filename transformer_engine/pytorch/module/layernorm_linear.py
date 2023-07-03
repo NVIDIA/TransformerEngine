@@ -92,9 +92,12 @@ class _LayerNormLinear(torch.autograd.Function):
         fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         # Make sure input dimensions are compatible
-        in_features = ln_weight.shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        assert inp.shape[-1] == ln_weight.shape[-1]
+        assert len(ln_weight.shape) in [1, 2]
+
+        in_features = inp.shape[-1]
         inputmat = inp.view((-1, in_features))
+
         if fp8:
             assert_dim_for_fp8_forward_exec(inputmat)
             assert_dim_for_fp8_forward_exec(weight)
@@ -415,7 +418,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
                         ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
                     )
-            
+
             if ctx.ub_bulk_dgrad:
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
 
@@ -770,7 +773,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
-            
+
         self.eps = eps
         self.layer_norm_weight = Parameter(
             torch.empty(
@@ -875,7 +878,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 args = [None]
-            args += (
+            args += [
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
@@ -902,7 +905,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_split_ag,
-            )
+            ]
             out = fwd_fn(*args)
 
         if self.return_layernorm_output:
