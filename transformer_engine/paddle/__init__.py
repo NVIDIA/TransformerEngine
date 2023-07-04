@@ -3,4 +3,4 @@
 # See LICENSE for license information.
 """Transformer Engine bindings for Paddle"""
 
-from .layer import Linear
+from .layer import Linear, LayerNorm

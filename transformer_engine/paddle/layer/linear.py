@@ -6,6 +6,7 @@
 from typing import Union, Tuple
 
 import paddle
+from paddle.nn.initializer import Constant
 
 from .base import TransformerEngineBaseLayer, get_workspace
 from ..cpp_extensions import gemm
@@ -103,14 +104,14 @@ class Linear(TransformerEngineBaseLayer):
         self,
         in_features: int,
         out_features: int,
-        weight_attr=None,
-        has_bias: bool = False,
+        weight_attr: Union[paddle.ParamAttr, None] = None,
+        bias_attr: Union[paddle.ParamAttr, None, bool] = None,
     ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.has_bias = has_bias
         self._weight_attr = weight_attr
+        self._bias_attr = bias_attr
         self._dtype = self._helper.get_default_dtype()
 
         # TE linear weight is in column major
@@ -121,10 +122,12 @@ class Linear(TransformerEngineBaseLayer):
             is_bias=False,
         )
 
+        self.has_bias = self._bias_attr is not False
         if self.has_bias:
             self.bias = self.create_parameter(
                 shape=[out_features],
-                attr=paddle.nn.initializer.Constant(value=0.0),
+                attr=self._bias_attr if self._bias_attr is not None else paddle.ParamAttr(
+                    initializer=Constant(value=0.0)),
                 dtype=self._dtype,
                 is_bias=True,
             )

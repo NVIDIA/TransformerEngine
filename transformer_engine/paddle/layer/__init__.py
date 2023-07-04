@@ -4,3 +4,4 @@
 """Layer level Paddle APIs"""
 
 from .linear import Linear
+from .layernorm import LayerNorm
