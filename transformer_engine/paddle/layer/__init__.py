@@ -5,3 +5,4 @@
 
 from .linear import Linear
 from .layernorm import LayerNorm
+from .layernorm_linear import LayerNormLinear

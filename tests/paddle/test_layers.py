@@ -130,3 +130,50 @@ class TestLayerNorm:
         assert_allclose(x.grad, grad_x_ref, rtol=1e-2, atol=1e-2)
         assert_allclose(layer.weight.grad, grad_weight_ref, rtol=1e-2, atol=1e-2)
         assert_allclose(layer.bias.grad, grad_bias_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                    reason="BF16 Linear requires Ampere+ GPU")
+@pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+def test_layernorm_linear_bf16(bs, in_features, out_features):
+    """
+    Test BF16 LayerNormLinear Layer
+    """
+    paddle.set_default_dtype("bfloat16")
+
+    input_tensor = paddle.rand(shape=(bs, in_features), dtype='bfloat16')
+    input_tensor.stop_gradient = False
+    grad_out = paddle.rand(shape=(bs, out_features), dtype='bfloat16')
+    eps = 1e-3
+
+    layernorm_linear = te.LayerNormLinear(
+        in_features=in_features,
+        out_features=out_features,
+        eps=eps,
+    )
+
+    linear = te.Linear(in_features=in_features, out_features=out_features)
+    linear.weight.copy_(layernorm_linear.weight, True)
+    linear.bias.copy_(layernorm_linear.bias, True)
+
+    layernorm = te.LayerNorm(hidden_size=in_features, eps=eps)
+    layernorm.weight.copy_(layernorm_linear.ln_weight, True)
+    layernorm.bias.copy_(layernorm_linear.ln_bias, True)
+
+    # Calculate ref
+    input_tensor_ref = paddle.to_tensor(input_tensor)
+    input_tensor_ref.stop_gradient = False
+
+    y_ref = linear(layernorm(input_tensor_ref))
+    y_ref.backward(grad_out)
+
+    # Calculate actual
+    y = layernorm_linear(input_tensor)
+    y.backward(grad_out)
+
+    assert_allclose(y, y_ref, rtol=1e-2, atol=1e-2)
+    assert_allclose(input_tensor.grad, input_tensor_ref.grad, rtol=1e-2, atol=1e-2)
+    assert_allclose(layernorm_linear.weight.grad, linear.weight.grad, rtol=1e-2, atol=1e-2)
+    assert_allclose(layernorm_linear.bias.grad, linear.bias.grad, rtol=1e-2, atol=1e-2)
+    assert_allclose(layernorm_linear.ln_weight.grad, layernorm.weight.grad, rtol=1e-2, atol=1e-2)
+    assert_allclose(layernorm_linear.ln_bias.grad, layernorm.bias.grad, rtol=1e-2, atol=1e-2)
