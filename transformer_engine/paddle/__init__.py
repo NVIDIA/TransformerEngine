@@ -4,4 +4,3 @@
 """Transformer Engine bindings for Paddle"""
 
 from .layer import Linear
-from .fp8 import fp8_autocast

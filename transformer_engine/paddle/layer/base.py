@@ -11,7 +11,6 @@ from paddle.fluid import core
 from paddle.fluid.framework import _dygraph_tracer
 
 from ..profile import nvtx_range
-from ..fp8 import is_fp8_enabled, is_fp8_calibration
 
 _cublas_workspace = None
 
@@ -40,7 +39,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert 'gpu' in paddle.device.get_device(), "TransformerEngine needs CUDA."
-        self.fp8 = False
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -72,13 +70,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         self.activation_dtype = dtype
 
-    # This routine is shared across FP8 and FP8_calibration paths so should not actually
-    # assume FP8 execution.
-    def fp8_init(self) -> None:
-        """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8 = is_fp8_enabled()
-        self.fp8_calibration = is_fp8_calibration()
-
     @contextmanager
     def prepare_forward(
         self,
@@ -92,7 +83,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         """
 
         self.set_activation_dtype(inp)
-        self.fp8_init()
 
         with nvtx_range(self.__class__.__name__ + " forward"):
             yield inp

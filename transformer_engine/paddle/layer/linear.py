@@ -15,7 +15,7 @@ __all__ = ["Linear"]
 
 
 class _Linear(paddle.autograd.PyLayer):
-    """TE implementation of Linear"""
+    """TE implementation of non-FP8 Linear"""
 
     @staticmethod
     def forward(
@@ -24,7 +24,6 @@ class _Linear(paddle.autograd.PyLayer):
         inp: paddle.Tensor,
         bias: paddle.Tensor,
         use_bias: bool,
-        fp8: bool,
         activation_dtype: paddle.dtype,
         is_grad_enabled: bool,
     ) -> paddle.Tensor:
@@ -33,29 +32,27 @@ class _Linear(paddle.autograd.PyLayer):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        inputmat_no_fp8 = inputmat
+        # check input dtype
+        assert inp.dtype == activation_dtype
+        assert weight.dtype == activation_dtype
+        if use_bias:
+            assert bias.dtype == activation_dtype
 
-        if fp8:    # pylint: disable=no-else-raise
-            # FP8 calculation
-            raise NotImplementedError("FP8 not implemented.")
-        else:
-            # Cast for native AMP
-            out, _, _ = gemm(
-                weight,
-                inputmat_no_fp8,
-                activation_dtype,
-                get_workspace(),
-                bias=bias,
-                use_bias=use_bias,
-            )
+        out, _, _ = gemm(
+            weight,
+            inputmat,
+            activation_dtype,
+            get_workspace(),
+            bias=bias,
+            use_bias=use_bias,
+        )
 
         if is_grad_enabled:
             ctx.save_for_backward(
-                inputmat_no_fp8,
+                inputmat,
                 weight,
             )
             ctx.activation_dtype = activation_dtype
-            ctx.fp8 = fp8
             ctx.use_bias = use_bias
             ctx.inp_shape = inp.shape
             ctx.requires_dgrad = not inp.stop_gradient
@@ -66,31 +63,25 @@ class _Linear(paddle.autograd.PyLayer):
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
         inputmat, weight = ctx.saved_tensor()
         if ctx.requires_dgrad:
-            if ctx.fp8:    # pylint: disable=no-else-raise
-                raise NotImplementedError("FP8 not implemented.")
-            else:
-                dgrad, _, _ = gemm(
-                    weight,
-                    grad_output,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NN",
-                    grad=True,
-                )
+            dgrad, _, _ = gemm(
+                weight,
+                grad_output,
+                ctx.activation_dtype,
+                get_workspace(),
+                layout="NN",
+                grad=True,
+            )
 
         if not weight.stop_gradient:
-            if ctx.fp8:    # pylint: disable=no-else-raise
-                raise NotImplementedError("FP8 not implemented.")
-            else:
-                wgrad, grad_bias, _ = gemm(
-                    inputmat,
-                    grad_output,
-                    ctx.activation_dtype,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
-                    use_bias=ctx.use_bias,
-                )
+            wgrad, grad_bias, _ = gemm(
+                inputmat,
+                grad_output,
+                ctx.activation_dtype,
+                get_workspace(),
+                layout="NT",
+                grad=True,
+                use_bias=ctx.use_bias,
+            )
 
         if not ctx.use_bias:
             return (
@@ -162,7 +153,6 @@ class Linear(TransformerEngineBaseLayer):
                 cast_if_needed(inp, self.activation_dtype),
                 cast_if_needed(self.bias, self.activation_dtype) if self.has_bias else self.bias,
                 self.has_bias,
-                self.fp8,
                 self.activation_dtype,
                 paddle.is_grad_enabled(),
             )
