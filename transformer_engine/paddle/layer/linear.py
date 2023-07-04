@@ -25,7 +25,6 @@ class _Linear(paddle.autograd.PyLayer):
         bias: paddle.Tensor,
         use_bias: bool,
         activation_dtype: paddle.dtype,
-        is_grad_enabled: bool,
     ) -> paddle.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -47,15 +46,14 @@ class _Linear(paddle.autograd.PyLayer):
             use_bias=use_bias,
         )
 
-        if is_grad_enabled:
-            ctx.save_for_backward(
-                inputmat,
-                weight,
-            )
-            ctx.activation_dtype = activation_dtype
-            ctx.use_bias = use_bias
-            ctx.inp_shape = inp.shape
-            ctx.requires_dgrad = not inp.stop_gradient
+        ctx.save_for_backward(
+            inputmat,
+            weight,
+        )
+        ctx.activation_dtype = activation_dtype
+        ctx.use_bias = use_bias
+        ctx.inp_shape = inp.shape
+        ctx.requires_dgrad = not inp.stop_gradient
 
         return out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
 
@@ -142,20 +140,12 @@ class Linear(TransformerEngineBaseLayer):
         """
 
         with self.prepare_forward(inp) as inp:
-            if paddle.is_grad_enabled():
-                linear_fn = _Linear.apply
-                args = []
-            else:
-                linear_fn = _Linear.forward
-                args = [None]
-            args = (
+            out = _Linear.apply(
                 cast_if_needed(self.weight, self.activation_dtype),
                 cast_if_needed(inp, self.activation_dtype),
                 cast_if_needed(self.bias, self.activation_dtype) if self.has_bias else self.bias,
                 self.has_bias,
                 self.activation_dtype,
-                paddle.is_grad_enabled(),
             )
-            out = linear_fn(*args)
 
         return out
