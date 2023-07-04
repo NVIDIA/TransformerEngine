@@ -3,13 +3,34 @@
 # See LICENSE for license information.
 
 """Python interface for cast extensions"""
-from typing import Optional, Union
+from typing import Optional, Union, overload
 import torch
 import transformer_engine_extensions as tex
 
 
-__all__ = ['cast_to_fp8',
-           'cast_from_fp8']
+__all__ = ["cast_to_fp8", "cast_from_fp8"]
+
+
+@overload
+def cast_to_fp8(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    out: None = None,
+) -> torch.Tensor:
+    ...
+
+
+@overload
+def cast_to_fp8(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    out: torch.Tensor,
+) -> None:
+    ...
 
 
 def cast_to_fp8(
@@ -17,8 +38,8 @@ def cast_to_fp8(
     fp8_meta_tensor: tex.FP8TensorMeta,
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     otype: tex.DType,
-    out: Optional[torch.Tensor] = None,
-) -> Optional[torch.Tensor]:
+    out: torch.Tensor | None = None,
+) -> torch.Tensor | None:
     """Cast input to FP8"""
 
     if out is not None:
@@ -28,7 +49,7 @@ def cast_to_fp8(
             out,
             fp8_meta_tensor.amax_history[0][fp8_tensor],
             fp8_meta_tensor.scale_inv[fp8_tensor],
-            otype
+            otype,
         )
         return None
     return torch.ops.tex_ts.cast_to_fp8_ts(

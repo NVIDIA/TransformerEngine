@@ -3,16 +3,54 @@
 # See LICENSE for license information.
 
 """Python interface for transpose extensions"""
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, overload
 import torch
 import transformer_engine_extensions as tex
 from ..constants import TE_DType
 
 
-__all__ = ['fp8_cast_transpose_fused',
-           'fp8_cast_transpose_bgrad_fused',
-           'fp8_cast_transpose_bgrad_dgelu_fused',
-           'fp8_transpose_bgrad_fused']
+__all__ = [
+    "fp8_cast_transpose_fused",
+    "fp8_cast_transpose_bgrad_fused",
+    "fp8_cast_transpose_bgrad_dgelu_fused",
+    "fp8_transpose_bgrad_fused",
+]
+
+
+@overload
+def fp8_cast_transpose_fused(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    cast_out: None = None,
+    transpose_out: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    ...
+
+
+@overload
+def fp8_cast_transpose_fused(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    cast_out: torch.Tensor | None,
+    transpose_out: None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    ...
+
+
+@overload
+def fp8_cast_transpose_fused(
+    inp: torch.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    cast_out: torch.Tensor,
+    transpose_out: torch.Tensor,
+) -> None:
+    ...
 
 
 def fp8_cast_transpose_fused(
