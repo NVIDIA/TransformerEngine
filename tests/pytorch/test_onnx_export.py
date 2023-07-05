@@ -314,9 +314,9 @@ def get_attn_mask_str(use_mask, attn_mask_type):
     # See FusedScaleMaskSoftmax::forward_fused_softmax for logic behind names.
     if attn_mask_type is None:
         return "_mask" if use_mask else "_no-mask"
-    attn_mask_str = "_padding-no-mask"
+    attn_mask_str = "_arbitrary-no-mask"
     attn_mask_str = "_causal-mask" if attn_mask_type == "causal" else attn_mask_str
-    attn_mask_str = "_padding-mask" if use_mask and attn_mask_type == "padding" else attn_mask_str
+    attn_mask_str = "_arbitrary-mask" if use_mask and attn_mask_type == "arbitrary" else attn_mask_str
     return attn_mask_str
 
 
@@ -1097,9 +1097,9 @@ def test_export_core_attention(
 
 test_configs_multihead_attention = [
     #"use_mask, attn_mask_type"
-    (False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
-    (True,     "padding"), # calls ScaledMaskedSoftmax
-    (False,    "padding"), # calls ScaledSoftmax
+    (False,    "causal"),    # calls ScaledUpperTriangMaskedSoftmax
+    (True,     "arbitrary"), # calls ScaledMaskedSoftmax
+    (False,    "no_mask"),   # calls ScaledSoftmax
 ]
 test_configs_attention_type = [
     #"input_layernorm, attention_type, fuse_qkv_params"
