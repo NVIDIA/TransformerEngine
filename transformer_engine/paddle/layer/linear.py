@@ -31,11 +31,10 @@ class _Linear(paddle.autograd.PyLayer):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        # check input dtype
-        assert inp.dtype == activation_dtype
-        assert weight.dtype == activation_dtype
-        if use_bias:
-            assert bias.dtype == activation_dtype
+        # Cast for native AMP
+        inputmat = cast_if_needed(inputmat, activation_dtype)
+        weight = cast_if_needed(weight, activation_dtype)
+        bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
 
         out, _, _ = gemm(
             weight,
@@ -141,9 +140,9 @@ class Linear(TransformerEngineBaseLayer):
 
         with self.prepare_forward(inp) as inp:
             out = _Linear.apply(
-                cast_if_needed(self.weight, self.activation_dtype),
-                cast_if_needed(inp, self.activation_dtype),
-                cast_if_needed(self.bias, self.activation_dtype) if self.has_bias else self.bias,
+                self.weight,
+                inp,
+                self.bias,
                 self.has_bias,
                 self.activation_dtype,
             )
