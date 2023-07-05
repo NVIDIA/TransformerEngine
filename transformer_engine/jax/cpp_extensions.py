@@ -2057,32 +2057,14 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
-        ir_qkv_type = ir.RankedTensorType(qkv.type)
-        ir_qkv_shape = ir_qkv_type.shape
+        batch, max_seqlen, _, num_head, head_dim = qkv_aval.shape
 
-        ir_bias_type = ir.RankedTensorType(bias.type)
-        ir_bias_shape = ir_bias_type.shape
-
-        ir_cu_seqlen_type = ir.RankedTensorType(cu_seqlen.type)
-        ir_cu_seqlen_shape = ir_cu_seqlen_type.shape
-
-        ir_seed_type = ir.RankedTensorType(seed.type)
-        ir_seed_shape = ir_seed_type.shape
-
-        batch, max_seqlen, nqkv, num_head, head_dim = ir_qkv_shape
-        assert nqkv == 3
-
-        output_shape = (batch, max_seqlen, num_head, head_dim)
-        softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
-        rng_state_shape = (2 * 2,)
-
-        out_types = [
-            ir.RankedTensorType.get(output_shape, ir_qkv_type.element_type),
-            ir.RankedTensorType.get(softmax_aux_shape, ir_qkv_type.element_type),
-            ir.RankedTensorType.get(rng_state_shape, ir_seed_type.element_type),
-        ]
         operands = [qkv, bias, cu_seqlen, seed]
-        operand_shapes = [ir_qkv_shape, ir_bias_shape, ir_cu_seqlen_shape, ir_seed_shape]
+        operand_shapes = map(lambda x: x.type.shape, operands)
+        out_types = [
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
+        ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
@@ -2169,37 +2151,13 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
         """
         qkv_aval, _, _, _, _, _ = ctx.avals_in
 
-        ir_qkv_type = ir.RankedTensorType(qkv.type)
-        ir_qkv_shape = ir_qkv_type.shape
+        batch, max_seqlen, _, num_head, head_dim = qkv_aval.shape
 
-        ir_softmax_aux_type = ir.RankedTensorType(softmax_aux.type)
-        ir_softmax_aux_shape = ir_softmax_aux_type.shape
-
-        ir_rng_state_type = ir.RankedTensorType(rng_state.type)
-        ir_rng_state_shape = ir_rng_state_type.shape
-
-        ir_output_type = ir.RankedTensorType(output.type)
-        ir_output_shape = ir_output_type.shape
-
-        ir_doutput_type = ir.RankedTensorType(doutput.type)
-        ir_doutput_shape = ir_doutput_type.shape
-
-        ir_cu_seqlen_type = ir.RankedTensorType(cu_seqlen.type)
-        ir_cu_seqlen_shape = ir_cu_seqlen_type.shape
-
-        batch, max_seqlen, num_head, head_dim = ir_doutput_shape
-
-        dbias_shape = (1, num_head, max_seqlen, max_seqlen)
-        dbias_dtype = ir_qkv_type.element_type
-
-        out_types = [
-            ir.RankedTensorType.get(ir_qkv_shape, ir_qkv_type.element_type),
-            ir.RankedTensorType.get(dbias_shape, dbias_dtype)
-        ]
         operands = [qkv, softmax_aux, rng_state, output, doutput, cu_seqlen]
-        operand_shapes = [
-            ir_qkv_shape, ir_softmax_aux_shape, ir_rng_state_shape, ir_output_shape,
-            ir_doutput_shape, ir_cu_seqlen_shape
+        operand_shapes = map(lambda x: x.type.shape, operands)
+        out_types = [
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
@@ -2299,31 +2257,14 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
         q_aval, kv_aval, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
-        ir_q_type = ir.RankedTensorType(q.type)
-        ir_q_shape = ir_q_type.shape
+        batch, q_max_seqlen, num_head, head_dim = q_aval.shape
+        kv_max_seqlen = kv_aval.shape[1]
 
-        ir_kv_type = ir.RankedTensorType(kv.type)
-        ir_kv_shape = ir_kv_type.shape
-
-        ir_q_cu_seqlen_shape = ir.RankedTensorType(q_cu_seqlen.type).shape
-        ir_kv_cu_seqlen_shape = ir.RankedTensorType(kv_cu_seqlen.type).shape
-
-        ir_seed_type = ir.RankedTensorType(seed.type)
-        ir_seed_shape = ir_seed_type.shape
-
-        batch, q_max_seqlen, num_head, head_dim = ir_q_shape
-        kv_max_seqlen = ir_kv_shape[1]
-
-        output_shape = (batch, q_max_seqlen, num_head, head_dim)
-        softmax_aux_shape = (batch, num_head, q_max_seqlen, kv_max_seqlen)
-
-        out_types = [
-            ir.RankedTensorType.get(output_shape, ir_q_type.element_type),
-            ir.RankedTensorType.get(softmax_aux_shape, ir_q_type.element_type)
-        ]
         operands = [q, kv, q_cu_seqlen, kv_cu_seqlen, seed]
-        operand_shapes = [
-            ir_q_shape, ir_kv_shape, ir_q_cu_seqlen_shape, ir_kv_cu_seqlen_shape, ir_seed_shape
+        operand_shapes = map(lambda x: x.type.shape, operands)
+        out_types = [
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
@@ -2409,32 +2350,17 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
         """
         Cross fused attention max seqlen 512 bwd lowering rules
         """
-        q_aval, _, _, _, _, _ = ctx.avals_in
+        q_aval, kv_aval, _, _, _, _ = ctx.avals_in
+        assert q_aval.dtype == kv_aval.dtype
 
-        ir_q_type = ir.RankedTensorType(q.type)
-        ir_q_shape = ir_q_type.shape
+        batch, q_max_seqlen, num_head, head_dim = q_aval.shape
+        kv_max_seqlen = kv_aval.shape[1]
 
-        ir_kv_type = ir.RankedTensorType(kv.type)
-        ir_kv_shape = ir_kv_type.shape
-
-        ir_softmax_aux_type = ir.RankedTensorType(softmax_aux.type)
-        ir_softmax_aux_shape = ir_softmax_aux_type.shape
-
-        ir_doutput_shape = ir.RankedTensorType(doutput.type).shape
-        ir_q_cu_seqlen_shape = ir.RankedTensorType(q_cu_seqlen.type).shape
-        ir_kv_cu_seqlen_shape = ir.RankedTensorType(kv_cu_seqlen.type).shape
-
-        batch, q_max_seqlen, num_head, head_dim = ir_doutput_shape
-        kv_max_seqlen = ir_kv_shape[1]
-
-        out_types = [
-            ir.RankedTensorType.get(ir_q_shape, ir_q_type.element_type),
-            ir.RankedTensorType.get(ir_kv_shape, ir_kv_type.element_type),
-        ]
         operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
-        operand_shapes = [
-            ir_q_shape, ir_kv_shape, ir_softmax_aux_shape, ir_doutput_shape, ir_q_cu_seqlen_shape,
-            ir_kv_cu_seqlen_shape
+        operand_shapes = map(lambda x: x.type.shape, operands)
+        out_types = [
+            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+            for output in ctx.avals_out
         ]
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
