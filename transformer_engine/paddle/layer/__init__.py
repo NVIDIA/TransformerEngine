@@ -6,3 +6,4 @@
 from .linear import Linear
 from .layernorm import LayerNorm
 from .layernorm_linear import LayerNormLinear
+from .layernorm_mlp import LayerNormMLP

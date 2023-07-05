@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""LayerNormLinear API"""
+"""LayerNormMLP API"""
 import os
 from typing import Union, Tuple
 
@@ -18,11 +18,11 @@ from .base import get_workspace, TransformerEngineBaseLayer
 from ..utils import cast_if_needed
 from ..constants import TE_DType
 
-__all__ = ["LayerNormLinear"]
+__all__ = ["LayerNormMLP"]
 
 
-class _LayerNormLinear(paddle.autograd.PyLayer):
-    """TE implementation of non-FP8 LayerNormLinear"""
+class _LayerNormMLP(paddle.autograd.PyLayer):
+    """TE implementation of non-FP8 LayerNormMLP"""
 
     @staticmethod
     def forward(
@@ -30,39 +30,62 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         inp: paddle.Tensor,
         ln_weight: paddle.Tensor,
         ln_bias: paddle.Tensor,
-        weight: paddle.Tensor,
-        bias: Union[paddle.Tensor, None],
-        use_bias: bool,
+        fc1_weight: paddle.Tensor,
+        fc1_bias: Union[paddle.Tensor, None],
+        use_fc1_bias: bool,
+        fc2_weight: paddle.Tensor,
+        fc2_bias: Union[paddle.Tensor, None],
+        use_fc2_bias: bool,
         eps: float,
         activation_dtype: paddle.dtype,
         return_layernorm_output: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        activation: str,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        # Cast for native AMP
+        # only support gelu for now
+        assert activation == 'gelu'
+
+        # LN FWD
         inputmat = cast_if_needed(inputmat, activation_dtype)
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
-        weight = cast_if_needed(weight, activation_dtype)
-        bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
 
         ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
                                            TE_DType[activation_dtype], fwd_ln_sm_margin,
                                            zero_centered_gamma)
 
-        out, _, _ = gemm(
-            weight,
+        # MLP FWD
+        fc1_weight = cast_if_needed(fc1_weight, activation_dtype)
+        fc2_weight = cast_if_needed(fc2_weight, activation_dtype)
+        fc1_bias = (cast_if_needed(fc1_bias, activation_dtype) if use_fc1_bias else fc1_bias)
+        fc2_bias = (cast_if_needed(fc2_bias, activation_dtype) if use_fc2_bias else fc2_bias)
+
+        # FC1 + GeLU
+        gelu_out, _, fc1_out = gemm(
+            fc1_weight,
             ln_out,
             activation_dtype,
             get_workspace(),
-            bias=bias,
-            use_bias=use_bias,
+            bias=fc1_bias,
+            use_bias=use_fc1_bias,
+            gelu=(activation == 'gelu'),
+        )
+
+        # FC2
+        fc2_out, _, _ = gemm(
+            fc2_weight,
+            gelu_out,
+            activation_dtype,
+            get_workspace(),
+            bias=fc2_bias,
+            use_bias=use_fc2_bias,
         )
 
         ctx.save_for_backward(
@@ -70,12 +93,16 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ln_weight,
             mu,
             rsigma,
-            weight,
             ln_out,
+            fc1_out,
+            gelu_out,
+            fc1_weight,
+            fc2_weight,
         )
-
         ctx.activation_dtype = activation_dtype
-        ctx.use_bias = use_bias
+        ctx.activation = activation
+        ctx.use_fc1_bias = use_fc1_bias
+        ctx.use_fc2_bias = use_fc2_bias
         ctx.inp_shape = inp.shape
         ctx.return_layernorm_output = return_layernorm_output
         ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
@@ -83,11 +110,11 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         ctx.requires_dgrad = not inp.stop_gradient
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        out = out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
+        fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
 
         if return_layernorm_output:
-            return out, ln_out.reshape(inp.shape)
-        return out
+            return fc2_out, ln_out.reshape(inp.shape)
+        return fc2_out
 
     @staticmethod
     def backward(
@@ -98,35 +125,68 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ln_weight,
             mu,
             rsigma,
-            weight,
             ln_out,
+            fc1_out,
+            gelu_out,
+            fc1_weight,
+            fc2_weight,
         ) = ctx.saved_tensor()
+        # grad_fc2_out
         grad_output = grad_outputs[0]
 
-        # Dgrad
-        dgrad, _, _ = gemm(
-            weight,
+        # FC2 Dgrad + dGELU
+        dgelu, _, _ = gemm(
+            fc2_weight,
             grad_output,
+            ctx.activation_dtype,
+            get_workspace(),
+            layout="NN",
+            gelu=(ctx.activation == 'gelu'),
+            gelu_input=fc1_out,
+            grad=True,
+        )
+
+        # FC2 Wgrad
+        if not fc2_weight.stop_gradient:
+            fc2_wgrad, fc2_bias_grad, _ = gemm(
+                gelu_out,
+                grad_output,
+                ctx.activation_dtype,
+                get_workspace(),
+                layout="NT",
+                grad=True,
+                use_bias=ctx.use_fc2_bias,
+            )
+
+        # For non-fp8 execution, FC1 bias gradient is fused with FC1 wgrad GEMM
+        # and will not be calculated in case wgrad is not required.
+        if fc1_weight.stop_gradient:
+            fc1_bias_grad = dgelu.sum(axis=0)
+
+        # FC1 DGRAD
+        fc1_dgrad, _, _ = gemm(
+            fc1_weight,
+            dgelu,
             ctx.activation_dtype,
             get_workspace(),
             layout="NN",
             grad=True,
         )
 
-        # Wgrad
-        if not weight.stop_gradient:
-            wgrad, grad_bias, _ = gemm(
+        # FC1 Wgrad
+        if not fc1_weight.stop_gradient:
+            fc1_wgrad, fc1_bias_grad, _ = gemm(
                 ln_out,
-                grad_output,
+                dgelu,
                 ctx.activation_dtype,
                 get_workspace(),
                 layout="NT",
                 grad=True,
-                use_bias=ctx.use_bias,
+                use_bias=ctx.use_fc1_bias,
             )
 
         # LayerNorm gradient
-        d_ln_out = dgrad.reshape(inputmat.shape)
+        d_ln_out = fc1_dgrad.reshape(inputmat.shape)
         # Residual gradient
         if ctx.return_layernorm_output:
             d_ln_out = d_ln_out + grad_outputs[1].reshape(d_ln_out.shape)
@@ -134,43 +194,42 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         dxmat, dgamma, dbeta = layernorm_bwd(d_ln_out, inputmat, mu, rsigma, ln_weight,
                                              ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma)
 
-        if not ctx.use_bias:
-            return (
-                dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma,
-                dbeta,
-                wgrad if not weight.stop_gradient else None,
-            )
+        fc1_bias_grad_out = (fc1_bias_grad,) if ctx.use_fc1_bias else ()
+        fc2_bias_grad_out = (fc2_bias_grad,) if ctx.use_fc2_bias else ()
 
         return (
             dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
-            wgrad if not weight.stop_gradient else None,
-            grad_bias,
+            fc1_wgrad if not fc1_weight.stop_gradient else None,
+            *fc1_bias_grad_out,
+            fc2_wgrad if not fc2_weight.stop_gradient else None,
+            *fc2_bias_grad_out,
         )
 
 
-class LayerNormLinear(TransformerEngineBaseLayer):
+class LayerNormMLP(TransformerEngineBaseLayer):
     r"""
     Applies layer normalization followed by linear transformation to the incoming data.
     """
 
     def __init__(
         self,
-        in_features: int,
-        out_features: int,
+        hidden_size: int,
+        ffn_hidden_size: int,
         eps: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        activation: str = "gelu",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
     ) -> None:
         super().__init__()
 
-        self.in_features = in_features
-        self.out_features = out_features
+        self.hidden_size = hidden_size
+        self.ffn_hidden_size = ffn_hidden_size
         self.eps = eps
+        self.activation = activation
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
 
@@ -180,7 +239,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
 
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
-            shape=[in_features],
+            shape=[self.hidden_size],
             attr=paddle.ParamAttr(initializer=Constant(
                 value=0.0 if self.zero_centered_gamma else 1.0)),
             dtype=self._dtype,
@@ -188,31 +247,51 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         )
 
         self.ln_bias = self.create_parameter(
-            shape=[in_features],
+            shape=[self.hidden_size],
             attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
             dtype=self._dtype,
             is_bias=True,
         )
 
-        # Linear weights
-        self.weight = self.create_parameter(
-            shape=[out_features, in_features],
+        # FC1 weights
+        self.fc1_weight = self.create_parameter(
+            shape=[self.ffn_hidden_size, self.hidden_size],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
         )
 
         self.has_bias = self._bias_attr is not False
+        if self._bias_attr is None:
+            self._bias_attr = paddle.ParamAttr(initializer=Constant(value=0.0))
+
         if self.has_bias:
-            self.bias = self.create_parameter(
-                shape=[out_features],
-                attr=self._bias_attr if self._bias_attr is not None else paddle.ParamAttr(
-                    initializer=Constant(value=0.0)),
+            self.fc1_bias = self.create_parameter(
+                shape=[self.ffn_hidden_size],
+                attr=self._bias_attr,
                 dtype=self._dtype,
                 is_bias=True,
             )
         else:
-            self.bias = None
+            self.fc1_bias = None
+
+        # FC2 weights
+        self.fc2_weight = self.create_parameter(
+            shape=[self.hidden_size, self.ffn_hidden_size],
+            attr=self._weight_attr,
+            dtype=self._dtype,
+            is_bias=False,
+        )
+
+        if self.has_bias:
+            self.fc2_bias = self.create_parameter(
+                shape=[self.hidden_size],
+                attr=self._bias_attr,
+                dtype=self._dtype,
+                is_bias=True,
+            )
+        else:
+            self.fc2_bias = None
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -230,12 +309,15 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         """
 
         with self.prepare_forward(inp) as inp:
-            out = _LayerNormLinear.apply(
+            out = _LayerNormMLP.apply(
                 inp,
                 self.ln_weight,
                 self.ln_bias,
-                self.weight,
-                self.bias,
+                self.fc1_weight,
+                self.fc1_bias,
+                self.has_bias,
+                self.fc2_weight,
+                self.fc2_bias,
                 self.has_bias,
                 self.eps,
                 self.activation_dtype,
@@ -243,6 +325,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.activation,
             )
 
         if self.return_layernorm_output:
