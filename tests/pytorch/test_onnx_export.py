@@ -1038,14 +1038,14 @@ def test_export_layernorm_mlp(
 @skip_FP8
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type", [
-    (torch.float32,  False,    None),      # calls forward_torch_softmax
-    (torch.float32,  True,     None),      # calls forward_torch_softmax
-    (torch.float16,  False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
-    (torch.float16,  True,     "padding"), # calls ScaledMaskedSoftmax
-    (torch.float16,  False,    "padding"), # calls ScaledSoftmax
-    (torch.bfloat16, False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
-    (torch.bfloat16, True,     "padding"), # calls ScaledMaskedSoftmax
-    (torch.bfloat16, False,    "padding"), # calls ScaledSoftmax
+    (torch.float32,  False,    None),        # calls forward_torch_softmax
+    (torch.float32,  True,     None),        # calls forward_torch_softmax
+    (torch.float16,  False,    "causal"),    # calls ScaledUpperTriangMaskedSoftmax
+    (torch.float16,  True,     "arbitrary"), # calls ScaledMaskedSoftmax
+    (torch.float16,  False,    "no_mask"),   # calls ScaledSoftmax
+    (torch.bfloat16, False,    "causal"),    # calls ScaledUpperTriangMaskedSoftmax
+    (torch.bfloat16, True,     "arbitrary"), # calls ScaledMaskedSoftmax
+    (torch.bfloat16, False,    "no_mask"),   # calls ScaledSoftmax
 ])
 def test_export_core_attention(
     seed_default_rng,
@@ -1065,7 +1065,7 @@ def test_export_core_attention(
     attention_mask = None
     if use_mask:
         # Generate a random mask with 50% probability for 0 or 1.
-        probs = 0.5 * torch.ones(qkv_size[1], qkv_size[2], qkv_size[0], qkv_size[0], device="cuda", dtype=precision)
+        probs = 0.5 * torch.ones(batch_size, 1, 1, seq_len, device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
     inp = (query_layer, key_layer, value_layer, attention_mask)
 
