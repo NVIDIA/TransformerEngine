@@ -422,7 +422,11 @@ def fused_attn_fwd_qkvpacked(
     else:
         assert False, "No support for this dtype and max_seqlen combination."
 
-    out = paddle.empty(shape=[total_seqs, h, d], dtype=qkv.dtype)
+    if set_zero:
+        out = paddle.full(shape=[total_seqs, h, d], fill_value=0, dtype=qkv.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs, h, d], dtype=qkv.dtype)
+
     if is_training:
         softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
     else:
@@ -444,7 +448,6 @@ def fused_attn_fwd_qkvpacked(
         is_training,
         attn_scale,
         dropout,
-        set_zero,
         qkv_layout,
         bias_type,
         attn_mask_type,
@@ -490,7 +493,11 @@ def fused_attn_bwd_qkvpacked(
     else:
         assert False, "No support for this dtype and max_seqlen combination."
 
-    dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
+    if set_zero:
+        dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
+    else:
+        dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
+
     if bias_type != "no_bias":
         dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
     else:
@@ -511,7 +518,6 @@ def fused_attn_bwd_qkvpacked(
         max_seqlen,
         attn_scale,
         dropout,
-        set_zero,
         qkv_layout,
         bias_type,
         attn_mask_type,
@@ -569,7 +575,11 @@ def fused_attn_fwd_kvpacked(
     else:
         assert False, "No support for this dtype and max_seqlen combination."
 
-    out = paddle.empty(shape=[total_seqs_q, h, d], dtype=q.dtype)
+    if set_zero:
+        out = paddle.full(shape=[total_seqs_q, h, d], fill_value=0, dtype=q.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs_q, h, d], dtype=q.dtype)
+
     if is_training:
         softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
@@ -595,7 +605,6 @@ def fused_attn_fwd_kvpacked(
         is_training,
         attn_scale,
         dropout,
-        set_zero,
         qkv_layout,
         bias_type,
         attn_mask_type,
@@ -645,8 +654,12 @@ def fused_attn_bwd_kvpacked(
     else:
         assert False, "No support for this dtype and max_seqlen combination."
 
-    dq = paddle.empty(shape=q.shape, dtype=q.dtype)
-    dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
+    if set_zero:
+        dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
+        dkv = paddle.full(shape=kv.shape, fill_value=0, dtype=kv.dtype)
+    else:
+        dq = paddle.empty(shape=q.shape, dtype=q.dtype)
+        dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
     if bias_type != "no_bias":
         dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
     else:
@@ -672,7 +685,6 @@ def fused_attn_bwd_kvpacked(
         max_seqlen_kv,
         attn_scale,
         dropout,
-        set_zero,
         qkv_layout,
         bias_type,
         attn_mask_type,

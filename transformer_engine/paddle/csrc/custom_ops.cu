@@ -11,37 +11,6 @@
 namespace transformer_engine {
 namespace paddle_ext {
 
-constexpr int block_size = 256;
-
-// fill a tensor with a constant value
-template <typename scalar_t>
-__global__ void __launch_bounds__(block_size)
-    fill_value(scalar_t *tensor, size_t len, scalar_t value) {
-    size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < len) {
-        tensor[index] = value;
-    }
-}
-
-void mha_fill_zero(paddle::Tensor &tensor) {  // NOLINT
-    auto stream = tensor.stream();
-    auto size = tensor.numel();
-    auto type = tensor.type();
-
-    if (type == paddle::DataType::FLOAT32) {
-        fill_value<<<(size + block_size - 1) / block_size, block_size, 0, stream>>>(
-            tensor.data<float>(), size, static_cast<float>(0));
-    } else if (type == paddle::DataType::FLOAT16) {
-        fill_value<<<(size + block_size - 1) / block_size, block_size, 0, stream>>>(
-            tensor.data<half>(), size, static_cast<half>(0));
-    } else if (type == paddle::DataType::BFLOAT16) {
-        fill_value<<<(size + block_size - 1) / block_size, block_size, 0, stream>>>(
-            tensor.data<half>(), size, static_cast<half>(0));
-    } else {
-        NVTE_CHECK(false, "Unsupported data type");
-    }
-}
-
 // MHA utils
 // convert QKV layout to enum
 NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout) {
@@ -536,15 +505,13 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  paddle::Tensor &rng_state,                      // NOLINT
                                  int64_t b, int64_t h, int64_t d, int64_t total_seqs,
                                  int64_t max_seqlen, bool is_training, float attn_scale,
-                                 float p_dropout, bool set_zero, const std::string &qkv_layout,
+                                 float p_dropout, const std::string &qkv_layout,
                                  const std::string &bias_type, const std::string &attn_mask_type,
                                  const int64_t qkv_type) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
-    if (set_zero) {
-        mha_fill_zero(O);
-    }
+
     auto qkv_dtype = Int2NvteDType(qkv_type);
     // construct NVTE tensors
     TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens;
@@ -610,13 +577,8 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  paddle::optional<paddle::Tensor> &dBias,  // NOLINT
                                  int64_t b, int64_t h, int64_t d, int64_t total_seqs,
                                  int64_t max_seqlen, float attn_scale, float p_dropout,
-                                 bool set_zero, const std::string &qkv_layout,
-                                 const std::string &bias_type, const std::string &attn_mask_type,
-                                 int64_t qkv_type) {
-    if (set_zero) {
-        mha_fill_zero(dQKV);
-    }
-
+                                 const std::string &qkv_layout, const std::string &bias_type,
+                                 const std::string &attn_mask_type, int64_t qkv_type) {
     TensorWrapper te_dBias;
     if (bias_type != "no_bias" && dBias) {
         auto bias_shape = dBias->shape();
@@ -691,16 +653,13 @@ void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
                                 paddle::Tensor &rng_state,                      // NOLINT
                                 int64_t b, int64_t h, int64_t d, int64_t total_seqs_q,
                                 int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
-                                bool is_training, float attn_scale, float p_dropout, bool set_zero,
+                                bool is_training, float attn_scale, float p_dropout,
                                 const std::string &qkv_layout, const std::string &bias_type,
                                 const std::string &attn_mask_type, const int64_t qkv_type) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
 
-    if (set_zero) {
-        mha_fill_zero(O);
-    }
     auto qkv_dtype = Int2NvteDType(qkv_type);
 
     // construct NVTE tensors
@@ -785,14 +744,9 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
                                 paddle::optional<paddle::Tensor> &dBias,  // NOLINT
                                 int64_t b, int64_t h, int64_t d, int64_t total_seqs_q,
                                 int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
-                                float attn_scale, float p_dropout, bool set_zero,
-                                const std::string &qkv_layout, const std::string &bias_type,
-                                const std::string &attn_mask_type, int64_t qkv_type) {
-    if (set_zero) {
-        mha_fill_zero(dQ);
-        mha_fill_zero(dKV);
-    }
-
+                                float attn_scale, float p_dropout, const std::string &qkv_layout,
+                                const std::string &bias_type, const std::string &attn_mask_type,
+                                int64_t qkv_type) {
     TensorWrapper te_dBias;
     if (bias_type != "no_bias" && dBias) {
         auto bias_shape = dBias->shape();
@@ -993,8 +947,8 @@ std::vector<paddle::Tensor> te_scaled_upper_triang_masked_softmax_forward(
 void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads,  // NOLINT
                                                     const paddle::Tensor &softmax_results,
                                                     float scale_factor) {
-    NVTE_CHECK(output_grads.shape().size() == 3, "expected 4D tensor");
-    NVTE_CHECK(softmax_results.shape().size() == 3, "expected 4D tensor");
+    NVTE_CHECK(output_grads.shape().size() == 3, "expected 3D tensor");
+    NVTE_CHECK(softmax_results.shape().size() == 3, "expected 3D tensor");
 
     NVTE_CHECK((output_grads.dtype() == paddle::DataType::FLOAT16) ||
                    (output_grads.dtype() == paddle::DataType::BFLOAT16),
@@ -1123,9 +1077,8 @@ PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)
              "rng_state"})
     .Outputs({"O", paddle::Optional("softmax_aux")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
-            "is_training: bool", "attn_scale: float", "p_dropout: float", "set_zero: bool",
-            "qkv_layout: std::string", "bias_type: std::string", "attn_mask_type: std::string",
-            "qkv_type: int64_t"})
+            "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_qkvpacked));
@@ -1134,7 +1087,7 @@ PD_BUILD_OP(te_fused_attn_bwd_qkvpacked)
     .Inputs({"QKV", "cu_seqlens", "O", "dO", "softmax_aux", "_dQKV", paddle::Optional("_dBias")})
     .Outputs({"dQKV", paddle::Optional("dBias")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
-            "attn_scale: float", "p_dropout: float", "set_zero: bool", "qkv_layout: std::string",
+            "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
             "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
     .SetInplaceMap({{"_dQKV", "dQKV"}, {paddle::Optional("_dBias"), paddle::Optional("dBias")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_bwd_qkvpacked));
@@ -1145,9 +1098,8 @@ PD_BUILD_OP(te_fused_attn_fwd_kvpacked)
     .Outputs({"O", paddle::Optional("softmax_aux")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
-            "is_training: bool", "attn_scale: float", "p_dropout: float", "set_zero: bool",
-            "qkv_layout: std::string", "bias_type: std::string", "attn_mask_type: std::string",
-            "qkv_type: int64_t"})
+            "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_kvpacked));
@@ -1158,7 +1110,7 @@ PD_BUILD_OP(te_fused_attn_bwd_kvpacked)
     .Outputs({"dQ", "dKV", paddle::Optional("dBias")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
-            "attn_scale: float", "p_dropout: float", "set_zero: bool", "qkv_layout: std::string",
+            "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
             "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
     .SetInplaceMap({{"_dQ", "dQ"},
                     {"_dKV", "dKV"},
