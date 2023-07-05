@@ -23,6 +23,9 @@ import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import NVTEDType
 
 for _name, _value in transformer_engine_jax.registrations().items():
     xla_client.register_custom_call_target(_name, _value, platform="CUDA")
@@ -63,6 +66,19 @@ def jax_dtype_to_te_dtype(jax_dtype):
         return TEDType.kFloat16
     if jax_dtype == jnp.bfloat16:
         return TEDType.kBFloat16
+    raise ValueError(f"Not support the {jax_dtype=}")
+
+
+def jax_dtype_to_nvte_dtype(jax_dtype):
+    """
+    convert jax dtype to NVTE dtype
+    """
+    if jax_dtype == jnp.float32:
+        return NVTEDType.kNVTEFloat32
+    if jax_dtype == jnp.float16:
+        return NVTEDType.kNVTEFloat16
+    if jax_dtype == jnp.bfloat16:
+        return NVTEDType.kNVTEBFloat16
     raise ValueError(f"Not support the {jax_dtype=}")
 
 
@@ -2033,8 +2049,19 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
         output_shape = (batch, max_seqlen, num_head, head_dim)
         output_dtype = qkv_dtype
 
-        softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
-        softmax_dtype = qkv_dtype
+        backend = transformer_engine_jax.nvte_get_fused_attn_backend(
+            jax_dtype_to_nvte_dtype(qkv_dtype), jax_dtype_to_nvte_dtype(qkv_dtype),
+            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, attn_bias_type, attn_mask_type,
+            dropout_probability, max_seqlen, max_seqlen, head_dim)
+
+        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
+            softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
+            softmax_dtype = qkv_dtype
+        elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+            softmax_aux_shape = (batch, num_head, max_seqlen, 1)
+            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+        else:
+            raise ValueError(f'Not supported {backend=}')
 
         seed_dtype = dtypes.canonicalize_dtype(seed.dtype)
         assert seed_dtype == jnp.uint32    # _check_seed
@@ -2116,7 +2143,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     @staticmethod
     def abstract(
             qkv,
-            softmax_aux,
+            softmax_aux,    # pylint: disable=unused-argument
             rng_state,    # pylint: disable=unused-argument
             output,    # pylint: disable=unused-argument
             doutput,
@@ -2132,7 +2159,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
         Self fused attention bwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
-        assert qkv.dtype == softmax_aux.dtype == doutput.dtype
+        assert qkv.dtype == doutput.dtype
 
         _, seqlen, _, num_head, _ = qkv.shape
 
