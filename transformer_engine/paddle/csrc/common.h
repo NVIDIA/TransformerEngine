@@ -8,9 +8,12 @@
 #include <cublasLt.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
 #include <transformer_engine/logging.h>
+#include <transformer_engine/rmsnorm.h>
+#include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 #include <vector>
@@ -78,17 +81,17 @@ inline void *GetOptionalDataPtr(paddle::optional<paddle::Tensor> &x) {  // NOLIN
     return x ? x->data() : nullptr;
 }
 
-inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
-    if (x) return GetShapeArray(x.get());
-    return {0};
-}
-
 inline std::vector<size_t> GetShapeArray(const paddle::Tensor &x) {
     std::vector<size_t> shapes;
     for (auto dim : x.shape()) {
         shapes.push_back(static_cast<size_t>(dim));
     }
     return shapes;
+}
+
+inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
+    if (x) return GetShapeArray(x.get());
+    return {0};
 }
 
 paddle::Tensor AllocateSpace(const NVTEShape &shape, const DType type, const paddle::Place &place,
@@ -176,7 +179,8 @@ class cudaDevicePropertiesManager {
 };
 
 // NVTE Tensor Utils
-TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type);
+TensorWrapper MakeNvteTensor(const void *data_ptr, const std::vector<size_t> &shape,
+                             const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const NVTEShape &shape, const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type,
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);
