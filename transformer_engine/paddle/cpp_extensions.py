@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """TE FP8 extensions and GEMMs"""
 
+import math
 from typing import Optional, Tuple, Union
 import paddle
 import transformer_engine_paddle as tex
@@ -338,3 +339,411 @@ def layernorm_bwd(
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Non-FP8 LayerNorm backward"""
     return tex.te_layernorm_bwd(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma)
+
+
+def rmsnorm_fwd(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    eps: float,
+    otype: tex.DType,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 RMSNorm forward"""
+    return tex.te_rmsnorm_fwd(inp, weight, eps, int(otype), sm_margin)
+
+
+def rmsnorm_fwd_fp8(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    eps: float,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """RMSNorm with FP8 output"""
+    out, rsigma, _, _ = tex.te_rmsnorm_fwd_fp8(inp, weight, fp8_meta_tensor.scale,
+                                               fp8_meta_tensor.amax_history,
+                                               fp8_meta_tensor.scale_inv, eps, int(fp8_tensor),
+                                               int(otype), sm_margin)
+    return out, rsigma
+
+
+def rmsnorm_bwd(
+    dz: paddle.Tensor,
+    x: paddle.Tensor,
+    rsigma: paddle.Tensor,
+    gamma: paddle.Tensor,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 RMSNorm backward"""
+    return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin)
+
+
+def fused_attn_fwd_qkvpacked(
+    qkv: paddle.Tensor,
+    cu_seqlens: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    is_training: bool,
+    max_seqlen: int,
+    qkv_dtype: tex.DType,
+    Bias: paddle.Tensor = None,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed QKV input"""
+
+    b = cu_seqlens.shape[0] - 1
+
+    total_seqs = qkv.shape[0] * qkv.shape[1]
+    h = qkv.shape[3]
+    d = qkv.shape[4]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if bias_type != "no_bias":
+        assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (Bias.shape == [1, h, max_seqlen, max_seqlen
+                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
+
+    # BF16/FP16 fused attention API
+    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen <= 512) and (d
+                                                                                             == 64):
+        assert (qkv_layout == "qkv_interleaved" and bias_type == "no_bias"
+                and (attn_mask_type in ("padding", "causal"))
+               ), """The fused attention currently only supports qkv_interleaved layout,
+                no_bias type, and padding/causal attention mask type."""
+    else:
+        assert False, "No support for this dtype and max_seqlen combination."
+
+    if set_zero:
+        out = paddle.full(shape=[total_seqs, h, d], fill_value=0, dtype=qkv.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs, h, d], dtype=qkv.dtype)
+
+    if is_training:
+        softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+    else:
+        softmax_aux = None
+
+    # execute kernel
+    tex.te_fused_attn_fwd_qkvpacked(
+        qkv,
+        cu_seqlens,
+        Bias,
+        out,
+        softmax_aux,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs,
+        max_seqlen,
+        is_training,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return out, softmax_aux
+
+
+def fused_attn_bwd_qkvpacked(
+    qkv: paddle.Tensor,
+    cu_seqlens: paddle.Tensor,
+    o: paddle.Tensor,
+    d_o: paddle.Tensor,
+    softmax_aux: paddle.Tensor,
+    max_seqlen: int,
+    qkv_dtype: tex.DType,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed QKV input"""
+
+    b = cu_seqlens.shape[0] - 1
+
+    total_seqs = qkv.shape[0] * qkv.shape[1]
+    h = qkv.shape[3]
+    d = qkv.shape[4]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    # BF16/FP16 fused attention API
+    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen <= 512) and (d
+                                                                                             == 64):
+        assert (qkv_layout == "qkv_interleaved" and bias_type == "no_bias"
+                and (attn_mask_type in ("padding", "causal"))
+               ), """The fused attention currently only supports qkv_interleaved layout,
+                no_bias type, and padding attention mask type."""
+    else:
+        assert False, "No support for this dtype and max_seqlen combination."
+
+    if set_zero:
+        dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
+    else:
+        dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
+
+    if bias_type != "no_bias":
+        dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+    else:
+        dbias = None
+    # execute kernel
+    dqkv, dbias = tex.te_fused_attn_bwd_qkvpacked(
+        qkv,
+        cu_seqlens,
+        o,
+        d_o,
+        softmax_aux,
+        dqkv,
+        dbias,
+        b,
+        h,
+        d,
+        total_seqs,
+        max_seqlen,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return dqkv, dbias
+
+
+def fused_attn_fwd_kvpacked(
+    q: paddle.Tensor,
+    kv: paddle.Tensor,
+    cu_seqlens_q: paddle.Tensor,
+    cu_seqlens_kv: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    is_training: bool,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    qkv_dtype: tex.DType,
+    Bias: paddle.Tensor = None,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "kv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed KV input"""
+
+    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
+           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+    b = cu_seqlens_q.shape[0] - 1
+
+    total_seqs_q = q.shape[0] * q.shape[1]
+    total_seqs_kv = kv.shape[0] * kv.shape[1]
+    h = q.shape[2]
+    d = q.shape[3]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if bias_type != "no_bias":
+        assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (Bias.shape == [1, h, max_seqlen_q, max_seqlen_kv
+                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
+
+    # BF16/FP16 fused attention API
+    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen_q <= 512) and (
+            max_seqlen_kv <= 512) and (d == 64):
+        assert (qkv_layout == "kv_interleaved" and bias_type == "no_bias"
+                and (attn_mask_type in ("padding", "causal"))
+               ), """The fused attention currently only supports kv_interleaved layout,
+                no_bias type, and padding attention mask type."""
+    else:
+        assert False, "No support for this dtype and max_seqlen combination."
+
+    if set_zero:
+        out = paddle.full(shape=[total_seqs_q, h, d], fill_value=0, dtype=q.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs_q, h, d], dtype=q.dtype)
+
+    if is_training:
+        softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+    else:
+        softmax_aux = None
+
+    # execute kernel
+    tex.te_fused_attn_fwd_kvpacked(
+        q,
+        kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        Bias,
+        out,
+        softmax_aux,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs_q,
+        total_seqs_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        is_training,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return out, softmax_aux
+
+
+def fused_attn_bwd_kvpacked(
+    q: paddle.Tensor,
+    kv: paddle.Tensor,
+    cu_seqlens_q: paddle.Tensor,
+    cu_seqlens_kv: paddle.Tensor,
+    o: paddle.Tensor,
+    d_o: paddle.Tensor,
+    softmax_aux: paddle.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    qkv_dtype: tex.DType,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "kv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed KV input"""
+
+    b = cu_seqlens_q.shape[0] - 1
+
+    total_seqs_q = q.shape[0] * q.shape[1]
+    total_seqs_kv = kv.shape[0] * kv.shape[1]
+    h = q.shape[2]
+    d = q.shape[3]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    # BF16/FP16 fused attention API
+    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen_q <= 512) and (
+            max_seqlen_kv <= 512) and (d == 64):
+        assert (qkv_layout == "kv_interleaved" and bias_type == "no_bias"
+                and (attn_mask_type in ("padding", "causal"))
+               ), """The fused attention currently only supports kv_interleaved layout,
+                no_bias type, and padding attention mask type."""
+    else:
+        assert False, "No support for this dtype and max_seqlen combination."
+
+    if set_zero:
+        dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
+        dkv = paddle.full(shape=kv.shape, fill_value=0, dtype=kv.dtype)
+    else:
+        dq = paddle.empty(shape=q.shape, dtype=q.dtype)
+        dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
+    if bias_type != "no_bias":
+        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+    else:
+        dbias = None
+    # execute kernel
+    tex.te_fused_attn_bwd_kvpacked(
+        q,
+        kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        o,
+        d_o,
+        softmax_aux,
+        dq,
+        dkv,
+        dbias,
+        b,
+        h,
+        d,
+        total_seqs_q,
+        total_seqs_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+    return dq, dkv, dbias
+
+
+def scaled_softmax_forward(
+    inp: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled softmax forward"""
+    return tex.te_scaled_softmax_forward(inp, scale_factor)
+
+
+def scaled_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled softmax backward"""
+    tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad
+
+
+def scaled_masked_softmax_forward(
+    inp: paddle.Tensor,
+    mask: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled masked softmax forward"""
+
+    return tex.te_scaled_masked_softmax_forward(inp, mask, scale_factor)
+
+
+def scaled_masked_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled masked softmax backward"""
+    tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad
+
+
+def scaled_upper_triang_masked_softmax_forward(
+    inp: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled upper triang masked softmax forward"""
+    return tex.te_scaled_upper_triang_masked_softmax_forward(inp, scale_factor)
+
+
+def scaled_upper_triang_masked_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled upper triang masked softmax backward"""
+    tex.te_scaled_upper_triang_masked_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad

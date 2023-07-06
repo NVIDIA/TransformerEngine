@@ -9,8 +9,9 @@
 namespace transformer_engine {
 namespace paddle_ext {
 
-TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type) {
-    return TensorWrapper(data_ptr, shape, type);
+TensorWrapper MakeNvteTensor(const void *data_ptr, const std::vector<size_t> &shape,
+                             const DType type) {
+    return TensorWrapper(const_cast<void *>(data_ptr), shape, type);
 }
 
 TensorWrapper MakeNvteTensor(void *data_ptr, const NVTEShape &shape, const DType type) {
