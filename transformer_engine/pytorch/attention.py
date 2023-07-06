@@ -54,11 +54,7 @@ __all__ = ["DotProductAttention"]
 
 
 @jit_fuser
-def get_cu_seqlens_and_indices(
-    mask: torch.Tensor,
-    nheads: int,
-    kv_channels: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
     tensor of shape [batch_size + 1,] containing the cumulative sequence
@@ -74,7 +70,6 @@ def get_cu_seqlens_and_indices(
     mask = mask.reshape(-1)
     indices = mask.nonzero()
     indices = indices.unsqueeze(-1)
-    indices = indices.repeat(1, nheads, kv_channels)
     return cu_seqlens, indices
 
 
@@ -86,6 +81,7 @@ def pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     return torch.gather(tensor, 0, indices)
 
 
@@ -98,6 +94,7 @@ def pack_2_tensors(
     """
     Packs the given 2 tensors using the `indices`.
     """
+    indices = indices.repeat(1, t1.shape[1], t1.shape[2])
     t1_packed = torch.gather(t1, 0, indices)
     t2_packed = torch.gather(t2, 0, indices)
     return t1_packed, t2_packed
@@ -113,6 +110,7 @@ def pack_3_tensors(
     """
     Packs the given 3 tensors using the `indices`.
     """
+    indices = indices.repeat(1, t1.shape[1], t1.shape[2])
     t1_packed = torch.gather(t1, 0, indices)
     t2_packed = torch.gather(t2, 0, indices)
     t3_packed = torch.gather(t3, 0, indices)
@@ -128,6 +126,7 @@ def unpack_tensor(
     """
     Inverse of `pack_tensor`.
     """
+    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     unpacked = torch.zeros(
         dim0, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device)
     unpacked.scatter_(0, indices, tensor)
@@ -592,20 +591,14 @@ class FlashAttention(torch.nn.Module):
                 assert (
                     max_seqlen_q == max_seqlen_kv
                 ), "Maximum sequence length for Q and KV should be the same."
-                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
-                    attention_mask, query_layer.shape[1], query_layer.shape[2]
-                )
+                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
                 cu_seqlens_kv = cu_seqlens_q
                 query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
                     indices_q, query_layer, key_layer, value_layer
                 )
             else:
-                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(
-                    attention_mask[0], query_layer.shape[1], query_layer.shape[2]
-                )
-                cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(
-                    attention_mask[1], key_layer.shape[1], key_layer.shape[2]
-                )
+                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
+                cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
                 query_layer_packed = PackTensors.apply(indices_q, query_layer)
                 key_layer_packed, value_layer_packed = PackTensors.apply(
                     indices_kv, key_layer, value_layer
