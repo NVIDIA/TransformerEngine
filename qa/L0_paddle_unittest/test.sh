@@ -6,3 +6,4 @@ set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
 pytest -Wignore -v $TE_PATH/tests/paddle
+pytest -Wignore -v $TE_PATH/examples/paddle/mnist
