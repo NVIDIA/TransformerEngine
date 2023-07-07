@@ -262,11 +262,11 @@ class FusedScaleMaskSoftmax(nn.Module):
             scale is None or self.softmax_in_fp32
         ), "softmax should be in fp32 when scaled"
 
-        if self.is_kernel_available(*inp.size()) and not is_in_onnx_export_mode():
+        if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
@@ -283,6 +283,14 @@ class FusedScaleMaskSoftmax(nn.Module):
 
                 if self.attn_mask_type == "causal":
                     if attn_batches % batch_per_block == 0:
+                        return True
+                elif self.attn_mask_type == "padding":
+                    if (
+                        mask is not None
+                        and sq % batch_per_block == 0
+                        and mask.shape[-2] == sq
+                        and mask.shape[-1] == sk
+                    ):
                         return True
                 else:
                     if sq % batch_per_block == 0:

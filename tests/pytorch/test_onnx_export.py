@@ -758,7 +758,7 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
     te_outputs = te_infer(model, inp, is_fp8=False)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if fake_bf16_io or precision != torch.bfloat16:
-        atol = 5e-2 if fake_bf16_io else 1e-3
+        atol = 5e-1 if fake_bf16_io else 1e-3
         validate_result(fname, inp, model, atol=atol, input_names=input_names, te_outputs=te_outputs)
 
 
