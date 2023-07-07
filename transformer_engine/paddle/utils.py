@@ -2,10 +2,13 @@
 #
 # See LICENSE for license information.
 """Utility functions for Transformer Engine modules"""
+
+from typing import Union
+
 import paddle
 
 
-def cast_if_needed(tensor: paddle.Tensor, dtype: paddle.dtype) -> paddle.Tensor:
+def cast_if_needed(tensor: Union[paddle.Tensor, None],
+                   dtype: paddle.dtype) -> Union[paddle.Tensor, None]:
     """Cast tensor to dtype"""
-    with paddle.set_grad_enabled(True):
-        return tensor if tensor is None or tensor.dtype == dtype else tensor._to(dtype=dtype)
+    return tensor if tensor is None or tensor.dtype == dtype else paddle.cast(tensor, dtype)

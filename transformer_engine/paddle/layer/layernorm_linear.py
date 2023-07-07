@@ -45,13 +45,6 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
 
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        ln_weight = cast_if_needed(ln_weight, activation_dtype)
-        ln_bias = cast_if_needed(ln_bias, activation_dtype)
-        weight = cast_if_needed(weight, activation_dtype)
-        bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
-
         ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
                                            TE_DType[activation_dtype], fwd_ln_sm_margin,
                                            zero_centered_gamma)
@@ -231,11 +224,11 @@ class LayerNormLinear(TransformerEngineBaseLayer):
 
         with self.prepare_forward(inp) as inp:
             out = _LayerNormLinear.apply(
-                inp,
-                self.ln_weight,
-                self.ln_bias,
-                self.weight,
-                self.bias,
+                cast_if_needed(inp, self.activation_dtype),
+                cast_if_needed(self.ln_weight, self.activation_dtype),
+                cast_if_needed(self.ln_bias, self.activation_dtype),
+                cast_if_needed(self.weight, self.activation_dtype),
+                cast_if_needed(self.bias, self.activation_dtype),
                 self.has_bias,
                 self.eps,
                 self.activation_dtype,

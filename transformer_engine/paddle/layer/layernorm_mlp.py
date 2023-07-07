@@ -53,19 +53,9 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         assert activation == 'gelu'
 
         # LN FWD
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        ln_weight = cast_if_needed(ln_weight, activation_dtype)
-        ln_bias = cast_if_needed(ln_bias, activation_dtype)
-
         ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
                                            TE_DType[activation_dtype], fwd_ln_sm_margin,
                                            zero_centered_gamma)
-
-        # MLP FWD
-        fc1_weight = cast_if_needed(fc1_weight, activation_dtype)
-        fc2_weight = cast_if_needed(fc2_weight, activation_dtype)
-        fc1_bias = (cast_if_needed(fc1_bias, activation_dtype) if use_fc1_bias else fc1_bias)
-        fc2_bias = (cast_if_needed(fc2_bias, activation_dtype) if use_fc2_bias else fc2_bias)
 
         # FC1 + GeLU
         gelu_out, _, fc1_out = gemm(
@@ -310,14 +300,14 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
         with self.prepare_forward(inp) as inp:
             out = _LayerNormMLP.apply(
-                inp,
-                self.ln_weight,
-                self.ln_bias,
-                self.fc1_weight,
-                self.fc1_bias,
+                cast_if_needed(inp, self.activation_dtype),
+                cast_if_needed(self.ln_weight, self.activation_dtype),
+                cast_if_needed(self.ln_bias, self.activation_dtype),
+                cast_if_needed(self.fc1_weight, self.activation_dtype),
+                cast_if_needed(self.fc1_bias, self.activation_dtype),
                 self.has_bias,
-                self.fc2_weight,
-                self.fc2_bias,
+                cast_if_needed(self.fc2_weight, self.activation_dtype),
+                cast_if_needed(self.fc2_bias, self.activation_dtype),
                 self.has_bias,
                 self.eps,
                 self.activation_dtype,
