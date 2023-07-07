@@ -1,6 +1,6 @@
 # Basic MNIST Example (BF16)
 
 ```bash
-python main.py
-python main.py --use-te   # Linear layers from TransformerEngine
+python test_single_gpu_mnist.py
+python test_single_gpu_mnist.py --use-te   # Linear layers from TransformerEngine
 ```
