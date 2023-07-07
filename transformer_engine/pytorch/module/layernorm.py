@@ -12,6 +12,8 @@ from torch.nn import init
 
 import transformer_engine_extensions as tex
 
+from ..jit import no_torch_dynamo
+
 
 __all__ = ["LayerNorm"]
 
@@ -154,6 +156,7 @@ class LayerNorm(torch.nn.Module):
         init.zeros_(self.bias)
 
 
+    @no_torch_dynamo
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
         # Maintain backward compatibility.

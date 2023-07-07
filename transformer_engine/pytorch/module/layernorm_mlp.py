@@ -44,6 +44,7 @@ from ..distributed import (
 from .. import cpp_extensions as tex
 
 from ..constants import dist_group_type, TE_DType
+from ..jit import no_torch_dynamo
 
 
 __all__ = ["LayerNormMLP"]
@@ -1144,6 +1145,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
+    @no_torch_dynamo
     def forward(
         self, inp: torch.Tensor, is_first_microbatch: Optional[bool] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
