@@ -5,23 +5,23 @@
 # A workflow to trigger ci on hybrid infra (github + self hosted runner)
 name: TE-CI Logs
 on:
-  workflow_dispatch:
-      inputs:
-          platform:
-            description: 'runs-on argument'
-            required: false
-          args:
-            description: 'argument'
-            required: false
-          job_name:
-            description: 'name of the job'
-            required: true
-          commit_sha:
-            description: 'SHA of the commit that was tested.'
-            required: true
-          result:
-            description: 'Job result'
-            required: true
+  # workflow_dispatch:
+  #     inputs:
+  #         platform:
+  #           description: 'runs-on argument'
+  #           required: false
+  #         args:
+  #           description: 'argument'
+  #           required: false
+  #         job_name:
+  #           description: 'name of the job'
+  #           required: true
+  #         commit_sha:
+  #           description: 'SHA of the commit that was tested.'
+  #           required: true
+  #         result:
+  #           description: 'Job result'
+  #           required: true
 run-name: PR ${{ fromJson(github.event.inputs.args).pr }} - ${{ inputs.job_name }}
 jobs:
   Upload-Log:

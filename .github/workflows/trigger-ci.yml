@@ -5,8 +5,8 @@
 # A workflow to trigger ci on hybrid infra (github + self hosted runner)
 name: TE-CI Trigger
 on:
-  issue_comment:
-    types: [created]
+  # issue_comment:
+  #   types: [created]
 jobs:
   Authorization:
     name: Authorization

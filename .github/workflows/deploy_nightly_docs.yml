@@ -5,8 +5,8 @@
 # A workflow to deploy the nightly version of TE documentation to GitHub Pages
 name: Deploy nightly docs
 on:
-  push:
-    branches: [ "main" ]
+  # push:
+  #   branches: [ "main" ]
 jobs:
   build:
     uses: ./.github/workflows/docs.yml

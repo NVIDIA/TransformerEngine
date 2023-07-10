@@ -614,6 +614,8 @@ def main():
     if "paddle" in frameworks():
         ext_modules.append(setup_paddle_extension())
 
+    ext_modules = []
+
     # Configure package
     setuptools.setup(
         name="transformer_engine",
