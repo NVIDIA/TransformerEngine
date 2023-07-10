@@ -19,18 +19,21 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: 'Build'
+      - name: 'Check memory'
         run: |
-          mkdir -p wheelhouse && \
-          NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
-      - name: 'Upload wheel'
-        uses: actions/upload-artifact@v3
-        with:
-          name: te_wheel_pyt
-          path: wheelhouse/transformer_engine*.whl
-          retention-days: 7
-      - name: 'Install'
-        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+          free
+      # - name: 'Build'
+      #   run: |
+      #     mkdir -p wheelhouse && \
+      #     NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
+      # - name: 'Upload wheel'
+      #   uses: actions/upload-artifact@v3
+      #   with:
+      #     name: te_wheel_pyt
+      #     path: wheelhouse/transformer_engine*.whl
+      #     retention-days: 7
+      # - name: 'Install'
+      #   run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
       # - name: 'Sanity check'
       #   run: python tests/pytorch/test_sanity_import.py
   # jax:
