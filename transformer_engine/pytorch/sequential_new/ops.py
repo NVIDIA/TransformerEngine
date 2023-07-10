@@ -1,0 +1,14 @@
+from enum import Enum
+
+
+class Op(Enum):
+    GEMM = "GEMM"
+    GEMM_FP8 = "GEMM_FP8"
+    ADD = "ADD"
+    ADD_FP8 = "ADD_FP8"
+    LAYER_NORM = "LAYER_NORM"
+    LAYER_NORM_FP8 = "LAYER_NORM_FP8"
+    GELU = "GELU"
+    GELU_FP8 = "GELU_FP8"
+    RESIDUAL_BEGIN = "RESIDUAL_BEGIN"
+    RESIDUAL_END = "RESIDUAL_END"
