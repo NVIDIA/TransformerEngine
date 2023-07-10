@@ -90,7 +90,7 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 }
 
 bool IsFusedAttnKernelAvailable() {
-#if (CUDNN_VERSION >= 8901)
+#if (CUDNN_VERSION >= 8903)
     auto major = cudaDevicePropertiesManager::Instance().GetMajor();
     // Fused attention requires at least Ampere
     return major >= 8;
