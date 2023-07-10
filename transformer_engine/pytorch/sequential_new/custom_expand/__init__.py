@@ -2,72 +2,107 @@ from torch import nn
 from ..custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from ..expand_for_sequential import expand
 from ..compile_env import CompileEnv
-from ..ops import Op
+from ..ops import DType
+from .. import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 
 
-def expand_linear(module: nn.Module, env: CompileEnv):
+def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     assert isinstance(module, nn.Linear) or isinstance(module, Linear)
     has_bias = (
         getattr(module, "bias") is not None
         if isinstance(module, nn.Linear)
         else module.use_bias
     )
-    if env.fp8:
-        if has_bias:
-            return [Op.GEMM_FP8, Op.ADD_FP8]
-        else:
-            return [Op.GEMM_FP8]
+    in_features = module.in_features
+    out_features = module.out_features
+    tensor_type = DType.FP8 if env.fp8 else DType.default
+
+    if has_bias:
+        return [
+            ops.Gemm(tensor_type, tensor_type, in_features, out_features),
+            ops.Add(tensor_type, DType.infer, out_features),
+        ]
     else:
-        if has_bias:
-            return [Op.GEMM, Op.ADD]
-        else:
-            return [Op.GEMM]
+        return [ops.Gemm(tensor_type, DType.infer, in_features, out_features)]
 
 
-def expand_layerNorm(module: nn.Module, env: CompileEnv):
+def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     assert isinstance(module, nn.LayerNorm) or isinstance(module, LayerNorm)
-    if env.fp8:
-        return [Op.LAYER_NORM_FP8]
-    else:
-        return [Op.LAYER_NORM]
+
+    hidden_size = (
+        module.weight.shape[0]
+        if isinstance(module, LayerNorm)
+        else module.normalized_shape[0]
+    )
+    eps = module.eps
+    zero_centered_gamma = (
+        True if isinstance(module, nn.LayerNorm) else module.zero_centered_gamma
+    )
+    tensor_type = DType.FP8 if env.fp8 else DType.default
+
+    return [
+        ops.LayerNorm(tensor_type, DType.infer, hidden_size, eps, zero_centered_gamma)
+    ]
 
 
-def expand_layerNormLinear(module: nn.Module, env: CompileEnv):
+def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     assert isinstance(module, LayerNormLinear)
+
     has_bias = module.use_bias
-    if env.fp8:
-        if has_bias:
-            return [Op.LAYER_NORM_FP8, Op.GEMM_FP8, Op.ADD_FP8]
-        else:
-            return [Op.LAYER_NORM_FP8, Op.GEMM_FP8]
+    in_features = module.in_features
+    out_features = module.out_features
+    eps = module.eps
+    zero_centered_gamma = module.zero_centered_gamma
+    tensor_type = DType.FP8 if env.fp8 else DType.default
+
+    if has_bias:
+        return [
+            ops.LayerNorm(
+                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+            ),
+            ops.Gemm(tensor_type, tensor_type, in_features, out_features),
+            ops.Add(tensor_type, DType.infer, out_features),
+        ]
     else:
-        if has_bias:
-            return [Op.LAYER_NORM, Op.GEMM, Op.ADD]
-        else:
-            return [Op.LAYER_NORM, Op.GEMM]
+        return [
+            ops.LayerNorm(
+                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+            ),
+            ops.Gemm(tensor_type, DType.infer, in_features, out_features),
+        ]
 
 
-def expand_layerNormMLP(module: nn.Module, env: CompileEnv):
+def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     assert isinstance(module, LayerNormMLP)
+
     has_bias = module.use_bias
-    if env.fp8:
-        if has_bias:
-            return [
-                Op.LAYER_NORM_FP8,
-                Op.GEMM_FP8,
-                Op.ADD_FP8,
-                Op.GELU_FP8,
-                Op.GEMM_FP8,
-                Op.ADD_FP8,
-            ]
-        else:
-            return [Op.LAYER_NORM_FP8, Op.GEMM_FP8, Op.GELU_FP8, Op.GEMM_FP8]
+    in_features = module.layer_norm_weight.shape[0]
+    ffn_size = module.size_per_partition * module.tp_size
+    eps = module.eps
+    zero_centered_gamma = module.zero_centered_gamma
+    tensor_type = DType.FP8 if env.fp8 else DType.default
+
+    if has_bias:
+        return [
+            ops.LayerNorm(
+                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+            ),
+            ops.Gemm(tensor_type, tensor_type, in_features, ffn_size),
+            ops.Add(tensor_type, tensor_type, ffn_size),
+            ops.Gelu(),
+            ops.Gemm(tensor_type, tensor_type, ffn_size, in_features),
+            ops.Add(tensor_type, DType.infer, in_features),
+        ]
     else:
-        if has_bias:
-            return [Op.LAYER_NORM, Op.GEMM, Op.ADD, Op.GELU, Op.GEMM, Op.ADD]
-        else:
-            return [Op.LAYER_NORM, Op.GEMM, Op.GELU, Op.GEMM]
+        return [
+            ops.LayerNorm(
+                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+            ),
+            ops.Gemm(tensor_type, tensor_type, in_features, ffn_size),
+            ops.Gelu(),
+            ops.Gemm(tensor_type, tensor_type, ffn_size, in_features),
+        ]
 
 
 def expand_sequential(module: nn.Module, env: CompileEnv):

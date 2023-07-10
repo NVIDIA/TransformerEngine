@@ -1,8 +1,8 @@
 from torch import nn
 
 from .compile_env import CompileEnv
-from .ops import Op
 from .expand_for_sequential import expand
+from .ops import ResidualBegin, ResidualEnd
 
 
 class Residual(nn.Module):
@@ -11,10 +11,14 @@ class Residual(nn.Module):
         self.module_list = [*modules]
 
     def expand_for_sequential(self, compile_env: CompileEnv):
+        begin = ResidualBegin()
+        end = ResidualEnd(begin)
+        begin.end = end
+
         return [
-            Op.RESIDUAL_BEGIN,
+            begin,
             *[op for m in self.module_list for op in expand(m, compile_env)],
-            Op.RESIDUAL_END,
+            end,
         ]
 
 

@@ -1,14 +1,88 @@
+from __future__ import annotations
 from enum import Enum
 
 
-class Op(Enum):
-    GEMM = "GEMM"
-    GEMM_FP8 = "GEMM_FP8"
-    ADD = "ADD"
-    ADD_FP8 = "ADD_FP8"
-    LAYER_NORM = "LAYER_NORM"
-    LAYER_NORM_FP8 = "LAYER_NORM_FP8"
-    GELU = "GELU"
-    GELU_FP8 = "GELU_FP8"
-    RESIDUAL_BEGIN = "RESIDUAL_BEGIN"
-    RESIDUAL_END = "RESIDUAL_END"
+class DType(Enum):
+    FP8 = "FP8"
+    FP16 = "FP16"
+    BF16 = "BF16"
+    FP32 = "FP32"
+    infer = "INFER"
+    default = BF16
+
+
+class Op:
+    input_type: DType
+    output_type: DType
+
+    def __init__(self, input_type: DType, output_type: DType):
+        self.input_type = input_type
+        self.output_type = output_type
+
+
+class PassthroughOp(Op):
+    def __init__(self):
+        super().__init__(DType.infer, DType.infer)
+
+
+class ParamOp(Op):
+    pass
+
+
+class Gemm(ParamOp):
+    in_features: int
+    out_features: int
+
+    def __init__(
+        self, input_type: DType, output_type: DType, in_features: int, out_features: int
+    ):
+        super().__init__(input_type, output_type)
+        self.in_features = in_features
+        self.out_features = out_features
+
+
+class Add(ParamOp):
+    features: int
+
+    def __init__(self, input_type: DType, output_type: DType, features: int):
+        super().__init__(input_type, output_type)
+        self.features = features
+
+
+class LayerNorm(PassthroughOp):
+    features: int
+    eps: float
+    zero_centered_gamma: bool
+
+    def __init__(
+        self,
+        input_type: DType,
+        output_type: DType,
+        features: int,
+        eps: float,
+        zero_centered_gamma: bool,
+    ):
+        super().__init__()
+        self.features = features
+        self.eps = eps
+        self.zero_centered_gamma = zero_centered_gamma
+
+
+class Gelu(PassthroughOp):
+    pass
+
+
+class ResidualBegin(PassthroughOp):
+    end: ResidualEnd | None = None
+
+    def __init__(self, end: ResidualEnd | None = None):
+        super().__init__()
+        self.end = end
+
+
+class ResidualEnd(PassthroughOp):
+    begin: ResidualBegin
+
+    def __init__(self, begin: ResidualBegin):
+        super().__init__()
+        self.begin = begin
