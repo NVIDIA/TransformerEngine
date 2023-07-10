@@ -1877,7 +1877,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<placeholder>(m, "UbufP2PCommOverlap");
 #endif  // NVTE_WITH_USERBUFFERS
 
-  py::enum_<transformer_engine::DType>(m, "DType", py::module_local())
+  py::enum_<transformer_engine::DType>(m, "DType")
     .value("kByte", transformer_engine::DType::kByte)
     .value("kInt32", transformer_engine::DType::kInt32)
     .value("kFloat32", transformer_engine::DType::kFloat32)
