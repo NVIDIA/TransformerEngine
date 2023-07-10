@@ -78,7 +78,7 @@ def softmax(inputs: jnp.ndarray,
                                                   dp_axis_name=dp_axis_name,
                                                   tp_axis_name=tp_axis_name)
 
-        sharding_meta = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
 
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         mask_ = mask
@@ -97,7 +97,7 @@ def softmax(inputs: jnp.ndarray,
             else:
                 mask_sharding_meta = ShardingMeta([{}], {}, {}, [mask_.shape], mask_.shape)
 
-            mask_sharding_meta = extend_fsdp_sharding_meta(mask_sharding_meta, dp_dim_index)
+            mask_sharding_meta, _ = extend_fsdp_sharding_meta(mask_sharding_meta, dp_dim_index)
             mask_ = jnp.reshape(mask_, mask_sharding_meta.input_shapes[0])
             mask_in_axis = mask_sharding_meta.in_axes[0]
 

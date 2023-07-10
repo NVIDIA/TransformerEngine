@@ -1026,7 +1026,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
 
     mst = infer_major_sharding_type()
     if mst is MajorShardingType.SINGLE:
-        return sharding_meta
+        return sharding_meta, None
 
     gsr = global_shard_resource()
     dp_mesh_axis = gsr.dp_resource
@@ -1108,7 +1108,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
     sharding_meta.in_axes = tuple(new_in_axes)
 
     sharding_meta.axis_resources[fsdp_axis_name] = fsdp_mesh_axis
-    return sharding_meta
+    return sharding_meta, fsdp_axis_name
 
 
 def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
