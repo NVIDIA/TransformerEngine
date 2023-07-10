@@ -14,7 +14,7 @@ from .cpp_extensions import cast_transpose, gemm, jax_dtype_to_te_dtype
 from .fp8 import FP8Helper, FP8GemmPackage
 from .sharding import ShardingType, get_dot_sharding_meta, get_fp8_meta_sharding_meta
 from .sharding import is_dp_enabled, is_tp_enabled, merge_axis_resources
-from .sharding import xmap_runner
+from .sharding import xmap_runner, extend_fsdp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -64,6 +64,7 @@ def fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
         sharding_meta = get_dot_sharding_meta(sharding_type, inputs.shape, kernel.shape,
                                               dp_dim_index, input_tp_index, kernel_tp_index,
                                               contracting_dims, dp_axis_name, tp_axis_name)
+        sharding_meta = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index, {})
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         kernel_ = jnp.reshape(kernel, sharding_meta.input_shapes[1])    # 1 for kernel
 

@@ -1016,10 +1016,14 @@ def get_fused_attn_sharding_meta(stype: ShardingType,
                                                               tp_axis_name)
 
 
-def extend_dp_sharding_meta(sharding_meta: ShardingMeta, dp_dim: int = 0) -> ShardingMeta:
+def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
+                              input_dp_dim: int = 0,
+                              weight_fsdp_dim_map: Dict[int, int] = None) -> ShardingMeta:
     """
-    extend_dp_sharding_meta
+    extend_fsdp_sharding_meta
     """
+    weight_fsdp_dim_map = {} if weight_fsdp_dim_map is None else weight_fsdp_dim_map
+
     mst = infer_major_sharding_type()
     if mst is MajorShardingType.SINGLE:
         return sharding_meta
@@ -1033,37 +1037,75 @@ def extend_dp_sharding_meta(sharding_meta: ShardingMeta, dp_dim: int = 0) -> Sha
     if fsdp_mesh_axis is None:
         return sharding_meta
 
-    fsdp_dim, _ = _get_mesh_info(fsdp_mesh_axis)
+    fsdp_dim_size, _ = _get_mesh_info(fsdp_mesh_axis)
     fsdp_axis_name = "fsdp"
-    # Assume 0-idx in the tensor with inputs
-    idx_to_extend = dp_dim + 1 if is_dp_enabled(mst) else dp_dim
-    input_shape = sharding_meta.input_shapes[0]
-    remain_batch_size = input_shape[idx_to_extend]
-    assert remain_batch_size == -1 or remain_batch_size % fsdp_dim == 0
-    remain_batch_size = -1 if remain_batch_size == -1 else remain_batch_size // fsdp_dim
-    new_input_shape = tuple([
-        *input_shape[:idx_to_extend], fsdp_dim, remain_batch_size, *input_shape[idx_to_extend + 1:]
-    ])
-    sharding_meta.input_shapes = (new_input_shape, *sharding_meta.input_shapes[1:])
 
-    new_in_axes_for_input = {}
-    for key in sharding_meta.in_axes[0]:
-        if key < idx_to_extend:
-            new_in_axes_for_input[key] = sharding_meta.in_axes[0][key]
-        else:
-            new_in_axes_for_input[key + 1] = sharding_meta.in_axes[0][key]
-    new_in_axes_for_input[idx_to_extend] = fsdp_axis_name
-    sharding_meta.in_axes = (new_in_axes_for_input, *sharding_meta.in_axes[1:])
+    def get_idx_to_extend(sharded_indices, target_idx):
+        idx_to_extend = target_idx
+        for i in sharded_indices:
+            if i <= target_idx:
+                idx_to_extend += 1
+        return idx_to_extend
 
-    assert isinstance(sharding_meta.out_axes, dict)
-    new_out_axes_for_input = {}
-    for key in sharding_meta.out_axes:
-        if key < idx_to_extend:
-            new_out_axes_for_input[key] = sharding_meta.out_axes[key]
+    new_input_shapes = []
+    new_in_axes = []
+    for i, shape in enumerate(sharding_meta.input_shapes):
+        idx_to_extend = -1
+        if i == 0:    # Assume 0-idx in the tensor with inputs
+            # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
+            idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
+            remain_batch_size = shape[idx_to_extend]
+            assert remain_batch_size == -1 or remain_batch_size % fsdp_dim_size == 0
+            remain_batch_size = remain_batch_size // fsdp_dim_size
+            new_shape = tuple([
+                *shape[:idx_to_extend], fsdp_dim_size, remain_batch_size, *shape[idx_to_extend + 1:]
+            ])
+
+            # assume one output only and have the same sharding like input
+            assert isinstance(sharding_meta.out_axes, dict)
+            new_out_axes = {}
+            for key in sharding_meta.out_axes:
+                if key < idx_to_extend:
+                    new_out_axes[key] = sharding_meta.out_axes[key]
+                else:
+                    new_out_axes[key + 1] = sharding_meta.out_axes[key]
+            new_out_axes[idx_to_extend] = fsdp_axis_name
+            sharding_meta.out_axes = new_out_axes
+
+            # new_in_axes_for_input = {}
+            # for key in sharding_meta.in_axes[i]:
+            #     if key < idx_to_extend:
+            #         new_in_axes_for_input[key] = sharding_meta.in_axes[i][key]
+            #     else:
+            #         new_in_axes_for_input[key + 1] = sharding_meta.in_axes[i][key]
         else:
-            new_out_axes_for_input[key + 1] = sharding_meta.out_axes[key]
-    new_out_axes_for_input[idx_to_extend] = fsdp_axis_name
-    sharding_meta.out_axes = new_out_axes_for_input
+            new_shape = shape
+            if i in weight_fsdp_dim_map:
+                assert weight_fsdp_dim_map[i] not in sharding_meta.in_axes[i]
+                idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()),
+                                                  weight_fsdp_dim_map[i])
+                assert shape[idx_to_extend] % fsdp_dim_size == 0
+                remain_dim_size = shape[idx_to_extend] // fsdp_dim_size
+                new_shape = tuple([
+                    *shape[:idx_to_extend], fsdp_dim_size, remain_dim_size,
+                    *shape[idx_to_extend + 1:]
+                ])
+        if idx_to_extend >= 0:
+            new_ia = {}
+            for key in sharding_meta.in_axes[i]:
+                if key < idx_to_extend:
+                    new_ia[key] = sharding_meta.in_axes[i][key]
+                else:
+                    new_ia[key + 1] = sharding_meta.in_axes[i][key]
+            new_ia[idx_to_extend] = fsdp_axis_name
+        else:
+            new_ia = sharding_meta.in_axes[i]
+
+        new_input_shapes.append(new_shape)
+        new_in_axes.append(new_ia)
+
+    sharding_meta.input_shapes = tuple(new_input_shapes)
+    sharding_meta.in_axes = tuple(new_in_axes)
 
     sharding_meta.axis_resources[fsdp_axis_name] = fsdp_mesh_axis
     return sharding_meta
