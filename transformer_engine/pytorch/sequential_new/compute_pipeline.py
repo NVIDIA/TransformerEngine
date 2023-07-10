@@ -22,6 +22,8 @@ class ComputePipeline:
             if self._ops[-1].input_type is DType.infer:
                 assert self._ops[-2].output_type is not DType.infer
                 self._ops[-1].input_type = self._ops[-2].output_type
+        if self._ops[-1].output_type is DType.infer:
+            self._ops[-1].output_type = DType.default
 
         for i, op in enumerate(self._ops[1:-1]):
             prev = self._ops[i - 1]
