@@ -324,6 +324,11 @@ class CMakeExtension(setuptools.Extension):
 
     def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
 
+        ### TODO Remove
+        print("Printing memory before CMake")
+        subprocess.run(["df", "-h"])
+        subprocess.run(["free"])
+
         # Make sure paths are str
         _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
@@ -365,9 +370,10 @@ class CMakeExtension(setuptools.Extension):
             except (CalledProcessError, OSError) as e:
                 raise RuntimeError(f"Error when running CMake: {e}")
 
-        print("Printing memory after TE build")
-        subprocess.run(["df", "-h"])
-        subprocess.run(["free"])
+            ### TODO Remove
+            print(f"Printing memory after {command}")
+            subprocess.run(["df", "-h"])
+            subprocess.run(["free"])
 
 
 # PyTorch extension modules require special handling
