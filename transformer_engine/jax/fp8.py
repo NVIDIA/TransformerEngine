@@ -305,9 +305,9 @@ class FP8Helper:
 
             fp8_max = fp8_meta_arrays[fp8_max_idx]
             if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
-                amax = jnp.max(fp8_meta_arrays[fp8_amax_idx], axis=1, keepdims=True)
+                amax = jnp.max(fp8_meta_arrays[fp8_amax_idx], axis=-1, keepdims=True)
             else:
-                amax = fp8_meta_arrays[fp8_amax_idx][:, 0:1]
+                amax = fp8_meta_arrays[fp8_amax_idx][..., 0:1]
             scale = fp8_meta_arrays[fp8_scale_idx]
 
             exp = jnp.floor(jnp.log2(fp8_max / amax)) - FP8Helper.MARGIN
@@ -366,14 +366,14 @@ def fp8_autocast(enabled: bool = False,
     if fp8_recipe is None:
         fp8_recipe = DelayedScaling()
 
-    assert fp8_recipe.amax_compute_algo in ["max", "most_recent"], (
-        "DelayedScaling amax_compute_algo only supports max and most_recent with TE/JAX.")
+    assert fp8_recipe.amax_compute_algo in [
+        "max", "most_recent"
+    ], ("DelayedScaling amax_compute_algo only supports max and most_recent with TE/JAX.")
     assert fp8_recipe.scaling_factor_compute_algo is None, (
         "DelayedScaling scaling_factor_compute_algo isn't supported by TE/JAX.")
     assert fp8_recipe.override_linear_precision == (False, False, False), (
         "DelayedScaling override_linear_precision isn't supported by TE/JAX.")
-    assert fp8_recipe.reduce_amax, (
-        "DelayedScaling reduce_amax should be enabled for TE/JAX.")
+    assert fp8_recipe.reduce_amax, ("DelayedScaling reduce_amax should be enabled for TE/JAX.")
 
     if sharding_resource is None:
         sharding_resource = ShardingResource()
