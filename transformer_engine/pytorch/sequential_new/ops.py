@@ -72,6 +72,10 @@ class Gelu(PassthroughOp):
     pass
 
 
+class Relu(PassthroughOp):
+    pass
+
+
 class ResidualBegin(PassthroughOp):
     end: ResidualEnd | None = None
 
