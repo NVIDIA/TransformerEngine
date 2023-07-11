@@ -1,6 +1,6 @@
 from torch import nn
 from ..custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
-from ..expand_for_sequential import expand
+from ..custom_expand_for_sequential import expand
 from ..compile_env import CompileEnv
 from ..ops import DType
 from .. import ops
@@ -116,3 +116,5 @@ CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.LayerNorm] = expand_layerNorm
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNorm] = expand_layerNorm
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormLinear] = expand_layerNormLinear
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormMLP] = expand_layerNormMLP
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [ops.Gelu()]
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [ops.Relu()]
