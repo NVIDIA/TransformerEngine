@@ -21,8 +21,7 @@ jobs:
           submodules: recursive
       - name: 'Check memory before build'
         run: |
-          cat /sys/fs/cgroup/memory/memory.limit_in_bytes
-          df -h
+          df -h && \
           free
       - name: 'Build'
         run: |
@@ -30,7 +29,7 @@ jobs:
           NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
       - name: 'Check memory after build'
         run: |
-          df -h
+          df -h && \
           free
       # - name: 'Upload wheel'
       #   uses: actions/upload-artifact@v3
