@@ -761,6 +761,10 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -784,7 +788,11 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
 
     // aux tensors
     auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
+
+    auto backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -794,9 +802,8 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
                                   rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
-                                  descriptor.scaling_factor, descriptor.dropout_probability,
-                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
-                                  descriptor.mask_type, query_workspace_tensor.data(), stream);
+                                  descriptor.scaling_factor, dropout_probability, qkv_layout,
+                                  bias_type, mask_type, query_workspace_tensor.data(), stream);
 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
@@ -810,9 +817,8 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, cu_seqlens_tensor.data(),
                                   rng_state_tensor.data(), q_max_seqlen, descriptor.is_training,
-                                  descriptor.scaling_factor, descriptor.dropout_probability,
-                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
-                                  descriptor.mask_type, workspace_tensor.data(), stream);
+                                  descriptor.scaling_factor, dropout_probability, qkv_layout,
+                                  bias_type, mask_type, workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
@@ -924,6 +930,10 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
@@ -957,8 +967,7 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        descriptor.scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         query_workspace_tensor.data(), stream);
 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
@@ -975,14 +984,17 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
 
     auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
     auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, stream);
+
+    auto backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
         rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
+        descriptor.scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
