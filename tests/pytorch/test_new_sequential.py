@@ -1,3 +1,4 @@
+import pprint
 from torch import nn
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.sequential_new import Sequential
@@ -12,4 +13,4 @@ seq = Sequential(
 
 seq._compile_checked(CompileEnv.current())
 
-print(seq._pipeline._ops)
+pprint.pprint(seq._pipeline._ops)
