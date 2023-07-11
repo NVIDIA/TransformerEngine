@@ -11,10 +11,11 @@ class ComputePipeline:
         ...
 
     def compile(self):
-        self.infer_types()
-        ...
+        self.transform_op_list()
+        self.allocate_parameters()
 
-    def infer_types(self):
+    def transform_op_list(self):
+        # region infer_types
         if len(self._ops) >= 2:
             if self._ops[0].output_type is DType.infer:
                 assert self._ops[1].input_type is not DType.infer
@@ -34,6 +35,22 @@ class ComputePipeline:
             if op.output_type is DType.infer:
                 assert next.input_type is not DType.infer
                 op.output_type = next.input_type
+        # endregion
+        # TODO region auto_parallel
+        # region insert_casts
+        assert not any(isinstance(m, Cast) for m in self._ops)
+        for i, op in enumerate(self._ops[:-1]):
+            next = self._ops[i + 1]
+            if op.output_type is not next.input_type:
+                self._ops.insert(i + 1, Cast(op.output_type, next.input_type))
+        # endregion
+
+    def allocate_parameters(self):
+        ...
+
+
+class Cast(Op):
+    pass
 
 
 __all__ = ["ComputePipeline"]
