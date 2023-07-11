@@ -12,6 +12,7 @@ __all__ = []
 
 
 def register_activation(name: str):
+    impl = getattr(torch.ops.tex_ts, f"{name.lower()}_ts")
     def f(
         inp: torch.Tensor,
         fp8_meta_tensor: tex.FP8TensorMeta,
@@ -28,7 +29,7 @@ def register_activation(name: str):
             amax_history = empty_tensor
             scale_inv = empty_tensor
 
-        return getattr(torch.ops.tex_ts, f"{name.lower()}_ts")(
+        return impl(
             inp,
             scale,
             amax_history,
