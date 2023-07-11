@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional, Tuple, Union
 from pkg_resources import packaging
 
 import torch
+import torch.nn.functional as F
 
 from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 
@@ -82,7 +83,10 @@ def pack_tensor(
     Packs the given tensor using the `indices`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    return torch.gather(tensor, 0, indices)
+    packed = torch.gather(tensor, 0, indices)
+    pad_amount = tensor.shape[0] - packed.shape[0]
+    padded = F.pad(input=packed, pad=(0, 0, 0, 0, 0, pad_amount), mode="constant", value=0.0)
+    return padded
 
 
 @jit_fuser
@@ -94,9 +98,8 @@ def pack_2_tensors(
     """
     Packs the given 2 tensors using the `indices`.
     """
-    indices = indices.repeat(1, t1.shape[1], t1.shape[2])
-    t1_packed = torch.gather(t1, 0, indices)
-    t2_packed = torch.gather(t2, 0, indices)
+    t1_packed = pack_tensor(indices, t1)
+    t2_packed = pack_tensor(indices, t2)
     return t1_packed, t2_packed
 
 
@@ -110,10 +113,9 @@ def pack_3_tensors(
     """
     Packs the given 3 tensors using the `indices`.
     """
-    indices = indices.repeat(1, t1.shape[1], t1.shape[2])
-    t1_packed = torch.gather(t1, 0, indices)
-    t2_packed = torch.gather(t2, 0, indices)
-    t3_packed = torch.gather(t3, 0, indices)
+    t1_packed = pack_tensor(indices, t1)
+    t2_packed = pack_tensor(indices, t2)
+    t3_packed = pack_tensor(indices, t3)
     return t1_packed, t2_packed, t3_packed
 
 
@@ -525,6 +527,7 @@ class FlashAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         attention_type: str = "self",
         causal: bool = True,
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -539,6 +542,7 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
         self.causal = causal
+        self.layer_number = 1 if layer_number is None else layer_number
 
     def forward(
         self,
@@ -571,13 +575,13 @@ class FlashAttention(torch.nn.Module):
         ]
 
         if self.attn_mask_type != 'padding':
-            cu_seqlens_q = torch.arange(
+            self.cu_seqlens_q = torch.arange(
                 0,
                 (batch_size + 1) * max_seqlen_q,
                 step=max_seqlen_q,
                 dtype=torch.int32,
                 device=query_layer.device)
-            cu_seqlens_kv = torch.arange(
+            self.cu_seqlens_kv = torch.arange(
                 0,
                 (batch_size + 1) * max_seqlen_kv,
                 step=max_seqlen_kv,
@@ -591,30 +595,34 @@ class FlashAttention(torch.nn.Module):
                 assert (
                     max_seqlen_q == max_seqlen_kv
                 ), "Maximum sequence length for Q and KV should be the same."
-                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
-                cu_seqlens_kv = cu_seqlens_q
+                if self.layer_number == 1:
+                    self.cu_seqlens_q, self.indices_q = get_cu_seqlens_and_indices(attention_mask)
+                self.cu_seqlens_kv = self.cu_seqlens_q
                 query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
-                    indices_q, query_layer, key_layer, value_layer
+                    self.indices_q, query_layer, key_layer, value_layer
                 )
             else:
-                cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
-                cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
-                query_layer_packed = PackTensors.apply(indices_q, query_layer)
+                if self.layer_number == 1:
+                    self.cu_seqlens_q, self.indices_q = (
+                        get_cu_seqlens_and_indices(attention_mask[0]))
+                    self.cu_seqlens_kv, self.indices_kv = (
+                        get_cu_seqlens_and_indices(attention_mask[1]))
+                query_layer_packed = PackTensors.apply(self.indices_q, query_layer)
                 key_layer_packed, value_layer_packed = PackTensors.apply(
-                    indices_kv, key_layer, value_layer
+                    self.indices_kv, key_layer, value_layer
                 )
 
         with self.attention_dropout_ctx():
             output = flash_attn_unpadded_func(
                 query_layer_packed, key_layer_packed, value_layer_packed,
-                cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
+                self.cu_seqlens_q, self.cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=self.causal,
                 deterministic=self.deterministic,
             )
 
         if self.attn_mask_type == 'padding':
-            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+            output = UnpackTensor.apply(self.indices_q, batch_size * max_seqlen_q, output)
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
@@ -1006,6 +1014,7 @@ class DotProductAttention(torch.nn.Module):
             self.flash_attention = FlashAttention(norm_factor,
                                                   causal=self.causal_mask,
                                                   attention_type=attention_type,
+                                                  layer_number=layer_number,
                                                   **attn_kwargs)
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
