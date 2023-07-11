@@ -46,11 +46,10 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    dict["te_self_fused_attn_max_512_forward"] = EncapsulateFunction(SelfFusedAttnMax512Forward);
-    dict["te_self_fused_attn_max_512_backward"] = EncapsulateFunction(SelfFusedAttnMax512Backward);
-    dict["te_cross_fused_attn_max_512_forward"] = EncapsulateFunction(CrossFusedAttnMax512Forward);
-    dict["te_cross_fused_attn_max_512_backward"] =
-        EncapsulateFunction(CrossFusedAttnMax512Backward);
+    dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
+    dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
+    dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
+    dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
     return dict;
 }
 

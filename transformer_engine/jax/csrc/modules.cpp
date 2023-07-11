@@ -740,8 +740,8 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
         desc.scale_factor, stream);
 }
 
-void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                size_t opaque_len) {
+void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                          size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
         *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
@@ -823,8 +823,8 @@ void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len) {
+void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
         *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
@@ -909,8 +909,8 @@ void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len) {
+void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
         *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 
@@ -1000,8 +1000,8 @@ void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                  size_t opaque_len) {
+void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                            size_t opaque_len) {
     const CustomCallFusedAttnDescriptor &descriptor =
         *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
 

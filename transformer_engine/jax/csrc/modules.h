@@ -166,17 +166,17 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
-void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                size_t opaque_len);
+void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                          size_t opaque_len);
 
-void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len);
+void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len);
 
-void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len);
+void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len);
 
-void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                  size_t opaque_len);
+void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                            size_t opaque_len);
 
 }  // namespace jax
 }  // namespace transformer_engine

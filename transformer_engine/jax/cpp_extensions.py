@@ -2018,11 +2018,11 @@ def _check_seed(seed, dropout_probability, is_training):
     return seed
 
 
-class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
+class SelfFusedAttnFwdPrimitive(BasePrimitive):
     """
-    Self Fused Attention Max Seqlen 512 Forward Primitive
+    Self Fused Attention Forward Primitive
     """
-    name = "te_self_fused_attn_max_512_forward"
+    name = "te_self_fused_attn_forward"
     multiple_results = True
 
     @staticmethod
@@ -2039,7 +2039,7 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Self fused attention max seqlen 512 fwd abstract
+        Self fused attention fwd abstract
         """
         qkv_dtype = dtypes.canonicalize_dtype(qkv.dtype)
         batch, max_seqlen, nqkv, num_head, head_dim = qkv.shape
@@ -2080,7 +2080,7 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, bias, cu_seqlen, seed, *, attn_bias_type, attn_mask_type, scaling_factor,
                  dropout_probability, is_training):
         """
-        Self fused attention max seqlen 512 fwd lowering rules
+        Self fused attention fwd lowering rules
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
@@ -2098,23 +2098,20 @@ class SelfFusedAttnMax512FwdPrimitive(BasePrimitive):
             batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
-        out = custom_caller(SelfFusedAttnMax512FwdPrimitive.name,
-                            args,
-                            opaque,
-                            has_side_effect=False)
+        out = custom_caller(SelfFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
 
 
-_self_fused_attn_max_512_fwd_p = register_primitive(SelfFusedAttnMax512FwdPrimitive)
+_self_fused_attn_fwd_p = register_primitive(SelfFusedAttnFwdPrimitive)
 
 
-def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndarray,
-                                seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                                attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                                dropout_probability: float, is_training: bool):
+def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndarray,
+                        seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                        attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
+                        dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE self fused attention max seqlen 512 fwd
+    Wrapper for TE self fused attention fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
     seed = _check_seed(seed, dropout_probability, is_training)
@@ -2122,22 +2119,22 @@ def self_fused_attn_max_512_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: 
     if bias is None:
         assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
         bias = jnp.zeros(0, dtype=qkv.dtype)
-    return _self_fused_attn_max_512_fwd_p.bind(qkv,
-                                               bias,
-                                               cu_seqlen,
-                                               seed,
-                                               attn_bias_type=attn_bias_type,
-                                               attn_mask_type=attn_mask_type,
-                                               scaling_factor=scaling_factor,
-                                               dropout_probability=dropout_probability,
-                                               is_training=is_training)
+    return _self_fused_attn_fwd_p.bind(qkv,
+                                       bias,
+                                       cu_seqlen,
+                                       seed,
+                                       attn_bias_type=attn_bias_type,
+                                       attn_mask_type=attn_mask_type,
+                                       scaling_factor=scaling_factor,
+                                       dropout_probability=dropout_probability,
+                                       is_training=is_training)
 
 
-class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
+class SelfFusedAttnBwdPrimitive(BasePrimitive):
     """
-    Self Fused Attention Max Seqlen 512 Backward Primitive
+    Self Fused Attention Backward Primitive
     """
-    name = "te_self_fused_attn_max_512_backward"
+    name = "te_self_fused_attn_backward"
     multiple_results = True
 
     @staticmethod
@@ -2174,7 +2171,7 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
     def lowering(ctx, qkv, softmax_aux, rng_state, output, doutput, cu_seqlen, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
-        Self fused attention max seqlen 512 bwd lowering rules
+        Self fused attention bwd lowering rules
         """
         qkv_aval, _, _, _, _, _ = ctx.avals_in
 
@@ -2195,44 +2192,40 @@ class SelfFusedAttnMax512BwdPrimitive(BasePrimitive):
             batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
-        out = custom_caller(SelfFusedAttnMax512BwdPrimitive.name,
-                            args,
-                            opaque,
-                            has_side_effect=False)
+        out = custom_caller(SelfFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
 
 
-_self_fused_attn_max_512_bwd_p = register_primitive(SelfFusedAttnMax512BwdPrimitive)
+_self_fused_attn_bwd_p = register_primitive(SelfFusedAttnBwdPrimitive)
 
 
-def self_fused_attn_max_512_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, rng_state: jnp.ndarray,
-                                output: jnp.ndarray, doutput: jnp.ndarray, cu_seqlen: jnp.ndarray,
-                                attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                                scaling_factor: float, dropout_probability: float,
-                                is_training: bool):
+def self_fused_attn_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, rng_state: jnp.ndarray,
+                        output: jnp.ndarray, doutput: jnp.ndarray, cu_seqlen: jnp.ndarray,
+                        attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                        scaling_factor: float, dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE self fused attention max seqlen 512 bwd
+    Wrapper for TE self fused attention bwd
     Return the gradients of self fused attention with packed qkv input
     """
-    return _self_fused_attn_max_512_bwd_p.bind(qkv,
-                                               softmax_aux,
-                                               rng_state,
-                                               output,
-                                               doutput,
-                                               cu_seqlen,
-                                               attn_bias_type=attn_bias_type,
-                                               attn_mask_type=attn_mask_type,
-                                               scaling_factor=scaling_factor,
-                                               dropout_probability=dropout_probability,
-                                               is_training=is_training)
+    return _self_fused_attn_bwd_p.bind(qkv,
+                                       softmax_aux,
+                                       rng_state,
+                                       output,
+                                       doutput,
+                                       cu_seqlen,
+                                       attn_bias_type=attn_bias_type,
+                                       attn_mask_type=attn_mask_type,
+                                       scaling_factor=scaling_factor,
+                                       dropout_probability=dropout_probability,
+                                       is_training=is_training)
 
 
-class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
+class CrossFusedAttnFwdPrimitive(BasePrimitive):
     """
-    Cross Fused Attention Forward Max Seqlen 512 Primitive
+    Cross Fused Attention Forward Primitive
     """
-    name = "te_cross_fused_attn_max_512_forward"
+    name = "te_cross_fused_attn_forward"
     multiple_results = True
 
     @staticmethod
@@ -2250,7 +2243,7 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Cross fused attention max seqlen 512 fwd abstract
+        Cross fused attention fwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         batch_q, q_max_seqlen, num_head_q, head_dim_q = q.shape
@@ -2279,7 +2272,7 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, q_cu_seqlen, kv_cu_seqlen, seed, *, attn_bias_type, attn_mask_type,
                  scaling_factor, dropout_probability, is_training):
         """
-        Cross fused attention max seqlen 512 fwd lowering rules
+        Cross fused attention fwd lowering rules
         """
         q_aval, kv_aval, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
@@ -2300,45 +2293,41 @@ class CrossFusedAttnMax512FwdPrimitive(BasePrimitive):
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
 
-        out = custom_caller(CrossFusedAttnMax512FwdPrimitive.name,
-                            args,
-                            opaque,
-                            has_side_effect=False)
+        out = custom_caller(CrossFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
 
 
-_cross_fused_attn_max_512_fwd_p = register_primitive(CrossFusedAttnMax512FwdPrimitive)
+_cross_fused_attn_fwd_p = register_primitive(CrossFusedAttnFwdPrimitive)
 
 
-def cross_fused_attn_max_512_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
-                                 kv_cu_seqlen: jnp.ndarray, seed: jnp.ndarray,
-                                 attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
-                                 scaling_factor: float, dropout_probability: float,
-                                 is_training: bool):
+def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
+                         kv_cu_seqlen: jnp.ndarray, seed: jnp.ndarray,
+                         attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                         scaling_factor: float, dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE cross fused attention max seqlen 512 fwd
+    Wrapper for TE cross fused attention fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
     seed = _check_seed(seed, dropout_probability, is_training)
 
-    return _cross_fused_attn_max_512_fwd_p.bind(q,
-                                                kv,
-                                                q_cu_seqlen,
-                                                kv_cu_seqlen,
-                                                seed,
-                                                attn_bias_type=attn_bias_type,
-                                                attn_mask_type=attn_mask_type,
-                                                scaling_factor=scaling_factor,
-                                                dropout_probability=dropout_probability,
-                                                is_training=is_training)
+    return _cross_fused_attn_fwd_p.bind(q,
+                                        kv,
+                                        q_cu_seqlen,
+                                        kv_cu_seqlen,
+                                        seed,
+                                        attn_bias_type=attn_bias_type,
+                                        attn_mask_type=attn_mask_type,
+                                        scaling_factor=scaling_factor,
+                                        dropout_probability=dropout_probability,
+                                        is_training=is_training)
 
 
-class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
+class CrossFusedAttnBwdPrimitive(BasePrimitive):
     """
-    Cross Fused Attention Max Seqlen 512 Backward Primitive
+    Cross Fused Attention Backward Primitive
     """
-    name = "te_cross_fused_attn_max_512_backward"
+    name = "te_cross_fused_attn_backward"
     multiple_results = True
 
     @staticmethod
@@ -2357,7 +2346,7 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
             is_training    # pylint: disable=unused-argument
     ):
         """
-        Cross fused attention max seqlen 512 bwd abstract
+        Cross fused attention bwd abstract
         """
         q_dtype = dtypes.canonicalize_dtype(q.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv.dtype)
@@ -2375,7 +2364,7 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
     def lowering(ctx, q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
-        Cross fused attention max seqlen 512 bwd lowering rules
+        Cross fused attention bwd lowering rules
         """
         q_aval, kv_aval, _, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
@@ -2399,34 +2388,30 @@ class CrossFusedAttnMax512BwdPrimitive(BasePrimitive):
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
 
-        out = custom_caller(CrossFusedAttnMax512BwdPrimitive.name,
-                            args,
-                            opaque,
-                            has_side_effect=False)
+        out = custom_caller(CrossFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
 
 
-_cross_fused_attn_max_512_bwd_p = register_primitive(CrossFusedAttnMax512BwdPrimitive)
+_cross_fused_attn_bwd_p = register_primitive(CrossFusedAttnBwdPrimitive)
 
 
-def cross_fused_attn_max_512_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
-                                 doutput: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
-                                 kv_cu_seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                                 attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                                 dropout_probability: float, is_training: bool):
+def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
+                         doutput: jnp.ndarray, q_cu_seqlen: jnp.ndarray, kv_cu_seqlen: jnp.ndarray,
+                         attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                         scaling_factor: float, dropout_probability: float, is_training: bool):
     """
-    Wrapper for TE cross fused attention max seqlen 512 bwd
+    Wrapper for TE cross fused attention bwd
     Return the gradients of cross fused attention with packed kv input
     """
-    return _cross_fused_attn_max_512_bwd_p.bind(q,
-                                                kv,
-                                                softmax_aux,
-                                                doutput,
-                                                q_cu_seqlen,
-                                                kv_cu_seqlen,
-                                                attn_bias_type=attn_bias_type,
-                                                attn_mask_type=attn_mask_type,
-                                                scaling_factor=scaling_factor,
-                                                dropout_probability=dropout_probability,
-                                                is_training=is_training)
+    return _cross_fused_attn_bwd_p.bind(q,
+                                        kv,
+                                        softmax_aux,
+                                        doutput,
+                                        q_cu_seqlen,
+                                        kv_cu_seqlen,
+                                        attn_bias_type=attn_bias_type,
+                                        attn_mask_type=attn_mask_type,
+                                        scaling_factor=scaling_factor,
+                                        dropout_probability=dropout_probability,
+                                        is_training=is_training)
