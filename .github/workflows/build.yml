@@ -19,13 +19,19 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: 'Check memory'
+      - name: 'Check memory before build'
         run: |
+          cat /sys/fs/cgroup/memory/memory.limit_in_bytes
+          df -h
           free
-      # - name: 'Build'
-      #   run: |
-      #     mkdir -p wheelhouse && \
-      #     NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
+      - name: 'Build'
+        run: |
+          mkdir -p wheelhouse && \
+          NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
+      - name: 'Check memory after build'
+        run: |
+          df -h
+          free
       # - name: 'Upload wheel'
       #   uses: actions/upload-artifact@v3
       #   with:

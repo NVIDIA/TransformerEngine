@@ -365,6 +365,10 @@ class CMakeExtension(setuptools.Extension):
             except (CalledProcessError, OSError) as e:
                 raise RuntimeError(f"Error when running CMake: {e}")
 
+        print("Printing memory after TE build")
+        subprocess.run(["df", "-h"])
+        subprocess.run(["free"])
+
 
 # PyTorch extension modules require special handling
 if "pytorch" in frameworks():
@@ -613,8 +617,6 @@ def main():
 
     if "paddle" in frameworks():
         ext_modules.append(setup_paddle_extension())
-
-    ext_modules = []
 
     # Configure package
     setuptools.setup(
