@@ -71,14 +71,18 @@ class Sequential(nn.Module):
         args: tuple[nn.Module | OrderedDict[str, nn.Module], ...],
         compile_env: CompileEnv,
     ):
-        modules: Iterable[nn.Module]
+        modules: Iterable[tuple[str, nn.Module]]
         if len(args) == 1 and isinstance(args[0], OrderedDict):
-            modules = args[0].values()
+            modules = args[0].items()
         else:
             args1: tuple[nn.Module, ...] = args  # type: ignore
-            modules = args1
+            modules = map(lambda p: (str(p[0]), p[1]), enumerate(args1))
 
-        return [op for module in modules for op in expand(module, compile_env)]
+        return [
+            op.named(name)
+            for name, module in modules
+            for op in expand(module, compile_env)
+        ]
 
 
 __all__ = ["Sequential"]

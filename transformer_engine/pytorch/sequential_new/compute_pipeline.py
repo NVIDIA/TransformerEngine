@@ -42,10 +42,17 @@ class ComputePipeline:
         for i, op in enumerate(self._ops[:-1]):
             next = self._ops[i + 1]
             if op.output_type is not next.input_type:
-                self._ops.insert(i + 1, Cast(op.output_type, next.input_type))
+                name = f"Cast({op.name}, {next.name})"
+                self._ops.insert(i + 1, Cast(name, op.output_type, next.input_type))
         # endregion
 
     def allocate_parameters(self):
+        for op in self._ops:
+            params = op.describe_params()
+            for name, shape in params.items():
+                self.allocate(op.name + "." + name, shape)
+
+    def allocate(self, name: str, shape: tuple[int, ...]):
         ...
 
 

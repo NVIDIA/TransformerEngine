@@ -20,11 +20,11 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
 
     if has_bias:
         return [
-            ops.Gemm(tensor_type, tensor_type, in_features, out_features),
-            ops.Add(tensor_type, DType.infer, out_features),
+            ops.Gemm("gemm", tensor_type, tensor_type, in_features, out_features),
+            ops.Add("add", tensor_type, DType.infer, out_features),
         ]
     else:
-        return [ops.Gemm(tensor_type, DType.infer, in_features, out_features)]
+        return [ops.Gemm("gemm", tensor_type, DType.infer, in_features, out_features)]
 
 
 def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
@@ -42,7 +42,9 @@ def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     tensor_type = DType.FP8 if env.fp8 else DType.default
 
     return [
-        ops.LayerNorm(tensor_type, DType.infer, hidden_size, eps, zero_centered_gamma)
+        ops.LayerNorm(
+            "layernorm", tensor_type, DType.infer, hidden_size, eps, zero_centered_gamma
+        )
     ]
 
 
@@ -59,17 +61,27 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     if has_bias:
         return [
             ops.LayerNorm(
-                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+                "layernorm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                eps,
+                zero_centered_gamma,
             ),
-            ops.Gemm(tensor_type, tensor_type, in_features, out_features),
-            ops.Add(tensor_type, DType.infer, out_features),
+            ops.Gemm("gemm", tensor_type, tensor_type, in_features, out_features),
+            ops.Add("add", tensor_type, DType.infer, out_features),
         ]
     else:
         return [
             ops.LayerNorm(
-                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+                "layernorm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                eps,
+                zero_centered_gamma,
             ),
-            ops.Gemm(tensor_type, DType.infer, in_features, out_features),
+            ops.Gemm("gemm", tensor_type, DType.infer, in_features, out_features),
         ]
 
 
@@ -86,22 +98,32 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     if has_bias:
         return [
             ops.LayerNorm(
-                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+                "layernorm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                eps,
+                zero_centered_gamma,
             ),
-            ops.Gemm(tensor_type, tensor_type, in_features, ffn_size),
-            ops.Add(tensor_type, tensor_type, ffn_size),
-            ops.Gelu(),
-            ops.Gemm(tensor_type, tensor_type, ffn_size, in_features),
-            ops.Add(tensor_type, DType.infer, in_features),
+            ops.Gemm("gemm1", tensor_type, tensor_type, in_features, ffn_size),
+            ops.Add("add1", tensor_type, tensor_type, ffn_size),
+            ops.Gelu("act"),
+            ops.Gemm("gemm2", tensor_type, tensor_type, ffn_size, in_features),
+            ops.Add("add2", tensor_type, DType.infer, in_features),
         ]
     else:
         return [
             ops.LayerNorm(
-                tensor_type, tensor_type, in_features, eps, zero_centered_gamma
+                "layernorm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                eps,
+                zero_centered_gamma,
             ),
-            ops.Gemm(tensor_type, tensor_type, in_features, ffn_size),
-            ops.Gelu(),
-            ops.Gemm(tensor_type, tensor_type, ffn_size, in_features),
+            ops.Gemm("gemm1", tensor_type, tensor_type, in_features, ffn_size),
+            ops.Gelu("act"),
+            ops.Gemm("gemm2", tensor_type, tensor_type, ffn_size, in_features),
         ]
 
 
@@ -116,5 +138,5 @@ CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.LayerNorm] = expand_layerNorm
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNorm] = expand_layerNorm
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormLinear] = expand_layerNormLinear
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormMLP] = expand_layerNormMLP
-CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [ops.Gelu()]
-CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [ops.Relu()]
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [ops.Gelu("act")]
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [ops.Relu("act")]

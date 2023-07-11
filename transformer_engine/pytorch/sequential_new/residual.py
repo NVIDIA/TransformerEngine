@@ -11,8 +11,8 @@ class Residual(nn.Module):
         self.module_list = [*modules]
 
     def expand_for_sequential(self, compile_env: CompileEnv):
-        begin = ResidualBegin()
-        end = ResidualEnd(begin)
+        begin = ResidualBegin("residual_begin")
+        end = ResidualEnd("residual_end", begin)
         begin.end = end
 
         return [
