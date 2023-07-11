@@ -25,7 +25,6 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
-from transformer_engine_jax import NVTEDType
 
 for _name, _value in transformer_engine_jax.registrations().items():
     xla_client.register_custom_call_target(_name, _value, platform="CUDA")
@@ -66,19 +65,6 @@ def jax_dtype_to_te_dtype(jax_dtype):
         return TEDType.kFloat16
     if jax_dtype == jnp.bfloat16:
         return TEDType.kBFloat16
-    raise ValueError(f"Not support the {jax_dtype=}")
-
-
-def jax_dtype_to_nvte_dtype(jax_dtype):
-    """
-    convert jax dtype to NVTE dtype
-    """
-    if jax_dtype == jnp.float32:
-        return NVTEDType.kNVTEFloat32
-    if jax_dtype == jnp.float16:
-        return NVTEDType.kNVTEFloat16
-    if jax_dtype == jnp.bfloat16:
-        return NVTEDType.kNVTEBFloat16
     raise ValueError(f"Not support the {jax_dtype=}")
 
 
@@ -2049,8 +2035,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (batch, max_seqlen, num_head, head_dim)
         output_dtype = qkv_dtype
 
-        backend = transformer_engine_jax.nvte_get_fused_attn_backend(
-            jax_dtype_to_nvte_dtype(qkv_dtype), jax_dtype_to_nvte_dtype(qkv_dtype),
+        backend = transformer_engine_jax.get_fused_attn_backend(
+            jax_dtype_to_te_dtype(qkv_dtype), jax_dtype_to_te_dtype(qkv_dtype),
             NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, attn_bias_type, attn_mask_type,
             dropout_probability, max_seqlen, max_seqlen, head_dim)
 

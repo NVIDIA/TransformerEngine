@@ -64,7 +64,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
     m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
-    m.def("nvte_get_fused_attn_backend", &nvte_get_fused_attn_backend);
+    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
@@ -90,16 +90,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
         .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
         .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED);
-
-    pybind11::enum_<NVTEDType>(m, "NVTEDType", pybind11::module_local())
-        .value("kNVTEByte", NVTEDType::kNVTEByte)
-        .value("kNVTEInt32", NVTEDType::kNVTEInt32)
-        .value("kNVTEInt64", NVTEDType::kNVTEInt64)
-        .value("kNVTEFloat32", NVTEDType::kNVTEFloat32)
-        .value("kNVTEFloat16", NVTEDType::kNVTEFloat16)
-        .value("kNVTEBFloat16", NVTEDType::kNVTEBFloat16)
-        .value("kNVTEFloat8E4M3", NVTEDType::kNVTEFloat8E4M3)
-        .value("kNVTEFloat8E5M2", NVTEDType::kNVTEFloat8E5M2);
 
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
