@@ -8,11 +8,9 @@ import torch
 import transformer_engine_extensions as tex
 
 
-__all__ = []
-
-
 def register_activation(name: str):
     impl = getattr(torch.ops.tex_ts, f"{name.lower()}_ts")
+
     def f(
         inp: torch.Tensor,
         fp8_meta_tensor: tex.FP8TensorMeta,
@@ -39,7 +37,6 @@ def register_activation(name: str):
         )
 
     f.__doc__ = f"""{name} with FP8 output"""
-    __all__.append(name.lower())
     return f
 
 
@@ -48,3 +45,11 @@ relu = register_activation("ReLU")
 geglu = register_activation("GeGLU")
 reglu = register_activation("ReGLU")
 swiglu = register_activation("SwiGLU")
+
+__all__ = [
+    "gelu",
+    "relu",
+    "geglu",
+    "reglu",
+    "swiglu",
+]
