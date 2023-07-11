@@ -49,7 +49,7 @@ class Add(ParamOp):
         self.features = features
 
 
-class LayerNorm(PassthroughOp):
+class LayerNorm(ParamOp):
     features: int
     eps: float
     zero_centered_gamma: bool
@@ -62,7 +62,7 @@ class LayerNorm(PassthroughOp):
         eps: float,
         zero_centered_gamma: bool,
     ):
-        super().__init__()
+        super().__init__(input_type, output_type)
         self.features = features
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
