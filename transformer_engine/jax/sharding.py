@@ -1061,7 +1061,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
                 *shape[:idx_to_extend], fsdp_dim_size, remain_batch_size, *shape[idx_to_extend + 1:]
             ])
 
-            # assume one output only and have the same sharding like input
+            # assume one output only and have the same batch sharding like input
             assert isinstance(sharding_meta.out_axes, dict)
             new_out_axes = {}
             for key in sharding_meta.out_axes:
@@ -1071,13 +1071,6 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
                     new_out_axes[key + 1] = sharding_meta.out_axes[key]
             new_out_axes[idx_to_extend] = fsdp_axis_name
             sharding_meta.out_axes = new_out_axes
-
-            # new_in_axes_for_input = {}
-            # for key in sharding_meta.in_axes[i]:
-            #     if key < idx_to_extend:
-            #         new_in_axes_for_input[key] = sharding_meta.in_axes[i][key]
-            #     else:
-            #         new_in_axes_for_input[key + 1] = sharding_meta.in_axes[i][key]
         else:
             new_shape = shape
             if i in weight_fsdp_dim_map:

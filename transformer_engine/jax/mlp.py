@@ -54,7 +54,7 @@ def geglu(
 
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, None,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index, {})
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
 
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
 
@@ -134,7 +134,7 @@ def fp8_ln_mlp(
     if major_sharding_type is MajorShardingType.SINGLE:
         res = _fp8_mlp(inputs, ln_scale, ln_bias, kernel_1, kernel_2, fp8_max, amax, scale,
                        scale_inv, layernorm_type, activations, zero_centered_gamma, epsilon,
-                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "")
+                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "", "")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -144,7 +144,7 @@ def fp8_ln_mlp(
         ln_sharding_meta = get_elementwise_sharding_meta(first_part_st, inputs.shape,
                                                          ln_scale.shape, dp_dim_index, dp_axis_name,
                                                          tp_axis_name)
-        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, dp_dim_index, {})
+        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, dp_dim_index)
 
         input_tp_index = len(inputs.shape) - 1
         first_dot_sharding_meta = get_dot_sharding_meta(first_part_st, inputs.shape, kernel_1.shape,
@@ -161,7 +161,7 @@ def fp8_ln_mlp(
                                                          contracting_dims, dp_axis_name,
                                                          tp_axis_name)
         second_dot_sharding_meta, _ = extend_fsdp_sharding_meta(second_dot_sharding_meta,
-                                                                dp_dim_index, {})
+                                                                dp_dim_index)
 
         num_of_fp8_meta_kind = 4    # fp8_max, amax, scale, scale_inv
         fp8_sharding_meta = get_fp8_meta_sharding_meta(first_part_st, num_of_fp8_meta_kind,
@@ -259,7 +259,7 @@ def _fp8_mlp_fwd(
         major_sharding_type,
         dp_axis_name,    # pylint: disable=unused-argument
         tp_axis_name,
-        fsdp_axis_name):
+        fsdp_axis_name):    # pylint: disable=unused-argument
     if activations != ('gelu', 'linear'):
         raise NotImplementedError("activations only support ('gelu', 'linear') for now.")
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims

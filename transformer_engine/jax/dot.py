@@ -49,7 +49,8 @@ def fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                        contracting_dims=contracting_dims,
                        sharding_type=sharding_type,
                        dp_axis_name="",
-                       tp_axis_name="")
+                       tp_axis_name="",
+                       fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -64,7 +65,7 @@ def fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
         sharding_meta = get_dot_sharding_meta(sharding_type, inputs.shape, kernel.shape,
                                               dp_dim_index, input_tp_index, kernel_tp_index,
                                               contracting_dims, dp_axis_name, tp_axis_name)
-        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index, {})
+        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         kernel_ = jnp.reshape(kernel, sharding_meta.input_shapes[1])    # 1 for kernel
 
@@ -126,7 +127,7 @@ def _fp8_dot_fwd(
         sharding_type,
         dp_axis_name,    # pylint: disable=unused-argument
         tp_axis_name,
-        fsdp_axis_name):
+        fsdp_axis_name):    # pylint: disable=unused-argument
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
     input_shape_pre = inputs.shape[:min(lhs_contracting_dims)]
     input_shape_suf = inputs.shape[min(lhs_contracting_dims):]
