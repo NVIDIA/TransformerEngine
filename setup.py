@@ -296,7 +296,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax"])
-        add_unique(test_reqs, ["numpy", "praxis"])
+        # Installing with SKIP_HEAD_INSTALLS=true skips jax/fiddle. jax is covered
+        #   in install_reqs, so fiddle is covered in test_reqs
+        add_unique(test_reqs, ["numpy", "praxis @ git+https://github.com/google/praxis.git", "fiddle"])
     if "tensorflow" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
