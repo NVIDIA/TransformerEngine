@@ -1,9 +1,14 @@
-from typing import Any
+from typing import Any, Generic
 from .ops import Op, DType
+from .framework_interface import FrameworkInterface, TensorType
 
 
-class ComputePipeline:
-    def __init__(self, ops: list[Op]):
+class ComputePipeline(Generic[TensorType]):
+    def __init__(
+        self, framework_interface: FrameworkInterface[TensorType], ops: list[Op]
+    ):
+        self._framework_interface = framework_interface
+        self._framework = type(framework_interface)
         self._ops = ops
         self.compile()
 
@@ -48,12 +53,13 @@ class ComputePipeline:
 
     def allocate_parameters(self):
         for op in self._ops:
-            params = op.describe_params()
-            for name, shape in params.items():
-                self.allocate(op.name + "." + name, shape)
+            op_params = op.describe_params()
+            for name, desc in op_params.items():
+                self.allocate(op.name + "." + name, desc.shape)
 
     def allocate(self, name: str, shape: tuple[int, ...]):
-        ...
+        tensor = self._framework.fi_empty(shape)
+        self._framework_interface.fi_register_buffer(name, tensor)
 
 
 class Cast(Op):

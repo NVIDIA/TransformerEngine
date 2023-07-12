@@ -1,10 +1,13 @@
 from typing import Any, Iterable, OrderedDict, overload
+
+import torch
 import torch.nn as nn
 
 from .expand_for_sequential import expand
 from .compute_pipeline import ComputePipeline
 from .compile_env import CompileEnv
 from .ops import Op
+from .pytorch_interface import PytorchInterface
 
 
 class Sequential(nn.Module):
@@ -16,7 +19,7 @@ class Sequential(nn.Module):
     _compile_env: CompileEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _compiled_op_list: list[Op]
-    _pipeline: ComputePipeline
+    _pipeline: ComputePipeline[torch.Tensor]
 
     @overload
     def __init__(self, *modules: nn.Module) -> None:
@@ -61,7 +64,7 @@ class Sequential(nn.Module):
             self._compile_env = compile_env
             self._args_during_compilation = self._args
             self._compiled_op_list = Sequential._compile(self._args, compile_env)
-            self._pipeline = ComputePipeline(self._compiled_op_list)
+            self._pipeline = ComputePipeline(PytorchInterface(), self._compiled_op_list)
         else:
             assert self._compile_env == compile_env
             assert self._args_during_compilation == self._args
@@ -76,7 +79,7 @@ class Sequential(nn.Module):
             modules = args[0].items()
         else:
             args1: tuple[nn.Module, ...] = args  # type: ignore
-            modules = map(lambda p: (str(p[0]), p[1]), enumerate(args1))
+            modules = map(lambda p: (f"seq[{p[0]}]", p[1]), enumerate(args1))
 
         return [
             op.named(name)

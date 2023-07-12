@@ -1,5 +1,6 @@
 from __future__ import annotations
 from abc import abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -10,6 +11,11 @@ class DType(Enum):
     FP32 = "FP32"
     infer = "INFER"
     default = BF16
+
+
+@dataclass
+class ParamDescriptor:
+    shape: tuple[int, ...]
 
 
 class Op:
@@ -27,7 +33,7 @@ class Op:
         return self
 
     @abstractmethod
-    def describe_params(self) -> dict[str, tuple[int, ...]]:
+    def describe_params(self) -> dict[str, ParamDescriptor]:
         ...
 
 
@@ -35,24 +41,24 @@ class PassthroughOp(Op):
     def __init__(self, name: str):
         super().__init__(name, DType.infer, DType.infer)
 
-    def describe_params(self) -> dict[str, tuple[int, ...]]:
+    def describe_params(self) -> dict[str, ParamDescriptor]:
         return {}
 
 
 class ParamOp(Op):
-    _params: dict[str, tuple[int, ...]]
+    _params: dict[str, ParamDescriptor]
 
     def __init__(
         self,
         name: str,
         input_type: DType,
         output_type: DType,
-        **params: tuple[int, ...],
+        **params: ParamDescriptor,
     ):
         super().__init__(name, input_type, output_type)
         self._params = params
 
-    def describe_params(self) -> dict[str, tuple[int, ...]]:
+    def describe_params(self) -> dict[str, ParamDescriptor]:
         return self._params
 
 
@@ -69,7 +75,10 @@ class Gemm(ParamOp):
         out_features: int,
     ):
         super().__init__(
-            name, input_type, output_type, weight=(out_features, in_features)
+            name,
+            input_type,
+            output_type,
+            weight=ParamDescriptor((out_features, in_features)),
         )
         self.in_features = in_features
         self.out_features = out_features
@@ -79,7 +88,9 @@ class Add(ParamOp):
     features: int
 
     def __init__(self, name: str, input_type: DType, output_type: DType, features: int):
-        super().__init__(name, input_type, output_type, bias=(features,))
+        super().__init__(
+            name, input_type, output_type, bias=ParamDescriptor((features,))
+        )
         self.features = features
 
 
@@ -98,7 +109,11 @@ class LayerNorm(ParamOp):
         zero_centered_gamma: bool,
     ):
         super().__init__(
-            name, input_type, output_type, weight=(features,), bias=(features,)
+            name,
+            input_type,
+            output_type,
+            weight=ParamDescriptor((features,)),
+            bias=ParamDescriptor((features,)),
         )
         self.features = features
         self.eps = eps
