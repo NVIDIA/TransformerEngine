@@ -120,6 +120,10 @@ class LayerNorm(ParamOp):
         self.zero_centered_gamma = zero_centered_gamma
 
 
+class Transpose(PassthroughOp):
+    pass
+
+
 class Gelu(PassthroughOp):
     pass
 

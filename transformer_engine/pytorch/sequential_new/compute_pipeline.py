@@ -1,15 +1,19 @@
-from typing import Any, Generic
+from typing import Any, Callable, Generic
 from .ops import Op, DType
 from .framework_interface import FrameworkInterface, TensorType
 
 
 class ComputePipeline(Generic[TensorType]):
     def __init__(
-        self, framework_interface: FrameworkInterface[TensorType], ops: list[Op]
+        self,
+        framework_interface: FrameworkInterface[TensorType],
+        ops: list[Op],
+        extra_transforations: list[Callable[[list[Op]], list[Op]]] = [],
     ):
         self._framework_interface = framework_interface
         self._framework = type(framework_interface)
         self._ops = ops
+        self._extra_transforations = extra_transforations
         self.compile()
 
     def __call__(self, *args: Any, **kwargs: Any):
@@ -40,9 +44,16 @@ class ComputePipeline(Generic[TensorType]):
             if op.output_type is DType.infer:
                 assert next.input_type is not DType.infer
                 op.output_type = next.input_type
+
         # endregion
-        # TODO region auto_parallel
+
+        for transform in self._extra_transforations:
+            self._ops = transform(self._ops)
+
         # region insert_casts
+        class Cast(Op):
+            pass
+
         assert not any(isinstance(m, Cast) for m in self._ops)
         for i, op in enumerate(self._ops[:-1]):
             next = self._ops[i + 1]
@@ -60,10 +71,6 @@ class ComputePipeline(Generic[TensorType]):
     def allocate(self, name: str, shape: tuple[int, ...]):
         tensor = self._framework.fi_empty(shape)
         self._framework_interface.fi_register_buffer(name, tensor)
-
-
-class Cast(Op):
-    pass
 
 
 __all__ = ["ComputePipeline"]

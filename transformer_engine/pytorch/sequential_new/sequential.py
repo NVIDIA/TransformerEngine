@@ -1,4 +1,4 @@
-from typing import Any, Iterable, OrderedDict, overload
+from typing import Any, Callable, Iterable, OrderedDict, overload
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ from .compute_pipeline import ComputePipeline
 from .compile_env import CompileEnv
 from .ops import Op
 from .pytorch_interface import PytorchInterface
+from .model_parallel_transform import model_parallel_transform
 
 
 class Sequential(nn.Module):
@@ -16,24 +17,36 @@ class Sequential(nn.Module):
 
     _had_run: bool
     _args: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
+    _model_parallel: bool
     _compile_env: CompileEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _compiled_op_list: list[Op]
     _pipeline: ComputePipeline[torch.Tensor]
 
     @overload
-    def __init__(self, *modules: nn.Module) -> None:
+    def __init__(self, *modules: nn.Module, model_parallel: bool = False) -> None:
         ...
 
     @overload
-    def __init__(self, module_dict: OrderedDict[str, nn.Module], /) -> None:
+    def __init__(
+        self,
+        module_dict: OrderedDict[str, nn.Module],
+        /,
+        *,
+        model_parallel: bool = False,
+    ) -> None:
         ...
 
-    def __init__(self, *args: nn.Module | OrderedDict[str, nn.Module]):
+    def __init__(
+        self,
+        *args: nn.Module | OrderedDict[str, nn.Module],
+        model_parallel: bool = False,
+    ):
         super().__init__()  # type: ignore
 
         self._had_run = False
         self._args = args
+        self._model_parallel = model_parallel
 
     def __len__(self):
         return len(self._modules)
@@ -64,6 +77,11 @@ class Sequential(nn.Module):
             self._compile_env = compile_env
             self._args_during_compilation = self._args
             self._compiled_op_list = Sequential._compile(self._args, compile_env)
+
+            additional_transforms: list[Callable[[list[Op]], list[Op]]] = []
+            if self._model_parallel:
+                additional_transforms.append(model_parallel_transform)
+
             self._pipeline = ComputePipeline(PytorchInterface(), self._compiled_op_list)
         else:
             assert self._compile_env == compile_env
