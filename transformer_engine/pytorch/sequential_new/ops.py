@@ -1,5 +1,5 @@
 from __future__ import annotations
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 
@@ -18,7 +18,7 @@ class ParamDescriptor:
     shape: tuple[int, ...]
 
 
-class Op:
+class Op(ABC):
     name: str
     input_type: DType
     output_type: DType
@@ -38,8 +38,13 @@ class Op:
 
 
 class PassthroughOp(Op):
-    def __init__(self, name: str):
-        super().__init__(name, DType.infer, DType.infer)
+    def __init__(
+        self,
+        name: str,
+        input_type: DType = DType.infer,
+        output_type: DType = DType.infer,
+    ):
+        super().__init__(name, input_type, output_type)
 
     def describe_params(self) -> dict[str, ParamDescriptor]:
         return {}

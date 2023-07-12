@@ -10,11 +10,12 @@ seq = Sequential(
     nn.Linear(10, 10),
     nn.ReLU(),
     nn.Linear(10, 10),
+    model_parallel=True,
 )
 
 seq._compile_checked(CompileEnv.current())
 
-pprint(seq._pipeline._ops)
+pprint([type(op).__name__ for op in seq._pipeline._ops])
 
 assert isinstance(seq._pipeline._framework_interface, PytorchInterface)
 

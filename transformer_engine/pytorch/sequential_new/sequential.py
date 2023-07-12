@@ -82,7 +82,9 @@ class Sequential(nn.Module):
             if self._model_parallel:
                 additional_transforms.append(model_parallel_transform)
 
-            self._pipeline = ComputePipeline(PytorchInterface(), self._compiled_op_list)
+            self._pipeline = ComputePipeline(
+                PytorchInterface(), self._compiled_op_list, additional_transforms
+            )
         else:
             assert self._compile_env == compile_env
             assert self._args_during_compilation == self._args

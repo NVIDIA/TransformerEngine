@@ -1,5 +1,5 @@
 from typing import Any, Callable, Generic
-from .ops import Op, DType
+from .ops import Op, DType, PassthroughOp
 from .framework_interface import FrameworkInterface, TensorType
 
 
@@ -24,7 +24,13 @@ class ComputePipeline(Generic[TensorType]):
         self.allocate_parameters()
 
     def transform_op_list(self):
-        # region infer_types
+        for transform in self._extra_transforations:
+            self.infer_types()
+            self._ops = transform(self._ops)
+        self.infer_types()
+        self.insert_casts()
+
+    def infer_types(self):
         if len(self._ops) >= 2:
             if self._ops[0].output_type is DType.infer:
                 assert self._ops[1].input_type is not DType.infer
@@ -40,27 +46,19 @@ class ComputePipeline(Generic[TensorType]):
             next = self._ops[i + 1]
 
             if op.input_type is DType.infer:
+                assert prev.output_type is not DType.infer
                 op.input_type = prev.output_type
             if op.output_type is DType.infer:
                 assert next.input_type is not DType.infer
                 op.output_type = next.input_type
 
-        # endregion
-
-        for transform in self._extra_transforations:
-            self._ops = transform(self._ops)
-
-        # region insert_casts
-        class Cast(Op):
-            pass
-
+    def insert_casts(self):
         assert not any(isinstance(m, Cast) for m in self._ops)
         for i, op in enumerate(self._ops[:-1]):
             next = self._ops[i + 1]
             if op.output_type is not next.input_type:
                 name = f"Cast({op.name}, {next.name})"
                 self._ops.insert(i + 1, Cast(name, op.output_type, next.input_type))
-        # endregion
 
     def allocate_parameters(self):
         for op in self._ops:
@@ -74,3 +72,7 @@ class ComputePipeline(Generic[TensorType]):
 
 
 __all__ = ["ComputePipeline"]
+
+
+class Cast(PassthroughOp):
+    pass
