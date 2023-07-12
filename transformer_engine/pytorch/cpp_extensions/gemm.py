@@ -9,6 +9,7 @@ import transformer_engine_extensions as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
+
 __all__ = ['gemm', 'fp8_gemm']
 
 
