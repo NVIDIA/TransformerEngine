@@ -89,6 +89,24 @@ class Gemm(ParamOp):
         self.out_features = out_features
 
 
+class DotProductAttention(PassthroughOp):
+    features_per_head: int
+
+    def __init__(
+        self,
+        name: str,
+        input_type: DType,
+        output_type: DType,
+        features_per_head: int,
+    ):
+        super().__init__(
+            name,
+            input_type,
+            output_type,
+        )
+        self.features_per_head = features_per_head
+
+
 class Add(ParamOp):
     features: int
 
@@ -141,7 +159,7 @@ class ResidualBegin(PassthroughOp):
     end: ResidualEnd | None = None
 
     def __init__(self, name: str, end: ResidualEnd | None = None):
-        super().__init__(name)
+        super().__init__(name, DType.default, DType.default)
         self.end = end
 
 
@@ -149,5 +167,5 @@ class ResidualEnd(PassthroughOp):
     begin: ResidualBegin
 
     def __init__(self, name: str, begin: ResidualBegin):
-        super().__init__(name)
+        super().__init__(name, DType.default, DType.default)
         self.begin = begin

@@ -31,34 +31,52 @@ class ComputePipeline(Generic[TensorType]):
         self.insert_casts()
 
     def infer_types(self):
-        if len(self._ops) >= 2:
-            if self._ops[0].output_type is DType.infer:
-                assert self._ops[1].input_type is not DType.infer
-                self._ops[0].output_type = self._ops[1].input_type
-            if self._ops[-1].input_type is DType.infer:
-                assert self._ops[-2].output_type is not DType.infer
-                self._ops[-1].input_type = self._ops[-2].output_type
-        if self._ops[-1].output_type is DType.infer:
-            self._ops[-1].output_type = DType.default
-
-        for i, op in enumerate(self._ops[1:-1]):
-            prev = self._ops[i - 1]
-            next = self._ops[i + 1]
+        for i, op in enumerate(self._ops):
+            prev = self._ops[i - 1] if i > 0 else None
+            next = self._ops[i + 1] if i < len(self._ops) - 1 else None
 
             if op.input_type is DType.infer:
-                assert prev.output_type is not DType.infer
-                op.input_type = prev.output_type
+                if prev is None:
+                    pass
+                elif prev.output_type is not DType.infer:
+                    op.input_type = prev.output_type
+                elif op.output_type is not DType.infer:
+                    op.input_type = op.output_type
+                elif next is not None and next.input_type is not DType.infer:
+                    op.input_type = next.input_type
+                else:
+                    raise RuntimeError("Cannot infer input type")
             if op.output_type is DType.infer:
-                assert next.input_type is not DType.infer
-                op.output_type = next.input_type
+                if next is None:
+                    pass
+                elif next.input_type is not DType.infer:
+                    op.output_type = next.input_type
+                elif op.input_type is not DType.infer:
+                    op.output_type = op.input_type
+                elif prev is not None and prev.output_type is not DType.infer:
+                    op.output_type = prev.output_type
+                else:
+                    for next in self._ops[i + 2 :]:
+                        if next.input_type is not DType.infer:
+                            op.output_type = next.input_type
+                            break
+                        elif next.output_type is not DType.infer:
+                            op.output_type = next.output_type
+                            break
+                    if op.output_type is DType.infer:
+                        raise RuntimeError("Cannot infer output type")
 
     def insert_casts(self):
         assert not any(isinstance(m, Cast) for m in self._ops)
-        for i, op in enumerate(self._ops[:-1]):
+        i = 0
+        while i < len(self._ops) - 1:
+            op = self._ops[i]
             next = self._ops[i + 1]
             if op.output_type is not next.input_type:
                 name = f"Cast({op.name}, {next.name})"
                 self._ops.insert(i + 1, Cast(name, op.output_type, next.input_type))
+                i += 1  # skip cast
+            i += 1
 
     def allocate_parameters(self):
         for op in self._ops:

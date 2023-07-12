@@ -13,6 +13,7 @@ from .ops import (
     ResidualEnd,
     LayerNorm,
     Transpose,
+    DotProductAttention,
 )
 
 
@@ -21,6 +22,8 @@ def model_parallel_transform(ops: list[Op]) -> list[Op]:
     for op in ops:
         if isinstance(op, Gemm):
             graph.append(_ugemm(op))
+        elif isinstance(op, DotProductAttention):
+            graph.append(_dot_product_attention(op))
         elif type(op) in POINTWISE_OPS:
             graph.append(_pointwise(op))
         elif type(op) in ROWWISE_OPS:
@@ -125,8 +128,8 @@ def _ugemm(gemm: Gemm) -> Node:
     cgemm = GemmColParallel(
         "cgemm", gemm.input_type, gemm.output_type, gemm.in_features, gemm.out_features
     ).named(gemm.name)
-    rs = ReduceScatter("rs").named(gemm.name)
-    ag = AllGather("ag").named(gemm.name)
+    rs = ReduceScatter("rs", gemm.output_type, gemm.output_type).named(gemm.name)
+    ag = AllGather("ag", gemm.input_type, gemm.input_type).named(gemm.name)
 
     return Node(
         [
@@ -135,6 +138,17 @@ def _ugemm(gemm: Gemm) -> Node:
             Connection(EndPoint.NCS, EndPoint.PA, [rgemm]),
             Connection(EndPoint.NCS, EndPoint.NRS, [rgemm, rs]),
             Connection(EndPoint.NRS, EndPoint.NCS, [ag, cgemm]),
+        ]
+    )
+
+
+def _dot_product_attention(dpa: DotProductAttention) -> Node:
+    return Node(
+        [
+            Connection(EndPoint.NA, EndPoint.NA, [dpa]),
+            Connection(EndPoint.NA, EndPoint.NCS, [dpa]),
+            Connection(EndPoint.NCS, EndPoint.NCS, [dpa]),
+            Connection(EndPoint.NCS, EndPoint.NA, [dpa]),
         ]
     )
 

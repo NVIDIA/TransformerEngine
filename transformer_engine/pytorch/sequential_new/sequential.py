@@ -52,13 +52,17 @@ class Sequential(nn.Module):
         return len(self._modules)
 
     def __add__(self, other: "Sequential") -> "Sequential":
-        return Sequential(self, other)
+        return Sequential(
+            self, other, model_parallel=self._model_parallel and other._model_parallel
+        )
 
     def __mul__(self, other: int):
         if other <= 0:
             raise ValueError("Repetition factor must be >= 1")
         else:
-            return Sequential(*(self for _ in range(other)))
+            return Sequential(
+                *(self for _ in range(other)), model_parallel=self._model_parallel
+            )
 
     def __rmul__(self, other: int):
         return self * other
@@ -76,7 +80,12 @@ class Sequential(nn.Module):
             self._had_run = True
             self._compile_env = compile_env
             self._args_during_compilation = self._args
-            self._compiled_op_list = Sequential._compile(self._args, compile_env)
+            modules = Sequential._flatten(self._args)
+            self._compiled_op_list = [
+                op.named(name)
+                for name, module in modules
+                for op in expand(module, compile_env)
+            ]
 
             additional_transforms: list[Callable[[list[Op]], list[Op]]] = []
             if self._model_parallel:
@@ -90,22 +99,28 @@ class Sequential(nn.Module):
             assert self._args_during_compilation == self._args
 
     @staticmethod
-    def _compile(
-        args: tuple[nn.Module | OrderedDict[str, nn.Module], ...],
-        compile_env: CompileEnv,
-    ):
-        modules: Iterable[tuple[str, nn.Module]]
+    def _flatten(
+        args: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
+    ) -> list[tuple[str, nn.Module]]:
+        modules: list[tuple[str, nn.Module]]
         if len(args) == 1 and isinstance(args[0], OrderedDict):
-            modules = args[0].items()
+            modules = list(args[0].items())
         else:
             args1: tuple[nn.Module, ...] = args  # type: ignore
-            modules = map(lambda p: (f"seq[{p[0]}]", p[1]), enumerate(args1))
+            modules = list(map(lambda p: (f"{p[0]}", p[1]), enumerate(args1)))
 
-        return [
-            op.named(name)
-            for name, module in modules
-            for op in expand(module, compile_env)
-        ]
+        flattened: list[tuple[str, nn.Module]] = []
+        for name, module in modules:
+            submodules: list[tuple[str, nn.Module]]
+            if isinstance(module, Sequential):
+                submodules = Sequential._flatten(module._args)
+                for i, (submodule_name, submodule) in enumerate(submodules):
+                    submodules[i] = (f"{name}[{submodule_name}]", submodule)
+            else:
+                submodules = [(name, module)]
+            flattened.extend(submodules)
+
+        return flattened
 
 
 __all__ = ["Sequential"]
