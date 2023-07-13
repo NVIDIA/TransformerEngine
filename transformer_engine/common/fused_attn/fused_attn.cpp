@@ -79,7 +79,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   } else {
     backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
-  printf("------------ fused attn backend is %d ----------------\n",(int)backend);
   return backend;
 }
 
