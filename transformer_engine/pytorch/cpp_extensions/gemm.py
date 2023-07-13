@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_extensions as tex
 from ..constants import TE_DType
+from ..utils import assert_dim_for_fp8_exec
 
 
 __all__ = ['gemm', 'fp8_gemm']
@@ -41,6 +42,8 @@ def fp8_gemm(
     empty_tensor = torch.Tensor()
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_index is not None
+    assert_dim_for_fp8_exec(A)
+    assert_dim_for_fp8_exec(B)
 
     return_output = False
     if out is None:
