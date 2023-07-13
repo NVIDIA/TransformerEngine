@@ -215,7 +215,7 @@ class FusedScaleMaskSoftmax(nn.Module):
     fused operation: scaling + mask + softmax
 
     Arguments:
-        attn_mask_type: attention mask type ('padding', 'causal', or None)
+        attn_mask_type: attention mask type ('padding', 'causal', 'no_mask', or 'arbitrary')
         mask_func: mask function to be applied.
         softmax_in_fp32: if true, softmax in performed at fp32 precision.
     """

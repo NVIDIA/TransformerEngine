@@ -1038,8 +1038,8 @@ def test_export_layernorm_mlp(
 @skip_FP8
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type", [
-    (torch.float32,  False,    None),        # calls forward_torch_softmax
-    (torch.float32,  True,     None),        # calls forward_torch_softmax
+    (torch.float32,  False,    "no_mask"),   # calls forward_torch_softmax
+    (torch.float32,  True,     "no_mask"),   # calls forward_torch_softmax
     (torch.float16,  False,    "causal"),    # calls ScaledUpperTriangMaskedSoftmax
     (torch.float16,  True,     "arbitrary"), # calls ScaledMaskedSoftmax
     (torch.float16,  False,    "no_mask"),   # calls ScaledSoftmax
