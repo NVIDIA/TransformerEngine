@@ -696,13 +696,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.reset_layer_norm_parameters()
 
         if not skip_weight_param_allocation:
-            self.register_buffer("weight_tensor",
-                                 torch.empty(
-                                    self.out_features,
-                                    self.in_features,
-                                    device=torch.cuda.current_device(),
-                                    dtype=params_dtype),
-                                 persistent=False)
+            self.weight_tensor = torch.empty(
+                self.out_features, self.in_features,
+                device=torch.cuda.current_device(),
+                dtype=params_dtype)
 
             initialize_affine_weight_gpu(
                 self.weight_tensor,
@@ -713,17 +710,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             if self.use_bias:
-                self.register_buffer("bias_tensor",
-                                     torch.empty(
-                                         self.out_features,
-                                         device=torch.cuda.current_device(),
-                                         dtype=params_dtype),
-                                     persistent=False)
+                self.bias_tensor = torch.empty(
+                    self.out_features,
+                    device=torch.cuda.current_device(),
+                    dtype=params_dtype)
             else:
-                self.register_buffer("bias_tensor",
-                                     torch.Tensor().to(dtype=params_dtype,
-                                                       device=torch.cuda.current_device()),
-                                     persistent=False)
+                self.bias_tensor = torch.Tensor().to(dtype=params_dtype,
+                                                     device=torch.cuda.current_device())
 
             with torch.no_grad():
                 self.bias_tensor.zero_()
@@ -760,10 +753,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                     )
                 else:
-                    self.register_buffer(bname,
-                                         torch.Tensor().to(dtype=params_dtype,
-                                                           device=torch.cuda.current_device()),
-                                         persistent=False)
+                    setattr(self, bname, torch.Tensor().to(dtype=params_dtype,
+                                                           device=torch.cuda.current_device()))
 
                 if parallel_mode == "column":
                     set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
