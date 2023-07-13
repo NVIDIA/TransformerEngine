@@ -27,7 +27,7 @@ from ..utils import (
     divide,
     get_default_init_method,
     cast_if_needed,
-    assert_dim_for_fp8_forward_exec,
+    assert_dim_for_fp8_exec,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -99,8 +99,8 @@ class _LayerNormLinear(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
 
         if fp8:
-            assert_dim_for_fp8_forward_exec(inputmat)
-            assert_dim_for_fp8_forward_exec(weight)
+            assert_dim_for_fp8_exec(inputmat)
+            assert_dim_for_fp8_exec(weight)
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
