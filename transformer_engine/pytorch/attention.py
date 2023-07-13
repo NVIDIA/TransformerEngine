@@ -49,6 +49,7 @@ from transformer_engine.pytorch.jit import jit_fuser
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
+_cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 
 
 __all__ = ["DotProductAttention"]
@@ -574,14 +575,15 @@ class FlashAttention(torch.nn.Module):
             for x in [query_layer, key_layer, value_layer]
         ]
 
+        global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
         if self.attn_mask_type != 'padding':
-            self.cu_seqlens_q = torch.arange(
+            _cu_seqlens_q = torch.arange(
                 0,
                 (batch_size + 1) * max_seqlen_q,
                 step=max_seqlen_q,
                 dtype=torch.int32,
                 device=query_layer.device)
-            self.cu_seqlens_kv = torch.arange(
+            _cu_seqlens_kv = torch.arange(
                 0,
                 (batch_size + 1) * max_seqlen_kv,
                 step=max_seqlen_kv,
@@ -596,33 +598,31 @@ class FlashAttention(torch.nn.Module):
                     max_seqlen_q == max_seqlen_kv
                 ), "Maximum sequence length for Q and KV should be the same."
                 if self.layer_number == 1:
-                    self.cu_seqlens_q, self.indices_q = get_cu_seqlens_and_indices(attention_mask)
-                self.cu_seqlens_kv = self.cu_seqlens_q
+                    _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
+                _cu_seqlens_kv = _cu_seqlens_q
                 query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
-                    self.indices_q, query_layer, key_layer, value_layer
+                    _indices_q, query_layer, key_layer, value_layer
                 )
             else:
                 if self.layer_number == 1:
-                    self.cu_seqlens_q, self.indices_q = (
-                        get_cu_seqlens_and_indices(attention_mask[0]))
-                    self.cu_seqlens_kv, self.indices_kv = (
-                        get_cu_seqlens_and_indices(attention_mask[1]))
-                query_layer_packed = PackTensors.apply(self.indices_q, query_layer)
+                    _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask[0])
+                    _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
+                query_layer_packed = PackTensors.apply(_indices_q, query_layer)
                 key_layer_packed, value_layer_packed = PackTensors.apply(
-                    self.indices_kv, key_layer, value_layer
+                    _indices_kv, key_layer, value_layer
                 )
 
         with self.attention_dropout_ctx():
             output = flash_attn_unpadded_func(
                 query_layer_packed, key_layer_packed, value_layer_packed,
-                self.cu_seqlens_q, self.cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
+                _cu_seqlens_q, _cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=self.causal,
                 deterministic=self.deterministic,
             )
 
         if self.attn_mask_type == 'padding':
-            output = UnpackTensor.apply(self.indices_q, batch_size * max_seqlen_q, output)
+            output = UnpackTensor.apply(_indices_q, batch_size * max_seqlen_q, output)
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
         return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
