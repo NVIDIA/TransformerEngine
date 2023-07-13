@@ -31,6 +31,7 @@ class _LayerNorm(torch.autograd.Function):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        is_grad_enabled: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -38,7 +39,7 @@ class _LayerNorm(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.view((-1, in_features))
 
-        if torch.is_grad_enabled():
+        if is_grad_enabled:
             ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
                 ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
             ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
@@ -61,7 +62,7 @@ class _LayerNorm(torch.autograd.Function):
             d_ln_out, inputmat, mu, rsigma, ln_weight,
             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
@@ -181,7 +182,8 @@ class LayerNorm(torch.nn.Module):
             self.eps,
             self.fwd_ln_sm_margin,
             self.bwd_ln_sm_margin,
-            self.zero_centered_gamma
+            self.zero_centered_gamma,
+            torch.is_grad_enabled()
         )
 
         return fwd_fn(*args)
