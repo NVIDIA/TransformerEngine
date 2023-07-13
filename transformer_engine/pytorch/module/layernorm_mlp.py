@@ -1048,10 +1048,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
             set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
         else:
-            self.register_buffer("fc1_bias",
-                                 torch.Tensor().to(dtype=params_dtype,
-                                                   device=torch.cuda.current_device()),
-                                 persistent=False)
+            self.fc1_bias = torch.Tensor().to(dtype=params_dtype,
+                                              device=torch.cuda.current_device())
 
         with torch.no_grad():
             self.fc1_bias.zero_()
@@ -1082,10 +1080,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 )
             )
         else:
-            self.register_buffer("fc2_bias",
-                                 torch.Tensor().to(dtype=params_dtype,
-                                                   device=torch.cuda.current_device()),
-                                 persistent=False)
+            self.fc2_bias = torch.Tensor().to(dtype=params_dtype,
+                                              device=torch.cuda.current_device())
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
