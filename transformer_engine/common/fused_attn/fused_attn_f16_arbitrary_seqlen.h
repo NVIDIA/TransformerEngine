@@ -18,7 +18,7 @@
 #include "common/common.h"
 
 namespace transformer_engine {
-#if (CUDNN_VERSION >= 8903)
+#if (CUDNN_VERSION >= 8900)
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(size_t batch, size_t max_seqlen, size_t num_head,
                                       size_t head_size, bool is_training, float attn_scale,
                                       float p_dropout, NVTE_QKV_Layout qkv_layout,
@@ -38,7 +38,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                       const Tensor *cu_seqlens, const Tensor *rng_state,
                                       Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
-#endif  // CUDNN_VERSION >= 8903
+#endif  // CUDNN_VERSION >= 8900
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_

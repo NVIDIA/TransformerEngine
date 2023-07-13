@@ -407,7 +407,7 @@ class MultiHeadAttention(nn.Module):
                 reason += f"kv_seqlen in {fused_attn_supported_seqlen} is required " \
                           f"but got {kv_seqlen=}, "
             if not is_fused_attn_kernel_available():
-                reason += "GPU arch >= Ampere and cuDNN >= 8.9.3 are required, "
+                reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
             if self.head_dim != 64:
                 reason += f"head_dim should be 64 but got {self.head_dim}, "
 

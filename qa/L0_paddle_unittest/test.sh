@@ -5,4 +5,7 @@
 set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
+export LD_LIBRARY_PATH=/opt/cudnn/lib64:$LD_LIBRARY_PATH
+echo LD_LIBRARY_PATH is $LD_LIBRARY_PATH
+echo CUDNN_PATH is $CUDNN_PATH
 pytest -Wignore -v $TE_PATH/tests/paddle

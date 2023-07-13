@@ -15,7 +15,7 @@
 #include "../common.h"
 #include "utils.h"
 
-#if (CUDNN_VERSION >= 8903)
+#if (CUDNN_VERSION >= 8901)
 #define Q_ID 1
 #define K_ID 2
 #define V_ID 3
@@ -1506,4 +1506,4 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     }
 }
 }  // namespace transformer_engine
-#endif  // CUDNN_VERSION >= 8903
+#endif  // CUDNN_VERSION >= 8901
