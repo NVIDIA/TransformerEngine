@@ -18,9 +18,10 @@ def _gemm_param_init_methods(te: bool, in_features: int):
             fi.zeros,
         )
     else:
+        k = 1 / sqrt(in_features)
         return (
-            partial(fi.uniform, -1 / sqrt(in_features), 1 / sqrt(in_features)),
-            partial(fi.uniform, -1 / sqrt(in_features), 1 / sqrt(in_features)),
+            partial(fi.uniform, -sqrt(k), sqrt(k)),
+            partial(fi.uniform, -sqrt(k), sqrt(k)),
         )
 
 
