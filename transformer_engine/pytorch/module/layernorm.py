@@ -11,7 +11,9 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 
 import transformer_engine_extensions as tex
-
+from ..cpp_extensions import (
+    layernorm_fwd_inf,
+ )
 
 __all__ = ["LayerNorm"]
 
@@ -36,13 +38,16 @@ class _LayerNorm(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.view((-1, in_features))
 
-        ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
-                                               ln_bias, eps, fwd_ln_sm_margin,
-                                               zero_centered_gamma)
-        ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
-        ctx.inp_shape = inp.shape
-        ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
-        ctx.zero_centered_gamma = zero_centered_gamma
+        if torch.is_grad_enabled():
+            ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
+                ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
+            ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
+            ctx.inp_shape = inp.shape
+            ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
+        else:
+            ln_out, mu, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
+                ln_bias, eps, zero_centered_gamma), None, None
         return ln_out.view_as(inp)
 
     @staticmethod
@@ -162,7 +167,14 @@ class LayerNorm(torch.nn.Module):
         if hasattr(self, "layer_norm_bias"):
             setattr(self, "bias", self.layer_norm_bias)
 
-        return _LayerNorm.apply(
+        if torch.is_grad_enabled():
+            fwd_fn = _LayerNorm.apply
+            args = []
+        else:
+            fwd_fn = _LayerNorm.forward
+            args = [None]
+
+        args += (
             inp,
             self.weight,
             self.bias,
@@ -171,3 +183,5 @@ class LayerNorm(torch.nn.Module):
             self.bwd_ln_sm_margin,
             self.zero_centered_gamma
         )
+
+        return fwd_fn(*args)

@@ -620,20 +620,13 @@ def test_export_layernorm(
     class Test_Layernorm(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            normalized_shape = torch.Size(inp.shape[1:])
-            self.weight = torch.randn(*normalized_shape, device="cuda",
-                dtype=torch.float if fake_bf16_io else precision)
-            self.bias = torch.zeros(*normalized_shape, device="cuda",
-                dtype=torch.float if fake_bf16_io else precision)
-            self.eps = 1e-6 # An arbitrary small value
+            eps = 1e-6 # An arbitrary small value
+            dtype = torch.float if fake_bf16_io else precision
+            self.ln = te.LayerNorm(inp_shape[1], eps, params_dtype=dtype,
+                zero_centered_gamma=False).eval().cuda()
 
         def forward(self, inp):
-            ret = texcpp.layernorm_fwd_inf(
-                inp,
-                self.weight,
-                self.bias,
-                self.eps,
-                zero_centered_gamma)
+            ret = self.ln(inp)
             return ret
 
     class TestFP8_Layernorm(nn.Module):
