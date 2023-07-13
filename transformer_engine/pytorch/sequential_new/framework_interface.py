@@ -35,20 +35,6 @@ class FrameworkInterface(ABC, Generic[TensorType]):
     def fi_register_buffer(self, name: str, tensor: TensorType) -> None:
         ...
 
-    @abstractmethod
-    def __getattr__(self, name: str) -> TensorType | FrameworkInterface[TensorType]:
-        ...
-
-    @abstractmethod
-    def __setattr__(
-        self, name: str, value: TensorType | FrameworkInterface[TensorType]
-    ) -> None:
-        ...
-
-    @abstractmethod
-    def __delattr__(self, name: str):
-        ...
-
 
 def empty(fi: FrameworkInterface[TensorType], shape: tuple[int, ...]) -> TensorType:
     return fi.fi_empty(shape)

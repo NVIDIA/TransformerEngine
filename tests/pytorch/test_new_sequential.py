@@ -43,4 +43,4 @@ pprint(
 
 assert isinstance(transformer._pipeline._framework_interface, PytorchInterface)
 
-# pprint(seq._pipeline._framework_interface._buffers)
+pprint(transformer._pipeline._framework_interface.__dict__)

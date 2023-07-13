@@ -21,7 +21,7 @@ class ParamDescriptor:
     _constructor: ...  # Callable[[FrameworkInterface[TensorType]], TensorType]
 
     def construct(self, framework: type[FrameworkInterface[TensorType]]) -> TensorType:
-        return self._constructor(framework)
+        return self._constructor(framework, self._shape)
 
 
 # Base classes

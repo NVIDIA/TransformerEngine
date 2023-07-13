@@ -4,7 +4,7 @@ from torch import nn
 from .framework_interface import FrameworkInterface
 
 
-class PytorchInterface(nn.Module, FrameworkInterface[torch.Tensor]):
+class PytorchInterface(FrameworkInterface[torch.Tensor], nn.Module):
     @staticmethod
     def fi_empty(shape: tuple[int, ...]):
         return torch.empty(shape)
@@ -28,13 +28,3 @@ class PytorchInterface(nn.Module, FrameworkInterface[torch.Tensor]):
     def fi_register_buffer(self, name: str, tensor: torch.Tensor):
         name = name.replace(".", "_")
         self.register_buffer(name, tensor, False)
-
-    def __getattr__(self, name: str) -> torch.Tensor | PytorchInterface:
-        attr = super().__getattr__(name)
-        if isinstance(attr, nn.Module):
-            return PytorchInterface(attr)
-        else:
-            return attr
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)  # type: ignore
