@@ -18,6 +18,7 @@ class ParamDescriptor:
     shape: tuple[int, ...]
 
 
+# Base classes
 class Op(ABC):
     name: str
     input_type: DType
@@ -67,56 +68,6 @@ class ParamOp(Op):
         return self._params
 
 
-class Gemm(ParamOp):
-    in_features: int
-    out_features: int
-
-    def __init__(
-        self,
-        name: str,
-        input_type: DType,
-        output_type: DType,
-        in_features: int,
-        out_features: int,
-    ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-            weight=ParamDescriptor((out_features, in_features)),
-        )
-        self.in_features = in_features
-        self.out_features = out_features
-
-
-class DotProductAttention(PassthroughOp):
-    features_per_head: int
-
-    def __init__(
-        self,
-        name: str,
-        input_type: DType,
-        output_type: DType,
-        features_per_head: int,
-    ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-        )
-        self.features_per_head = features_per_head
-
-
-class Add(ParamOp):
-    features: int
-
-    def __init__(self, name: str, input_type: DType, output_type: DType, features: int):
-        super().__init__(
-            name, input_type, output_type, bias=ParamDescriptor((features,))
-        )
-        self.features = features
-
-
 class LayerNorm(ParamOp):
     features: int
     eps: float
@@ -143,18 +94,64 @@ class LayerNorm(ParamOp):
         self.zero_centered_gamma = zero_centered_gamma
 
 
+# Linear
+class Gemm(ParamOp):
+    in_features: int
+    out_features: int
+
+    def __init__(
+        self,
+        name: str,
+        input_type: DType,
+        output_type: DType,
+        in_features: int,
+        out_features: int,
+    ):
+        super().__init__(
+            name,
+            input_type,
+            output_type,
+            weight=ParamDescriptor((out_features, in_features)),
+        )
+        self.in_features = in_features
+        self.out_features = out_features
+
+
+class Add(ParamOp):
+    features: int
+
+    def __init__(self, name: str, input_type: DType, output_type: DType, features: int):
+        super().__init__(
+            name, input_type, output_type, bias=ParamDescriptor((features,))
+        )
+        self.features = features
+
+
+# Transpose
 class Transpose(PassthroughOp):
     pass
 
 
-class Gelu(PassthroughOp):
-    pass
+# Attention
+class DotProductAttention(PassthroughOp):
+    features_per_head: int
+
+    def __init__(
+        self,
+        name: str,
+        input_type: DType,
+        output_type: DType,
+        features_per_head: int,
+    ):
+        super().__init__(
+            name,
+            input_type,
+            output_type,
+        )
+        self.features_per_head = features_per_head
 
 
-class Relu(PassthroughOp):
-    pass
-
-
+# Residual
 class ResidualBegin(PassthroughOp):
     end: ResidualEnd | None = None
 
@@ -169,3 +166,12 @@ class ResidualEnd(PassthroughOp):
     def __init__(self, name: str, begin: ResidualBegin):
         super().__init__(name, DType.default, DType.default)
         self.begin = begin
+
+
+# Activation
+class Gelu(PassthroughOp):
+    pass
+
+
+class Relu(PassthroughOp):
+    pass
