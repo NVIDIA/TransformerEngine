@@ -5,7 +5,7 @@ from math import inf
 from .ops import (
     Op,
     Gemm,
-    Add,
+    Bias,
     Gelu,
     PassthroughOp,
     Relu,
@@ -35,7 +35,7 @@ def model_parallel_transform(ops: list[Op]) -> list[Op]:
     return _bfs01(graph)
 
 
-POINTWISE_OPS = [Add, Gelu, Relu, ResidualBegin, ResidualEnd]
+POINTWISE_OPS = [Bias, Gelu, Relu, ResidualBegin, ResidualEnd]
 ROWWISE_OPS = [LayerNorm]
 
 
@@ -123,10 +123,20 @@ class Node:
 
 def _ugemm(gemm: Gemm) -> Node:
     rgemm = GemmRowParallel(
-        "rgemm", gemm.input_type, gemm.output_type, gemm.in_features, gemm.out_features
+        "rgemm",
+        gemm.input_type,
+        gemm.output_type,
+        gemm.in_features,
+        gemm.out_features,
+        gemm.init_method,
     ).named(gemm.name)
     cgemm = GemmColParallel(
-        "cgemm", gemm.input_type, gemm.output_type, gemm.in_features, gemm.out_features
+        "cgemm",
+        gemm.input_type,
+        gemm.output_type,
+        gemm.in_features,
+        gemm.out_features,
+        gemm.init_method,
     ).named(gemm.name)
     rs = ReduceScatter("rs", gemm.output_type, gemm.output_type).named(gemm.name)
     ag = AllGather("ag", gemm.input_type, gemm.input_type).named(gemm.name)
@@ -186,7 +196,7 @@ def _pointwise(op: Op) -> Node:
         [
             Connection(EndPoint.NA, EndPoint.NA, [op]),
             Connection(EndPoint.NCS, EndPoint.NCS, [op]),
-            # TODO: for ex. Add could work with PA if it was divided
+            # TODO: for ex. Bias could work with PA if it was divided
             Connection(EndPoint.NRS, EndPoint.NRS, [op]),
         ]
     )

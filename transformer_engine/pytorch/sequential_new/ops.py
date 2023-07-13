@@ -2,6 +2,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from . import framework_interface as fi
+from .framework_interface import FrameworkInterface, TensorType
 
 
 class DType(Enum):
@@ -15,7 +17,11 @@ class DType(Enum):
 
 @dataclass
 class ParamDescriptor:
-    shape: tuple[int, ...]
+    _shape: tuple[int, ...]
+    _constructor: ...  # Callable[[FrameworkInterface[TensorType]], TensorType]
+
+    def construct(self, framework: type[FrameworkInterface[TensorType]]) -> TensorType:
+        return self._constructor(framework)
 
 
 # Base classes
@@ -87,8 +93,10 @@ class LayerNorm(ParamOp):
             name,
             input_type,
             output_type,
-            weight=ParamDescriptor((features,)),
-            bias=ParamDescriptor((features,)),
+            weight=ParamDescriptor(
+                (features,), fi.zeros if zero_centered_gamma else fi.ones
+            ),
+            bias=ParamDescriptor((features,), fi.zeros),
         )
         self.features = features
         self.eps = eps
@@ -99,6 +107,7 @@ class LayerNorm(ParamOp):
 class Gemm(ParamOp):
     in_features: int
     out_features: int
+    init_method: ...
 
     def __init__(
         self,
@@ -107,25 +116,39 @@ class Gemm(ParamOp):
         output_type: DType,
         in_features: int,
         out_features: int,
+        init_method: ...,
     ):
         super().__init__(
             name,
             input_type,
             output_type,
-            weight=ParamDescriptor((out_features, in_features)),
+            weight=ParamDescriptor((out_features, in_features), init_method),
         )
         self.in_features = in_features
         self.out_features = out_features
+        self.init_method = init_method
 
 
-class Add(ParamOp):
+class Bias(ParamOp):
     features: int
+    init_method: ...
 
-    def __init__(self, name: str, input_type: DType, output_type: DType, features: int):
+    def __init__(
+        self,
+        name: str,
+        input_type: DType,
+        output_type: DType,
+        features: int,
+        init_method: ...,
+    ):
         super().__init__(
-            name, input_type, output_type, bias=ParamDescriptor((features,))
+            name,
+            input_type,
+            output_type,
+            bias=ParamDescriptor((features,), init_method),
         )
         self.features = features
+        self.init_method = init_method
 
 
 # Transpose

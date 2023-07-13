@@ -21,7 +21,7 @@ class ComputePipeline(Generic[TensorType]):
 
     def compile(self):
         self.transform_op_list()
-        self.allocate_parameters()
+        self.construct_parameters()
 
     def transform_op_list(self):
         for transform in self._extra_transforations:
@@ -78,15 +78,13 @@ class ComputePipeline(Generic[TensorType]):
                 i += 1  # skip cast
             i += 1
 
-    def allocate_parameters(self):
+    def construct_parameters(self):
         for op in self._ops:
             op_params = op.describe_params()
             for name, desc in op_params.items():
-                self.allocate(op.name + "." + name, desc.shape)
-
-    def allocate(self, name: str, shape: tuple[int, ...]):
-        tensor = self._framework.fi_empty(shape)
-        self._framework_interface.fi_register_buffer(name, tensor)
+                name = op.name + "." + name
+                param = desc.construct(self._framework)
+                setattr(self._framework_interface, name, param)
 
 
 __all__ = ["ComputePipeline"]

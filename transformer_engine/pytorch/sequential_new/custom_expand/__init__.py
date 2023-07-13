@@ -1,3 +1,5 @@
+from functools import partial
+from math import sqrt
 from torch import nn
 from ..custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from ..custom_expand_for_sequential import expand
@@ -6,6 +8,20 @@ from ..ops import DType
 from .. import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ...attention import DotProductAttention
+from .. import framework_interface as fi
+
+
+def _gemm_param_init_methods(te: bool, in_features: int):
+    if te:
+        return (
+            partial(fi.normal, 0, 0.023),
+            fi.zeros,
+        )
+    else:
+        return (
+            partial(fi.uniform, -1 / sqrt(in_features), 1 / sqrt(in_features)),
+            partial(fi.uniform, -1 / sqrt(in_features), 1 / sqrt(in_features)),
+        )
 
 
 def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
@@ -19,13 +35,33 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     out_features = module.out_features
     tensor_type = DType.FP8 if env.fp8 else DType.default
 
+    weight_init_method, bias_init_method = _gemm_param_init_methods(
+        isinstance(module, Linear), in_features
+    )
+
     if has_bias:
         return [
-            ops.Gemm("gemm", tensor_type, tensor_type, in_features, out_features),
-            ops.Add("add", tensor_type, DType.infer, out_features),
+            ops.Gemm(
+                "gemm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                out_features,
+                weight_init_method,
+            ),
+            ops.Bias("bias", tensor_type, DType.infer, out_features, bias_init_method),
         ]
     else:
-        return [ops.Gemm("gemm", tensor_type, DType.infer, in_features, out_features)]
+        return [
+            ops.Gemm(
+                "gemm",
+                tensor_type,
+                DType.infer,
+                in_features,
+                out_features,
+                weight_init_method,
+            )
+        ]
 
 
 def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
@@ -38,8 +74,11 @@ def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     )
     eps = module.eps
     zero_centered_gamma = (
-        True if isinstance(module, nn.LayerNorm) else module.zero_centered_gamma
+        False if isinstance(module, nn.LayerNorm) else module.zero_centered_gamma
     )
+    if isinstance(module, nn.LayerNorm):
+        if not module.elementwise_affine:
+            raise ValueError("nn.LayerNorm must have elementwise_affine=True")
 
     return [
         ops.LayerNorm(
@@ -58,6 +97,8 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     zero_centered_gamma = module.zero_centered_gamma
     tensor_type = DType.FP8 if env.fp8 else DType.default
 
+    weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
+
     if has_bias:
         return [
             ops.LayerNorm(
@@ -68,8 +109,15 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 eps,
                 zero_centered_gamma,
             ),
-            ops.Gemm("gemm", tensor_type, tensor_type, in_features, out_features),
-            ops.Add("add", tensor_type, DType.infer, out_features),
+            ops.Gemm(
+                "gemm",
+                tensor_type,
+                tensor_type,
+                in_features,
+                out_features,
+                weight_init_method,
+            ),
+            ops.Bias("bias", tensor_type, DType.infer, out_features, bias_init_method),
         ]
     else:
         return [
@@ -81,7 +129,14 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 eps,
                 zero_centered_gamma,
             ),
-            ops.Gemm("gemm", tensor_type, DType.infer, in_features, out_features),
+            ops.Gemm(
+                "gemm",
+                tensor_type,
+                DType.infer,
+                in_features,
+                out_features,
+                weight_init_method,
+            ),
         ]
 
 
@@ -95,6 +150,8 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     zero_centered_gamma = module.zero_centered_gamma
     tensor_type = DType.FP8 if env.fp8 else DType.default
 
+    weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
+
     if has_bias:
         return [
             ops.LayerNorm(
@@ -105,11 +162,25 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 eps,
                 zero_centered_gamma,
             ),
-            ops.Gemm("gemm1", tensor_type, tensor_type, in_features, ffn_size),
-            ops.Add("add1", tensor_type, tensor_type, ffn_size),
+            ops.Gemm(
+                "gemm1",
+                tensor_type,
+                tensor_type,
+                in_features,
+                ffn_size,
+                weight_init_method,
+            ),
+            ops.Bias("bias1", tensor_type, tensor_type, ffn_size, bias_init_method),
             ops.Gelu("act"),
-            ops.Gemm("gemm2", tensor_type, tensor_type, ffn_size, in_features),
-            ops.Add("add2", tensor_type, DType.infer, in_features),
+            ops.Gemm(
+                "gemm2",
+                tensor_type,
+                tensor_type,
+                ffn_size,
+                in_features,
+                weight_init_method,
+            ),
+            ops.Bias("bias1", tensor_type, DType.infer, in_features, bias_init_method),
         ]
     else:
         return [
@@ -121,9 +192,23 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 eps,
                 zero_centered_gamma,
             ),
-            ops.Gemm("gemm1", tensor_type, tensor_type, in_features, ffn_size),
+            ops.Gemm(
+                "gemm1",
+                tensor_type,
+                tensor_type,
+                in_features,
+                ffn_size,
+                weight_init_method,
+            ),
             ops.Gelu("act"),
-            ops.Gemm("gemm2", tensor_type, DType.infer, ffn_size, in_features),
+            ops.Gemm(
+                "gemm2",
+                tensor_type,
+                DType.infer,
+                ffn_size,
+                in_features,
+                weight_init_method,
+            ),
         ]
 
 
