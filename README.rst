@@ -184,7 +184,7 @@ Pre-requisites
 * CUDA 11.8 or later
 * NVIDIA Driver supporting CUDA 11.8 or later
 * cuDNN 8.1 or later
-* For FP8 fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
+* For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
 
 From source
 ^^^^^^^^^^^
