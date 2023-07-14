@@ -599,7 +599,7 @@ upload_logs:
 
 .H100_1GPU:
     tags:
-      - computelab_h100
+      - dlcluster_h100
     variables:
       CI_SCHEDULER_TYPE: docker
       EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
