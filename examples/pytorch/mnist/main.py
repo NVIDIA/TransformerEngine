@@ -210,7 +210,7 @@ def main():
         test(model, device, test_loader, args.use_fp8)
         scheduler.step()
 
-    if args.use_fp8_infer:
+    if args.use_fp8_infer and not args.use_fp8:
         calibrate(model, device, test_loader, args.use_fp8)
 
     if args.save_model or args.use_fp8_infer:
