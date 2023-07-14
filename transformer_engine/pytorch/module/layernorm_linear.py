@@ -627,7 +627,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
-        skip_weight_param_allocation: bool = False, # pylint: disable=unused-argument
+        skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
         zero_centered_gamma: bool = False,
         ub_bulk_wgrad: bool = False,
@@ -636,11 +636,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
     ) -> None:
         super().__init__()
 
-        warnings.warn(
-            "Argument `skip_weight_param_allocation` is deprecated and"
-            "will be fully removed in future releases.",
-            category=DeprecationWarning,
-        )
+        if skip_weight_param_allocation:
+            warnings.warn(
+                "Argument `skip_weight_param_allocation` is deprecated and"
+                "will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -822,8 +823,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def forward(
         self,
         inp: torch.Tensor,
-        weight: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
-        bias: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -853,11 +854,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        warnings.warn(
-            "Arguments `weight` and `bias` are deprecated and"
-            "will be fully removed in future releases.",
-            category=DeprecationWarning,
-        )
+        if weight is not None or bias is not None:
+            raise RuntimeError(
+                "Arguments `weight` and `bias` are deprecated and "
+                "will be fully removed in future releases."
+            )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (

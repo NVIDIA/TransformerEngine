@@ -514,18 +514,19 @@ class Linear(TransformerEngineBaseModule):
         return_bias: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
-        skip_weight_param_allocation: bool = False, # pylint: disable=unused-argument
+        skip_weight_param_allocation: bool = False,
         parameters_split: Optional[Tuple[str, ...]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
     ) -> None:
         super().__init__()
 
-        warnings.warn(
-            "Argument `skip_weight_param_allocation` is deprecated and"
-            "will be fully removed in future releases.",
-            category=DeprecationWarning,
-        )
+        if skip_weight_param_allocation:
+            warnings.warn(
+                "Argument `skip_weight_param_allocation` is deprecated and"
+                "will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -669,8 +670,8 @@ class Linear(TransformerEngineBaseModule):
     def forward(
         self,
         inp: torch.Tensor,
-        weight: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
-        bias: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -700,11 +701,11 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        warnings.warn(
-            "Arguments `weight` and `bias` are deprecated and"
-            "will be fully removed in future releases.",
-            category=DeprecationWarning,
-        )
+        if weight is not None or bias is not None:
+            raise RuntimeError(
+                "Arguments `weight` and `bias` are deprecated and "
+                "will be fully removed in future releases."
+            )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
