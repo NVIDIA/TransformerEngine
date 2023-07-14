@@ -639,7 +639,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases.",
+                "will be fully removed in future releases. It is ignored"
+                "starting from v0.11.",
                 category=DeprecationWarning,
             )
 
