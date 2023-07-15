@@ -49,6 +49,7 @@ from ..cpp_extensions import (
     cast_from_fp8,
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
+from ..jit import no_torch_dynamo
 
 
 __all__ = ["LayerNormLinear"]
@@ -821,6 +822,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
+    @no_torch_dynamo
     def forward(
         self,
         inp: torch.Tensor,
