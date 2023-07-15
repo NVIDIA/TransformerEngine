@@ -12,6 +12,8 @@ import transformer_engine.pytorch as te
 # Model names for test_torch_dynamo
 _model_names = ["Linear", "LayerNorm", "LayerNormLinear", "LayerNormMLP"]
 
+
+@pytest.mark.skipif(torch.__version__ < "2", reason="torch.compile not available")
 @pytest.mark.parametrize("model_name", _model_names)
 def test_torch_dynamo(model_name: str):
     """Test compatibility with Torch Dynamo
