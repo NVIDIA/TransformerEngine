@@ -7,8 +7,10 @@ import os
 from typing import Union, Tuple
 
 import paddle
+import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
+from .base import TransformerEngineBaseLayer
 from ..cpp_extensions import layernorm_fwd, layernorm_bwd
 from ..constants import TE_DType
 
@@ -59,7 +61,7 @@ class _LayerNorm(paddle.autograd.PyLayer):
         )
 
 
-class LayerNorm(paddle.nn.Layer):
+class LayerNorm(TransformerEngineBaseLayer):
     r"""
     Applies Layer Normalization over a mini-batch of inputs as described in
     the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`
@@ -72,8 +74,9 @@ class LayerNorm(paddle.nn.Layer):
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         zero_centered_gamma: bool = False,
+        **kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
         self._dtype = self._helper.get_default_dtype()
@@ -108,7 +111,18 @@ class LayerNorm(paddle.nn.Layer):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-    def forward(self, inp: paddle.Tensor) -> paddle.Tensor:
+    def _te_forward(self, inp: paddle.Tensor) -> paddle.Tensor:
         """LayerNorm FWD"""
         return _LayerNorm.apply(inp, self.weight, self.bias, self.eps, self.fwd_ln_sm_margin,
                                 self.bwd_ln_sm_margin, self.zero_centered_gamma)
+
+    def _pd_forward(
+        self,
+        inp: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """Calls Paddle OP"""
+        return F.layer_norm(x=inp,
+                            normalized_shape=inp.shape[1:],
+                            weight=self.weight,
+                            bias=self.bias,
+                            epsilon=self.eps)

@@ -6,6 +6,7 @@
 from typing import Union, Tuple
 
 import paddle
+import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
 from .base import TransformerEngineBaseLayer, get_workspace
@@ -100,8 +101,9 @@ class Linear(TransformerEngineBaseLayer):
         out_features: int,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        **kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
         self.in_features = in_features
         self.out_features = out_features
         self._weight_attr = weight_attr
@@ -110,7 +112,8 @@ class Linear(TransformerEngineBaseLayer):
 
         # TE linear weight is in column major
         self.weight = self.create_parameter(
-            shape=[out_features, in_features],
+            shape=[out_features, in_features]
+            if self.backend == 'transformer_engine' else [in_features, out_features],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
@@ -128,7 +131,7 @@ class Linear(TransformerEngineBaseLayer):
         else:
             self.bias = None
 
-    def forward(
+    def _te_forward(
         self,
         inp: paddle.Tensor,
     ) -> paddle.Tensor:
@@ -146,3 +149,10 @@ class Linear(TransformerEngineBaseLayer):
             )
 
         return out
+
+    def _pd_forward(
+        self,
+        inp: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """Calls Paddle OP"""
+        return F.linear(inp, self.weight, self.bias)

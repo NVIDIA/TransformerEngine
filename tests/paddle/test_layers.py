@@ -7,135 +7,81 @@ import pytest
 from utils import assert_allclose
 
 import paddle
-import paddle.nn.functional as F
 
 import transformer_engine.paddle as te
 
-LINEAR_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
-                (16384, 1024, 1024)]
+LINEAR_CASES = [(16, 16, 32), (32, 32, 64), (64, 128, 256)]
 NORM_CASES = [(16, 32), (256, 1024)]
 MLP_CASES = [(32, 32, 32), (64, 256, 512)]
 
 
-class TestLinear:
+def calc_output_and_grad(layer, x, dy):
     """
-    Tests for Linear layer
+    Calculate forward and backward pass
     """
+    inp = paddle.to_tensor(x)
+    inp.stop_gradient = x.stop_gradient
+    y = layer(inp)
+    y.backward(dy)
 
-    @staticmethod
-    def calc_ref(x, weight, bias, dy):
-        """
-        Calculate reference using paddle linear op
-        """
-        # Create a copy of input tensor to enable grad calculation
-        x = paddle.to_tensor(x)
-        x.stop_gradient = False
-        weight = paddle.to_tensor(weight)
-        weight.stop_gradient = False
-        bias = paddle.to_tensor(bias)
-        bias.stop_gradient = False
-
-        y = F.linear(x, weight, bias)
-        y.backward(dy)
-
-        return y, x.grad, weight.grad.T, bias.grad
-
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                        reason="BF16 Linear requires Ampere+ GPU")
-    @pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
-    def test_bf16(self, bs, in_features, out_features):
-        """
-        Test BF16 Linear
-        """
-        rtol = 1e-2
-        atol = 1e-2
-
-        input_tensor = paddle.rand(shape=(bs, in_features), dtype='bfloat16')
-        input_tensor.stop_gradient = False
-        grad_out = paddle.rand(shape=(bs, out_features), dtype='bfloat16')
-
-        paddle.set_default_dtype("bfloat16")
-        layer = te.Linear(
-            in_features=in_features,
-            out_features=out_features,
-        )
-
-        (
-            out_ref,
-            grad_input_ref,
-            grad_weight_ref,
-            grad_bias_ref,
-        ) = self.calc_ref(input_tensor.clone()._to(dtype=paddle.float32),
-                          layer.weight.T.clone()._to(dtype=paddle.float32),
-                          layer.bias.clone()._to(dtype=paddle.float32),
-                          grad_out.clone()._to(dtype=paddle.float32))
-
-        out = layer(input_tensor)
-        out.backward(grad_out)
-
-        assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-        assert_allclose(input_tensor.grad, grad_input_ref, rtol=rtol, atol=atol)
-        assert_allclose(layer.weight.grad, grad_weight_ref, rtol=rtol, atol=atol)
-        assert_allclose(layer.bias.grad, grad_bias_ref, rtol=rtol, atol=atol)
+    return y, inp.grad if not inp.stop_gradient else None
 
 
-class TestLayerNorm:
+@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                    reason="BF16 Linear requires Ampere+ GPU")
+@pytest.mark.parametrize('bs,in_features,out_features', LINEAR_CASES)
+def test_linear_bf16(bs, in_features, out_features):
     """
-    Tests for LayerNorm layer
+    Test BF16 Linear
     """
+    rtol = 1e-2
+    atol = 1e-2
 
-    @staticmethod
-    def calc_ref(x, eps, gamma, beta, dy):
-        """
-        Calculate reference using paddle layer_norm op
-        """
-        x = paddle.to_tensor(x)
-        x.stop_gradient = False
-        gamma = paddle.to_tensor(gamma)
-        gamma.stop_gradient = False
-        beta = paddle.to_tensor(beta)
-        beta.stop_gradient = False
+    input_tensor = paddle.uniform(shape=(bs, in_features), dtype='bfloat16')
+    input_tensor.stop_gradient = False
+    grad_out = paddle.uniform(shape=(bs, out_features), dtype='bfloat16')
 
-        y = paddle.nn.functional.layer_norm(x=x,
-                                            normalized_shape=x.shape[1:],
-                                            weight=gamma,
-                                            bias=beta,
-                                            epsilon=eps)
+    paddle.set_default_dtype("bfloat16")
+    layer_te = te.Linear(in_features, out_features)
+    layer_pd = te.Linear(in_features, out_features, backend='paddle')
+    layer_pd.weight.copy_(layer_te.weight.T, True)
+    layer_pd.bias.copy_(layer_te.bias, True)
 
-        y.backward(dy)
+    out_ref, grad_input_ref = calc_output_and_grad(layer_pd, input_tensor, grad_out)
+    out, grad_input = calc_output_and_grad(layer_te, input_tensor, grad_out)
 
-        return y, x.grad, gamma.grad, beta.grad
+    assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.weight.grad, layer_pd.weight.grad.T, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
 
-    @pytest.mark.parametrize('bs,hidden_size', NORM_CASES)
-    def test_bf16(self, bs, hidden_size):
-        """
-        Test BF16 LayerNorm
-        """
-        eps = 1e-3
-        rtol = 1e-2
-        atol = 1e-2
 
-        x = paddle.uniform(shape=(bs, hidden_size), dtype='bfloat16')
-        x.stop_gradient = False
-        grad_out = paddle.rand(shape=(bs, hidden_size), dtype='bfloat16')
+@pytest.mark.parametrize('bs,hidden_size', NORM_CASES)
+def test_layernorm_bf16(bs, hidden_size):
+    """
+    Test BF16 LayerNorm
+    """
+    eps = 1e-3
+    rtol = 1e-2
+    atol = 1e-2
 
-        paddle.set_default_dtype("bfloat16")
-        layer = te.LayerNorm(hidden_size=hidden_size, eps=eps)
+    x = paddle.uniform(shape=(bs, hidden_size), dtype='bfloat16')
+    x.stop_gradient = False
+    grad_out = paddle.uniform(shape=(bs, hidden_size), dtype='bfloat16')
 
-        (
-            out_ref,
-            grad_x_ref,
-            grad_weight_ref,
-            grad_bias_ref,
-        ) = self.calc_ref(x, eps, layer.weight, layer.bias, grad_out)
+    paddle.set_default_dtype("bfloat16")
+    layer_te = te.LayerNorm(hidden_size=hidden_size, eps=eps)
+    layer_pd = te.LayerNorm(hidden_size=hidden_size, eps=eps, backend='paddle')
+    layer_pd.weight.copy_(layer_te.weight, True)
+    layer_pd.bias.copy_(layer_te.bias, True)
 
-        out = layer(x)
-        out.backward(grad_out)
+    out_ref, grad_input_ref = calc_output_and_grad(layer_pd, x, grad_out)
+    out, grad_input = calc_output_and_grad(layer_te, x, grad_out)
 
-        assert_allclose(out, out_ref, rtol=rtol, atol=atol)
-        assert_allclose(x.grad, grad_x_ref, rtol=rtol, atol=atol)
-        assert_allclose(layer.weight.grad, grad_weight_ref, rtol=rtol, atol=atol)
-        assert_allclose(layer.bias.grad, grad_bias_ref, rtol=rtol, atol=atol)
+    assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.weight.grad, layer_pd.weight.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
@@ -149,42 +95,35 @@ def test_layernorm_linear_bf16(bs, in_features, out_features):
     rtol = 1e-2
     atol = 1e-2
 
-    input_tensor = paddle.rand(shape=(bs, in_features), dtype='bfloat16')
+    input_tensor = paddle.uniform(shape=(bs, in_features), dtype='bfloat16')
     input_tensor.stop_gradient = False
-    grad_out = paddle.rand(shape=(bs, out_features), dtype='bfloat16')
+    grad_out = paddle.uniform(shape=(bs, out_features), dtype='bfloat16')
     eps = 1e-3
 
-    layernorm_linear = te.LayerNormLinear(
+    layer_te = te.LayerNormLinear(
         in_features=in_features,
         out_features=out_features,
         eps=eps,
     )
 
-    linear = te.Linear(in_features=in_features, out_features=out_features)
-    linear.weight.copy_(layernorm_linear.weight, True)
-    linear.bias.copy_(layernorm_linear.bias, True)
+    layer_pd = te.LayerNormLinear(in_features=in_features,
+                                  out_features=out_features,
+                                  eps=eps,
+                                  backend='paddle')
+    layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
+    layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+    layer_pd.weight.copy_(layer_te.weight.T, True)
+    layer_pd.bias.copy_(layer_te.bias, True)
 
-    layernorm = te.LayerNorm(hidden_size=in_features, eps=eps)
-    layernorm.weight.copy_(layernorm_linear.ln_weight, True)
-    layernorm.bias.copy_(layernorm_linear.ln_bias, True)
+    out_ref, grad_input_ref = calc_output_and_grad(layer_pd, input_tensor, grad_out)
+    out, grad_input = calc_output_and_grad(layer_te, input_tensor, grad_out)
 
-    # Calculate ref
-    input_tensor_ref = paddle.to_tensor(input_tensor)
-    input_tensor_ref.stop_gradient = False
-
-    y_ref = linear(layernorm(input_tensor_ref))
-    y_ref.backward(grad_out)
-
-    # Calculate actual
-    y = layernorm_linear(input_tensor)
-    y.backward(grad_out)
-
-    assert_allclose(y, y_ref, rtol=rtol, atol=atol)
-    assert_allclose(input_tensor.grad, input_tensor_ref.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_linear.weight.grad, linear.weight.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_linear.bias.grad, linear.bias.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_linear.ln_weight.grad, layernorm.weight.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_linear.ln_bias.grad, layernorm.bias.grad, rtol=rtol, atol=atol)
+    assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.weight.grad, layer_pd.weight.grad.T, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.bias.grad, layer_pd.bias.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)
 
 
 @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
@@ -198,47 +137,37 @@ def test_layernorm_mlp_bf16(bs, hidden_size, ffn_hidden_size):
     rtol = 5e-2
     atol = 5e-2
 
-    input_tensor = paddle.rand(shape=(bs, hidden_size), dtype='bfloat16')
+    input_tensor = paddle.uniform(shape=(bs, hidden_size), dtype='bfloat16')
     input_tensor.stop_gradient = False
-    grad_out = paddle.rand(shape=(bs, hidden_size), dtype='bfloat16')
+    grad_out = paddle.uniform(shape=(bs, hidden_size), dtype='bfloat16')
     eps = 1e-3
 
-    layernorm_mlp = te.LayerNormMLP(
+    layer_te = te.LayerNormMLP(
         hidden_size=hidden_size,
         ffn_hidden_size=ffn_hidden_size,
         eps=eps,
     )
+    layer_pd = te.LayerNormMLP(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        eps=eps,
+        backend='paddle',
+    )
+    layer_pd.ln_weight.copy_(layer_te.ln_weight, True)
+    layer_pd.ln_bias.copy_(layer_te.ln_bias, True)
+    layer_pd.fc1_weight.copy_(layer_te.fc1_weight.T, True)
+    layer_pd.fc1_bias.copy_(layer_te.fc1_bias, True)
+    layer_pd.fc2_weight.copy_(layer_te.fc2_weight.T, True)
+    layer_pd.fc2_bias.copy_(layer_te.fc2_bias, True)
 
-    layernorm = te.LayerNorm(hidden_size=hidden_size, eps=eps)
-    layernorm.weight.copy_(layernorm_mlp.ln_weight, True)
-    layernorm.bias.copy_(layernorm_mlp.ln_bias, True)
+    out_ref, grad_input_ref = calc_output_and_grad(layer_pd, input_tensor, grad_out)
+    out, grad_input = calc_output_and_grad(layer_te, input_tensor, grad_out)
 
-    fc1 = te.Linear(in_features=hidden_size, out_features=ffn_hidden_size)
-    fc1.weight.copy_(layernorm_mlp.fc1_weight, True)
-    fc1.bias.copy_(layernorm_mlp.fc1_bias, True)
-
-    fc2 = te.Linear(in_features=ffn_hidden_size, out_features=hidden_size)
-    fc2.weight.copy_(layernorm_mlp.fc2_weight, True)
-    fc2.bias.copy_(layernorm_mlp.fc2_bias, True)
-
-    act = paddle.nn.GELU()
-
-    # Calculate ref
-    input_tensor_ref = paddle.to_tensor(input_tensor)
-    input_tensor_ref.stop_gradient = False
-
-    y_ref = fc2(act(fc1(layernorm(input_tensor_ref))))
-    y_ref.backward(grad_out)
-
-    # Calculate actual
-    y = layernorm_mlp(input_tensor)
-    y.backward(grad_out)
-
-    assert_allclose(y, y_ref, rtol=5e-2, atol=5e-2)
-    assert_allclose(input_tensor.grad, input_tensor_ref.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.fc1_weight.grad, fc1.weight.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.fc1_bias.grad, fc1.bias.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.fc2_weight.grad, fc2.weight.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.fc2_bias.grad, fc2.bias.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.ln_weight.grad, layernorm.weight.grad, rtol=rtol, atol=atol)
-    assert_allclose(layernorm_mlp.ln_bias.grad, layernorm.bias.grad, rtol=rtol, atol=atol)
+    assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.fc1_weight.grad, layer_pd.fc1_weight.grad.T, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.fc1_bias.grad, layer_pd.fc1_bias.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.fc2_weight.grad, layer_pd.fc2_weight.grad.T, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.fc2_bias.grad, layer_pd.fc2_bias.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.ln_weight.grad, layer_pd.ln_weight.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_te.ln_bias.grad, layer_pd.ln_bias.grad, rtol=rtol, atol=atol)

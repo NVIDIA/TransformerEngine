@@ -6,6 +6,7 @@ import os
 from typing import Union, Tuple
 
 import paddle
+import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
 from ..cpp_extensions import (
@@ -15,7 +16,7 @@ from ..cpp_extensions import (
 )
 
 from .base import get_workspace, TransformerEngineBaseLayer
-from ..utils import cast_if_needed
+from ..utils import cast_if_needed, get_paddle_act_func
 from ..constants import TE_DType
 
 __all__ = ["LayerNormMLP"]
@@ -213,8 +214,9 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         activation: str = "gelu",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
+        **kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
 
         self.hidden_size = hidden_size
         self.ffn_hidden_size = ffn_hidden_size
@@ -245,7 +247,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
         # FC1 weights
         self.fc1_weight = self.create_parameter(
-            shape=[self.ffn_hidden_size, self.hidden_size],
+            shape=[self.ffn_hidden_size, self.hidden_size]
+            if self.backend == 'transformer_engine' else [self.hidden_size, self.ffn_hidden_size],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
@@ -267,7 +270,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
 
         # FC2 weights
         self.fc2_weight = self.create_parameter(
-            shape=[self.hidden_size, self.ffn_hidden_size],
+            shape=[self.hidden_size, self.ffn_hidden_size]
+            if self.backend == 'transformer_engine' else [self.ffn_hidden_size, self.hidden_size],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
@@ -290,7 +294,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-    def forward(
+    def _te_forward(
         self,
         inp: paddle.Tensor,
     ) -> Union[paddle.Tensor, Tuple[paddle.Tensor, ...]]:
@@ -322,4 +326,20 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             out, ln_out = out
             return out, ln_out
 
+        return out
+
+    def _pd_forward(
+        self,
+        inp: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """Calls Paddle OP"""
+        inp = F.layer_norm(x=inp,
+                           normalized_shape=inp.shape[1:],
+                           weight=self.ln_weight,
+                           bias=self.ln_bias,
+                           epsilon=self.eps)
+        inp = F.linear(inp, self.fc1_weight, self.fc1_bias)
+        act_func = get_paddle_act_func(self.activation)
+        inp = act_func(inp)
+        out = F.linear(inp, self.fc2_weight, self.fc2_bias)
         return out

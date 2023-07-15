@@ -6,6 +6,7 @@ import os
 from typing import Union, Tuple
 
 import paddle
+import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
 from ..cpp_extensions import (
@@ -158,8 +159,9 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
+        **kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
 
         self.in_features = in_features
         self.out_features = out_features
@@ -189,7 +191,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
 
         # Linear weights
         self.weight = self.create_parameter(
-            shape=[out_features, in_features],
+            shape=[out_features, in_features]
+            if self.backend == 'transformer_engine' else [in_features, out_features],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
@@ -214,7 +217,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-    def forward(
+    def _te_forward(
         self,
         inp: paddle.Tensor,
     ) -> Union[paddle.Tensor, Tuple[paddle.Tensor, ...]]:
@@ -242,4 +245,17 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             out, ln_out = out
             return out, ln_out
 
+        return out
+
+    def _pd_forward(
+        self,
+        inp: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """Calls Paddle OP"""
+        inp = F.layer_norm(x=inp,
+                           normalized_shape=inp.shape[1:],
+                           weight=self.ln_weight,
+                           bias=self.ln_bias,
+                           epsilon=self.eps)
+        out = F.linear(inp, self.weight, self.bias)
         return out
