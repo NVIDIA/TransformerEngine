@@ -30,7 +30,7 @@ from ..utils import (
     divide,
     get_default_init_method,
     cast_if_needed,
-    assert_dim_for_fp8_forward_exec,
+    assert_dim_for_fp8_exec,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -113,9 +113,9 @@ class _LayerNormMLP(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
-            assert_dim_for_fp8_forward_exec(inputmat)
-            assert_dim_for_fp8_forward_exec(fc1_weight)
-            assert_dim_for_fp8_forward_exec(fc2_weight)
+            assert_dim_for_fp8_exec(inputmat)
+            assert_dim_for_fp8_exec(fc1_weight)
+            assert_dim_for_fp8_exec(fc2_weight)
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
@@ -1049,10 +1049,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
             set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
         else:
-            self.register_buffer("fc1_bias",
-                                 torch.Tensor().to(dtype=params_dtype,
-                                                   device=torch.cuda.current_device()),
-                                 persistent=False)
+            self.fc1_bias = torch.Tensor().to(dtype=params_dtype,
+                                              device=torch.cuda.current_device())
 
         with torch.no_grad():
             self.fc1_bias.zero_()
@@ -1083,10 +1081,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 )
             )
         else:
-            self.register_buffer("fc2_bias",
-                                 torch.Tensor().to(dtype=params_dtype,
-                                                   device=torch.cuda.current_device()),
-                                 persistent=False)
+            self.fc2_bias = torch.Tensor().to(dtype=params_dtype,
+                                              device=torch.cuda.current_device())
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
