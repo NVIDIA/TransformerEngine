@@ -11,8 +11,8 @@ import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
 from .base import TransformerEngineBaseLayer
-from ..cpp_extensions import layernorm_fwd, layernorm_bwd
 from ..constants import TE_DType
+from ..cpp_extensions import layernorm_fwd, layernorm_bwd
 
 __all__ = ["LayerNorm"]
 

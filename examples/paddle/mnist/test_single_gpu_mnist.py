@@ -3,8 +3,8 @@
 # See LICENSE for license information.
 """MNIST example of Transformer Engine Paddle"""
 
-import unittest
 import argparse
+import unittest
 
 import paddle
 from paddle import nn

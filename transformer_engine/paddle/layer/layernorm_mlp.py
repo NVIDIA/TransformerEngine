@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """LayerNormMLP API"""
+
 import os
 from typing import Union, Tuple
 
@@ -16,8 +17,8 @@ from ..cpp_extensions import (
 )
 
 from .base import get_workspace, TransformerEngineBaseLayer
-from ..utils import cast_if_needed, get_paddle_act_func
 from ..constants import TE_DType
+from ..utils import cast_if_needed, get_paddle_act_func
 
 __all__ = ["LayerNormMLP"]
 

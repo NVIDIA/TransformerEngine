@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 """Utils for profiling"""
 
-import os
 import ctypes
 from contextlib import contextmanager
+import os
 
 _cuda_home = os.environ.get('CUDA_HOME', '/usr/local/cuda')
 
