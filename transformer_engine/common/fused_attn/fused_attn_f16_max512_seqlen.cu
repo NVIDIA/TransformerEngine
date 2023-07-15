@@ -680,17 +680,23 @@ void fused_attn_max_512_fwd_impl(
             // inference mode doesn't need the S auxiliary
             auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
                           (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) && is_training;
+            std::shared_ptr<cudnn_frontend::Tensor> maskInput;
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
             NVTE_CHECK(bias_type != NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS,
                        "NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS has not been implemented.");
 
             if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
-                createBias(b, h, s_q, s_kv, d, layout, tensorType, ops, bmm1_output);
+                auto bias_output = createBias(b, h, s_q, s_kv, d, layout,
+                                tensorType, ops, bmm1_output);
+                maskInput = std::make_shared<cudnn_frontend::Tensor>(std::move(bias_output));
+            }
+            if (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) {
+                maskInput = std::make_shared<cudnn_frontend::Tensor>(std::move(bmm1_output));
             }
 
             auto mask_output = createMask(b, h, s_q, s_kv, d, layout, mask_type, tensorType, ops,
-                                          bmm1_output, false);
+                                          *maskInput.get(), false);
 
             NVTE_CHECK(dropout_probability != 1.0f, "Dropout probability cannot be 1.0.");
 
@@ -1248,7 +1254,7 @@ void fused_attn_max_512_fwd_qkvpacked(
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
-    const auto stride = num_head * head_dim;
+    const auto stride = 2 * num_head * head_dim;
 
     void *devPtrQ = static_cast<void *>(devPtrQKV);
     void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -1322,7 +1328,7 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     void *devPtrQ = input_Q->data.dptr;
 
     // KV shape is [b, s, 2, h, d]
-    const auto stride = num_head * head_dim;
+    const auto stride = 2 * num_head * head_dim;
     void *devPtrK = input_KV->data.dptr;
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrK) + stride);
 
@@ -1393,7 +1399,7 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
 
-    auto stride = num_head * head_dim;
+    auto stride = 2 * num_head * head_dim;
     void *devPtrQ = devPtrQKV;
     void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
@@ -1453,7 +1459,7 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
 
     // Q shape is [b, s, h, d]
     // KV shape is [b, s, 2, h, d]
-    auto stride = num_head * head_dim;
+    auto stride = 2 * num_head * head_dim;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_KV->data.dptr;
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrK) + stride);

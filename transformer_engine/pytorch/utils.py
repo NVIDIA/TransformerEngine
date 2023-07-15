@@ -179,19 +179,19 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
 
 
-def check_dim_for_fp8_forward_exec(tensor: torch.Tensor) -> bool:
+def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
     """For fp8 fprop (TN layout), inputs and weights must be such
        that dim0 is divisible by 8 and dim1 is divisible by 16.
     """
     return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
 
 
-def assert_dim_for_fp8_forward_exec(tensor: torch.Tensor) -> None:
+def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
     """For fp8 fprop (TN layout), inputs and weights must be such
        that dim0 is divisible by 8 and dim1 is divisible by 16.
     """
     # single tensor check so it's clear which tensor is triggering the assertion
-    assert check_dim_for_fp8_forward_exec(tensor), (
+    assert check_dim_for_fp8_exec(tensor), (
         "Tensor dimensions are not compatible for FP8 execution: "
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
     )
