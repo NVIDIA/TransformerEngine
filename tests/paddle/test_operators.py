@@ -49,6 +49,7 @@ is_fp8_supported, reason = is_fp8_available()
 
 SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
+FLASH_ATTN_CASES = [(32, 1024, 16, 64), (16, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
 
 
@@ -714,6 +715,23 @@ class TestFusedAttn:
         test cross attention forward + backward
         """
         self.set_input(b, s_q, s_kv, h, d, dtype, "cross_attn")
+        reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
+        fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
+        assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
+        assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
+
+    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
+                        reason="cuDNN fMHA requires Ampere+ GPU")
+    @pytest.mark.parametrize('b, s, h, d', FLASH_ATTN_CASES)
+    @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
+    @pytest.mark.parametrize('is_causal_masking', [True])
+    def test_flash_attn_forward_backward(self, b, s, h, d, dtype, is_causal_masking):
+        """
+        test flash attention forward + backward
+        """
+        self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
         assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
