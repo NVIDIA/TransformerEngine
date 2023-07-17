@@ -43,6 +43,7 @@ from ..cpp_extensions import (
     cast_to_fp8,
 )
 from ..constants import GemmParallelModes, dist_group_type
+from ..jit import no_torch_dynamo
 
 
 __all__ = ["Linear"]
@@ -668,6 +669,7 @@ class Linear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
+    @no_torch_dynamo
     def forward(
         self,
         inp: torch.Tensor,
