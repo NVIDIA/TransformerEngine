@@ -992,7 +992,8 @@ class MultiHeadAttention(torch.nn.Module):
         self.qkv_weight_interleaved = qkv_weight_interleaved
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
-        assert layer_number > 0, "layer_number must be a positive integer"
+        if layer_number is not None:
+            assert layer_number > 0, "layer_number must be a positive integer"
 
         tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_size = tp_size
