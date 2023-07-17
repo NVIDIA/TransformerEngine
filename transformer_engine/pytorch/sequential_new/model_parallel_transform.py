@@ -220,24 +220,30 @@ def _unknown(op: Op) -> Node:
 
 
 class ReduceScatter(PassthroughOp):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")
 
 
 class Scatter(PassthroughOp):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")
 
 
 class AllGather(PassthroughOp):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")
 
 
 class AllReduce(PassthroughOp):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")
 
 
 class GemmRowParallel(Gemm):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")
 
 
 class GemmColParallel(Gemm):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")

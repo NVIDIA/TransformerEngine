@@ -36,7 +36,7 @@ pprint(
     [
         f"{type(op).__name__}[{op.input_type.value},{op.output_type.value}]".ljust(40)
         + op.name
-        for op in transformer._pipeline._ops
+        for op in transformer._pipeline._fwd
     ],
     width=200,
 )

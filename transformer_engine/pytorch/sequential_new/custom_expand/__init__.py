@@ -34,7 +34,7 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     )
     in_features = module.in_features
     out_features = module.out_features
-    tensor_type = DType.FP8 if env.fp8 else DType.default
+    tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
 
     weight_init_method, bias_init_method = _gemm_param_init_methods(
         isinstance(module, Linear), in_features
@@ -96,7 +96,7 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     out_features = module.out_features
     eps = module.eps
     zero_centered_gamma = module.zero_centered_gamma
-    tensor_type = DType.FP8 if env.fp8 else DType.default
+    tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
 
     weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
 
@@ -149,7 +149,7 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     ffn_size = module.size_per_partition * module.tp_size
     eps = module.eps
     zero_centered_gamma = module.zero_centered_gamma
-    tensor_type = DType.FP8 if env.fp8 else DType.default
+    tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
 
     weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
 

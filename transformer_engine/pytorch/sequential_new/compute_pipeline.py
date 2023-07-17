@@ -1,5 +1,6 @@
 from typing import Any, Callable, Generic
-from .ops import Op, DType, PassthroughOp
+from .ops import Op, PassthroughOp
+from .enums import DType
 from .framework_interface import FrameworkInterface, TensorType
 
 
@@ -8,32 +9,39 @@ class ComputePipeline(Generic[TensorType]):
         self,
         framework_interface: FrameworkInterface[TensorType],
         ops: list[Op],
-        extra_transforations: list[Callable[[list[Op]], list[Op]]] = [],
+        extra_transformations: list[Callable[[list[Op]], list[Op]]] = [],
     ):
         self._framework_interface = framework_interface
         self._framework = type(framework_interface)
-        self._ops = ops
-        self._extra_transforations = extra_transforations
-        self.compile()
+        self._fwd = ComputePipeline.compile(ops, extra_transformations)
+        self._bwd = ComputePipeline.compile(
+            list(map(Op.bwd, ops))[::-1], extra_transformations
+        )
+        self.construct_parameters()
 
     def __call__(self, *args: Any, **kwargs: Any):
         ...
 
-    def compile(self):
-        self.transform_op_list()
-        self.construct_parameters()
+    @staticmethod
+    def compile(_ops: list[Op], _transforms: list[Callable[[list[Op]], list[Op]]]):
+        return ComputePipeline.transform_op_list(_ops, _transforms)
 
-    def transform_op_list(self):
-        for transform in self._extra_transforations:
-            self.infer_types()
-            self._ops = transform(self._ops)
-        self.infer_types()
-        self.insert_casts()
+    @staticmethod
+    def transform_op_list(
+        _ops: list[Op], _transforms: list[Callable[[list[Op]], list[Op]]]
+    ):
+        for transform in _transforms:
+            _ops = ComputePipeline.infer_types(_ops)
+            _ops = transform(_ops)
+        _ops = ComputePipeline.infer_types(_ops)
+        _ops = ComputePipeline.insert_casts(_ops)
+        return _ops
 
-    def infer_types(self):
-        for i, op in enumerate(self._ops):
-            prev = self._ops[i - 1] if i > 0 else None
-            next = self._ops[i + 1] if i < len(self._ops) - 1 else None
+    @staticmethod
+    def infer_types(_ops: list[Op]):
+        for i, op in enumerate(_ops):
+            prev = _ops[i - 1] if i > 0 else None
+            next = _ops[i + 1] if i < len(_ops) - 1 else None
 
             if op.input_type is DType.infer:
                 if prev is None:
@@ -56,7 +64,7 @@ class ComputePipeline(Generic[TensorType]):
                 elif prev is not None and prev.output_type is not DType.infer:
                     op.output_type = prev.output_type
                 else:
-                    for next in self._ops[i + 2 :]:
+                    for next in _ops[i + 2 :]:
                         if next.input_type is not DType.infer:
                             op.output_type = next.input_type
                             break
@@ -65,21 +73,24 @@ class ComputePipeline(Generic[TensorType]):
                             break
                     if op.output_type is DType.infer:
                         raise RuntimeError("Cannot infer output type")
+        return _ops
 
-    def insert_casts(self):
-        assert not any(isinstance(m, Cast) for m in self._ops)
+    @staticmethod
+    def insert_casts(_ops: list[Op]):
+        assert not any(isinstance(m, Cast) for m in _ops)
         i = 0
-        while i < len(self._ops) - 1:
-            op = self._ops[i]
-            next = self._ops[i + 1]
+        while i < len(_ops) - 1:
+            op = _ops[i]
+            next = _ops[i + 1]
             if op.output_type is not next.input_type:
                 name = f"Cast({op.name}, {next.name})"
-                self._ops.insert(i + 1, Cast(name, op.output_type, next.input_type))
+                _ops.insert(i + 1, Cast(name, op.output_type, next.input_type))
                 i += 1  # skip cast
             i += 1
+        return _ops
 
     def construct_parameters(self):
-        for op in self._ops:
+        for op in self._fwd:
             op_params = op.describe_params()
             for name, desc in op_params.items():
                 name = op.name + "." + name
@@ -91,4 +102,5 @@ __all__ = ["ComputePipeline"]
 
 
 class Cast(PassthroughOp):
-    pass
+    def bwd(self):
+        raise ValueError("This operation is meant for internal use only")

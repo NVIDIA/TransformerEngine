@@ -2,17 +2,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from typing import NoReturn
+
 from . import framework_interface as fi
 from .framework_interface import FrameworkInterface, TensorType
-
-
-class DType(Enum):
-    FP8 = "FP8"
-    FP16 = "FP16"
-    BF16 = "BF16"
-    FP32 = "FP32"
-    infer = "INFER"
-    default = BF16
+from .enums import DType
 
 
 @dataclass
@@ -43,6 +37,10 @@ class Op(ABC):
     def describe_params(self) -> dict[str, ParamDescriptor]:
         ...
 
+    @abstractmethod
+    def bwd(self) -> Op:
+        ...
+
 
 class PassthroughOp(Op):
     def __init__(
@@ -55,6 +53,11 @@ class PassthroughOp(Op):
 
     def describe_params(self) -> dict[str, ParamDescriptor]:
         return {}
+
+
+class Identity(PassthroughOp):
+    def bwd(self):
+        return Identity(self.name + "_grad", self.input_type, self.output_type)
 
 
 class ParamOp(Op):
@@ -150,10 +153,17 @@ class Bias(ParamOp):
         self.features = features
         self.init_method = init_method
 
+    def bwd(self):
+        return Identity(self.name + "_grad", self.input_type, self.output_type)
+
+    def bwd_bias(self):
+        return Identity(self.name + "_grad_bias", self.input_type, self.output_type)
+
 
 # Transpose
 class Transpose(PassthroughOp):
-    pass
+    def bwd(self):
+        return self
 
 
 # Attention
@@ -174,6 +184,35 @@ class DotProductAttention(PassthroughOp):
         )
         self.features_per_head = features_per_head
 
+    def bwd(self):
+        return DotProductAttentionGrad(
+            self.name + "_grad",
+            self.input_type,
+            self.output_type,
+            self.features_per_head,
+        )
+
+
+class DotProductAttentionGrad(PassthroughOp):
+    features_per_head: int
+
+    def __init__(
+        self,
+        name: str,
+        input_type: DType,
+        output_type: DType,
+        features_per_head: int,
+    ):
+        super().__init__(
+            name,
+            input_type,
+            output_type,
+        )
+        self.features_per_head = features_per_head
+
+    def bwd(self) -> NoReturn:
+        raise NotImplementedError("Second order gradient not supported")
+
 
 # Residual
 class ResidualBegin(PassthroughOp):
@@ -183,6 +222,10 @@ class ResidualBegin(PassthroughOp):
         super().__init__(name, DType.default, DType.default)
         self.end = end
 
+    def bwd(self):
+        assert self.end is not None
+        return self.end
+
 
 class ResidualEnd(PassthroughOp):
     begin: ResidualBegin
@@ -191,11 +234,26 @@ class ResidualEnd(PassthroughOp):
         super().__init__(name, DType.default, DType.default)
         self.begin = begin
 
+    def bwd(self):
+        return self.begin
+
 
 # Activation
 class Gelu(PassthroughOp):
-    pass
+    def bwd(self):
+        return GeluGrad(self.name + "_grad", self.input_type, self.output_type)
+
+
+class GeluGrad(PassthroughOp):
+    def bwd(self) -> NoReturn:
+        raise NotImplementedError("Second order gradient not supported")
 
 
 class Relu(PassthroughOp):
-    pass
+    def bwd(self):
+        return ReluGrad(self.name + "_grad", self.input_type, self.output_type)
+
+
+class ReluGrad(PassthroughOp):
+    def bwd(self) -> NoReturn:
+        raise NotImplementedError("Second order gradient not supported")
