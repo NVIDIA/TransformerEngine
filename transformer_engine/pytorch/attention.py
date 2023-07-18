@@ -48,9 +48,9 @@ _flash_attn_version_required = packaging.version.Version("1.0.6")
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
 if _flash_attn_2_available:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_fun # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
 else:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_fun # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module
 
 
 __all__ = ["DotProductAttention"]
@@ -404,7 +404,7 @@ class FlashAttention(torch.nn.Module):
             fa_optional_forward_kwargs = {}
             if not _flash_attn_2_available:
                 fa_optional_forward_kwargs["deterministic"] = self.deterministic
-            output = flash_attn_forward_fun(
+            output = flash_attn_forward_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
