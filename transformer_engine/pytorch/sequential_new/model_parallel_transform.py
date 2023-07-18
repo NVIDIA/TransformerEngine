@@ -145,6 +145,7 @@ def _ugemm(gemm: Gemm) -> Node:
         [
             Connection(EndPoint.NA, EndPoint.NA, [gemm]),
             Connection(EndPoint.NA, EndPoint.NCS, [cgemm]),
+            Connection(EndPoint.NA, EndPoint.PA, [rgemm]),
             Connection(EndPoint.NCS, EndPoint.PA, [rgemm]),
             Connection(EndPoint.NCS, EndPoint.NRS, [rgemm, rs]),
             Connection(EndPoint.NRS, EndPoint.NCS, [ag, cgemm]),
