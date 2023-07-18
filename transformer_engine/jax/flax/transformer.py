@@ -858,7 +858,7 @@ class TransformerLayer(nn.Module):
         Transformer in conjunction with the TransformerLayerType.ENCODER option.
     self_attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
-        New in version 0.10.
+        Introduced in v0.10.0.
     enable_relative_embedding: bool, default = True
         Whether to enable relative embedding as shifting of attention logits.
     relative_embedding: flax.linen.Module, default = None
