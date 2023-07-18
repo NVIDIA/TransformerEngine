@@ -879,7 +879,7 @@ class DotProductAttention(torch.nn.Module):
         if (query_layer.dtype not in [torch.bfloat16, torch.float16]
             or key_layer.dtype not in [torch.bfloat16, torch.float16]
             or value_layer.dtype not in [torch.bfloat16, torch.float16]
-            or (self.device_compute_capability in (8.6, 8.9) and key_layer.shape[-1] > 64)
+            or (self.device_compute_capability in (8.6, 8.7, 8.9) and key_layer.shape[-1] > 64)
         ):
             use_flash_attention = False
 
