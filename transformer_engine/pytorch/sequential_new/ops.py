@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import NoReturn
 
+from transformer_engine.pytorch.sequential_new.enums import DType
+
 from . import framework_interface as fi
 from .framework_interface import FrameworkInterface, TensorType
 from .enums import DType
@@ -12,10 +14,11 @@ from .enums import DType
 @dataclass
 class ParamDescriptor:
     _shape: tuple[int, ...]
-    _constructor: ...  # Callable[[FrameworkInterface[TensorType]], TensorType]
+    _constructor: ...
+    _dtype: DType = DType.FP32  # TODO: is this correct?
 
     def construct(self, framework: type[FrameworkInterface[TensorType]]) -> TensorType:
-        return self._constructor(framework, self._shape)
+        return self._constructor(framework, self._shape, self._dtype)
 
 
 # Base classes
@@ -55,11 +58,6 @@ class PassthroughOp(Op):
         return {}
 
 
-class Identity(PassthroughOp):
-    def bwd(self):
-        return Identity(self.name + "_grad", self.input_type, self.output_type)
-
-
 class ParamOp(Op):
     _params: dict[str, ParamDescriptor]
 
@@ -75,6 +73,19 @@ class ParamOp(Op):
 
     def describe_params(self) -> dict[str, ParamDescriptor]:
         return self._params
+
+
+class Grad(PassthroughOp):
+    def __init__(self, orig: Op):
+        self.orig = orig
+        super().__init__(orig.name + "_grad", *self.io_types())
+
+    @abstractmethod
+    def io_types(self) -> tuple[DType, DType]:
+        ...
+
+    def bwd(self) -> NoReturn:
+        raise NotImplementedError("Second order gradient not supported")
 
 
 # Normalization
@@ -105,6 +116,14 @@ class LayerNorm(ParamOp):
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
 
+    def bwd(self):
+        return LayerNormGrad(self)
+
+
+class LayerNormGrad(Grad):
+    def io_types(self):
+        return (self.orig.input_type, self.orig.input_type)
+
 
 # Linear
 class Gemm(ParamOp):
@@ -131,6 +150,14 @@ class Gemm(ParamOp):
         self.out_features = out_features
         self.init_method = init_method
 
+    def bwd(self):
+        return GemmGrad(self)
+
+
+class GemmGrad(Grad):
+    def io_types(self):
+        return (self.orig.input_type, DType.default)
+
 
 class Bias(ParamOp):
     features: int
@@ -154,10 +181,12 @@ class Bias(ParamOp):
         self.init_method = init_method
 
     def bwd(self):
-        return Identity(self.name + "_grad", self.input_type, self.output_type)
+        return BiasGrad(self)
 
-    def bwd_bias(self):
-        return Identity(self.name + "_grad_bias", self.input_type, self.output_type)
+
+class BiasGrad(Grad):
+    def io_types(self):
+        return (DType.infer, DType.default)
 
 
 # Transpose
@@ -185,33 +214,12 @@ class DotProductAttention(PassthroughOp):
         self.features_per_head = features_per_head
 
     def bwd(self):
-        return DotProductAttentionGrad(
-            self.name + "_grad",
-            self.input_type,
-            self.output_type,
-            self.features_per_head,
-        )
+        return DotProductAttentionGrad(self)
 
 
-class DotProductAttentionGrad(PassthroughOp):
-    features_per_head: int
-
-    def __init__(
-        self,
-        name: str,
-        input_type: DType,
-        output_type: DType,
-        features_per_head: int,
-    ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-        )
-        self.features_per_head = features_per_head
-
-    def bwd(self) -> NoReturn:
-        raise NotImplementedError("Second order gradient not supported")
+class DotProductAttentionGrad(Grad):
+    def io_types(self):
+        return (self.orig.output_type, self.orig.input_type)
 
 
 # Residual
@@ -241,19 +249,19 @@ class ResidualEnd(PassthroughOp):
 # Activation
 class Gelu(PassthroughOp):
     def bwd(self):
-        return GeluGrad(self.name + "_grad", self.input_type, self.output_type)
+        return GeluGrad(self)
 
 
-class GeluGrad(PassthroughOp):
-    def bwd(self) -> NoReturn:
-        raise NotImplementedError("Second order gradient not supported")
+class GeluGrad(Grad):
+    def io_types(self):
+        return (DType.infer, DType.infer)
 
 
 class Relu(PassthroughOp):
     def bwd(self):
-        return ReluGrad(self.name + "_grad", self.input_type, self.output_type)
+        return ReluGrad(self)
 
 
-class ReluGrad(PassthroughOp):
-    def bwd(self) -> NoReturn:
-        raise NotImplementedError("Second order gradient not supported")
+class ReluGrad(Grad):
+    def io_types(self):
+        return (DType.infer, DType.infer)

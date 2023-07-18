@@ -15,7 +15,7 @@ class ComputePipeline(Generic[TensorType]):
         self._framework = type(framework_interface)
         self._fwd = ComputePipeline.compile(ops, extra_transformations)
         self._bwd = ComputePipeline.compile(
-            list(map(Op.bwd, ops))[::-1], extra_transformations
+            [op.bwd() for op in ops[::-1]], extra_transformations
         )
         self.construct_parameters()
 

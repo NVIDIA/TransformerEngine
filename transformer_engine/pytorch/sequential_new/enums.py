@@ -3,13 +3,14 @@ import torch
 
 
 class DType(Enum):
-    FP8E4M3 = torch.int8
-    FP8E5M2 = torch.int8
-    FP16 = torch.float16
-    BF16 = torch.bfloat16
-    FP32 = torch.float32
-    infer = "INFER"
-    default = "DEFAULT"
+    FP8Any = "FP8Any"
+    FP8E4M3 = "FP8E4M3"
+    FP8E5M2 = "FP8E5M2"
+    FP16 = "FP16"
+    BF16 = "BF16"
+    FP32 = "FP32"
+    infer = "infer"
+    default = BF16
 
 
 class InitMethod(Enum):

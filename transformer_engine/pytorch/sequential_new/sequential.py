@@ -21,7 +21,8 @@ class Sequential(nn.Module):
     _compile_env: CompileEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _compiled_op_list: list[Op]
-    _pipeline: ComputePipeline[torch.Tensor]
+    _pipeline: ComputePipeline[torch.Tensor]  # type: ignore
+    # TODO: fix type ignore
 
     @overload
     def __init__(self, *modules: nn.Module, model_parallel: bool = False) -> None:
