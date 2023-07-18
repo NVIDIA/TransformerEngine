@@ -246,7 +246,7 @@ class MultiHeadAttention(nn.Module):
         Indicate if apply a layer normalization at the end of MHA.
     attn_mask_type: {'causal', 'padding'}, default = 'causal'
         Type of attention mask passed into softmax operation.
-        New in version 0.10.
+        Introduced in v0.10.0.
 
     Optimization parameters
     -----------------------
