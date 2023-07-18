@@ -49,7 +49,7 @@ is_fp8_supported, reason = is_fp8_available()
 
 SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
-FLASH_ATTN_CASES = [(32, 1024, 16, 64), (16, 2048, 16, 128)]
+FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
 
 
@@ -642,6 +642,7 @@ class TestFusedAttn:
             dqkv, _ = fused_attn_bwd_qkvpacked(
                 qkv_tensor,
                 q_cu_seqlen_tensor,
+                rng_state,
                 out,
                 self.dout,
                 softmax_aux_tensor,
@@ -672,6 +673,7 @@ class TestFusedAttn:
                                                  kv_tensor,
                                                  q_cu_seqlen_tensor,
                                                  kv_cu_seqlen_tensor,
+                                                 rng_state,
                                                  out,
                                                  self.dout,
                                                  softmax_aux_tensor,
