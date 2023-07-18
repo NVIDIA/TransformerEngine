@@ -171,6 +171,7 @@ class TestEncoderLayer:
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
+                            self_attn_mask_type='padding',
                             dtype=dtype,
                             **te_layer_attrs)
 
@@ -215,6 +216,7 @@ class TestEncoderLayer:
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
+                            self_attn_mask_type='padding',
                             dtype=dtype,
                             **te_layer_attrs)
         ref_layer, ref_params, ref_others = generate_layer(ref_layer_cls, init_rng, inputs,
