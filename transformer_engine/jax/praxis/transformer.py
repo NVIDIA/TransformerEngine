@@ -5,7 +5,7 @@
 Praxis Modules related Transformer
 """
 from functools import partial
-from typing import Any, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 from praxis import pax_fiddle
 from praxis.base_layer import WeightInit
@@ -73,8 +73,6 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     bias_init: WeightInit = WeightInit.Constant(0.0)
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
-    # TODO(rewang): remove attn_type and the related doc after v0.11
-    attn_type: Any = None
     attn_mask_type: str = 'causal'
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
@@ -147,7 +145,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     output_layernorm: bool = False
     float32_attention_logits: bool = False
     layer_type: TransformerLayerType = TransformerLayerType.ENCODER
-    self_attn_mask_type: str = None    # TODO(rewang): default to 'causal' after 0.11
+    self_attn_mask_type: str = 'causal'
     enable_relative_embedding: bool = True
     relative_embedding: pax_fiddle.Config[RelativePositionBiases] = pax_fiddle.template_field(None)
     drop_path: float = 0.0
