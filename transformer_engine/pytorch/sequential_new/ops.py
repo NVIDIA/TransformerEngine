@@ -246,6 +246,23 @@ class ResidualEnd(PassthroughOp):
         return self.begin
 
 
+# Dropout
+class Dropout(PassthroughOp):
+    p: float
+
+    def __init__(self, name: str, p: float):
+        super().__init__(name, DType.infer, DType.infer)
+        self.p = p
+
+    def bwd(self):
+        return DropoutGrad(self)
+
+
+class DropoutGrad(Grad):
+    def io_types(self):
+        return (DType.infer, DType.infer)
+
+
 # Activation
 class Gelu(PassthroughOp):
     def bwd(self):
