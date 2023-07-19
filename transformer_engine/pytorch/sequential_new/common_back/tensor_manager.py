@@ -5,7 +5,7 @@ import subprocess
 from typing import Any, Callable, Generic
 from attr import dataclass
 from .enums import DType
-from .framework_interface import FrameworkInterface, TensorType, TensorTypeBase
+from .framework_interface import FrameworkInterface, TensorType, ParamConstructor
 from . import framework_interface as fi
 import transformer_engine_extensions as tex  # TODO: make this framework agnostic
 
@@ -22,12 +22,10 @@ class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
 
 
 @dataclass
-class TensorDescriptor(Generic[TensorType]):
+class TensorDescriptor:
     shape: tuple[int, ...]
     dtype: DType
-    init_method: Callable[
-        [type[FrameworkInterface[TensorType]], tuple[int, ...], DType], TensorType
-    ]
+    init_method: ParamConstructor
 
 
 def is_hopper():
@@ -52,7 +50,7 @@ def cublas_workspace(fw: type[FrameworkInterface[TensorType]]) -> TensorType:
 
 
 class TensorManagerBase(ABC, Generic[TensorType]):
-    tensor_descriptors = dict[str, TensorDescriptor[TensorType]]()
+    tensor_descriptors = dict[str, TensorDescriptor]()
     meta_storage: TransformerEngineExtensionsFP8TensorMeta[TensorType]
     tensor_storage = dict[DType, TensorType]()
     tensor_indices = dict[str, int]()
@@ -63,7 +61,7 @@ class TensorManagerBase(ABC, Generic[TensorType]):
         self.framework_interface = framework_interface
         self.framework = type(framework_interface)
 
-    def register_tensor(self, name: str, desc: TensorDescriptor[TensorType]):
+    def register_tensor(self, name: str, desc: TensorDescriptor):
         if not self.allocated:
             raise RuntimeError("Storage already allocated")
         if name in self.tensor_descriptors:

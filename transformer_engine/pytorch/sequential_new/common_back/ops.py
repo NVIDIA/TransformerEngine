@@ -3,13 +3,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import NoReturn
 from . import framework_interface as fi
+from .framework_interface import ParamConstructor
 from .enums import DType
 
 
 @dataclass
 class ParamDescriptor:
     _shape: tuple[int, ...]
-    _constructor: ...
+    _constructor: ParamConstructor
     _dtype: DType = DType.FP32  # TODO: is this correct?
 
 
@@ -121,7 +122,7 @@ class LayerNormGrad(Grad):
 class Gemm(ParamOp):
     in_features: int
     out_features: int
-    init_method: ...
+    init_method: ParamConstructor
 
     def __init__(
         self,
@@ -130,7 +131,7 @@ class Gemm(ParamOp):
         output_type: DType,
         in_features: int,
         out_features: int,
-        init_method: ...,
+        init_method: ParamConstructor,
     ):
         super().__init__(
             name,
@@ -153,7 +154,7 @@ class GemmGrad(Grad):
 
 class Bias(ParamOp):
     features: int
-    init_method: ...
+    init_method: ParamConstructor
 
     def __init__(
         self,
@@ -161,7 +162,7 @@ class Bias(ParamOp):
         input_type: DType,
         output_type: DType,
         features: int,
-        init_method: ...,
+        init_method: ParamConstructor,
     ):
         super().__init__(
             name,

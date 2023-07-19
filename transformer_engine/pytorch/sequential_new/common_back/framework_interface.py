@@ -208,3 +208,14 @@ def uniform(
     out: TensorType | None = None,
 ):
     return fi.fi_uniform(min, max, shape, dtype, out)
+
+
+class ParamConstructor(Protocol):
+    @staticmethod
+    def __call__(
+        fi: type[FrameworkInterface[TensorType]],
+        shape: tuple[int, ...],
+        dtype: DType,
+        /,
+    ) -> TensorType:
+        ...
