@@ -1,8 +1,7 @@
 from abc import ABC, abstractmethod
-from enum import Enum
 from math import prod
 import subprocess
-from typing import Any, Callable, Generic
+from typing import Any, Generic
 from attr import dataclass
 from .enums import DType
 from .framework_interface import FrameworkInterface, TensorType, ParamConstructor
@@ -158,5 +157,5 @@ class TensorManagerBase(ABC, Generic[TensorType]):
         return tex.FP8TensorMeta()  # type: ignore
 
     @abstractmethod
-    def gemm(self, in1: str, in2: str, out: str):
-        ...
+    def gemm(self, in1: str, in2: str, out: str) -> None:
+        raise NotImplementedError()

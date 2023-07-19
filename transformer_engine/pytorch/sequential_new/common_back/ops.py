@@ -31,11 +31,11 @@ class Op(ABC):
 
     @abstractmethod
     def describe_params(self) -> dict[str, ParamDescriptor]:
-        ...
+        raise NotImplementedError()
 
     @abstractmethod
     def bwd(self) -> Op:
-        ...
+        raise NotImplementedError()
 
 
 class PassthroughOp(Op):
@@ -75,7 +75,7 @@ class Grad(PassthroughOp):
 
     @abstractmethod
     def io_types(self) -> tuple[DType, DType]:
-        ...
+        raise NotImplementedError()
 
     def bwd(self) -> NoReturn:
         raise NotImplementedError("Second order gradient not supported")

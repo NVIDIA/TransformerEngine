@@ -13,13 +13,13 @@ class TensorTypeBase(Protocol):
         ...
 
     def view(self, *size: int | Sequence[int]) -> TensorTypeBase:
-        ...
+        raise NotImplementedError()
 
     def __getitem__(self, indices: int | slice | tuple[int | slice]) -> TensorTypeBase:
-        ...
+        raise NotImplementedError()
 
     def is_contiguous(self) -> bool:
-        ...
+        raise NotImplementedError()
 
 
 TensorType = TypeVar(
@@ -33,7 +33,7 @@ class FrameworkInterface(Protocol[TensorType]):
 
     @staticmethod
     def fi_empty(shape: tuple[int, ...], dtype: DType) -> "Tensor":
-        ...
+        raise NotImplementedError()
 
     @staticmethod
     def fi_zeros(
@@ -41,7 +41,7 @@ class FrameworkInterface(Protocol[TensorType]):
         dtype: DType | None,
         out: "Tensor" | None,
     ) -> "Tensor" | None:
-        ...
+        raise NotImplementedError()
 
     @staticmethod
     def fi_ones(
@@ -49,7 +49,7 @@ class FrameworkInterface(Protocol[TensorType]):
         dtype: DType | None,
         out: "Tensor" | None,
     ) -> "Tensor" | None:
-        ...
+        raise NotImplementedError()
 
     @staticmethod
     def fi_normal(
@@ -59,7 +59,7 @@ class FrameworkInterface(Protocol[TensorType]):
         dtype: DType | None,
         out: "Tensor" | None,
     ) -> "Tensor" | None:
-        ...
+        raise NotImplementedError()
 
     @staticmethod
     def fi_uniform(
@@ -69,10 +69,10 @@ class FrameworkInterface(Protocol[TensorType]):
         dtype: DType | None,
         out: "Tensor" | None,
     ) -> "Tensor" | None:
-        ...
+        raise NotImplementedError()
 
     def fi_register_buffer(self, name: str, tensor: "Tensor") -> None:
-        ...
+        raise NotImplementedError()
 
 
 def empty(
@@ -218,4 +218,4 @@ class ParamConstructor(Protocol):
         dtype: DType,
         /,
     ) -> TensorType:
-        ...
+        raise NotImplementedError()

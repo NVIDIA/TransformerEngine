@@ -1,4 +1,4 @@
-from typing import Any, Callable, Generic
+from typing import Any, Callable
 from .ops import Op, PassthroughOp
 from .enums import DType
 from .framework_interface import FrameworkInterface, TensorType
@@ -19,8 +19,8 @@ class ComputePipeline:
         )
         # TODO: construct parameters and activations
 
-    def __call__(self, *args: Any, **kwargs: Any):
-        ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError()
 
     @staticmethod
     def compile(_ops: list[Op], _transforms: list[Callable[[list[Op]], list[Op]]]):
