@@ -10,7 +10,6 @@ import paddle
 import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
-from .base import TransformerEngineBaseLayer
 from ..constants import TE_DType
 from ..cpp_extensions import layernorm_fwd, layernorm_bwd
 
@@ -61,7 +60,7 @@ class _LayerNorm(paddle.autograd.PyLayer):
         )
 
 
-class LayerNorm(TransformerEngineBaseLayer):
+class LayerNorm(paddle.nn.Layer):
     r"""
     Applies Layer Normalization over a mini-batch of inputs as described in
     the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`
@@ -74,11 +73,12 @@ class LayerNorm(TransformerEngineBaseLayer):
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         zero_centered_gamma: bool = False,
-        **kwargs,
+        backend: str = 'transformer_engine',
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
+        self.backend = backend
         self._dtype = self._helper.get_default_dtype()
 
         self._weight_attr = weight_attr
@@ -121,8 +121,20 @@ class LayerNorm(TransformerEngineBaseLayer):
         inp: paddle.Tensor,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
+        if self.zero_centered_gamma:
+            raise NotImplementedError(
+                "Paddle backend does not support LayerNorm with zero-centered scale.")
+
         return F.layer_norm(x=inp,
                             normalized_shape=inp.shape[1:],
                             weight=self.weight,
                             bias=self.bias,
                             epsilon=self.eps)
+
+    def forward(self, *args, **kwargs):
+        """forward"""
+        if self.backend == 'transformer_engine':
+            return self._te_forward(*args, **kwargs)
+        if self.backend == 'paddle':
+            return self._pd_forward(*args, **kwargs)
+        raise AttributeError(f"Backend {self.backend} is not supported.")

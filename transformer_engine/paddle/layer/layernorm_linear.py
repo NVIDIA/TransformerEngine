@@ -160,15 +160,16 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
-        **kwargs,
+        backend: str = 'transformer_engine',
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.eps = eps
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
+        self.backend = backend
 
         self._weight_attr = weight_attr
         self._bias_attr = bias_attr
@@ -253,10 +254,24 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         inp: paddle.Tensor,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
-        inp = F.layer_norm(x=inp,
-                           normalized_shape=inp.shape[1:],
-                           weight=self.ln_weight,
-                           bias=self.ln_bias,
-                           epsilon=self.eps)
-        out = F.linear(inp, self.weight, self.bias)
+        if self.zero_centered_gamma:
+            raise NotImplementedError(
+                "Paddle backend does not support LayerNorm with zero-centered scale.")
+
+        ln_out = F.layer_norm(x=inp,
+                              normalized_shape=inp.shape[1:],
+                              weight=self.ln_weight,
+                              bias=self.ln_bias,
+                              epsilon=self.eps)
+        out = F.linear(ln_out, self.weight, self.bias)
+        if self.return_layernorm_output:
+            return out, ln_out
         return out
+
+    def forward(self, *args, **kwargs):
+        """forward"""
+        if self.backend == 'transformer_engine':
+            return self._te_forward(*args, **kwargs)
+        if self.backend == 'paddle':
+            return self._pd_forward(*args, **kwargs)
+        raise AttributeError(f"Backend {self.backend} is not supported.")

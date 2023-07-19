@@ -36,13 +36,9 @@ def get_workspace() -> paddle.Tensor:
 class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     """Base TE Layer."""
 
-    def __init__(
-        self,
-        backend: str = 'transformer_engine',
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
         assert 'gpu' in paddle.device.get_device(), "TransformerEngine needs CUDA."
-        self.backend = backend
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -89,17 +85,5 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             yield inp
 
     @abstractmethod
-    def _te_forward(self):
-        """TransformerEngine Path"""
-
-    @abstractmethod
-    def _pd_forward(self):
-        """Paddle Path"""
-
-    def forward(self, *args, **kwargs):
-        """forward"""
-        if self.backend == 'transformer_engine':
-            return self._te_forward(*args, **kwargs)
-        if self.backend == 'paddle':
-            return self._pd_forward(*args, **kwargs)
-        raise AttributeError(f"Backend {self.backend} is not supported.")
+    def forward(self):
+        """Needs override."""

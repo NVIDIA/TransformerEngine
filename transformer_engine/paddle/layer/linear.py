@@ -101,11 +101,12 @@ class Linear(TransformerEngineBaseLayer):
         out_features: int,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
-        **kwargs,
+        backend: str = 'transformer_engine',
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.backend = backend
         self._weight_attr = weight_attr
         self._bias_attr = bias_attr
         self._dtype = self._helper.get_default_dtype()
@@ -156,3 +157,11 @@ class Linear(TransformerEngineBaseLayer):
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
         return F.linear(inp, self.weight, self.bias)
+
+    def forward(self, *args, **kwargs):
+        """forward"""
+        if self.backend == 'transformer_engine':
+            return self._te_forward(*args, **kwargs)
+        if self.backend == 'paddle':
+            return self._pd_forward(*args, **kwargs)
+        raise AttributeError(f"Backend {self.backend} is not supported.")

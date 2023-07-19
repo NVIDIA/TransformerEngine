@@ -215,9 +215,9 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         activation: str = "gelu",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
-        **kwargs,
+        backend: str = 'transformer_engine',
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
 
         self.hidden_size = hidden_size
         self.ffn_hidden_size = ffn_hidden_size
@@ -225,6 +225,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self.activation = activation
         self.return_layernorm_output = return_layernorm_output
         self.zero_centered_gamma = zero_centered_gamma
+        self.backend = backend
 
         self._weight_attr = weight_attr
         self._bias_attr = bias_attr
@@ -334,13 +335,28 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         inp: paddle.Tensor,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
-        inp = F.layer_norm(x=inp,
-                           normalized_shape=inp.shape[1:],
-                           weight=self.ln_weight,
-                           bias=self.ln_bias,
-                           epsilon=self.eps)
-        inp = F.linear(inp, self.fc1_weight, self.fc1_bias)
+        if self.zero_centered_gamma:
+            raise NotImplementedError(
+                "Paddle backend does not support LayerNorm with zero-centered scale.")
+
+        ln_out = F.layer_norm(x=inp,
+                              normalized_shape=inp.shape[1:],
+                              weight=self.ln_weight,
+                              bias=self.ln_bias,
+                              epsilon=self.eps)
+        fc1_out = F.linear(ln_out, self.fc1_weight, self.fc1_bias)
         act_func = get_paddle_act_func(self.activation)
-        inp = act_func(inp)
-        out = F.linear(inp, self.fc2_weight, self.fc2_bias)
+        act_out = act_func(fc1_out)
+        out = F.linear(act_out, self.fc2_weight, self.fc2_bias)
+
+        if self.return_layernorm_output:
+            return out, ln_out
         return out
+
+    def forward(self, *args, **kwargs):
+        """forward"""
+        if self.backend == 'transformer_engine':
+            return self._te_forward(*args, **kwargs)
+        if self.backend == 'paddle':
+            return self._pd_forward(*args, **kwargs)
+        raise AttributeError(f"Backend {self.backend} is not supported.")
