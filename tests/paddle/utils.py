@@ -3,8 +3,10 @@
 # See LICENSE for license information.
 """Utils for testing"""
 
-import paddle
 import numpy as np
+
+import paddle
+
 import transformer_engine    # pylint: disable=unused-import
 import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
 
