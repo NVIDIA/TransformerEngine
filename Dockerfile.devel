@@ -24,11 +24,3 @@ RUN set -x \
  && NO_PROT="${GIT_URL#*://}" \
  && NO_USER="${NO_PROT#*@}" \
  && git remote set-url origin "https://${NO_USER}"
-
-# Install dependencies for testing
-RUN pip install pytest
-
-# TensorFlow build tests require TensorFlow Datasets
-RUN [[ "${FRAMEWORK}" =~ tensorflow|all ]] \
- && pip install tensorflow_datasets \
- || [[ ! "${FRAMEWORK}" =~ tensorflow|all ]]
