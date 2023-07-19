@@ -1,19 +1,13 @@
-from abc import abstractmethod
-from functools import reduce
-import operator
-from typing import Generic, NoReturn
+from typing import Generic
 from typing_extensions import TypeVarTuple, Unpack
 
-from transformer_engine.pytorch.sequential_new.enums import DType
 from .ops import (
     Bias,
     BiasGrad,
     Gelu,
     GeluGrad,
     Gemm,
-    Grad,
     Op,
-    ParamDescriptor,
     ResidualBegin,
     ResidualEnd,
     Dropout,
@@ -22,24 +16,24 @@ from .ops import (
 
 
 # Fused op base class
-class FusedOp(Op):
+Ops = TypeVarTuple("Ops", default=Unpack[tuple[Op]])
+
+
+class FusedOp(Op, Generic[Unpack[Ops]]):
     pass
 
 
 # Auto fuser
-Ops = TypeVarTuple("Ops", default=Unpack[tuple[Op]])
-
-
-class AutoFuse(FusedOp, Generic[Unpack[Ops]]):
+class AutoFuse(FusedOp[Unpack[Ops]]):
     pass
 
 
 # Manual fusions
-class GemmBias(FusedOp):
+class GemmBias(FusedOp[Gemm, Bias]):
     pass
 
 
-class GemmBiasGelu(FusedOp):
+class GemmBiasGelu(FusedOp[Gemm, Bias, Gelu]):
     pass
 
 
@@ -52,8 +46,8 @@ class Fuser(Generic[Unpack[FusedOpTypes]]):
 
 
 TE_FUSER = Fuser[
-    # GemmBias,
-    # GemmBiasGelu,
+    GemmBias,
+    GemmBiasGelu,
     AutoFuse[GeluGrad, BiasGrad],
     AutoFuse[Bias, Dropout, ResidualEnd],
     AutoFuse[ResidualBegin, BiasGrad, DropoutGrad],
