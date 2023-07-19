@@ -3,12 +3,12 @@ from math import sqrt
 from torch import nn
 from .custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from .custom_expand_for_sequential import expand
-from ..common.compile_env import CompileEnv
-from ..common.ops import DType
-from ..common import ops
+from ..common_back.compile_env import CompileEnv
+from ..common_back.ops import DType
+from ..common_back import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ...attention import DotProductAttention
-from ..common import framework_interface as fi
+from ..common_back import framework_interface as fi
 
 
 def _gemm_param_init_methods(te: bool, in_features: int):

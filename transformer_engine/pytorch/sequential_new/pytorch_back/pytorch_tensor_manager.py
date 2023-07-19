@@ -1,5 +1,5 @@
 import torch
-from ..common.tensor_manager import TensorManagerBase, cublas_workspace
+from ..common_back.tensor_manager import TensorManagerBase, cublas_workspace
 from .pytorch_interface import PytorchInterface
 from ... import cpp_extensions
 

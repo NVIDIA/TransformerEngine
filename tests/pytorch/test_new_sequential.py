@@ -3,8 +3,8 @@ from torch import nn
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.sequential_new import Sequential, Residual
-from transformer_engine.pytorch.sequential_new.common.compile_env import CompileEnv
-from transformer_engine.pytorch.sequential_new.pt.pytorch_interface import (
+from transformer_engine.pytorch.sequential_new.common_back.compile_env import CompileEnv
+from transformer_engine.pytorch.sequential_new.pytorch_back.pytorch_interface import (
     PytorchInterface,
 )
 
@@ -40,7 +40,7 @@ pprint(
     [
         f"{type(op).__name__}[{op.input_type.value},{op.output_type.value}]".ljust(40)
         + op.name
-        for op in transformer._pipeline._bwd
+        for op in transformer._pipeline._fwd
     ],
     width=200,
 )

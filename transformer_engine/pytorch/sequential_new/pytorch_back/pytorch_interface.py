@@ -1,8 +1,8 @@
 from __future__ import annotations
 import torch
 from torch import nn
-from ..common.framework_interface import FrameworkInterface
-from ..common.enums import DType
+from ..common_back.framework_interface import FrameworkInterface
+from ..common_back.enums import DType
 
 _types = {
     DType.FP8E4M3: torch.uint8,

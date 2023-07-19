@@ -17,7 +17,7 @@ class ComputePipeline:
         self._bwd = ComputePipeline.compile(
             [op.bwd() for op in ops[::-1]], extra_transformations
         )
-        self.construct_parameters()
+        # TODO: construct parameters and activations
 
     def __call__(self, *args: Any, **kwargs: Any):
         ...
@@ -88,14 +88,6 @@ class ComputePipeline:
                 i += 1  # skip cast
             i += 1
         return _ops
-
-    def construct_parameters(self):
-        for op in self._fwd:
-            op_params = op.describe_params()
-            for name, desc in op_params.items():
-                name = op.name + "." + name
-                param = desc.construct(self._framework)
-                setattr(self._framework_interface, name, param)
 
 
 __all__ = ["ComputePipeline"]

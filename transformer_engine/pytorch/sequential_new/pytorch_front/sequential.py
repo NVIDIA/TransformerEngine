@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 
 from .expand_for_sequential import expand
-from ..common.compute_pipeline import ComputePipeline
-from ..common.compile_env import CompileEnv
-from ..common.ops import Op
-from .pytorch_interface import PytorchInterface
-from ..common.model_parallel_transform import model_parallel_transform
+from ..common_back.compute_pipeline import ComputePipeline
+from ..common_back.compile_env import CompileEnv
+from ..common_back.ops import Op
+from ..pytorch_back.pytorch_interface import PytorchInterface
+from ..common_back.model_parallel_transform import model_parallel_transform
 
 
 class Sequential(nn.Module):

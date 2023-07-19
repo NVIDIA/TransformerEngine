@@ -1,7 +1,7 @@
 from typing import Callable
 from torch import nn
-from ..common.compile_env import CompileEnv
-from ..common.ops import Op
+from ..common_back.compile_env import CompileEnv
+from ..common_back.ops import Op
 
 CUSTOM_EXPAND_FOR_SEQUENTIAL: dict[
     type, Callable[[nn.Module, CompileEnv], list[Op]]

@@ -1,5 +1,5 @@
-from .pt.sequential import Sequential
-from .pt.residual import Residual
+from .pytorch_front.sequential import Sequential
+from .pytorch_front.residual import Residual
 
 __all__ = [
     "Sequential",
