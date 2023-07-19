@@ -231,6 +231,11 @@ def expand_dot_product_attention(module: nn.Module, env: CompileEnv) -> list[ops
     ]
 
 
+def expand_dropout(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+    assert isinstance(module, nn.Dropout)
+    return [ops.Dropout("dropout", module.p)]
+
+
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.Linear] = expand_linear
 CUSTOM_EXPAND_FOR_SEQUENTIAL[Linear] = expand_linear
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.LayerNorm] = expand_layerNorm
@@ -239,5 +244,6 @@ CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormLinear] = expand_layerNormLinear
 CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormMLP] = expand_layerNormMLP
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.Sequential] = expand_sequential
 CUSTOM_EXPAND_FOR_SEQUENTIAL[DotProductAttention] = expand_dot_product_attention
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.Dropout] = expand_dropout
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [ops.Gelu("act")]
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [ops.Relu("act")]

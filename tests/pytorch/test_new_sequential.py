@@ -19,12 +19,14 @@ transformer = blocks * Sequential(
         te.Linear(token_size, 3 * token_size),
         te.DotProductAttention(heads, token_size // heads),
         te.Linear(3 * token_size, token_size),
+        nn.Dropout(0.3),
     ),
     Residual(
         te.LayerNorm(token_size),
         nn.Linear(token_size, ffn_size),
         nn.ReLU(),
         nn.Linear(ffn_size, token_size),
+        nn.Dropout(0.3),
     ),
     model_parallel=True,
 )

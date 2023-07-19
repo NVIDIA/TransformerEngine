@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
-from math import inf
 from .ops import (
     Op,
     Gemm,
@@ -14,6 +13,7 @@ from .ops import (
     LayerNorm,
     Transpose,
     DotProductAttention,
+    Dropout,
 )
 
 
@@ -35,7 +35,7 @@ def model_parallel_transform(ops: list[Op]) -> list[Op]:
     return _bfs01(graph)
 
 
-POINTWISE_OPS = [Bias, Gelu, Relu, ResidualBegin, ResidualEnd]
+POINTWISE_OPS = [Bias, Gelu, Relu, ResidualBegin, ResidualEnd, Dropout]
 ROWWISE_OPS = [LayerNorm]
 
 
