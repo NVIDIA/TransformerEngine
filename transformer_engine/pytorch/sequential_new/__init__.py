@@ -1,5 +1,5 @@
-from .sequential import Sequential
-from .residual import Residual
+from .pt.sequential import Sequential
+from .pt.residual import Residual
 
 __all__ = [
     "Sequential",

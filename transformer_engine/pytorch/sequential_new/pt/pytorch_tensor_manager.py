@@ -1,7 +1,7 @@
 import torch
-from .tensor_manager import TensorManagerBase, cublas_workspace
+from ..common.tensor_manager import TensorManagerBase, cublas_workspace
 from .pytorch_interface import PytorchInterface
-from .. import cpp_extensions
+from ... import cpp_extensions
 
 
 class PytorchTensorManager(TensorManagerBase[torch.Tensor]):

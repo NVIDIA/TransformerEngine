@@ -2,9 +2,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import NoReturn
-
-from transformer_engine.pytorch.sequential_new.enums import DType
-
 from . import framework_interface as fi
 from .enums import DType
 

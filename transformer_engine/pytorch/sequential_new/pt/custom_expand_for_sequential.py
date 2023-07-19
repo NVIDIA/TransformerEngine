@@ -1,11 +1,12 @@
 from typing import Callable
 from torch import nn
-from .compile_env import CompileEnv
-from .ops import Op
+from ..common.compile_env import CompileEnv
+from ..common.ops import Op
 
 CUSTOM_EXPAND_FOR_SEQUENTIAL: dict[
     type, Callable[[nn.Module, CompileEnv], list[Op]]
 ] = {}
+
 
 def expand(m: nn.Module, compile_env: CompileEnv) -> list[Op]:
     if hasattr(m, "expand_for_sequential"):
@@ -14,5 +15,6 @@ def expand(m: nn.Module, compile_env: CompileEnv) -> list[Op]:
         return CUSTOM_EXPAND_FOR_SEQUENTIAL[type(m)](m, compile_env)
     else:
         raise NotImplementedError
+
 
 __all__ = ["CUSTOM_EXPAND_FOR_SEQUENTIAL", "expand"]
