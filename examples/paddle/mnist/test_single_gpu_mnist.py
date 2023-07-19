@@ -187,6 +187,8 @@ class TestMNIST(unittest.TestCase):
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_test_accuracy
 
+    @unittest.skipIf(paddle.device.cuda.get_device_capability() < (8, 0),
+                     "BF16 MNIST example requires Ampere+ GPU")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         self.args.use_te = True

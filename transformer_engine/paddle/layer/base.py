@@ -79,11 +79,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self,
         inp: paddle.Tensor,
     ) -> None:
-        """Checks and prep for FWD.
-        The context manager is needed because there isn't a way for a module to know
-        if it's the last FP8 module in the forward autocast. It is useful
-        to setup the forward aggregated amax reduction for every module
-        just in case. The autocast exit will pick up the most recent one.
+        """
+        Checks and prep for FWD.
         """
 
         self.set_activation_dtype(inp)
