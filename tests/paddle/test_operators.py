@@ -42,6 +42,7 @@ from transformer_engine.paddle.cpp_extensions import (
 )
 from transformer_engine.paddle.fp8 import is_fp8_available
 
+np.random.seed(10)
 paddle.seed(10)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
