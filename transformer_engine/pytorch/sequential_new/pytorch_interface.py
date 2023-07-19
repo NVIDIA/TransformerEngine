@@ -13,15 +13,18 @@ _types = {
 }
 
 
-# TODO: fix type ignore
-class PytorchInterface(FrameworkInterface[torch.Tensor], nn.Module):  # type: ignore
+class PytorchInterface(FrameworkInterface[torch.Tensor], nn.Module):
+    Tensor: type[torch.Tensor] = torch.Tensor
+
     @staticmethod
     def fi_empty(shape: tuple[int, ...], dtype: DType):
         return torch.empty(shape, dtype=_types[dtype])
 
     @staticmethod
     def fi_zeros(
-        shape: tuple[int, ...] | None, dtype: DType | None, out: torch.Tensor | None
+        shape: tuple[int, ...] | None,
+        dtype: DType | None,
+        out: torch.Tensor | None,
     ):
         if out is None:
             assert shape is not None and dtype is not None

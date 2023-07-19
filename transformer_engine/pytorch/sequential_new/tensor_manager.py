@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from enum import Enum
 from math import prod
 import subprocess
@@ -50,7 +51,7 @@ def cublas_workspace(fw: type[FrameworkInterface[TensorType]]) -> TensorType:
     return _cublas_workspace
 
 
-class TensorManager(Generic[TensorType]):
+class TensorManagerBase(ABC, Generic[TensorType]):
     tensor_descriptors = dict[str, TensorDescriptor[TensorType]]()
     meta_storage: TransformerEngineExtensionsFP8TensorMeta[TensorType]
     tensor_storage = dict[DType, TensorType]()
@@ -150,7 +151,7 @@ class TensorManager(Generic[TensorType]):
 
     def te_dtype(self, tensor: str) -> object:
         assert self._is_fp8(tensor)
-        if self.tensor_descriptors[tensor].dtype == DType.FP8E4M3:
+        if self.tensor_descriptors[tensor].dtype is DType.FP8E4M3:
             return tex.DType.FP8E4M3  # type: ignore
         else:
             return tex.DType.FP8E5M2  # type: ignore
@@ -158,54 +159,6 @@ class TensorManager(Generic[TensorType]):
     def make_tensor_meta(self) -> TransformerEngineExtensionsFP8TensorMeta[TensorType]:
         return tex.FP8TensorMeta()  # type: ignore
 
+    @abstractmethod
     def gemm(self, in1: str, in2: str, out: str):
-        import torch
-        from .pytorch_interface import PytorchInterface
-        from transformer_engine.pytorch import cpp_extensions
-
-        # TODO: make this framework agnostic
-
-        assert issubclass(self.framework, PytorchInterface)
-
-        self._sanity_check(in1, in2, out)
-
-        out_torch_dtype = self.tensor_descriptors[out].dtype.value
-        assert isinstance(out_torch_dtype, torch.dtype)
-
-        if self._is_fp8(in1) and self._is_fp8(in2):
-            in1_te_dtype = self.te_dtype(in1)
-            in2_te_dtype = self.te_dtype(in2)
-            out_te_dtype = self.te_dtype(out) if self._is_fp8(out) else None
-
-            cpp_extensions.fp8_gemm(  # type: ignore
-                self.tensors[in1],
-                self.meta_storage.scale_inv,
-                self.tensor_indices[in1],
-                in1_te_dtype,
-                self.tensors[in2],
-                self.meta_storage.scale_inv,
-                self.tensor_indices[in2],
-                in2_te_dtype,
-                out_torch_dtype,
-                cublas_workspace(),
-                out=self.tensors[out],
-                fp8_meta_tensor=self.meta_storage if self._is_fp8(out) else None,
-                out_index=self.tensor_indices[out] if self._is_fp8(out) else None,
-                D_dtype=out_te_dtype,
-            )
-
-        elif self._is_fp8(in1) ^ self._is_fp8(in2):
-            raise RuntimeError("Mixed precision `GEMM(FP8, not FP8)` not supported.")
-        else:
-            if self._is_fp8(out):
-                raise RuntimeError(
-                    "Mixed precision `GEMM(not FP8, not FP8) -> FP8` not supported."
-                )
-
-            cpp_extensions.gemm(  # type: ignore
-                self.tensors[in1],
-                self.tensors[in2],
-                out_torch_dtype,
-                cublas_workspace(),
-                out=self.tensors[out],
-            )
+        ...

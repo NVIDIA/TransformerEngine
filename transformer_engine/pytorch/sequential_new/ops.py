@@ -1,13 +1,11 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 from typing import NoReturn
 
 from transformer_engine.pytorch.sequential_new.enums import DType
 
 from . import framework_interface as fi
-from .framework_interface import FrameworkInterface, TensorType
 from .enums import DType
 
 
@@ -16,9 +14,6 @@ class ParamDescriptor:
     _shape: tuple[int, ...]
     _constructor: ...
     _dtype: DType = DType.FP32  # TODO: is this correct?
-
-    def construct(self, framework: type[FrameworkInterface[TensorType]]) -> TensorType:
-        return self._constructor(framework, self._shape, self._dtype)
 
 
 # Base classes

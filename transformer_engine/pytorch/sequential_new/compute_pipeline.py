@@ -4,7 +4,7 @@ from .enums import DType
 from .framework_interface import FrameworkInterface, TensorType
 
 
-class ComputePipeline(Generic[TensorType]):
+class ComputePipeline:
     def __init__(
         self,
         framework_interface: FrameworkInterface[TensorType],
