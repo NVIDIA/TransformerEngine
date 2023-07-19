@@ -659,38 +659,38 @@ class TestRelativePositionBias(TestLayer):
 class MultiHeadAttnAttr:
     USE_BIAS = 'use_bias'
     LN_TYPE = 'layernorm_type'
-    ATTN_TYPE = 'attn_type'
+    ATTN_MASK_TYPE = 'attn_mask_type'
     ZERO_CEN = 'zero_centered_gamma'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_TYPE: 'padding'
+        ATTN_MASK_TYPE: 'padding'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: False,
-        ATTN_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
         ZERO_CEN: True,
-        ATTN_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal'
     }, {
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
-        ATTN_TYPE: 'causal'
+        ATTN_MASK_TYPE: 'causal'
     }]
 
 
@@ -714,7 +714,7 @@ class TestMultiHeadAttn(TestLayer):
         bias_init = WeightInit.Constant(0.0)
         apply_residual_connection_post_layernorm = False
         output_layernorm = False
-        attn_type = attrs[MultiHeadAttnAttr.ATTN_TYPE]
+        attn_mask_type = attrs[MultiHeadAttnAttr.ATTN_MASK_TYPE]
         fuse_qkv: bool = True
         transpose_batch_sequence = True
         scale_attn_logits = False
@@ -734,7 +734,7 @@ class TestMultiHeadAttn(TestLayer):
             bias_init=bias_init,
             apply_residual_connection_post_layernorm=apply_residual_connection_post_layernorm,
             output_layernorm=output_layernorm,
-            attn_type=attn_type,
+            attn_mask_type=attn_mask_type,
             fuse_qkv=fuse_qkv,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
@@ -752,7 +752,7 @@ class TestMultiHeadAttn(TestLayer):
             bias_init=TransformerEngineBaseLayer.generate_params_init("bias", bias_init),
             apply_residual_connection_post_layernorm=apply_residual_connection_post_layernorm,
             output_layernorm=output_layernorm,
-            attn_type=attn_type,
+            attn_mask_type=attn_mask_type,
             fuse_qkv=fuse_qkv,
             transpose_batch_sequence=transpose_batch_sequence,
             scale_attn_logits=scale_attn_logits,
