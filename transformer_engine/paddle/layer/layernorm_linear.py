@@ -4,7 +4,7 @@
 """LayerNormLinear API"""
 
 import os
-from typing import Union, Tuple, Dict, Any
+from typing import Union, Tuple, Dict, Any, Optional
 
 import paddle
 import paddle.nn.functional as F
@@ -21,9 +21,22 @@ from ..cpp_extensions import (
 
 from .base import TransformerEngineBaseLayer
 from .linear import _linear_fwd, _linear_bwd
-from ..constants import TE_DType, FP8FwdTensors, FP8BwdTensors
+from ..constants import TE_DType, FP8FwdTensors, FP8BwdTensors, GemmParallelModes, dist_group_type
+from ..distributed import (
+    allreduce,
+    get_tp_group_and_world_size,
+    identity,
+    track_rng_state,
+    set_tensor_dist_attr,
+    set_weight_tensor_dist_attr,
+)
 from ..fp8 import get_fp8_te_dtype
-from ..utils import cast_if_needed, cast_if_needed_inplace, assert_dim_for_fp8_forward_exec
+from ..utils import (
+    assert_dim_for_fp8_forward_exec,
+    cast_if_needed,
+    cast_if_needed_inplace,
+    divide,
+)
 
 __all__ = ["LayerNormLinear", "_layernorm_fwd_fp8_cast", "_layernorm_bwd"]
 
@@ -128,6 +141,10 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        parallel_mode: Union[str, None],
+        tensor_parallel: bool,
+        tp_group: Union[dist_group_type, None],
+        tp_size: int,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -169,6 +186,9 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             fp8_calibration,
             fp8_meta,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
             is_grad_enabled,
         )
 
@@ -192,6 +212,10 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.return_layernorm_output = return_layernorm_output
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.parallel_mode = parallel_mode
+            ctx.tensor_parallel = tensor_parallel
+            ctx.tp_group = tp_group
+            ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
@@ -206,8 +230,10 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
     def backward(
             ctx, *grad_outputs: Tuple[paddle.Tensor,
                                       ...]) -> Tuple[Union[paddle.Tensor, None], ...]:
-        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
+        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8,
                                                          ctx.fp8_meta,
+                                                         ctx.tp_group,
+                                                         ctx.tp_size,
                                                          name="_LayerNormLinear"):
             (
                 inputmat,
@@ -262,6 +288,9 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
                 ctx.fp8_meta,
                 True,    # Always compute dgrad to feed into LayerNorm bwd
                 ctx.activation_dtype,
+                ctx.parallel_mode,
+                ctx.tensor_parallel,
+                ctx.tp_group,
             )
 
             if not ctx.fp8_enabled:
@@ -307,6 +336,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
+        parallel_mode: Optional[str] = None,
+        tp_group: Union[dist_group_type, None] = None,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -322,9 +353,22 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self._bias_attr = bias_attr
         self._dtype = self._helper.get_default_dtype()
 
+        # Set parallel configs
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group)
+        self.tensor_parallel = self.tp_size > 1
+        self.parallel_mode = parallel_mode
+        assert (self.parallel_mode
+                in GemmParallelModes), f"parallel_mode {parallel_mode} not supported"
+
+        if self.parallel_mode == "column":
+            self.out_features = divide(self.out_features, self.tp_size)
+        elif self.parallel_mode == "row":
+            self.in_features = divide(self.in_features, self.tp_size)
+        self.set_nccl_overlap_warning_if_tp()
+
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
-            shape=[in_features],
+            shape=[self.in_features],
             attr=paddle.ParamAttr(initializer=Constant(
                 value=0.0 if self.zero_centered_gamma else 1.0)),
             dtype=self._dtype,
@@ -332,33 +376,47 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         )
 
         self.ln_bias = self.create_parameter(
-            shape=[in_features],
+            shape=[self.in_features],
             attr=paddle.ParamAttr(initializer=Constant(value=0.0)),
             dtype=self._dtype,
             is_bias=True,
         )
 
-        # Linear weights
-        self.weight = self.create_parameter(
-            shape=[out_features, in_features]
-            if self.backend == 'transformer_engine' else [in_features, out_features],
-            attr=self._weight_attr,
-            dtype=self._dtype,
-            is_bias=False,
-        )
+        # Initialize Linear weight parameter
+        with track_rng_state(enable=self.tensor_parallel):
+            # TE linear weight is in column major
+            self.weight = self.create_parameter(
+                shape=[self.out_features, self.in_features]
+                if self.backend == 'transformer_engine' else [self.in_features, self.out_features],
+                attr=self._weight_attr,
+                dtype=self._dtype,
+                is_bias=False,
+            )
+        set_weight_tensor_dist_attr(self.weight, self.tensor_parallel, self.parallel_mode,
+                                    self.backend)
 
+        # Initialize Linear bias parameter
         self.has_bias = self._bias_attr is not False
         use_default_bias = self._bias_attr is None or self._bias_attr is True
         if self.has_bias:
             self.bias = self.create_parameter(
-                shape=[out_features],
+                shape=[self.out_features],
                 attr=self._bias_attr if not use_default_bias else paddle.ParamAttr(
                     initializer=Constant(value=0.0)),
                 dtype=self._dtype,
                 is_bias=True,
             )
+            if parallel_mode == "column":
+                set_tensor_dist_attr(self.bias, self.tensor_parallel, axis=0)
         else:
             self.bias = None
+
+        # For RPL, bias has to be added after TP collectives
+        # So it cannot be fused with the GEMM
+        if self.parallel_mode == "row" and self.tensor_parallel and self.has_bias:
+            self.gemm_bias_unfused_add = True
+        else:
+            self.gemm_bias_unfused_add = False
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -385,8 +443,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.ln_weight,
                 self.ln_bias,
                 self.weight,
-                self.bias,
-                self.has_bias,
+                self.bias if not self.gemm_bias_unfused_add else None,
+                self.has_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 self.fp8_enabled,
                 self.fp8_calibration,
@@ -397,10 +455,19 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.parallel_mode,
+                self.tensor_parallel,
+                self.tp_group,
+                self.tp_size,
             )
 
         if self.return_layernorm_output:
             out, ln_out = out
+
+        if self.gemm_bias_unfused_add:
+            out = out + cast_if_needed_inplace(self.bias, self.activation_dtype)
+
+        if self.return_layernorm_output:
             return out, ln_out
         return out
 
@@ -418,7 +485,12 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                               weight=self.ln_weight,
                               bias=self.ln_bias,
                               epsilon=self.eps)
-        out = F.linear(ln_out, self.weight, self.bias)
+        if self.parallel_mode == 'column' and self.tensor_parallel:
+            ln_out = identity(ln_out, self.tp_group)
+        out = F.linear(ln_out, self.weight, self.bias if not self.gemm_bias_unfused_add else None)
+        if self.parallel_mode == 'row' and self.tensor_parallel:
+            out = allreduce(out, self.tp_group)
+            out = out + self.bias if self.bias is not None else out
         if self.return_layernorm_output:
             return out, ln_out
         return out

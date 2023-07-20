@@ -5,8 +5,10 @@
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+import os
 import pickle
 from typing import Generator, Dict, Tuple, Union, Any
+import warnings
 
 import numpy as np
 
@@ -14,7 +16,7 @@ import paddle
 from paddle.fluid import core
 from paddle.fluid.framework import _dygraph_tracer
 
-from ..constants import FP8BwdTensors
+from ..constants import FP8BwdTensors, dist_group_type
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8
 from ..fp8 import (
     FP8State,
@@ -61,9 +63,15 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
+        self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = FP8State.get_default_fp8_recipe()
         self.fp8_meta["scaling_fwd"] = FP8TensorMeta(is_forward=True)
         self.fp8_meta["scaling_bwd"] = FP8TensorMeta(is_forward=False)
+        self.tp_group = None
+        self.tp_size = 1
+        self.fp8_meta["autocast_id_fwd_stack"] = []
+        self.fp8_meta["async_amax_reduction"] = bool(
+            int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0")))
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -114,6 +122,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
             # Set FP8, recipe, and other FP8 metadata
             self.fp8_meta["recipe"] = state.get_fp8_recipe()
+            self.fp8_meta["fp8_group"] = state.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
             self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
@@ -136,6 +145,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             state = {}
             state["scaling_fwd"] = self.fp8_meta["scaling_fwd"].to_numpy()
             state["scaling_bwd"] = self.fp8_meta["scaling_bwd"].to_numpy()
+            state["global_fp8_buffer"] = get_global_fp8_state().get_fp8_buffer().to_numpy()
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
@@ -179,6 +189,10 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta["scaling_fwd"].from_numpy(state["scaling_fwd"])
         self.fp8_meta["scaling_bwd"].from_numpy(state["scaling_bwd"])
 
+        # Restore global FP8 buffer states.
+        fp8_buffer = get_global_fp8_state().get_fp8_buffer()
+        fp8_buffer.from_numpy(state["global_fp8_buffer"])
+
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = self.fp8_meta["scaling_fwd"].amax_history.shape[
@@ -210,9 +224,24 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         # Previous iteration was grad_enabled
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            amax_and_scale_update(self.fp8_meta, True)
+            fp8_buffer = get_global_fp8_state().get_fp8_buffer()
+            fp8_buffer.wait(forward=True)
+            if self.fp8_meta["recipe"].reduce_amax:
+                fp8_buffer.get_amax(self.fp8_meta, True)
+                amax_and_scale_update(self.fp8_meta, True)
+                fp8_buffer.set_for_deletion(self.fp8_meta, True)
+            else:
+                amax_and_scale_update(self.fp8_meta, True)
 
         if self.fp8_enabled and self.training:
+            # Setup for amax reduction
+            if self.fp8_meta["recipe"].reduce_amax:
+                state = get_global_fp8_state()
+                self.fp8_meta["first_module"] = state.is_first_fp8_module()
+                self.fp8_meta["autocast_id_fwd"] = state.new_fp8_context_id(
+                ) if self.fp8_meta["first_module"] else state.get_fp8_context_id()
+                state.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                self.fp8_meta["autocast_id_fwd_stack"].append(self.fp8_meta["autocast_id_fwd"])
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
@@ -220,17 +249,46 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         with nvtx_range(self.__class__.__name__ + " forward"):
             yield inp
 
+        if self.fp8_enabled and self.training and self.fp8_meta["recipe"].reduce_amax:
+            state = get_global_fp8_state()
+            fp8_buffer = state.get_fp8_buffer()
+            fp8_buffer.add_amax(self.fp8_meta, True)
+            fp8_buffer.set_for_forward_amax_reduction(
+                self.fp8_meta,
+                self.tp_group,
+                self.tp_size,
+            )
+
     @staticmethod
     @contextmanager
     def prepare_backward(fp8_enabled: bool,
                          fp8_meta: Dict[str, Any],
+                         tp_group: dist_group_type,
+                         tp_size: int,
                          name: str = "") -> Generator[None, None, None]:
         """Checks and prep for BWD."""
         if fp8_enabled:
-            amax_and_scale_update(fp8_meta, False)
+            state = get_global_fp8_state()
+            fp8_buffer = state.get_fp8_buffer()
+            fp8_buffer.wait(forward=False)
+
+            if not fp8_meta["recipe"].reduce_amax:
+                amax_and_scale_update(fp8_meta, False)
+            else:
+                fp8_buffer.get_amax(fp8_meta, False)
+                amax_and_scale_update(fp8_meta, False)
+                fp8_buffer.set_for_deletion(fp8_meta, False)
+
+                # Get new backward key.
+                fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
         with nvtx_range(name + " backward"):
             yield
+
+        if fp8_enabled and fp8_meta["recipe"].reduce_amax:
+            fp8_buffer.add_amax(fp8_meta, False)
+            if fp8_meta["first_module"]:
+                fp8_buffer.finalize_bwd(fp8_meta, tp_group, tp_size)
 
     @staticmethod
     def grad_output_preprocess(
@@ -279,6 +337,21 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             bgrad = None
 
         return grad_output_mat, grad_output_c, grad_output_t, bgrad
+
+    def set_nccl_overlap_warning_if_tp(self) -> None:
+        """When using TP, the NCCL communication needs to be scheduled
+        before the GEMM for there to be a guaranteed overlap. From the
+        host side in TE, the comm calls are always launched first, but
+        to ensure that the GEMM isn't scheduled first, the environment
+        variable `CUDA_DEVICE_MAX_CONNECTIONS` needs to be set to 1 to
+        force a single channel.
+        """
+        if self.tp_size == 1:
+            return
+        num_cuda_work_queues = int(os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", "0"))
+        if num_cuda_work_queues != 1:
+            warnings.warn("To guarantee overlapping TP and SP collectives with the backward"
+                          "GEMMs, set environment variable CUDA_DEVICE_MAX_CONNECTIONS = 1")
 
     @abstractmethod
     def forward(self):

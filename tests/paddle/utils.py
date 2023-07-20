@@ -34,3 +34,15 @@ def assert_allclose(actual,
     if isinstance(desired, paddle.Tensor):
         desired = paddle.cast(desired, 'float32').numpy()
     np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
+
+
+def is_devices_enough(required):
+    """If the number of device is enough"""
+    return paddle.device.cuda.device_count() >= required
+
+
+def set_random_seed(seed):
+    """Set random seed for reproducability."""
+    np.random.seed(seed)
+    paddle.seed(seed)
+    paddle.distributed.fleet.meta_parallel.model_parallel_random_seed(seed)

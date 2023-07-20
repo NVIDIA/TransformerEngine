@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """Linear API"""
 
-from typing import Union, Tuple, Dict, Any
+from typing import Union, Tuple, Dict, Any, Optional
 
 import paddle
 import paddle.nn.functional as F
@@ -17,13 +17,22 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 
-from ..fp8 import get_fp8_te_dtype
-from ..constants import FP8FwdTensors, FP8BwdTensors
+from ..constants import FP8FwdTensors, FP8BwdTensors, GemmParallelModes, dist_group_type
 from ..cpp_extensions import gemm, fp8_gemm, cast_to_fp8, cast_transpose
+from ..distributed import (
+    allreduce,
+    get_tp_group_and_world_size,
+    identity,
+    track_rng_state,
+    set_tensor_dist_attr,
+    set_weight_tensor_dist_attr,
+)
+from ..fp8 import get_fp8_te_dtype
 from ..utils import (
+    assert_dim_for_fp8_forward_exec,
     cast_if_needed,
     cast_if_needed_inplace,
-    assert_dim_for_fp8_forward_exec,
+    divide,
     get_bias_dtype,
 )
 
@@ -39,6 +48,9 @@ def _linear_fwd_fp8(
     use_bias: bool,
     fp8_meta: Dict[str, Any],
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
 ):
     """FP8 path of Linear Fwd"""
@@ -78,6 +90,10 @@ def _linear_fwd_fp8(
         use_split_accumulator=_2X_ACC_FPROP,
     )
 
+    # Row Parallel Linear
+    if parallel_mode == "row" and tensor_parallel:
+        out = allreduce(out, tp_group)
+
     return out, weight_t_fp8
 
 
@@ -91,6 +107,9 @@ def _linear_fwd_non_fp8(
     fp8_calibration: bool,
     fp8_meta: Dict[str, Any],
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
     activation: str = "",
 ):
     """Non-FP8 path of Linear Fwd"""
@@ -123,6 +142,9 @@ def _linear_fwd_non_fp8(
         return out, gelu_out
 
     out, _, _ = outputs
+    # Row Parallel Linear
+    if parallel_mode == "row" and tensor_parallel:
+        out = allreduce(out, tp_group)
     return out
 
 
@@ -137,6 +159,9 @@ def _linear_fwd(
     fp8_calibration: bool,
     fp8_meta: Dict[str, Any],
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
 ):
     if fp8_enabled:
@@ -149,6 +174,9 @@ def _linear_fwd(
             use_bias,
             fp8_meta,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
             is_grad_enabled,
         )
     else:
@@ -162,6 +190,9 @@ def _linear_fwd(
             fp8_calibration,
             fp8_meta,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
         )
     return (
         out,
@@ -184,6 +215,9 @@ def _linear_bwd_fp8(
     requires_dgrad: bool,
     requires_wgrad: bool,
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
 ):
     dgrad, wgrad = None, None
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -202,6 +236,9 @@ def _linear_bwd_fp8(
             get_workspace(),
             use_split_accumulator=_2X_ACC_DGRAD,
         )
+        if parallel_mode == "column" and tensor_parallel:
+            dgrad = allreduce(dgrad, tp_group)
+
     if requires_wgrad:
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
             wgrad = fp8_gemm(
@@ -236,6 +273,9 @@ def _linear_bwd_non_fp8(
     requires_bgrad: bool,
     requires_dgrad: bool,
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
     gelu_input: Union[paddle.Tensor, None] = None,
     activation: str = "",
 ):
@@ -255,6 +295,9 @@ def _linear_bwd_non_fp8(
             gelu_input=gelu_input,
             grad=True,
         )
+        if parallel_mode == "column" and tensor_parallel:
+            dgrad = allreduce(dgrad, tp_group)
+
     if requires_wgrad:
         wgrad, bgrad, _ = gemm(
             inputmat,
@@ -288,6 +331,9 @@ def _linear_bwd(
     fp8_meta: Dict[str, Any],
     requires_dgrad: bool,
     activation_dtype: paddle.dtype,
+    parallel_mode: Union[str, None],
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
 ):
     dgrad, wgrad, bgrad = None, None, None
     requires_wgrad = not weight.stop_gradient
@@ -307,6 +353,9 @@ def _linear_bwd(
             requires_dgrad,
             requires_wgrad,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
         )
     else:
         dgrad, wgrad, bgrad = _linear_bwd_non_fp8(
@@ -316,6 +365,9 @@ def _linear_bwd(
             requires_bgrad,
             requires_dgrad,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
         )
     return dgrad, wgrad, bgrad
 
@@ -335,6 +387,10 @@ class _Linear(paddle.autograd.PyLayer):
         fp8_meta: Dict[str, Any],
         activation_dtype: paddle.dtype,
         is_grad_enabled: bool,
+        parallel_mode: Union[str, None],
+        tensor_parallel: bool,
+        tp_group: Union[dist_group_type, None],
+        tp_size: int,
     ) -> paddle.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -385,6 +441,9 @@ class _Linear(paddle.autograd.PyLayer):
             fp8_calibration,
             fp8_meta,
             activation_dtype,
+            parallel_mode,
+            tensor_parallel,
+            tp_group,
             is_grad_enabled,
         )
 
@@ -402,6 +461,10 @@ class _Linear(paddle.autograd.PyLayer):
             ctx.fp8_meta = fp8_meta
             ctx.use_bias = use_bias
             ctx.inp_shape = inp.shape
+            ctx.parallel_mode = parallel_mode
+            ctx.tensor_parallel = tensor_parallel
+            ctx.tp_group = tp_group
+            ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
 
@@ -409,8 +472,10 @@ class _Linear(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
-        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
+        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8,
                                                          ctx.fp8_meta,
+                                                         ctx.tp_group,
+                                                         ctx.tp_size,
                                                          name="_Linear"):
             (
                 inputmat,
@@ -444,6 +509,9 @@ class _Linear(paddle.autograd.PyLayer):
                 ctx.fp8_meta,
                 ctx.requires_dgrad,
                 ctx.activation_dtype,
+                ctx.parallel_mode,
+                ctx.tensor_parallel,
+                ctx.tp_group,
             )
 
             if not ctx.fp8_enabled:
@@ -474,6 +542,8 @@ class Linear(TransformerEngineBaseLayer):
         out_features: int,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        parallel_mode: Optional[str] = None,
+        tp_group: Union[dist_group_type, None] = None,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -484,27 +554,54 @@ class Linear(TransformerEngineBaseLayer):
         self._bias_attr = bias_attr
         self._dtype = self._helper.get_default_dtype()
 
-        # TE linear weight is in column major
-        self.weight = self.create_parameter(
-            shape=[out_features, in_features]
-            if self.backend == 'transformer_engine' else [in_features, out_features],
-            attr=self._weight_attr,
-            dtype=self._dtype,
-            is_bias=False,
-        )
+        # Set parallel configs
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group)
+        self.tensor_parallel = self.tp_size > 1
+        self.parallel_mode = parallel_mode
+        assert (self.parallel_mode
+                in GemmParallelModes), f"parallel_mode {parallel_mode} not supported"
 
+        if self.parallel_mode == "column":
+            self.out_features = divide(self.out_features, self.tp_size)
+        elif self.parallel_mode == "row":
+            self.in_features = divide(self.in_features, self.tp_size)
+        self.set_nccl_overlap_warning_if_tp()
+
+        # Initialize weight parameter
+        with track_rng_state(enable=self.tensor_parallel):
+            # TE linear weight is in column major
+            self.weight = self.create_parameter(
+                shape=[self.out_features, self.in_features]
+                if self.backend == 'transformer_engine' else [self.in_features, self.out_features],
+                attr=self._weight_attr,
+                dtype=self._dtype,
+                is_bias=False,
+            )
+        set_weight_tensor_dist_attr(self.weight, self.tensor_parallel, self.parallel_mode,
+                                    self.backend)
+
+        # Initialize bias parameter
         self.has_bias = self._bias_attr is not False
         use_default_bias = self._bias_attr is None or self._bias_attr is True
         if self.has_bias:
             self.bias = self.create_parameter(
-                shape=[out_features],
+                shape=[self.out_features],
                 attr=self._bias_attr if not use_default_bias else paddle.ParamAttr(
                     initializer=Constant(value=0.0)),
                 dtype=self._dtype,
                 is_bias=True,
             )
+            if parallel_mode == "column":
+                set_tensor_dist_attr(self.bias, self.tensor_parallel, axis=0)
         else:
             self.bias = None
+
+        # For RPL, bias has to be added after TP collectives
+        # So it cannot be fused with the GEMM
+        if self.parallel_mode == "row" and self.tensor_parallel and self.has_bias:
+            self.gemm_bias_unfused_add = True
+        else:
+            self.gemm_bias_unfused_add = False
 
     def _te_forward(
         self,
@@ -521,14 +618,21 @@ class Linear(TransformerEngineBaseLayer):
             out = _Linear.apply(
                 self.weight,
                 inp,
-                self.bias,
-                self.has_bias,
+                self.bias if not self.gemm_bias_unfused_add else None,
+                self.has_bias and not self.gemm_bias_unfused_add,
                 self.fp8_enabled,
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.activation_dtype,
                 paddle.is_grad_enabled(),
+                self.parallel_mode,
+                self.tensor_parallel,
+                self.tp_group,
+                self.tp_size,
             )
+
+        if self.gemm_bias_unfused_add:
+            out = out + cast_if_needed_inplace(self.bias, self.activation_dtype)
 
         return out
 
@@ -537,7 +641,13 @@ class Linear(TransformerEngineBaseLayer):
         inp: paddle.Tensor,
     ) -> paddle.Tensor:
         """Calls Paddle OP"""
-        return F.linear(inp, self.weight, self.bias)
+        if self.parallel_mode == 'column' and self.tensor_parallel:
+            inp = identity(inp, self.tp_group)
+        out = F.linear(inp, self.weight, self.bias if not self.gemm_bias_unfused_add else None)
+        if self.parallel_mode == 'row' and self.tensor_parallel:
+            out = allreduce(out, self.tp_group)
+            out = out + self.bias if self.bias is not None else out
+        return out
 
     def forward(self, *args, **kwargs):
         """forward"""
