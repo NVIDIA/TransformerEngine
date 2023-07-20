@@ -4,7 +4,7 @@
 
 """RMSNorm API"""
 import os
-from typing import Union, Tuple, Any, Mapping, Optional
+from typing import Union, Tuple, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -36,7 +36,7 @@ class _RMSNorm(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
 
         rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
-                                              eps, fwd_ln_sm_margin,
+                                              eps, fwd_rmsnorm_sm_margin,
                                               zero_centered_gamma)
         ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
         ctx.inp_shape = inp.shape
@@ -52,7 +52,7 @@ class _RMSNorm(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
         dxmat, dgamma = tex.rmsnorm_bwd(
-            d_ln_out, inputmat, rsigma, rmsnorm_weight,
+            d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
             ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
         )
         return dxmat.view(ctx.inp_shape), dgamma, None, None, None, None

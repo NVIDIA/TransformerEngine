@@ -121,7 +121,7 @@ def rmsnorm_fwd_fp8(
             weight,
             eps,
             fp8_meta_tensor.scale[fp8_tensor],
-            ln_out,
+            rmsnorm_out,
             fp8_meta_tensor.amax_history[0][fp8_tensor],
             fp8_meta_tensor.scale_inv[fp8_tensor],
             otype,
@@ -172,7 +172,6 @@ def rmsnorm_fwd_fp8_inf(
 def rmsnorm_fwd_inf(
     inp: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor,
     eps: float,
     zero_centered_gamma: bool,
 ) -> torch.Tensor:
