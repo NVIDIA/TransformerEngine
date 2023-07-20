@@ -5,7 +5,6 @@
 import jax
 import numpy as np
 import pytest
-from jax.experimental import maps
 
 from utils import is_devices_enough
 from transformer_engine.jax.flax import extend_logical_axis_rules
@@ -79,7 +78,7 @@ class TestGeneralFunc:
             sharding_type):
         devices = np.asarray(jax.devices()[:DEVICE_COUNT]).reshape(*mesh_shape)
         with global_shard_guard(_get_sharding_resource(mesh_names, sharding_type)):
-            with maps.Mesh(devices, mesh_names):
+            with jax.sharding.Mesh(devices, mesh_names):
                 assert infer_major_sharding_type() is sharding_type.value[0]
 
     @pytest.mark.parametrize('mesh_shape,mesh_names,sharding_type', MESH_CONFIG)
@@ -150,7 +149,7 @@ class TestShardingMetaGenerator:
 
         devices = np.asarray(jax.devices()[:DEVICE_COUNT]).reshape(*mesh_shape)
         with global_shard_guard(_get_sharding_resource(mesh_names, sharding_type)):
-            with maps.Mesh(devices, mesh_names):
+            with jax.sharding.Mesh(devices, mesh_names):
                 test_sm = get_fp8_meta_sharding_meta(
                     sharding_type,
                     num_of_fp8_meta,
@@ -240,7 +239,7 @@ class TestShardingMetaGenerator:
 
         devices = np.asarray(jax.devices()[:DEVICE_COUNT]).reshape(*mesh_shape)
         with global_shard_guard(_get_sharding_resource(mesh_names, sharding_type)):
-            with maps.Mesh(devices, mesh_names):
+            with jax.sharding.Mesh(devices, mesh_names):
                 test_sm = get_dot_sharding_meta(
                     sharding_type,
                     a_shape,
@@ -319,7 +318,7 @@ class TestShardingMetaGenerator:
 
         devices = np.asarray(jax.devices()[:DEVICE_COUNT]).reshape(*mesh_shape)
         with global_shard_guard(_get_sharding_resource(mesh_names, sharding_type)):
-            with maps.Mesh(devices, mesh_names):
+            with jax.sharding.Mesh(devices, mesh_names):
                 ref_sm, need_assert = get_ref_sm()
                 try:
                     test_sm = get_elementwise_sharding_meta(
