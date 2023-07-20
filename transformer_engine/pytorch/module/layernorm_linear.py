@@ -6,13 +6,14 @@
 import os
 import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+import warnings
 
 
 import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
-import transformer_engine_extensions as tex
+import ..cpp_extensions as tex
 
 from .base import (
     get_workspace,
@@ -54,6 +55,87 @@ from ..jit import no_torch_dynamo
 
 __all__ = ["LayerNormLinear"]
 
+def _get_normalization_func(normalization: str,
+                            fp8_output: bool,
+                            is_grad_enabled: bool,
+                            forward: bool):
+    fwd_normalization_funcs = {
+            ('LayerNorm', True, True):   tex.layernorm_fwd_fp8,
+            ('LayerNorm', True, False):  tex.layernorm_fwd_fp8_inf,
+            ('LayerNorm', False, True):  tex.layernorm_fwd,
+            ('LayerNorm', False, False): tex.layernorm_fwd_inf,
+            ('RMSNorm', True, True):     tex.rmsnorm_fwd_fp8,
+            ('RMSNorm', True, False):    tex.rmsnorm_fwd_fp8_inf,
+            ('RMSNorm', False, True):    tex.rmsnorm_fwd,
+            ('RMSNorm', False, False):   tex.rmsnorm_fwd_inf,
+    }
+    bwd_normalization_funcs = {
+            'LayerNorm':  tex.layernorm_bwd,
+            'RMSNorm':    tex.rmsnorm_bwd,
+    }
+
+    if forward:
+        return fwd_normalization_funcs[(normalization, fp8_output, is_grad_enabled)]
+    else:
+        assert not fp8_output, "FP8 output is not supported in backward normalization!"
+        assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
+        return bwd_normalization_funcs[normalization]
+
+def _apply_normalization(inputmat:torch.Tensor,
+                         ln_out: torch.Tensor,
+                         ln_weight: torch.Tensor,
+                         ln_bias: Union[torch.Tensor, None],
+                         eps: float,
+                         fp8_out: bool,
+                         fp8_meta: Dict[str, Any],
+                         normalization: str,
+                         fwd_ln_sm_margin: int,
+                         zero_centered_gamma: bool,
+                         is_grad_enabled: bool):
+    normalization_func = _get_normalization_func(normalization,
+                                                 fp8_out,
+                                                 is_grad_enabled,
+                                                 True)
+
+    inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
+    if fp8_out:
+        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+
+        if is_grad_enabled:
+            output = normalization_func(
+                *inputs,
+                eps,
+                fp8_meta["scaling_fwd"],
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fp8_dtype_forward,
+                fwd_ln_sm_margin,
+                zero_centered_gamma,
+                ln_out = ln_out
+            )
+        else:
+            return normalization_func(
+                *inputs,
+                eps,
+                fp8_meta["scaling_fwd"],
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fp8_dtype_forward,
+                zero_centered_gamma,
+            ), None, None
+    else:
+        if is_grad_enabled:
+            output = tex.layernorm_fwd_noalloc(
+                *inputs, ln_out, eps,
+                fwd_ln_sm_margin, zero_centered_gamma
+            )
+        else:
+            return layernorm_fwd_inf(
+                    *inputs, eps, zero_centered_gamma
+            ), None, None
+    if normalization == "RMSNorm":
+        output = (ln_out, None, output[1])
+    elif normalization == "LayerNorm":
+        output = (ln_out, output[1], output[2])
+    return output
 
 class _LayerNormLinear(torch.autograd.Function):
     """LayerNormLinear semi-top level module
@@ -65,7 +147,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ctx,
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
-        ln_bias: torch.Tensor,
+        ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
         weight_fp8: Union[torch.Tensor, None],
         weight_t_fp8: Union[torch.Tensor, None],
@@ -91,6 +173,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_split_ag: bool,
+        normalization: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -105,10 +188,8 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
-        ln_bias = cast_if_needed(ln_bias, activation_dtype)
-        # If residual connection is after LN, we need `ln_out`
-        # tensor in higher precision, this comes at the cost
-        # of an extra fp8 cast.
+        if ln_bias is not None:
+            ln_bias = cast_if_needed(ln_bias, activation_dtype)
         if ub_split_ag:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
@@ -118,69 +199,32 @@ class _LayerNormLinear(torch.autograd.Function):
             dim_size[0] = dim_size[0] * tp_world_size
             ub_obj_lnout = get_ub("qkv_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
-        if fp8:
-            fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-
-            if not return_layernorm_output:
-                if is_grad_enabled:
-                    if not ub_split_ag:
-                        ln_out = torch.empty_like(inputmat, dtype=torch.uint8)
-                    _, mu, rsigma = layernorm_fwd_fp8(
-                        inputmat,
-                        ln_weight,
-                        ln_bias,
-                        eps,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                        fwd_ln_sm_margin,
-                        zero_centered_gamma,
-                        ln_out = ln_out
-                    )
-                else:
-                    mu = rsigma = None
-                    ln_out = layernorm_fwd_fp8_inf(
-                        inputmat,
-                        ln_weight,
-                        ln_bias,
-                        eps,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                        zero_centered_gamma,
-                    )
-            else:
-                if is_grad_enabled:
-                    ln_out_return, mu, rsigma = tex.layernorm_fwd(
-                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
-                    )
-                else:
-                    ln_out_return, mu, rsigma = layernorm_fwd_inf(
-                        inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
-                    ), None, None
-
-                ln_out = cast_to_fp8(
-                    ln_out_return,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                )
         else:
-            if is_grad_enabled:
-                if ub_split_ag:
-                    _, mu, rsigma = tex.layernorm_fwd_noalloc(
-                        inputmat, ln_weight, ln_bias, ln_out, eps,
-                        fwd_ln_sm_margin, zero_centered_gamma
-                    )
-                else:
-                    ln_out, mu, rsigma = tex.layernorm_fwd(
-                        inputmat, ln_weight, ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma
-                    )
-            else:
-                ln_out, mu, rsigma = layernorm_fwd_inf(
-                        inputmat, ln_weight, ln_bias, eps, zero_centered_gamma
-                ), None, None
+            ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
+            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+
+        ln_out, mu, rsigma = _apply_normalization(inputmat,
+                                                  ln_out,
+                                                  ln_weight,
+                                                  ln_bias,
+                                                  eps,
+                                                  fp8 and not return_layernorm_output,
+                                                  fp8_meta,
+                                                  normalization,
+                                                  fwd_ln_sm_margin,
+                                                  zero_centered_gamma,
+                                                  is_grad_enabled)
+        # If residual connection is after LN, we need `ln_out_return`
+        # tensor in higher precision, this comes at the cost
+        # of an extra fp8 cast.
+        if fp8 and return_layernorm_output:
             ln_out_return = ln_out
+            ln_out = tex.cast_to_fp8(
+                ln_out,
+                fp8_meta["scaling_fwd"],
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fp8_dtype_forward,
+            )
         # Column Parallel Linear
         if ub_split_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
@@ -289,6 +333,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
             ctx.requires_dgrad = inp.requires_grad
+            ctx.normalization = normalization
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -496,10 +541,17 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.return_layernorm_output:
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
-            dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                d_ln_out, inputmat, mu, rsigma, ln_weight,
-                ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
-            )
+            if normalization == "LayerNorm":
+                dxmat, dgamma, dbeta = tex.layernorm_bwd(
+                    d_ln_out, inputmat, mu, rsigma, ln_weight,
+                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+                )
+            elif normalization == "RMSNorm":
+                dxmat, dgamma, dbeta = tex.rmsnorm_bwd(
+                    d_ln_out, inputmat, rsigma, ln_weight,
+                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+                ), None
+
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -512,6 +564,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -555,6 +608,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
          a value added to the denominator of layer normalization for numerical stability.
     bias : bool, default = `True`
           if set to `False`, the layer will not learn an additive bias.
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+          type of normalization applied.
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
@@ -624,6 +679,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         get_rng_state_tracker: Optional[Callable] = None,
         init_method: Optional[Callable] = None,
         bias: bool = True,
+        normalization: str = 'LayerNorm',
         return_bias: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
@@ -649,9 +705,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+        self.normalization = normalization
+        assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
         self.return_bias = return_bias
-        self.apply_bias = bias and not return_bias
+        self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
@@ -696,15 +754,18 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 dtype=params_dtype,
             )
         )
-        self.layer_norm_bias = Parameter(
-            torch.empty(
-                in_features,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
-        )
         setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
-        setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+        if self.normalization != "RMSNorm":
+            self.layer_norm_bias = Parameter(
+                torch.empty(
+                    in_features,
+                    device=torch.cuda.current_device(),
+                    dtype=params_dtype,
+                )
+            )
+            setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+        else:
+            self.layer_norm_bias = None
         self.reset_layer_norm_parameters()
 
         self.weight_tensor = torch.empty(
@@ -796,7 +857,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             init.ones_(self.layer_norm_weight)
         else:
             init.zeros_(self.layer_norm_weight)
-        init.zeros_(self.layer_norm_bias)
+        if self.layer_norm_bias is not None:
+            init.zeros_(self.layer_norm_bias)
 
     def get_fp8_weights_scratchpad(
         self,
@@ -915,6 +977,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_split_ag,
+                self.normalization,
             )
             out = fwd_fn(*args)
 
