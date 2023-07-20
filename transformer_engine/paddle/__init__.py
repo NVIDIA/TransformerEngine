@@ -4,3 +4,4 @@
 """Transformer Engine bindings for Paddle"""
 
 from .layer import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
+from .fp8 import fp8_autocast

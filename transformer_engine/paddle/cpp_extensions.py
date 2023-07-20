@@ -241,6 +241,25 @@ def cast_transpose(
     return cast_out, transpose_out
 
 
+def cast_transpose_bgrad(
+    inp: paddle.Tensor,
+    fp8_meta_tensor: tex.FP8TensorMeta,
+    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    otype: tex.DType,
+) -> Union[Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor], None]:
+    """Fused Cast + Transpose + Bias Grad"""
+    grad_bias, cast_out, transpose_out, _, _ = tex.te_cast_transpose_bgrad(
+        inp,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        int(fp8_tensor),
+        int(otype),
+    )
+
+    return grad_bias, cast_out, transpose_out
+
+
 def te_gelu(
     inp: paddle.Tensor,
     otype: tex.DType,

@@ -20,6 +20,7 @@ from transformer_engine.paddle.cpp_extensions import (
     fp8_gemm,
     transpose,
     cast_transpose,
+    cast_transpose_bgrad,
     te_gelu,
     gelu_fp8,
     dgelu_cast_transpose_bgrad_fp8,
@@ -41,6 +42,7 @@ from transformer_engine.paddle.cpp_extensions import (
     scaled_upper_triang_masked_softmax_backward,
 )
 from transformer_engine.paddle.fp8 import is_fp8_available
+from transformer_engine.common.recipe import DelayedScaling
 
 paddle.seed(10)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
@@ -152,6 +154,38 @@ class TestTranspose:
 
         assert_allclose(a_casted, a)
         assert_allclose(a_transposed, a.T)
+
+    @staticmethod
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize('fp8_dtype', [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+    def test_cast_transpose_bgrad(fp8_dtype):
+        """
+        Test cast_transpose_bgrad
+        """
+        min_val = -8
+        max_val = 8
+        a = paddle.cast(paddle.randint(min_val, max_val, shape=(16, 32)), 'float32')
+        fp8_meta = create_fp8_meta(num_fp8_tensors=1, amax_history_len=1)
+        bgrad, a_fp8_casted, a_fp8_transposed = cast_transpose_bgrad(a,
+                                                                     fp8_meta,
+                                                                     tex.FP8FwdTensors.GEMM1_INPUT,
+                                                                     otype=fp8_dtype)
+
+        a_transposed = cast_from_fp8(a_fp8_transposed,
+                                     fp8_meta,
+                                     tex.FP8FwdTensors.GEMM1_INPUT,
+                                     itype=fp8_dtype,
+                                     otype=tex.DType.kFloat32)
+
+        a_casted = cast_from_fp8(a_fp8_casted,
+                                 fp8_meta,
+                                 tex.FP8FwdTensors.GEMM1_INPUT,
+                                 itype=fp8_dtype,
+                                 otype=tex.DType.kFloat32)
+
+        assert_allclose(a_casted, a)
+        assert_allclose(a_transposed, a.T)
+        assert_allclose(bgrad, a.sum(axis=0))
 
 
 class TestActivation:
@@ -727,8 +761,9 @@ class TestSoftmax:
     Test softmax operators
     """
 
+    @staticmethod
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
-    def test_scaled_softmax_fwd_bwd(self, dtype):
+    def test_scaled_softmax_fwd_bwd(dtype):
         """test scaled softmax"""
         B, H, S = (16, 4, 32)
         scale = 0.8
@@ -747,8 +782,9 @@ class TestSoftmax:
         assert_allclose(y_ref, y, rtol=1e-4, atol=1e-3)
         assert_allclose(dx_ref, dx, rtol=1e-4, atol=1e-3)
 
+    @staticmethod
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
-    def test_scaled_masked_softmax_fwd_bwd(self, dtype):
+    def test_scaled_masked_softmax_fwd_bwd(dtype):
         """test scaled masked softmax"""
         B, H, S = (16, 4, 32)
         scale = 0.8
@@ -770,8 +806,9 @@ class TestSoftmax:
         assert_allclose(y_ref, y, rtol=1e-4, atol=1e-3)
         assert_allclose(dx_ref, dx, rtol=1e-4, atol=1e-3)
 
+    @staticmethod
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
-    def test_scaled_upper_triang_masked_softmax_fwd_bwd(self, dtype):
+    def test_scaled_upper_triang_masked_softmax_fwd_bwd(dtype):
         """test scaled upper triang masked softmax"""
         B, S = (16, 32)
         scale = 0.8
@@ -797,3 +834,27 @@ class TestSoftmax:
 
         assert_allclose(y_ref, y, rtol=1e-4, atol=5e-3)
         assert_allclose(dx_ref, dx, rtol=1e-4, atol=5e-3)
+
+
+def test_update_scale():
+    """Test update_scale"""
+    num_gemm = 6
+    recipe = DelayedScaling()
+    fp8_max = recipe.fp8_format.value.max_fwd
+
+    amax_tensor = paddle.rand(shape=[num_gemm], dtype='float32') * fp8_max
+    scale_tensor = paddle.ones(shape=[num_gemm], dtype='float32')
+
+    def calc_ref(amax, scale, fp8_max, margin=0):
+        """Calculate reference scale"""
+        exp = paddle.floor(paddle.log2(fp8_max / amax)) - margin
+        sf = paddle.round(2**paddle.abs(exp))
+        sf = paddle.where(amax > 0.0, sf, scale)
+        sf = paddle.where(paddle.isfinite(amax), sf, scale)
+        sf = paddle.where(exp < 0, 1 / sf, sf)
+        return sf
+
+    scale_ref = calc_ref(amax_tensor, scale_tensor, fp8_max, 0.)
+    scale_actual = tex.update_scale(amax_tensor, scale_tensor, fp8_max, 0.)
+
+    assert_allclose(scale_ref, scale_actual, rtol=1e-5, atol=1e-5)

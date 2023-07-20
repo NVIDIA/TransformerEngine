@@ -4,27 +4,266 @@
 """LayerNormMLP API"""
 
 import os
-from typing import Union, Tuple
+from typing import Union, Tuple, Dict, Any
 
 import paddle
 import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
+import transformer_engine_paddle as tex
+
 from ..cpp_extensions import (
-    gemm,
-    layernorm_fwd,
-    layernorm_bwd,
+    cast_from_fp8,
+    dgelu_cast_transpose_bgrad_fp8,
+    gelu_fp8,
+    transpose,
 )
 
-from .base import get_workspace, TransformerEngineBaseLayer
+from .base import _prepare_backward, TransformerEngineBaseLayer
+from .layernorm_linear import _layernorm_fwd_fp8_cast, _layernorm_bwd
+from .linear import _linear_fwd_fp8, _linear_fwd_non_fp8, _linear_bwd_fp8, _linear_bwd_non_fp8
 from ..constants import TE_DType
-from ..utils import cast_if_needed, get_paddle_act_func
+from ..fp8 import get_fp8_te_dtype
+from ..utils import cast_if_needed, assert_dim_for_fp8_forward_exec, get_paddle_act_func
 
 __all__ = ["LayerNormMLP"]
 
 
+def _mlp_forward(
+    inputmat: paddle.Tensor,
+    inputmat_fp8_index: tex.FP8FwdTensors,
+    fc1_weight: paddle.Tensor,
+    fc1_weight_fp8_index: tex.FP8FwdTensors,
+    fc1_bias: Union[paddle.Tensor, None],
+    use_fc1_bias: bool,
+    fc2_input_fp8_index: tex.FP8FwdTensors,    # tex.FP8FwdTensors.GEMM2_INPUT
+    fc2_weight: paddle.Tensor,
+    fc2_weight_fp8_index: tex.FP8FwdTensors,
+    fc2_bias: Union[paddle.Tensor, None],
+    use_fc2_bias: bool,
+    fp8: bool,
+    fp8_calibration: bool,
+    fp8_meta: Dict[str, Any],
+    activation_dtype: paddle.dtype,
+    is_grad_enabled: bool,
+):
+    if fp8:
+        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+        fc1_out, fc1_weight_t_fp8 = _linear_fwd_fp8(
+            inputmat,
+            inputmat_fp8_index,
+            fc1_weight,
+            fc1_weight_fp8_index,
+            fc1_bias,
+            use_fc1_bias,
+            fp8_meta,
+            activation_dtype,
+            is_grad_enabled,
+        )
+
+        gelu_out = gelu_fp8(
+            fc1_out,
+            fp8_meta["scaling_fwd"],
+            fc2_input_fp8_index,
+            fp8_dtype_forward,
+        )
+
+        fc2_out, fc2_weight_t_fp8 = _linear_fwd_fp8(
+            gelu_out,
+            fc2_input_fp8_index,
+            fc2_weight,
+            fc2_weight_fp8_index,
+            fc2_bias,
+            use_fc2_bias,
+            fp8_meta,
+            activation_dtype,
+            is_grad_enabled,
+        )
+    else:
+        fc1_out, gelu_out = _linear_fwd_non_fp8(
+            inputmat,
+            inputmat_fp8_index,
+            fc1_weight,
+            fc1_weight_fp8_index,
+            fc1_bias,
+            use_fc1_bias,
+            fp8_calibration,
+            fp8_meta,
+            activation_dtype,
+            activation='gelu',
+        )
+
+        fc2_out = _linear_fwd_non_fp8(
+            gelu_out,
+            fc2_input_fp8_index,
+            fc2_weight,
+            fc2_weight_fp8_index,
+            fc2_bias,
+            use_fc2_bias,
+            fp8_calibration,
+            fp8_meta,
+            activation_dtype,
+        )
+    return (
+        fc1_out,
+        gelu_out,
+        fc2_out,
+        fc1_weight_t_fp8 if fp8 else None,
+        fc2_weight_t_fp8 if fp8 else None,
+    )
+
+
+def _mlp_backward(
+    fc1_input: paddle.Tensor,    # ln_out, BF16 / FP8
+    fc1_input_fp8_index: tex.FP8FwdTensors,
+    fc1_weight: paddle.Tensor,
+    fc1_weight_t_fp8: paddle.Tensor,
+    fc1_weight_fp8_index: tex.FP8FwdTensors,
+    fc1_grad_output_fp8_index: tex.FP8BwdTensors,    # tex.FP8BwdTensors.GRAD_OUTPUT2
+    requires_fc1_bgrad: bool,
+    fc1_out: paddle.Tensor,
+    fc2_input: paddle.Tensor,    # gelu_out
+    fc2_input_fp8_index: tex.FP8FwdTensors,    # tex.FP8FwdTensors.GEMM2_INPUT
+    fc2_weight: paddle.Tensor,
+    fc2_weight_t_fp8: paddle.Tensor,
+    fc2_weight_fp8_index: tex.FP8FwdTensors,
+    requires_fc2_bgrad: bool,
+    grad_output: paddle.Tensor,
+    grad_output_c: paddle.Tensor,
+    grad_output_t: paddle.Tensor,
+    grad_output_fp8_index: tex.FP8BwdTensors,    # tex.FP8BwdTensors.GRAD_OUTPUT1
+    fwd_scale_inverses: paddle.Tensor,
+    fp8: bool,
+    fp8_meta: Dict[str, Any],
+    requires_dgrad: bool,
+    activation_dtype: paddle.dtype,
+    activation: str,
+):
+    (
+        fc1_dgrad,
+        fc1_wgrad,
+        fc1_bias_grad,
+        fc2_wgrad,
+        fc2_bias_grad,
+    ) = None, None, None, None, None
+
+    if fp8:
+        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+        fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
+        # FC2 Bwd
+        fc2_input_no_fp8, fc2_input_t = None, None
+        fp8_wgrad = not fp8_meta["recipe"].override_linear_precision.wgrad
+        requires_fc2_wgrad = not fc2_weight.stop_gradient
+        if requires_fc2_wgrad:
+            if fp8_wgrad:
+                fc2_input_t = transpose(fc2_input, fp8_dtype_forward)
+            else:
+                fc2_input_no_fp8 = cast_from_fp8(
+                    fc2_input,
+                    fp8_meta["scaling_fwd"],
+                    fc2_input_fp8_index,
+                    fp8_dtype_forward,
+                    TE_DType[activation_dtype],
+                )
+
+        fc2_dgrad, fc2_wgrad = _linear_bwd_fp8(
+            fc2_input_no_fp8,
+            fc2_input_t,
+            fc2_input_fp8_index,
+            fc2_weight_t_fp8,
+            fc2_weight_fp8_index,
+            grad_output,
+            grad_output_c,
+            grad_output_t,
+            grad_output_fp8_index,
+            fwd_scale_inverses,
+            fp8_meta,
+            True,
+            requires_fc2_wgrad,
+            activation_dtype,
+        )
+
+        # GELU Bwd
+        dgelu, dgelu_t, fc1_bias_grad_ = dgelu_cast_transpose_bgrad_fp8(
+            fc2_dgrad,
+            fc1_out,
+            fp8_meta["scaling_bwd"],
+            fc1_grad_output_fp8_index,
+            fp8_dtype_backward,
+        )
+
+        if requires_fc1_bgrad:
+            fc1_bias_grad = fc1_bias_grad_
+
+        # FC2 Bwd
+        requires_fc1_wgrad = not fc1_weight.stop_gradient
+        dgelu_no_fp8, fc1_input_no_fp8, fc1_input_t = None, None, None
+        if requires_fc1_wgrad:
+            if fp8_wgrad:
+                fc1_input_t = transpose(fc1_input, fp8_dtype_forward)
+            else:
+                # TODO(tizheng) Paddle lacks fused dgelu_bgrad OP. Cast from dgrad(fp8) instead.
+                dgelu_no_fp8 = cast_from_fp8(
+                    dgelu,
+                    fp8_meta["scaling_bwd"],
+                    fc1_grad_output_fp8_index,
+                    fp8_dtype_backward,
+                    TE_DType[activation_dtype],
+                )
+                fc1_input_no_fp8 = cast_from_fp8(
+                    fc1_input,
+                    fp8_meta["scaling_fwd"],
+                    fc1_input_fp8_index,
+                    fp8_dtype_forward,
+                    TE_DType[activation_dtype],
+                )
+
+        fc1_dgrad, fc1_wgrad = _linear_bwd_fp8(
+            fc1_input_no_fp8,
+            fc1_input_t,
+            fc1_input_fp8_index,
+            fc1_weight_t_fp8,
+            tex.FP8FwdTensors.GEMM1_WEIGHT,
+            dgelu_no_fp8,
+            dgelu,
+            dgelu_t,
+            fc1_weight_fp8_index,
+            fwd_scale_inverses,
+            fp8_meta,
+            requires_dgrad,
+            requires_fc1_wgrad,
+            activation_dtype,
+        )
+    else:
+        dgelu, fc2_wgrad, fc2_bias_grad = _linear_bwd_non_fp8(
+            fc2_input,
+            fc2_weight,
+            grad_output,
+            requires_fc2_bgrad,
+            True,
+            activation_dtype,
+            gelu_input=fc1_out,
+            activation=activation,
+        )
+        fc1_dgrad, fc1_wgrad, fc1_bias_grad = _linear_bwd_non_fp8(
+            fc1_input,
+            fc1_weight,
+            dgelu,
+            requires_fc1_bgrad,
+            requires_dgrad,
+            activation_dtype,
+        )
+    return (
+        fc1_dgrad,
+        fc1_wgrad,
+        fc1_bias_grad,
+        fc2_wgrad,
+        fc2_bias_grad,
+    )
+
+
 class _LayerNormMLP(paddle.autograd.PyLayer):
-    """TE implementation of non-FP8 LayerNormMLP"""
+    """TE implementation of LayerNormMLP"""
 
     @staticmethod
     def forward(
@@ -39,8 +278,12 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         fc2_bias: Union[paddle.Tensor, None],
         use_fc2_bias: bool,
         eps: float,
+        fp8: bool,
+        fp8_calibration: bool,
+        fp8_meta: Dict[str, Any],
         activation_dtype: paddle.dtype,
         return_layernorm_output: bool,
+        is_grad_enabled: bool,
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
@@ -50,154 +293,187 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
+        if fp8:
+            assert_dim_for_fp8_forward_exec(inputmat)
+            assert_dim_for_fp8_forward_exec(fc1_weight)
+            assert_dim_for_fp8_forward_exec(fc2_weight)
 
         # only support gelu for now
         assert activation == 'gelu'
 
-        # LN FWD
-        ln_out, mu, rsigma = layernorm_fwd(inputmat, ln_weight, ln_bias, eps,
-                                           TE_DType[activation_dtype], fwd_ln_sm_margin,
-                                           zero_centered_gamma)
-
-        # FC1 + GeLU
-        gelu_out, _, fc1_out = gemm(
-            fc1_weight,
+        # LayerNorm Fwd + FP8 Cast
+        (
+            ln_out_return,
             ln_out,
-            activation_dtype,
-            get_workspace(),
-            bias=fc1_bias,
-            use_bias=use_fc1_bias,
-            gelu=(activation == 'gelu'),
-        )
-
-        # FC2
-        fc2_out, _, _ = gemm(
-            fc2_weight,
-            gelu_out,
-            activation_dtype,
-            get_workspace(),
-            bias=fc2_bias,
-            use_bias=use_fc2_bias,
-        )
-
-        ctx.save_for_backward(
-            inputmat,
-            ln_weight,
             mu,
             rsigma,
-            ln_out,
+        ) = _layernorm_fwd_fp8_cast(
+            inputmat,
+            ln_weight,
+            ln_bias,
+            tex.FP8FwdTensors.GEMM1_INPUT,
+            eps,
+            fp8,
+            fp8_meta,
+            activation_dtype,
+            return_layernorm_output,
+            fwd_ln_sm_margin,
+            zero_centered_gamma,
+        )
+
+        (
             fc1_out,
             gelu_out,
+            fc2_out,
+            fc1_weight_t_fp8,
+            fc2_weight_t_fp8,
+        ) = _mlp_forward(
+            ln_out,
+            tex.FP8FwdTensors.GEMM1_INPUT,
             fc1_weight,
+            tex.FP8FwdTensors.GEMM1_WEIGHT,
+            fc1_bias,
+            use_fc1_bias,
+            tex.FP8FwdTensors.GEMM2_INPUT,
             fc2_weight,
+            tex.FP8FwdTensors.GEMM2_WEIGHT,
+            fc2_bias,
+            use_fc2_bias,
+            fp8,
+            fp8_calibration,
+            fp8_meta,
+            activation_dtype,
+            is_grad_enabled,
         )
-        ctx.activation_dtype = activation_dtype
-        ctx.activation = activation
-        ctx.use_fc1_bias = use_fc1_bias
-        ctx.use_fc2_bias = use_fc2_bias
-        ctx.inp_shape = inp.shape
-        ctx.return_layernorm_output = return_layernorm_output
-        ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
-        ctx.zero_centered_gamma = zero_centered_gamma
-        ctx.requires_dgrad = not inp.stop_gradient
+
+        if is_grad_enabled:
+            ctx.save_for_backward(
+                inputmat,
+                ln_weight,
+                mu,
+                rsigma,
+                ln_out,
+                fc1_out,
+                gelu_out,
+                fc1_weight,
+                fc1_weight_t_fp8,
+                fc2_weight,
+                fc2_weight_t_fp8,
+                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+            )
+            ctx.activation_dtype = activation_dtype
+            ctx.activation = activation
+            ctx.fp8 = fp8
+            ctx.fp8_meta = fp8_meta
+            ctx.use_fc1_bias = use_fc1_bias
+            ctx.use_fc2_bias = use_fc2_bias
+            ctx.inp_shape = inp.shape
+            ctx.return_layernorm_output = return_layernorm_output
+            ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.requires_dgrad = not inp.stop_gradient
+            ctx.requires_fc1_bgrad = use_fc1_bias and not fc1_bias.stop_gradient
+            ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
+            ctx.requires_ln_bgrad = not ln_bias.stop_gradient
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
 
         if return_layernorm_output:
-            return fc2_out, ln_out.reshape(inp.shape)
+            return fc2_out, ln_out_return.reshape(inp.shape)
         return fc2_out
 
     @staticmethod
     def backward(
             ctx, *grad_outputs: Tuple[paddle.Tensor,
                                       ...]) -> Tuple[Union[paddle.Tensor, None], ...]:
-        (
-            inputmat,
-            ln_weight,
-            mu,
-            rsigma,
-            ln_out,
-            fc1_out,
-            gelu_out,
-            fc1_weight,
-            fc2_weight,
-        ) = ctx.saved_tensor()
-        # grad_fc2_out
-        grad_output = grad_outputs[0]
-
-        # FC2 Dgrad + dGELU
-        dgelu, _, _ = gemm(
-            fc2_weight,
-            grad_output,
-            ctx.activation_dtype,
-            get_workspace(),
-            layout="NN",
-            gelu=(ctx.activation == 'gelu'),
-            gelu_input=fc1_out,
-            grad=True,
-        )
-
-        # FC2 Wgrad
-        if not fc2_weight.stop_gradient:
-            fc2_wgrad, fc2_bias_grad, _ = gemm(
-                gelu_out,
-                grad_output,
-                ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_fc2_bias,
-            )
-
-        # For non-fp8 execution, FC1 bias gradient is fused with FC1 wgrad GEMM
-        # and will not be calculated in case wgrad is not required.
-        if fc1_weight.stop_gradient:
-            fc1_bias_grad = dgelu.sum(axis=0)
-
-        # FC1 DGRAD
-        fc1_dgrad, _, _ = gemm(
-            fc1_weight,
-            dgelu,
-            ctx.activation_dtype,
-            get_workspace(),
-            layout="NN",
-            grad=True,
-        )
-
-        # FC1 Wgrad
-        if not fc1_weight.stop_gradient:
-            fc1_wgrad, fc1_bias_grad, _ = gemm(
+        with _prepare_backward(ctx.fp8, ctx.fp8_meta, name="_LayerNormMLP"):
+            (
+                inputmat,
+                ln_weight,
+                mu,
+                rsigma,
                 ln_out,
-                dgelu,
+                fc1_out,
+                gelu_out,
+                fc1_weight,
+                fc1_weight_t_fp8,
+                fc2_weight,
+                fc2_weight_t_fp8,
+                fwd_scale_inverses,
+            ) = ctx.saved_tensor()
+
+            ctx.use_bias = ctx.use_fc2_bias    # For grad_output_preprocess
+            (
+                grad_output,
+                grad_output_c,
+                grad_output_t,
+                fc2_bias_grad,
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0])
+
+            (
+                fc1_dgrad,
+                fc1_wgrad,
+                fc1_bias_grad,
+                fc2_wgrad,
+                fc2_bias_grad_,
+            ) = _mlp_backward(
+                ln_out,
+                tex.FP8FwdTensors.GEMM1_INPUT,
+                fc1_weight,
+                fc1_weight_t_fp8,
+                tex.FP8FwdTensors.GEMM1_WEIGHT,
+                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                ctx.requires_fc1_bgrad,
+                fc1_out,
+                gelu_out,
+                tex.FP8FwdTensors.GEMM2_INPUT,
+                fc2_weight,
+                fc2_weight_t_fp8,
+                tex.FP8FwdTensors.GEMM2_WEIGHT,
+                ctx.requires_fc2_bgrad,
+                grad_output,
+                grad_output_c,
+                grad_output_t,
+                tex.FP8BwdTensors.GRAD_OUTPUT1,
+                fwd_scale_inverses,
+                ctx.fp8,
+                ctx.fp8_meta,
+                True,
                 ctx.activation_dtype,
-                get_workspace(),
-                layout="NT",
-                grad=True,
-                use_bias=ctx.use_fc1_bias,
+                ctx.activation,
+            )
+            if not ctx.fp8:
+                # fc2_bias is fused with gemm for non-FP8 path
+                fc2_bias_grad = fc2_bias_grad_
+
+            # LayerNorm Bwd
+            dxmat, dgamma, dbeta = _layernorm_bwd(
+                inputmat,
+                fc1_dgrad,
+                ln_weight,
+                mu,
+                rsigma,
+                grad_outputs[1] if ctx.return_layernorm_output else None,
+                ctx.return_layernorm_output,
+                ctx.bwd_ln_sm_margin,
+                ctx.zero_centered_gamma,
             )
 
-        # LayerNorm gradient
-        d_ln_out = fc1_dgrad.reshape(inputmat.shape)
-        # Residual gradient
-        if ctx.return_layernorm_output:
-            d_ln_out = d_ln_out + grad_outputs[1].reshape(d_ln_out.shape)
+            fc1_bias_grad = fc1_bias_grad if ctx.requires_fc1_bgrad else None
+            fc2_bias_grad = fc2_bias_grad if ctx.requires_fc2_bgrad else None
+            fc1_bias_grad_out = (fc1_bias_grad,) if ctx.use_fc1_bias else ()
+            fc2_bias_grad_out = (fc2_bias_grad,) if ctx.use_fc2_bias else ()
 
-        dxmat, dgamma, dbeta = layernorm_bwd(d_ln_out, inputmat, mu, rsigma, ln_weight,
-                                             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma)
-
-        fc1_bias_grad_out = (fc1_bias_grad,) if ctx.use_fc1_bias else ()
-        fc2_bias_grad_out = (fc2_bias_grad,) if ctx.use_fc2_bias else ()
-
-        return (
-            dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-            dgamma,
-            dbeta,
-            fc1_wgrad if not fc1_weight.stop_gradient else None,
-            *fc1_bias_grad_out,
-            fc2_wgrad if not fc2_weight.stop_gradient else None,
-            *fc2_bias_grad_out,
-        )
+            return (
+                dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
+                dgamma if not ln_weight.stop_gradient else None,
+                dbeta if ctx.requires_ln_bgrad else None,
+                fc1_wgrad if not fc1_weight.stop_gradient else None,
+                *fc1_bias_grad_out,
+                fc2_wgrad if not fc2_weight.stop_gradient else None,
+                *fc2_bias_grad_out,
+            )
 
 
 class LayerNormMLP(TransformerEngineBaseLayer):
@@ -257,7 +533,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         )
 
         self.has_bias = self._bias_attr is not False
-        if self._bias_attr is None:
+        if self._bias_attr is None or self._bias_attr is True:
             self._bias_attr = paddle.ParamAttr(initializer=Constant(value=0.0))
 
         if self.has_bias:
@@ -304,20 +580,28 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         Apply layer normalization to the input followed by a linear transformation.
         """
 
-        with self.prepare_forward(inp) as inp:
+        with self.prepare_forward(inp, num_gemms=2) as inp:
+            # Layer input should be casted outside PyLayer, as performing
+            # inplace cast to input tensors may cause problems when used
+            # together with Paddle native layers.
+            inp = cast_if_needed(inp, self.activation_dtype)
             out = _LayerNormMLP.apply(
-                cast_if_needed(inp, self.activation_dtype),
-                cast_if_needed(self.ln_weight, self.activation_dtype),
-                cast_if_needed(self.ln_bias, self.activation_dtype),
-                cast_if_needed(self.fc1_weight, self.activation_dtype),
-                cast_if_needed(self.fc1_bias, self.activation_dtype),
+                inp,
+                self.ln_weight,
+                self.ln_bias,
+                self.fc1_weight,
+                self.fc1_bias,
                 self.has_bias,
-                cast_if_needed(self.fc2_weight, self.activation_dtype),
-                cast_if_needed(self.fc2_bias, self.activation_dtype),
+                self.fc2_weight,
+                self.fc2_bias,
                 self.has_bias,
                 self.eps,
+                self.fp8,
+                self.fp8_calibration,
+                self.fp8_meta,
                 self.activation_dtype,
                 self.return_layernorm_output,
+                paddle.is_grad_enabled(),
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,

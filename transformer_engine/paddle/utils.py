@@ -15,6 +15,29 @@ def cast_if_needed(tensor: Union[paddle.Tensor, None],
     return tensor if tensor is None or tensor.dtype == dtype else paddle.cast(tensor, dtype)
 
 
+def cast_if_needed_inplace(tensor: Union[paddle.Tensor, None],
+                           dtype: paddle.dtype) -> Union[paddle.Tensor, None]:
+    """Cast tensor to dtype (inplace), not to be used on layer inputs"""
+    return tensor if tensor is None or tensor.dtype == dtype else tensor._to(dtype=dtype)
+
+
+def check_dim_for_fp8_forward_exec(tensor: paddle.Tensor) -> bool:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
+    return not tensor.shape[0] % 8 and not tensor.shape[1] % 16
+
+
+def assert_dim_for_fp8_forward_exec(tensor: paddle.Tensor) -> None:
+    """For fp8 fprop (TN layout), inputs and weights must be such
+       that dim0 is divisible by 8 and dim1 is divisible by 16.
+    """
+    # single tensor check so it's clear which tensor is triggering the assertion
+    assert check_dim_for_fp8_forward_exec(tensor), (
+        "Tensor dimensions are not compatible for FP8 execution: "
+        f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)")
+
+
 def get_paddle_act_func(activation):
     """Get paddle activation function"""
     funcs = {
