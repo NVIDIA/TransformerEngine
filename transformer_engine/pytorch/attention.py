@@ -61,7 +61,6 @@ _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 __all__ = ["DotProductAttention"]
 
 
-@jit_fuser
 def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
@@ -70,6 +69,8 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
     samples.
     """
     mask = mask.squeeze(1).squeeze(1)
+    bs, seqlen = mask.shape
+
     reduced_mask = mask.sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -78,6 +79,12 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
     mask = mask.reshape(-1)
     indices = mask.nonzero()
     indices = indices.unsqueeze(-1)
+
+    num_nonzeros = indices.shape[0]
+    pad_amount = bs * seqlen - num_nonzeros
+    indices = F.pad(input=indices, pad=(0, 0, 0, 0, 0, pad_amount),
+                    mode="constant", value=float(bs * seqlen))
+
     return cu_seqlens, indices
 
 
@@ -89,11 +96,13 @@ def pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    padding_indice = torch.zeros(
+        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device)
+    tensor = torch.cat((tensor, padding_indice), dim=0)
+
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     packed = torch.gather(tensor, 0, indices)
-    pad_amount = tensor.shape[0] - packed.shape[0]
-    padded = F.pad(input=packed, pad=(0, 0, 0, 0, 0, pad_amount), mode="constant", value=0.0)
-    return padded
+    return packed
 
 
 @jit_fuser
@@ -137,8 +146,9 @@ def unpack_tensor(
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     unpacked = torch.zeros(
-        dim0, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device)
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device)
     unpacked.scatter_(0, indices, tensor)
+    unpacked = unpacked[0:-1,:,:]
     return unpacked
 
 
