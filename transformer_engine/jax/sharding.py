@@ -422,6 +422,11 @@ class FusedAttnShardingMetaGenerator(ShardingMetaGenerator):
                 out_axis[tp_dim] = tp_axis_name
             out_axes.append(out_axis)
 
+        assert len(out_axes) == 1, "Only allow single output at this moment."
+        assert len(output_new_shapes) == 1, "Only allow single output at this moment."
+        out_axes = out_axes[0]
+        output_new_shapes = output_new_shapes[0]
+
         axis_resources = {}
         if dp_axis_name is not None:
             axis_resources[dp_axis_name] = dp_mesh_axis
@@ -1047,6 +1052,13 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
                 idx_to_extend += 1
         return idx_to_extend
 
+    def extend_exist_sharding(idx, shape):
+        remain_size = shape[idx]
+        assert remain_size == -1 or remain_size % fsdp_dim_size == 0
+        remain_size = remain_size // fsdp_dim_size
+        new_shape = tuple([*shape[:idx], fsdp_dim_size, remain_size, *shape[idx + 1:]])
+        return new_shape
+
     new_input_shapes = []
     new_in_axes = []
     for i, shape in enumerate(sharding_meta.input_shapes):
@@ -1054,12 +1066,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
         if i == 0:    # Assume 0-idx in the tensor with inputs
             # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
             idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
-            remain_batch_size = shape[idx_to_extend]
-            assert remain_batch_size == -1 or remain_batch_size % fsdp_dim_size == 0
-            remain_batch_size = remain_batch_size // fsdp_dim_size
-            new_shape = tuple([
-                *shape[:idx_to_extend], fsdp_dim_size, remain_batch_size, *shape[idx_to_extend + 1:]
-            ])
+            new_shape = extend_exist_sharding(idx_to_extend, shape)
 
             # assume one output only and have the same batch sharding like input
             assert isinstance(sharding_meta.out_axes, dict)
@@ -1074,15 +1081,17 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
         else:
             new_shape = shape
             if i in weight_fsdp_dim_map:
-                assert weight_fsdp_dim_map[i] not in sharding_meta.in_axes[i]
                 idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()),
                                                   weight_fsdp_dim_map[i])
-                assert shape[idx_to_extend] % fsdp_dim_size == 0
-                remain_dim_size = shape[idx_to_extend] // fsdp_dim_size
-                new_shape = tuple([
-                    *shape[:idx_to_extend], fsdp_dim_size, remain_dim_size,
-                    *shape[idx_to_extend + 1:]
-                ])
+                if weight_fsdp_dim_map[i] in sharding_meta.in_axes[i]:
+                    new_shape = extend_exist_sharding(idx_to_extend, shape)
+                else:
+                    assert shape[idx_to_extend] % fsdp_dim_size == 0
+                    remain_dim_size = shape[idx_to_extend] // fsdp_dim_size
+                    new_shape = tuple([
+                        *shape[:idx_to_extend], fsdp_dim_size, remain_dim_size,
+                        *shape[idx_to_extend + 1:]
+                    ])
         if idx_to_extend >= 0:
             new_ia = {}
             for key in sharding_meta.in_axes[i]:
