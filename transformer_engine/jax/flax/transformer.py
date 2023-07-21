@@ -109,8 +109,15 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
     if gsr.fsdp_resource is not None and gsr.dp_resource != gsr.fsdp_resource:
         batch_dim_rule.append(gsr.fsdp_resource)
 
+    if len(batch_dim_rule) <= 0:
+        batch_dim_rule = None
+    elif len(batch_dim_rule) == 1:
+        batch_dim_rule = batch_dim_rule[0]
+    else:
+        batch_dim_rule = tuple(batch_dim_rule)
+
     te_logical_axis_rules = (
-        (BATCH_AXES, tuple(batch_dim_rule)),
+        (BATCH_AXES, batch_dim_rule),
         (SEQLEN_AXES, None),
         (HEAD_AXES, gsr.tp_resource),
         (HIDDEN_AXES, None),
@@ -204,6 +211,9 @@ def core_attention(query: Array,
         attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
     else:
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+
+    attn_weights = _with_sharding_constraint(attn_weights,
+                                             (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
 
     # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
     # In this case, the scale can not fused into the Softmax module.
