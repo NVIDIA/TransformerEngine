@@ -575,6 +575,7 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  const paddle::Tensor &softmax_aux,
                                  paddle::Tensor &dQKV,                     // NOLINT
                                  paddle::optional<paddle::Tensor> &dBias,  // NOLINT
+                                 paddle::Tensor &rng_state,                // NOLINT
                                  int64_t b, int64_t h, int64_t d, int64_t total_seqs,
                                  int64_t max_seqlen, float attn_scale, float p_dropout,
                                  const std::string &qkv_layout, const std::string &bias_type,
@@ -610,12 +611,15 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     NVTETensorPack nvte_aux_tensor_pack;
     nvte_tensor_pack_create(&nvte_aux_tensor_pack);
 
-    nvte_aux_tensor_pack.size = 1;
+    nvte_aux_tensor_pack.size = 2;  // 1. softmax_aux  2. rng_state
     auto *output_s = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[0]);
+    auto *fwd_rng_state = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[1]);
     output_s->data.shape =
         std::vector<size_t>({static_cast<size_t>(b), static_cast<size_t>(h),
                              static_cast<size_t>(max_seqlen), static_cast<size_t>(max_seqlen)});
     output_s->data.dptr = const_cast<void *>(softmax_aux.data());
+    fwd_rng_state->data.shape = std::vector<size_t>({2});
+    fwd_rng_state->data.dptr = const_cast<void *>(rng_state.data());
 
     // create cu_seqlens tensorwrappers
     TensorWrapper te_cu_seqlens;
@@ -742,6 +746,7 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
                                 paddle::Tensor &dQ,                       // NOLINT
                                 paddle::Tensor &dKV,                      // NOLINT
                                 paddle::optional<paddle::Tensor> &dBias,  // NOLINT
+                                paddle::Tensor &rng_state,                // NOLINT
                                 int64_t b, int64_t h, int64_t d, int64_t total_seqs_q,
                                 int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
                                 float attn_scale, float p_dropout, const std::string &qkv_layout,
@@ -780,12 +785,15 @@ void te_fused_attn_bwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     NVTETensorPack nvte_aux_tensor_pack;
     nvte_tensor_pack_create(&nvte_aux_tensor_pack);
 
-    nvte_aux_tensor_pack.size = 1;
+    nvte_aux_tensor_pack.size = 2;
     auto *output_s = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[0]);
+    auto *fwd_rng_state = reinterpret_cast<Tensor *>(nvte_aux_tensor_pack.tensors[1]);
     output_s->data.shape = std::vector<size_t>({static_cast<size_t>(b), static_cast<size_t>(h),
                                                 static_cast<size_t>(max_seqlen_q),
                                                 static_cast<size_t>(max_seqlen_kv)});
     output_s->data.dptr = const_cast<void *>(softmax_aux.data());
+    fwd_rng_state->data.shape = std::vector<size_t>({2});
+    fwd_rng_state->data.dptr = const_cast<void *>(rng_state.data());
 
     // create cu_seqlens tensorwrappers
     TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
@@ -1084,7 +1092,8 @@ PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_qkvpacked));
 
 PD_BUILD_OP(te_fused_attn_bwd_qkvpacked)
-    .Inputs({"QKV", "cu_seqlens", "O", "dO", "softmax_aux", "_dQKV", paddle::Optional("_dBias")})
+    .Inputs({"QKV", "cu_seqlens", "O", "dO", "softmax_aux", "_dQKV", paddle::Optional("_dBias"),
+             "rng_state"})
     .Outputs({"dQKV", paddle::Optional("dBias")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
             "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
@@ -1106,7 +1115,7 @@ PD_BUILD_OP(te_fused_attn_fwd_kvpacked)
 
 PD_BUILD_OP(te_fused_attn_bwd_kvpacked)
     .Inputs({"Q", "KV", "cu_seqlens_q", "cu_seqlens_kv", "O", "dO", "softmax_aux", "_dQ", "_dKV",
-             paddle::Optional("_dBias")})
+             paddle::Optional("_dBias"), "rng_state"})
     .Outputs({"dQ", "dKV", paddle::Optional("dBias")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",

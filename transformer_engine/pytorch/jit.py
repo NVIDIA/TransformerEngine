@@ -220,7 +220,7 @@ def warmup_jit_bias_gelu(
 
     bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device="cuda")
     inp = torch.rand(
-        (seq_length, micro_batch_size, ffn_hidden_size_per_partition),
+        (seq_length * micro_batch_size, ffn_hidden_size_per_partition),
         dtype=dtype,
         device="cuda",
     )
@@ -229,8 +229,9 @@ def warmup_jit_bias_gelu(
     for bias_grad, input_grad in zip([True, True], [False, True]):
         bias.requires_grad, inp.requires_grad = bias_grad, input_grad
         for _ in range(5):
-            output = bias_gelu_fused(inp, bias)
-    del bias, inp, output
+            _ = bias_gelu_fused_(inp, bias)
+            _ = gelu_fused_(inp)
+    del bias, inp
 
     torch.cuda.empty_cache()
     torch.cuda.set_rng_state(rng_state)

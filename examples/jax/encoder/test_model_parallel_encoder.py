@@ -48,6 +48,7 @@ class Net(nn.Module):
                              attention_dropout=0.1,
                              dropout_rng_name=DROPOUT_KEY,
                              layer_type=te_flax.TransformerLayerType.ENCODER,
+                             self_attn_mask_type='padding',
                              enable_relative_embedding=False,
                              dtype=jnp.bfloat16)
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
