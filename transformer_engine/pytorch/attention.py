@@ -774,15 +774,12 @@ class DotProductAttention(torch.nn.Module):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.num_attention_heads = num_attention_heads
 
-        #projection_size = kv_channels * num_attention_heads
-        #self.hidden_size_per_partition = divide(projection_size, self.tp_size)
         self.hidden_size_per_attention_head = kv_channels
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
         assert (num_attention_heads%self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
-        #self.num_gqa_groups_per_partition = divide(self.num_gqa_groups, tp_size)
 
         if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
@@ -1097,7 +1094,8 @@ class MultiHeadAttention(torch.nn.Module):
                     **common_gemm_kwargs,
                 )
         elif ((self.attention_type == "cross")
-                or (self.attention_type == "self" and self.num_gqa_groups != self.num_attention_heads)):
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
@@ -1274,7 +1272,8 @@ class MultiHeadAttention(torch.nn.Module):
                     mixed_x_layer, split_dim, 3
                 )
         elif ((self.attention_type == "cross")
-                or (self.attention_type == "self" and self.num_gqa_groups != self.num_attention_heads)):
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
 
             if self.attention_type == "cross":
                 input_tensor = encoder_output
