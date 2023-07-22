@@ -38,6 +38,7 @@ RUN \
  NVTE_FRAMEWORK=${FRAMEWORK} \
  NVTE_WITH_USERBUFFERS=1 \
  MPI_HOME=/usr/local/mpi \
+ MAX_JOBS=1 \
  pip install .[test] \
  && rm -rf transformer_engine.egg-info dist build
 
