@@ -416,8 +416,10 @@ def fused_attn_fwd_qkvpacked(
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention FWD for packed QKV input"""
 
-    b = cu_seqlens.shape[0] - 1
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
 
+    b = cu_seqlens.shape[0] - 1
     total_seqs = qkv.shape[0] * qkv.shape[1]
     h = qkv.shape[3]
     d = qkv.shape[4]
@@ -430,16 +432,6 @@ def fused_attn_fwd_qkvpacked(
         assert (Bias.shape == [1, h, max_seqlen, max_seqlen
                               ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
         assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
-
-    # BF16/FP16 fused attention API
-    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen <= 512) and (d
-                                                                                             == 64):
-        assert (qkv_layout == "qkv_interleaved" and bias_type == "no_bias"
-                and (attn_mask_type in ("padding", "causal"))
-               ), """The fused attention currently only supports qkv_interleaved layout,
-                no_bias type, and padding/causal attention mask type."""
-    else:
-        assert False, "No support for this dtype and max_seqlen combination."
 
     if set_zero:
         out = paddle.full(shape=[total_seqs, h, d], fill_value=0, dtype=qkv.dtype)
@@ -479,6 +471,7 @@ def fused_attn_fwd_qkvpacked(
 def fused_attn_bwd_qkvpacked(
     qkv: paddle.Tensor,
     cu_seqlens: paddle.Tensor,
+    rng_state: paddle.Tensor,
     o: paddle.Tensor,
     d_o: paddle.Tensor,
     softmax_aux: paddle.Tensor,
@@ -491,26 +484,18 @@ def fused_attn_bwd_qkvpacked(
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-    """Fused Attention FWD for packed QKV input"""
+    """Fused Attention BWD for packed QKV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
 
     b = cu_seqlens.shape[0] - 1
-
     total_seqs = qkv.shape[0] * qkv.shape[1]
     h = qkv.shape[3]
     d = qkv.shape[4]
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
-
-    # BF16/FP16 fused attention API
-    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen <= 512) and (d
-                                                                                             == 64):
-        assert (qkv_layout == "qkv_interleaved" and bias_type == "no_bias"
-                and (attn_mask_type in ("padding", "causal"))
-               ), """The fused attention currently only supports qkv_interleaved layout,
-                no_bias type, and padding attention mask type."""
-    else:
-        assert False, "No support for this dtype and max_seqlen combination."
 
     if set_zero:
         dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
@@ -530,6 +515,7 @@ def fused_attn_bwd_qkvpacked(
         softmax_aux,
         dqkv,
         dbias,
+        rng_state,
         b,
         h,
         d,
@@ -566,10 +552,12 @@ def fused_attn_fwd_kvpacked(
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
     """Fused Attention FWD for packed KV input"""
 
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
     assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
            ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
-    b = cu_seqlens_q.shape[0] - 1
 
+    b = cu_seqlens_q.shape[0] - 1
     total_seqs_q = q.shape[0] * q.shape[1]
     total_seqs_kv = kv.shape[0] * kv.shape[1]
     h = q.shape[2]
@@ -583,16 +571,6 @@ def fused_attn_fwd_kvpacked(
         assert (Bias.shape == [1, h, max_seqlen_q, max_seqlen_kv
                               ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
         assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
-
-    # BF16/FP16 fused attention API
-    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen_q <= 512) and (
-            max_seqlen_kv <= 512) and (d == 64):
-        assert (qkv_layout == "kv_interleaved" and bias_type == "no_bias"
-                and (attn_mask_type in ("padding", "causal"))
-               ), """The fused attention currently only supports kv_interleaved layout,
-                no_bias type, and padding attention mask type."""
-    else:
-        assert False, "No support for this dtype and max_seqlen combination."
 
     if set_zero:
         out = paddle.full(shape=[total_seqs_q, h, d], fill_value=0, dtype=q.dtype)
@@ -638,6 +616,7 @@ def fused_attn_bwd_kvpacked(
     kv: paddle.Tensor,
     cu_seqlens_q: paddle.Tensor,
     cu_seqlens_kv: paddle.Tensor,
+    rng_state: paddle.Tensor,
     o: paddle.Tensor,
     d_o: paddle.Tensor,
     softmax_aux: paddle.Tensor,
@@ -651,10 +630,14 @@ def fused_attn_bwd_kvpacked(
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
-    """Fused Attention FWD for packed KV input"""
+    """Fused Attention BWD for packed KV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
+           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
 
     b = cu_seqlens_q.shape[0] - 1
-
     total_seqs_q = q.shape[0] * q.shape[1]
     total_seqs_kv = kv.shape[0] * kv.shape[1]
     h = q.shape[2]
@@ -662,16 +645,6 @@ def fused_attn_bwd_kvpacked(
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
-
-    # BF16/FP16 fused attention API
-    if (qkv_dtype in (tex.DType.kBFloat16, tex.DType.kFloat16)) and (max_seqlen_q <= 512) and (
-            max_seqlen_kv <= 512) and (d == 64):
-        assert (qkv_layout == "kv_interleaved" and bias_type == "no_bias"
-                and (attn_mask_type in ("padding", "causal"))
-               ), """The fused attention currently only supports kv_interleaved layout,
-                no_bias type, and padding attention mask type."""
-    else:
-        assert False, "No support for this dtype and max_seqlen combination."
 
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
@@ -695,6 +668,7 @@ def fused_attn_bwd_kvpacked(
         dq,
         dkv,
         dbias,
+        rng_state,
         b,
         h,
         d,
