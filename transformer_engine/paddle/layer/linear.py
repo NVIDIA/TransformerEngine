@@ -22,7 +22,12 @@ from .base import (
 
 from ..fp8 import get_fp8_te_dtype
 from ..cpp_extensions import gemm, fp8_gemm, cast_to_fp8, cast_transpose
-from ..utils import cast_if_needed, cast_if_needed_inplace, assert_dim_for_fp8_forward_exec
+from ..utils import (
+    cast_if_needed,
+    cast_if_needed_inplace,
+    assert_dim_for_fp8_forward_exec,
+    get_bias_dtype,
+)
 
 __all__ = ["Linear", "_linear_fwd", "_linear_fwd_fp8", "_linear_bwd", "_linear_fwd_non_fp8"]
 
@@ -40,7 +45,7 @@ def _linear_fwd_fp8(
 ):
     """FP8 path of Linear Fwd"""
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-    bias_dtype = (paddle.bfloat16 if activation_dtype == paddle.float32 else activation_dtype)
+    bias_dtype = get_bias_dtype(activation_dtype)
     bias = cast_if_needed_inplace(bias, bias_dtype)
 
     if is_grad_enabled:

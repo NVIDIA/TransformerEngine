@@ -26,6 +26,7 @@ from ..fp8 import (
     get_fp8_te_dtype,
 )
 from ..profile import nvtx_range
+from ..utils import get_bias_dtype, cast_if_needed
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -315,6 +316,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 tex.FP8BwdTensors.GRAD_OUTPUT1,
                 fp8_dtype_backward,
             )
+            bias_dtype = get_bias_dtype(ctx.activation_dtype)
+            grad_bias = cast_if_needed(grad_bias, bias_dtype)
         else:
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                 grad_output_c, grad_output_t = cast_transpose(

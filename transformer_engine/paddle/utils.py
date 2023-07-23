@@ -38,6 +38,11 @@ def assert_dim_for_fp8_forward_exec(tensor: paddle.Tensor) -> None:
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)")
 
 
+def get_bias_dtype(activation_dtype: paddle.dtype):
+    """Get bias dtype given activation_dtype"""
+    return paddle.bfloat16 if activation_dtype == paddle.float32 else activation_dtype
+
+
 def get_paddle_act_func(activation):
     """Get paddle activation function"""
     funcs = {
