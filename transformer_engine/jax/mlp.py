@@ -134,7 +134,7 @@ def fp8_ln_mlp(
     if major_sharding_type is MajorShardingType.SINGLE:
         res = _fp8_mlp(inputs, ln_scale, ln_bias, kernel_1, kernel_2, fp8_max, amax, scale,
                        scale_inv, layernorm_type, activations, zero_centered_gamma, epsilon,
-                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "", "")
+                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "", None)
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -443,6 +443,11 @@ def _fp8_mlp_bwd(
         amax = jax.lax.pmax(amax, dp_axis_name)
 
     if fsdp_axis_name is not None:
+        wgrad_1 = jax.lax.psum(wgrad_1, fsdp_axis_name)
+        wgrad_2 = jax.lax.psum(wgrad_2, fsdp_axis_name)
+        grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
+        if grad_beta is not None:
+            grad_beta = jax.lax.psum(grad_beta, fsdp_axis_name)
         amax = jax.lax.pmax(amax, fsdp_axis_name)
 
     if major_sharding_type in (MajorShardingType.TP, MajorShardingType.DPTP):
