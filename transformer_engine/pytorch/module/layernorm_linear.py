@@ -6,7 +6,6 @@
 import os
 import warnings
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
-import warnings
 
 
 import torch
@@ -66,10 +65,9 @@ def _get_normalization_func(normalization: str,
 
     if forward:
         return fwd_normalization_funcs[(normalization, fp8_output, is_grad_enabled)]
-    else:
-        assert not fp8_output, "FP8 output is not supported in backward normalization!"
-        assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
-        return bwd_normalization_funcs[normalization]
+    assert not fp8_output, "FP8 output is not supported in backward normalization!"
+    assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
+    return bwd_normalization_funcs[normalization]
 
 def _apply_normalization(inputmat:torch.Tensor,
                          ln_out: torch.Tensor,
@@ -192,6 +190,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+
+        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
         ln_out, mu, rsigma = _apply_normalization(inputmat,
                                                   ln_out,
