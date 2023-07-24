@@ -1,31 +1,42 @@
 from __future__ import annotations
-from typing import Protocol, Sequence, TypeVar, overload
+from dataclasses import dataclass
+from typing import (
+    Callable,
+    Concatenate,
+    ParamSpec,
+    Protocol,
+    Sequence,
+    TypeVar,
+    overload,
+)
 from .enums import DType
-
-
-class TensorTypeBase(Protocol):
-    @overload
-    def view(self, size: Sequence[int], /) -> TensorTypeBase:
-        ...
-
-    @overload
-    def view(self, *size: int) -> TensorTypeBase:
-        ...
-
-    def view(self, *size: int | Sequence[int]) -> TensorTypeBase:
-        raise NotImplementedError()
-
-    def __getitem__(self, indices: int | slice | tuple[int | slice]) -> TensorTypeBase:
-        raise NotImplementedError()
-
-    def is_contiguous(self) -> bool:
-        raise NotImplementedError()
 
 
 TensorType = TypeVar(
     "TensorType",
-    bound=TensorTypeBase,
+    bound="TensorTypeBase",
 )
+
+
+class TensorTypeBase(Protocol):
+    @overload
+    def view(self: TensorType, size: Sequence[int], /) -> TensorType:
+        ...
+
+    @overload
+    def view(self: TensorType, *size: int) -> TensorType:
+        ...
+
+    def view(self: TensorType, *size: int | Sequence[int]) -> TensorType:
+        raise NotImplementedError()
+
+    def __getitem__(
+        self: TensorType, indices: int | slice | tuple[int | slice]
+    ) -> TensorType:
+        raise NotImplementedError()
+
+    def is_contiguous(self) -> bool:
+        raise NotImplementedError()
 
 
 class FrameworkInterface(Protocol[TensorType]):
@@ -523,13 +534,25 @@ def dswiglu(
 
 class ParamConstructor(Protocol):
     @staticmethod
+    @overload
     def __call__(
         fi: type[FrameworkInterface[TensorType]],
         shape: tuple[int, ...],
         dtype: DType,
         /,
     ) -> TensorType:
-        raise NotImplementedError()
+        ...
+
+    @staticmethod
+    @overload
+    def __call__(
+        fi: type[FrameworkInterface[TensorType]],
+        shape: tuple[int, ...],
+        dtype: DType,
+        out: TensorType,
+        /,
+    ) -> None:
+        ...
 
 
 class Activation(Protocol):
@@ -576,3 +599,10 @@ class Gradient(Protocol):
         /,
     ) -> None:
         ...
+
+
+@dataclass
+class TensorDescriptor:
+    shape: tuple[int, ...]
+    constructor: ParamConstructor | None
+    dtype: DType

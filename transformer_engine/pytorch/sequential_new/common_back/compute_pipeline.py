@@ -8,11 +8,11 @@ from .ops import (
     PassthroughOp,
     PointwiseOp,
     ShapePreserveOp,
-    TensorDescriptor,
     returning,
 )
 from .enums import DType, PType
-from .framework_interface import FrameworkInterface, TensorType
+from .framework_interface import FrameworkInterface, TensorType, TensorDescriptor
+from .tensor_manager import TensorManager
 
 
 class ComputePipeline:
@@ -20,15 +20,68 @@ class ComputePipeline:
         self,
         framework_interface: FrameworkInterface[TensorType],
         ops: list[OpBase],
+        input_shape: tuple[int, ...],
+        training: bool,
         extra_transformations: list[Callable[[list[OpBase]], list[OpBase]]] = [],
     ):
         self._framework_interface = framework_interface
         self._framework = type(framework_interface)
+        self._training = training
+        self._input_shape = input_shape
         self._fwd = ComputePipeline.compile(ops, extra_transformations)
-        self._bwd = ComputePipeline.compile(
-            [op.bwd() for op in ops[::-1]], extra_transformations
-        )
-        # TODO: construct parameters and activations
+        self._tensor_manager = TensorManager(self._framework_interface)
+        self.allocate_tensors()
+
+    def allocate_tensors(self):
+        input_shape = self._input_shape
+        for op in self._fwd:
+            params = op.describe_params()
+            for name, param in params.items():
+                self._tensor_manager.register_tensor(op.name + "." + name, param)
+
+            op.input_shape = input_shape
+            act_shape = op.describe_activation_shape()
+            input_shape = act_shape
+
+            call = (
+                op.describe_supplementary_tensors_training
+                if self._training
+                else op.describe_supplementary_tensors_inference
+            )
+
+            for (
+                name,
+                tensor,
+            ) in call().items():
+                self._tensor_manager.register_tensor(
+                    op.name + "." + name,
+                    TensorDescriptor(tensor.shape, None, tensor.dtype),
+                )
+
+        self._tensor_manager.allocate_storage()
+
+        for op in self._fwd:
+            params = op.describe_params()
+            for name, param in params.items():
+                setattr(
+                    op, name, self._tensor_manager.retrieve_tensor(op.name + "." + name)
+                )
+
+            call = (
+                op.describe_supplementary_tensors_training
+                if self._training
+                else op.describe_supplementary_tensors_inference
+            )
+
+            for (
+                name,
+                tensor,
+            ) in call().items():
+                setattr(
+                    op,
+                    name,
+                    self._tensor_manager.retrieve_tensor(op.name + "." + name),
+                )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError()

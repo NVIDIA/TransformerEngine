@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from typing import Protocol
 import torch
 from .enums import DType
+from ... import cpp_extensions
 
 
 class GenericTensor:
-    _tensor: torch.Tensor
+    tensor: torch.Tensor
 
     def dtype(self) -> DType:
         raise NotImplementedError()
@@ -23,9 +23,9 @@ class TEFP8TorchTensorMetadata:
 
 
 class TEFP8TorchTensor(GenericTensor):
-    _tensor: torch.Tensor
-    _meta_ref: TEFP8TorchTensorMetadata
-    _index_in_meta: int
+    tensor: torch.Tensor
+    meta_ref: TEFP8TorchTensorMetadata
+    index_in_meta: int
 
 
 # GEMM
@@ -49,28 +49,28 @@ def gemm(a: GenericTensor, b: GenericTensor, out: GenericTensor):
 
 def _gemm_fp8(a: TEFP8TorchTensor, b: TEFP8TorchTensor, out: GenericTensor):
     cpp_extensions.fp8_gemm(  # type: ignore
-        a._tensor,
-        a._meta_ref.scale_inv,
-        a._index_in_meta,
+        a.tensor,
+        a.meta_ref.scale_inv,
+        a.index_in_meta,
         a.dtype().tex_dtype(),
-        b._tensor,
-        b._meta_ref.scale_inv,
-        b._index_in_meta,
+        b.tensor,
+        b.meta_ref.scale_inv,
+        b.index_in_meta,
         b.dtype().tex_dtype(),
         out.dtype().torch_dtype(),
         _cublas_workspace(),
-        out=out._tensor,
-        fp8_meta_tensor=out._meta_ref if isinstance(out, TEFP8TorchTensor) else None,
-        out_index=out._index_in_meta if isinstance(out, TEFP8TorchTensor) else None,
+        out=out.tensor,
+        fp8_meta_tensor=out.meta_ref if isinstance(out, TEFP8TorchTensor) else None,
+        out_index=out.index_in_meta if isinstance(out, TEFP8TorchTensor) else None,
         D_dtype=out.dtype().tex_dtype(),
     )
 
 
 def _gemm(a: TorchTensor, b: TorchTensor, out: TorchTensor):
     cpp_extensions.gemm(  # type: ignore
-        a._tensor,
-        b._tensor,
+        a.tensor,
+        b.tensor,
         out.dtype().torch_dtype(),
         _cublas_workspace(),
-        out=out._tensor,
+        out=out.tensor,
     )

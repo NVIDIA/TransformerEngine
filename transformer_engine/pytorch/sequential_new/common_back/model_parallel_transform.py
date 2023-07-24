@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from enum import Enum
+from .enums import PType
 from .ops import (
     OpBase,
     Gemm,
@@ -17,32 +17,41 @@ from .ops import (
 )
 
 
+@dataclass
+class Connection:
+    src: PType
+    dst: PType
+    ops: list[OpBase]
+
+    def cost(self):
+        weight: int
+        if (self.src, self.dst) == (PType.NA, PType.NA):
+            weight = 1
+        elif (self.src, self.dst) == (PType.PA, PType.PA):
+            weight = 1
+        else:
+            weight = 0
+        return weight * len(self.ops)
+
+
+@dataclass
+class Node:
+    connections: list[Connection]
+
+
 def model_parallel_transform(ops: list[OpBase]) -> list[OpBase]:
     graph: list[Node] = []
     for op in ops:
-        if isinstance(op, Gemm):
-            graph.append(_ugemm(op))
-        elif isinstance(op, DotProductAttention):
-            graph.append(_dot_product_attention(op))
-        elif type(op) in POINTWISE_OPS:
-            graph.append(_pointwise(op))
-        elif type(op) in ROWWISE_OPS:
-            graph.append(_rowwise(op))
-        else:
-            graph.append(_unknown(op))
+        graph.append(op.describe_parallellism())
     graph = [_pre(ops[0])] + graph + [_post(ops[-1])]
 
     return _bfs01(graph)
 
 
-POINTWISE_OPS = [Bias, Gelu, Relu, ResidualBegin, ResidualEnd, Dropout]
-ROWWISE_OPS = [LayerNorm]
-
-
 def _bfs01(graph: list[Node]) -> list[OpBase]:
-    vertices = (len(graph) + 1) * len(EndPoint)
+    vertices = (len(graph) + 1) * len(PType)
     START = 0
-    FINISH = vertices - (len(EndPoint))
+    FINISH = vertices - (len(PType))
     UNREACHABLE = 1000000000
 
     dist = [UNREACHABLE] * vertices
@@ -60,13 +69,13 @@ def _bfs01(graph: list[Node]) -> list[OpBase]:
                 if d < dist[v]:
                     dist[v], prev[v] = d, p
 
-                node = v // len(EndPoint)
-                endpoint = EndPoint(v % len(EndPoint))
+                node = v // len(PType)
+                endpoint = PType(v % len(PType))
 
                 if node < len(graph):
                     for conn in graph[node].connections:
                         if conn.src == endpoint:
-                            u = (node + 1) * len(EndPoint) + conn.dst.value
+                            u = (node + 1) * len(PType) + conn.dst.value
                             if not reachable(u):
                                 cost = conn.cost()
                                 if cost == 0:
@@ -81,44 +90,11 @@ def _bfs01(graph: list[Node]) -> list[OpBase]:
         conn = prev[v]
         assert conn is not None
         path.append(conn)
-        node = v // len(EndPoint)
-        v = (node - 1) * len(EndPoint) + conn.src.value
+        node = v // len(PType)
+        v = (node - 1) * len(PType) + conn.src.value
     path.reverse()
     ops = [op for conn in path for op in conn.ops]
     return ops
-
-
-class EndPoint(Enum):
-    NA = 0
-    "normal all"
-    NCS = 1
-    "normal column-split"
-    PA = 2
-    "partial all"
-    NRS = 3
-    "normal row-split"
-
-
-@dataclass
-class Connection:
-    src: EndPoint
-    dst: EndPoint
-    ops: list[OpBase]
-
-    def cost(self):
-        weight: int
-        if (self.src, self.dst) == (EndPoint.NA, EndPoint.NA):
-            weight = 1
-        elif (self.src, self.dst) == (EndPoint.PA, EndPoint.PA):
-            weight = 1
-        else:
-            weight = 0
-        return weight * len(self.ops)
-
-
-@dataclass
-class Node:
-    connections: list[Connection]
 
 
 def _ugemm(gemm: Gemm) -> Node:
@@ -143,12 +119,12 @@ def _ugemm(gemm: Gemm) -> Node:
 
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, [gemm]),
-            Connection(EndPoint.NA, EndPoint.NCS, [cgemm]),
-            Connection(EndPoint.NA, EndPoint.PA, [rgemm]),
-            Connection(EndPoint.NCS, EndPoint.PA, [rgemm]),
-            Connection(EndPoint.NCS, EndPoint.NRS, [rgemm, rs]),
-            Connection(EndPoint.NRS, EndPoint.NCS, [ag, cgemm]),
+            Connection(PType.NA, PType.NA, [gemm]),
+            Connection(PType.NA, PType.NCS, [cgemm]),
+            Connection(PType.NA, PType.PA, [rgemm]),
+            Connection(PType.NCS, PType.PA, [rgemm]),
+            Connection(PType.NCS, PType.NRS, [rgemm, rs]),
+            Connection(PType.NRS, PType.NCS, [ag, cgemm]),
         ]
     )
 
@@ -156,10 +132,10 @@ def _ugemm(gemm: Gemm) -> Node:
 def _dot_product_attention(dpa: DotProductAttention) -> Node:
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, [dpa]),
-            Connection(EndPoint.NA, EndPoint.NCS, [dpa]),
-            Connection(EndPoint.NCS, EndPoint.NCS, [dpa]),
-            Connection(EndPoint.NCS, EndPoint.NA, [dpa]),
+            Connection(PType.NA, PType.NA, [dpa]),
+            Connection(PType.NA, PType.NCS, [dpa]),
+            Connection(PType.NCS, PType.NCS, [dpa]),
+            Connection(PType.NCS, PType.NA, [dpa]),
         ]
     )
 
@@ -170,9 +146,9 @@ def _pre(firstOp: OpBase) -> Node:
 
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, []),
-            Connection(EndPoint.NA, EndPoint.NCS, [s, t]),
-            Connection(EndPoint.NA, EndPoint.NRS, [s]),
+            Connection(PType.NA, PType.NA, []),
+            Connection(PType.NA, PType.NCS, [s, t]),
+            Connection(PType.NA, PType.NRS, [s]),
         ]
     )
 
@@ -184,10 +160,10 @@ def _post(lastOp: OpBase) -> Node:
 
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, []),
-            Connection(EndPoint.NCS, EndPoint.NA, [t, ag]),
-            Connection(EndPoint.PA, EndPoint.NA, [ar]),
-            Connection(EndPoint.NRS, EndPoint.NA, [ag]),
+            Connection(PType.NA, PType.NA, []),
+            Connection(PType.NCS, PType.NA, [t, ag]),
+            Connection(PType.PA, PType.NA, [ar]),
+            Connection(PType.NRS, PType.NA, [ag]),
         ]
     )
 
@@ -195,10 +171,10 @@ def _post(lastOp: OpBase) -> Node:
 def _pointwise(op: OpBase) -> Node:
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, [op]),
-            Connection(EndPoint.NCS, EndPoint.NCS, [op]),
+            Connection(PType.NA, PType.NA, [op]),
+            Connection(PType.NCS, PType.NCS, [op]),
             # TODO: for ex. Bias could work with PA if it was divided
-            Connection(EndPoint.NRS, EndPoint.NRS, [op]),
+            Connection(PType.NRS, PType.NRS, [op]),
         ]
     )
 
@@ -206,8 +182,8 @@ def _pointwise(op: OpBase) -> Node:
 def _rowwise(op: OpBase) -> Node:
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, [op]),
-            Connection(EndPoint.NRS, EndPoint.NRS, [op]),
+            Connection(PType.NA, PType.NA, [op]),
+            Connection(PType.NRS, PType.NRS, [op]),
         ]
     )
 
@@ -215,7 +191,7 @@ def _rowwise(op: OpBase) -> Node:
 def _unknown(op: OpBase) -> Node:
     return Node(
         [
-            Connection(EndPoint.NA, EndPoint.NA, [op]),
+            Connection(PType.NA, PType.NA, [op]),
         ]
     )
 

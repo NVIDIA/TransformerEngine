@@ -42,7 +42,7 @@ class DType(Enum):
 
 
 class PType(Enum):
-    NA = "NA"
-    PA = "PA"
-    NRS = "NRS"
-    NCS = "NCS"
+    NA = 0
+    NCS = 1
+    PA = 2
+    NRS = 3

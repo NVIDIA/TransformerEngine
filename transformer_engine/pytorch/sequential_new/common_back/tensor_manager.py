@@ -4,7 +4,7 @@ import subprocess
 from typing import Any, Generic
 from attr import dataclass
 from .enums import DType
-from .framework_interface import FrameworkInterface, TensorType, ParamConstructor
+from .framework_interface import FrameworkInterface, TensorType, TensorDescriptor
 from . import framework_interface as fi
 import transformer_engine_extensions as tex  # TODO: make this framework agnostic
 
@@ -40,13 +40,6 @@ class FP8Tensor(GenericTensor[TensorType]):
     _index: int
 
 
-@dataclass
-class TensorDescriptor:
-    shape: tuple[int, ...]
-    dtype: DType
-    init_method: ParamConstructor
-
-
 def is_hopper():
     gpu_name = (
         subprocess.check_output(
@@ -63,12 +56,12 @@ def cublas_workspace(fw: type[FrameworkInterface[TensorType]]) -> TensorType:
     if "_cublas_workspace" not in globals():
         workspace_size = 33_554_432 if is_hopper() else 4_194_304
         _cublas_workspace: TensorType = fi.empty(
-            fw, (workspace_size,), DType.FP8Any  # type: ignore
+            fw, (workspace_size,), DType.FP8E4M3  # type: ignore
         )
     return _cublas_workspace
 
 
-class TensorManagerBase(ABC, Generic[TensorType]):
+class TensorManager(ABC, Generic[TensorType]):
     tensor_descriptors = dict[str, TensorDescriptor]()
     meta_storage: TransformerEngineExtensionsFP8TensorMeta[TensorType]
     tensor_storage = dict[DType, TensorType]()
@@ -124,14 +117,15 @@ class TensorManagerBase(ABC, Generic[TensorType]):
                 ].view(desc.shape)
                 assert tensor.is_contiguous()
 
-                tensor = desc.init_method(self.framework, desc.shape, desc.dtype)
+                if desc.constructor is not None:
+                    desc.constructor(self.framework, desc.shape, desc.dtype, tensor)
 
                 self.tensors[name] = tensor
 
     def retrieve_tensor(self, name: str) -> GenericTensor[TensorType]:
         if not self.allocated:
             raise RuntimeError("Storage not yet allocated")
-        if name not in tensors:
+        if name not in self.tensors:
             raise RuntimeError("This tensor wasn't registered")
 
         dtype = self.tensor_descriptors[name].dtype

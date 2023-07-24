@@ -6,6 +6,7 @@ from typing import Any, Callable, Generator, Never, NewType, TypeVar, TypedDict,
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from . import framework_interface as fi
 from .framework_interface import Activation, Gradient, ParamConstructor, TensorType
+from .framework_interface import TensorDescriptor as ParamDescriptor
 from .enums import DType, PType
 from .tensor_operations import TensorHandle, OpMan
 
@@ -22,16 +23,9 @@ def returning(x: T) -> Callable[..., T]:
 
 # Op Protocol
 @dataclass
-class ParamDescriptor:
-    _shape: tuple[int, ...]
-    _constructor: ParamConstructor
-    _dtype: DType
-
-
-@dataclass
 class TensorDescriptor:
-    _shape: tuple[int, ...]
-    _dtype: DType
+    shape: tuple[int, ...]
+    dtype: DType
 
 
 class AnyKwargs(TypedDict, total=False):
@@ -39,48 +33,34 @@ class AnyKwargs(TypedDict, total=False):
 
 
 class Op(ABC):
+    input_type: DType
+    output_type: DType
+    parallellism: tuple[PType, PType]
+    input_shape: tuple[int, ...]
+
     @abstractmethod
     def describe_parallellism(self) -> list[tuple[PType, PType]]:
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_params(
-        self, typing: tuple[DType, DType], parallel: tuple[PType, PType]
-    ) -> dict[str, ParamDescriptor]:
+    def describe_params(self) -> dict[str, ParamDescriptor]:
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_activation_shape(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> tuple[int, ...]:
+    def describe_activation_shape(self) -> tuple[int, ...]:
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_supplementary_tensors_training(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> dict[str, TensorDescriptor]:
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_supplementary_tensors_inference(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> dict[str, TensorDescriptor]:
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
     @abstractmethod
     def training(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
         f: OpMan,
         x: TensorHandle,
     ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
