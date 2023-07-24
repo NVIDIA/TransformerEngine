@@ -5,12 +5,14 @@ import transformer_engine_extensions as tex
 
 TexDType = NewType("TexDType", int)
 
+
 class DType(Enum):
     FP8E4M3 = "FP8E4M3"
     FP8E5M2 = "FP8E5M2"
     FP16 = "FP16"
     BF16 = "BF16"
     FP32 = "FP32"
+
     infer = "infer"
     default = BF16
 
@@ -19,17 +21,28 @@ class DType(Enum):
 
     def tex_dtype(self) -> TexDType:
         if self is DType.infer:
-            raise ValueError("This type has not been inferred and doesn't correspond to any specific type")
+            raise ValueError(
+                "This type has not been inferred and doesn't correspond to any specific type"
+            )
 
         name = self.name.replace("FP", "F").replace("F", "Float")
-        return getattr(tex.DType, f"k{name}") # type: ignore
+        return getattr(tex.DType, f"k{name}")  # type: ignore
 
     def torch_dtype(self) -> torch.dtype:
         if self is DType.infer:
-            raise ValueError("This type has not been inferred and doesn't correspond to any specific type")
+            raise ValueError(
+                "This type has not been inferred and doesn't correspond to any specific type"
+            )
 
         if self.is_fp8():
             return torch.int8
         else:
             name = self.name.replace("FP", "F").replace("F", "Float")
-            return getattr(torch, name.lower()) # type: ignore
+            return getattr(torch, name.lower())  # type: ignore
+
+
+class PType(Enum):
+    NA = "NA"
+    PA = "PA"
+    NRS = "NRS"
+    NCS = "NCS"

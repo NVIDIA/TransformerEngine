@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from .ops import (
-    Op,
+    OpBase,
     Gemm,
     Bias,
     Gelu,
@@ -17,7 +17,7 @@ from .ops import (
 )
 
 
-def model_parallel_transform(ops: list[Op]) -> list[Op]:
+def model_parallel_transform(ops: list[OpBase]) -> list[OpBase]:
     graph: list[Node] = []
     for op in ops:
         if isinstance(op, Gemm):
@@ -39,7 +39,7 @@ POINTWISE_OPS = [Bias, Gelu, Relu, ResidualBegin, ResidualEnd, Dropout]
 ROWWISE_OPS = [LayerNorm]
 
 
-def _bfs01(graph: list[Node]) -> list[Op]:
+def _bfs01(graph: list[Node]) -> list[OpBase]:
     vertices = (len(graph) + 1) * len(EndPoint)
     START = 0
     FINISH = vertices - (len(EndPoint))
@@ -103,7 +103,7 @@ class EndPoint(Enum):
 class Connection:
     src: EndPoint
     dst: EndPoint
-    ops: list[Op]
+    ops: list[OpBase]
 
     def cost(self):
         weight: int
@@ -164,7 +164,7 @@ def _dot_product_attention(dpa: DotProductAttention) -> Node:
     )
 
 
-def _pre(firstOp: Op) -> Node:
+def _pre(firstOp: OpBase) -> Node:
     s = Scatter("pre-scatter").named(firstOp.name)
     t = Transpose("pre-transpose").named(firstOp.name)
 
@@ -177,7 +177,7 @@ def _pre(firstOp: Op) -> Node:
     )
 
 
-def _post(lastOp: Op) -> Node:
+def _post(lastOp: OpBase) -> Node:
     ar = AllReduce("post-allreduce").named(lastOp.name)
     ag = AllGather("post-allgather").named(lastOp.name)
     t = Transpose("post-transpose").named(lastOp.name)
@@ -192,7 +192,7 @@ def _post(lastOp: Op) -> Node:
     )
 
 
-def _pointwise(op: Op) -> Node:
+def _pointwise(op: OpBase) -> Node:
     return Node(
         [
             Connection(EndPoint.NA, EndPoint.NA, [op]),
@@ -203,7 +203,7 @@ def _pointwise(op: Op) -> Node:
     )
 
 
-def _rowwise(op: Op) -> Node:
+def _rowwise(op: OpBase) -> Node:
     return Node(
         [
             Connection(EndPoint.NA, EndPoint.NA, [op]),
@@ -212,7 +212,7 @@ def _rowwise(op: Op) -> Node:
     )
 
 
-def _unknown(op: Op) -> Node:
+def _unknown(op: OpBase) -> Node:
     return Node(
         [
             Connection(EndPoint.NA, EndPoint.NA, [op]),

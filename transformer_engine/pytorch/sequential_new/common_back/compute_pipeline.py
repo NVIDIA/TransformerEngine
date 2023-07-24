@@ -1,6 +1,17 @@
-from typing import Any, Callable
-from .ops import Op, PassthroughOp
-from .enums import DType
+from typing import Any, Callable, final
+
+from torch import Generator
+
+from .tensor_operations import OpMan, TensorHandle
+from .ops import (
+    OpBase,
+    PassthroughOp,
+    PointwiseOp,
+    ShapePreserveOp,
+    TensorDescriptor,
+    returning,
+)
+from .enums import DType, PType
 from .framework_interface import FrameworkInterface, TensorType
 
 
@@ -8,8 +19,8 @@ class ComputePipeline:
     def __init__(
         self,
         framework_interface: FrameworkInterface[TensorType],
-        ops: list[Op],
-        extra_transformations: list[Callable[[list[Op]], list[Op]]] = [],
+        ops: list[OpBase],
+        extra_transformations: list[Callable[[list[OpBase]], list[OpBase]]] = [],
     ):
         self._framework_interface = framework_interface
         self._framework = type(framework_interface)
@@ -23,12 +34,14 @@ class ComputePipeline:
         raise NotImplementedError()
 
     @staticmethod
-    def compile(_ops: list[Op], _transforms: list[Callable[[list[Op]], list[Op]]]):
+    def compile(
+        _ops: list[OpBase], _transforms: list[Callable[[list[OpBase]], list[OpBase]]]
+    ):
         return ComputePipeline.transform_op_list(_ops, _transforms)
 
     @staticmethod
     def transform_op_list(
-        _ops: list[Op], _transforms: list[Callable[[list[Op]], list[Op]]]
+        _ops: list[OpBase], _transforms: list[Callable[[list[OpBase]], list[OpBase]]]
     ):
         for transform in _transforms:
             _ops = ComputePipeline.infer_types(_ops)
@@ -38,7 +51,7 @@ class ComputePipeline:
         return _ops
 
     @staticmethod
-    def infer_types(_ops: list[Op]):
+    def infer_types(_ops: list[OpBase]):
         for i, op in enumerate(_ops):
             prev = _ops[i - 1] if i > 0 else None
             next = _ops[i + 1] if i < len(_ops) - 1 else None
@@ -76,7 +89,7 @@ class ComputePipeline:
         return _ops
 
     @staticmethod
-    def insert_casts(_ops: list[Op]):
+    def insert_casts(_ops: list[OpBase]):
         assert not any(isinstance(m, Cast) for m in _ops)
         i = 0
         while i < len(_ops) - 1:
@@ -93,6 +106,26 @@ class ComputePipeline:
 __all__ = ["ComputePipeline"]
 
 
-class Cast(PassthroughOp):
-    def bwd(self):
-        raise ValueError("This operation is meant for internal use only")
+@final
+class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
+    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
+    describe_supplementary_tensors_training = returning(dict[str, TensorDescriptor]())
+
+    def training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+        x_copy: TensorHandle,
+    ) -> Generator:
+        raise RuntimeError("Cast is not supposed to be invoked directly")
+
+    def inference(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+    ) -> TensorHandle:
+        raise RuntimeError("Cast is not supposed to be invoked directly")

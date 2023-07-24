@@ -12,11 +12,14 @@ import transformer_engine_extensions as tex  # TODO: make this framework agnosti
 AMAX_HISTORY_LEN = 1024
 ALIGN_BYTES = 32
 
+
 @dataclass
 class GenericTensor(Generic[TensorType]):
     _dtype: DType
+
     def dtype(self) -> DType:
         return self._dtype
+
 
 @dataclass
 class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
@@ -24,15 +27,18 @@ class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
     scale_inv: TensorType
     amax_history: TensorType
 
+
 @dataclass
 class NativeTensor(GenericTensor[TensorType]):
     _tensor: TensorType
+
 
 @dataclass
 class FP8Tensor(GenericTensor[TensorType]):
     _tensor: TensorType
     _meta: TransformerEngineExtensionsFP8TensorMeta[TensorType]
     _index: int
+
 
 @dataclass
 class TensorDescriptor:

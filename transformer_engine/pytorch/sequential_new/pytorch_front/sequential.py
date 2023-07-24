@@ -6,7 +6,7 @@ import torch.nn as nn
 from .expand_for_sequential import expand
 from ..common_back.compute_pipeline import ComputePipeline
 from ..common_back.compile_env import CompileEnv
-from ..common_back.ops import Op
+from ..common_back.ops import OpBase
 from ..pytorch_back.pytorch_interface import PytorchInterface
 from ..common_back.model_parallel_transform import model_parallel_transform
 
@@ -20,7 +20,7 @@ class Sequential(nn.Module):
     _model_parallel: bool
     _compile_env: CompileEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
-    _compiled_op_list: list[Op]
+    _compiled_op_list: list[OpBase]
     _pipeline: ComputePipeline
 
     @overload
@@ -87,7 +87,7 @@ class Sequential(nn.Module):
                 for op in expand(module, compile_env)
             ]
 
-            additional_transforms: list[Callable[[list[Op]], list[Op]]] = []
+            additional_transforms: list[Callable[[list[OpBase]], list[OpBase]]] = []
             if self._model_parallel:
                 additional_transforms.append(model_parallel_transform)
 

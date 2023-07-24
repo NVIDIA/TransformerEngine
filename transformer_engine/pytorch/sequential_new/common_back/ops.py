@@ -1,21 +1,104 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import Any, Callable, Generator, Never, NewType, TypeVar, TypedDict, final
+
+from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from . import framework_interface as fi
-from .framework_interface import ParamConstructor
-from .enums import DType
+from .framework_interface import Activation, Gradient, ParamConstructor, TensorType
+from .enums import DType, PType
+from .tensor_operations import TensorHandle, OpMan
+
+T = TypeVar("T")
 
 
+def returning(x: T) -> Callable[..., T]:
+    def func(*args: Any, **kwargs: Any):
+        del args, kwargs
+        return x
+
+    return func
+
+
+# Op Protocol
 @dataclass
 class ParamDescriptor:
     _shape: tuple[int, ...]
     _constructor: ParamConstructor
-    _dtype: DType = DType.FP32  # TODO: is this correct?
+    _dtype: DType
+
+
+@dataclass
+class TensorDescriptor:
+    _shape: tuple[int, ...]
+    _dtype: DType
+
+
+class AnyKwargs(TypedDict, total=False):
+    pass
+
+
+class Op(ABC):
+    @abstractmethod
+    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def describe_params(
+        self, typing: tuple[DType, DType], parallel: tuple[PType, PType]
+    ) -> dict[str, ParamDescriptor]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def describe_activation_shape(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def describe_supplementary_tensors_training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> dict[str, TensorDescriptor]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def describe_supplementary_tensors_inference(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> dict[str, TensorDescriptor]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def inference(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+    ) -> TensorHandle:
+        raise NotImplementedError()
 
 
 # Base classes
-class Op(ABC):
+class OpBase(Op):
     name: str
     input_type: DType
     output_type: DType
@@ -29,60 +112,37 @@ class Op(ABC):
         self.name = parent_module_name + "." + self.name
         return self
 
-    @abstractmethod
-    def describe_params(self) -> dict[str, ParamDescriptor]:
-        raise NotImplementedError()
 
-    @abstractmethod
-    def bwd(self) -> Op:
-        raise NotImplementedError()
+class PassthroughOp(OpBase):
+    describe_params = returning(dict[str, ParamDescriptor]())
 
 
-class PassthroughOp(Op):
-    def __init__(
+NORMAL = (PType.NA, PType.NA)
+ROW_PARALLEL = (PType.NRS, PType.NRS)
+COLUMN_PARALLEL = (PType.NCS, PType.NCS)
+
+
+class PointwiseOp(OpBase):
+    describe_parallellism = returning([NORMAL, ROW_PARALLEL, COLUMN_PARALLEL])
+
+
+class RowwiseOp(OpBase):
+    describe_parallellism = returning([NORMAL, ROW_PARALLEL])
+
+
+class ShapePreserveOp(OpBase):
+    def describe_activation_shape(
         self,
-        name: str,
-        input_type: DType = DType.infer,
-        output_type: DType = DType.infer,
-    ):
-        super().__init__(name, input_type, output_type)
-
-    def describe_params(self) -> dict[str, ParamDescriptor]:
-        return {}
-
-
-class ParamOp(Op):
-    _params: dict[str, ParamDescriptor]
-
-    def __init__(
-        self,
-        name: str,
-        input_type: DType,
-        output_type: DType,
-        **params: ParamDescriptor,
-    ):
-        super().__init__(name, input_type, output_type)
-        self._params = params
-
-    def describe_params(self) -> dict[str, ParamDescriptor]:
-        return self._params
-
-
-class Grad(PassthroughOp):
-    def __init__(self, orig: Op):
-        self.orig = orig
-        super().__init__(orig.name + "_grad", *self.io_types())
-
-    @abstractmethod
-    def io_types(self) -> tuple[DType, DType]:
-        raise NotImplementedError()
-
-    def bwd(self) -> NoReturn:
-        raise NotImplementedError("Second order gradient not supported")
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        return input_shape
 
 
 # Normalization
-class LayerNorm(ParamOp):
+@final
+class LayerNorm(RowwiseOp, ShapePreserveOp, OpBase):
     features: int
     eps: float
     zero_centered_gamma: bool
@@ -109,17 +169,17 @@ class LayerNorm(ParamOp):
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
 
-    def bwd(self):
-        return LayerNormGrad(self)
-
-
-class LayerNormGrad(Grad):
-    def io_types(self):
-        return (self.orig.input_type, self.orig.input_type)
-
 
 # Linear
-class Gemm(ParamOp):
+CGEMM = (PType.NA, PType.NCS)
+RGEMM = (PType.NA, PType.PA)
+RGEMM_SPLIT = (PType.NCS, PType.PA)
+RGEMM_RS = (PType.NCS, PType.NRS)
+AG_CGEMM = (PType.NRS, PType.NCS)
+
+
+@final
+class Gemm(OpBase):
     in_features: int
     out_features: int
     init_method: ParamConstructor
@@ -143,16 +203,19 @@ class Gemm(ParamOp):
         self.out_features = out_features
         self.init_method = init_method
 
-    def bwd(self):
-        return GemmGrad(self)
+    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+        return [
+            NORMAL,
+            CGEMM,
+            RGEMM,
+            RGEMM_SPLIT,
+            RGEMM_RS,
+            AG_CGEMM,
+        ]
 
 
-class GemmGrad(Grad):
-    def io_types(self):
-        return (self.orig.input_type, DType.default)
-
-
-class Bias(ParamOp):
+@final
+class Bias(PointwiseOp, ShapePreserveOp, OpBase):
     features: int
     init_method: ParamConstructor
 
@@ -173,23 +236,21 @@ class Bias(ParamOp):
         self.features = features
         self.init_method = init_method
 
-    def bwd(self):
-        return BiasGrad(self)
-
-
-class BiasGrad(Grad):
-    def io_types(self):
-        return (DType.infer, DType.default)
-
 
 # Transpose
+@final
 class Transpose(PassthroughOp):
-    def bwd(self):
-        return self
+    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+        return [NORMAL]
 
 
 # Attention
-class DotProductAttention(PassthroughOp):
+HEAD_PARALLEL_SCATTERING = (PType.NA, PType.NCS)
+HEAD_PARALLEL_GATHERING = (PType.NCS, PType.NA)
+
+
+@final
+class DotProductAttention(PassthroughOp, ShapePreserveOp):
     features_per_head: int
 
     def __init__(
@@ -206,72 +267,120 @@ class DotProductAttention(PassthroughOp):
         )
         self.features_per_head = features_per_head
 
-    def bwd(self):
-        return DotProductAttentionGrad(self)
-
-
-class DotProductAttentionGrad(Grad):
-    def io_types(self):
-        return (self.orig.output_type, self.orig.input_type)
+    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+        return [
+            NORMAL,
+            COLUMN_PARALLEL,
+            HEAD_PARALLEL_SCATTERING,
+            HEAD_PARALLEL_GATHERING,
+        ]
 
 
 # Residual
-class ResidualBegin(PassthroughOp):
+@final
+class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
     end: ResidualEnd | None = None
 
     def __init__(self, name: str, end: ResidualEnd | None = None):
         super().__init__(name, DType.default, DType.default)
         self.end = end
 
-    def bwd(self):
-        assert self.end is not None
-        return self.end
+    def describe_supplementary_tensors(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> dict[str, TensorDescriptor]:
+        return {"residue": TensorDescriptor(input_shape, typing[0])}
 
 
-class ResidualEnd(PassthroughOp):
+@final
+class ResidualEnd(PointwiseOp, PassthroughOp, ShapePreserveOp):
     begin: ResidualBegin
 
     def __init__(self, name: str, begin: ResidualBegin):
         super().__init__(name, DType.default, DType.default)
         self.begin = begin
 
-    def bwd(self):
-        return self.begin
-
 
 # Dropout
-class Dropout(PassthroughOp):
+@final
+class Dropout(PointwiseOp, PassthroughOp, ShapePreserveOp):
     p: float
 
     def __init__(self, name: str, p: float):
         super().__init__(name, DType.infer, DType.infer)
         self.p = p
 
-    def bwd(self):
-        return DropoutGrad(self)
-
-
-class DropoutGrad(Grad):
-    def io_types(self):
-        return (DType.infer, DType.infer)
-
 
 # Activation
-class Gelu(PassthroughOp):
-    def bwd(self):
-        return GeluGrad(self)
+@final
+class Gelu(PointwiseOp, PassthroughOp, ShapePreserveOp):
+    def training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+        x_copy: TensorHandle,
+    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
+        f.gelu(x, out=x_copy)
+        grad = yield x_copy
+        f.dgelu_(grad, x)
+        return grad
+
+    def inference(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+    ) -> TensorHandle:
+        f.gelu_(x)
+        return x
+
+    def describe_supplementary_tensors_training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> dict[str, TensorDescriptor]:
+        return {"x_copy": TensorDescriptor(input_shape, typing[0])}
+
+    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
 
-class GeluGrad(Grad):
-    def io_types(self):
-        return (DType.infer, DType.infer)
+@final
+class Relu(PointwiseOp, PassthroughOp, ShapePreserveOp):
+    def training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+        x_copy: TensorHandle,
+    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
+        f.relu(x, out=x_copy)
+        grad = yield x_copy
+        f.drelu_(grad, x)
+        return grad
 
+    def inference(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        f: OpMan,
+        x: TensorHandle,
+    ) -> TensorHandle:
+        f.relu_(x)
+        return x
 
-class Relu(PassthroughOp):
-    def bwd(self):
-        return ReluGrad(self)
+    def describe_supplementary_tensors_training(
+        self,
+        typing: tuple[DType, DType],
+        parallel: tuple[PType, PType],
+        input_shape: tuple[int, ...],
+    ) -> dict[str, TensorDescriptor]:
+        return {"x_copy": TensorDescriptor(input_shape, typing[0])}
 
-
-class ReluGrad(Grad):
-    def io_types(self):
-        return (DType.infer, DType.infer)
+    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
