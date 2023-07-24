@@ -29,7 +29,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
-  m.def("layernorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "LN FWD");
+  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
   m.def("rmsnorm_fwd_fp8", &rmsnorm_fwd_fp8, "LN FWD FP8");
   m.def("rmsnorm_fwd_fp8_noalloc", &rmsnorm_fwd_fp8_noalloc, "LN FWD FP8");
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "LN BWD");

@@ -110,8 +110,8 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
     auto gamma_cu     = makeTransformerEngineTensor(weight);
     auto beta_cu      = makeTransformerEngineTensor(bias);
     auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
-                                                    amax.data_ptr(), scale.data_ptr(),
-                                                    scale_inv.data_ptr());
+                                                    getDataPtr(amax), getDataPtr(scale),
+                                                    getDataPtr(scale_inv));
     auto mu_cu        = makeTransformerEngineTensor(mu);
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
     transformer_engine::TensorWrapper workspace, barrier;
@@ -307,8 +307,8 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
     auto input_cu     = makeTransformerEngineTensor(input);
     auto gamma_cu     = makeTransformerEngineTensor(weight);
     auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
-                                                    amax.data_ptr(), scale.data_ptr(),
-                                                    scale_inv.data_ptr());
+                                                    getDataPtr(amax), getDataPtr(scale),
+                                                    getDataPtr(scale_inv));
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
     transformer_engine::TensorWrapper workspace, barrier;
 
