@@ -12,6 +12,11 @@ import transformer_engine_extensions as tex  # TODO: make this framework agnosti
 AMAX_HISTORY_LEN = 1024
 ALIGN_BYTES = 32
 
+@dataclass
+class GenericTensor(Generic[TensorType]):
+    _dtype: DType
+    def dtype(self) -> DType:
+        return self._dtype
 
 @dataclass
 class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
@@ -19,6 +24,15 @@ class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
     scale_inv: TensorType
     amax_history: TensorType
 
+@dataclass
+class NativeTensor(GenericTensor[TensorType]):
+    _tensor: TensorType
+
+@dataclass
+class FP8Tensor(GenericTensor[TensorType]):
+    _tensor: TensorType
+    _meta: TransformerEngineExtensionsFP8TensorMeta[TensorType]
+    _index: int
 
 @dataclass
 class TensorDescriptor:
@@ -108,6 +122,22 @@ class TensorManagerBase(ABC, Generic[TensorType]):
 
                 self.tensors[name] = tensor
 
+    def retrieve_tensor(self, name: str) -> GenericTensor[TensorType]:
+        if not self.allocated:
+            raise RuntimeError("Storage not yet allocated")
+        if name not in tensors:
+            raise RuntimeError("This tensor wasn't registered")
+
+        dtype = self.tensor_descriptors[name].dtype
+        tensor = self.tensors[name]
+
+        if dtype.is_fp8():
+            meta = self.meta_storage
+            index = self.tensor_indices[name]
+            return FP8Tensor[TensorType](dtype, tensor, meta, index)
+        else:
+            return NativeTensor[TensorType](dtype, tensor)
+
     def _allocate_fp8_meta(
         self,
     ):
@@ -140,22 +170,5 @@ class TensorManagerBase(ABC, Generic[TensorType]):
             if arg not in self.tensors:
                 raise RuntimeError(f"Tensor {arg} not registered")
 
-    def _is_fp8(self, tensor: str):
-        return self.tensor_descriptors[tensor].dtype in [
-            DType.FP8E4M3,
-            DType.FP8E5M2,
-        ]
-
-    def te_dtype(self, tensor: str) -> object:
-        assert self._is_fp8(tensor)
-        if self.tensor_descriptors[tensor].dtype is DType.FP8E4M3:
-            return tex.DType.FP8E4M3  # type: ignore
-        else:
-            return tex.DType.FP8E5M2  # type: ignore
-
     def make_tensor_meta(self) -> TransformerEngineExtensionsFP8TensorMeta[TensorType]:
         return tex.FP8TensorMeta()  # type: ignore
-
-    @abstractmethod
-    def gemm(self, in1: str, in2: str, out: str) -> None:
-        raise NotImplementedError()
