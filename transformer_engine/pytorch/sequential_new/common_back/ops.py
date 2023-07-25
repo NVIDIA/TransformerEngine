@@ -4,11 +4,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generator, TypeVar, TypedDict, final
 
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
+from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
+    GenericTensor,
+)
 from . import framework_interface as fi
 from .framework_interface import ParamConstructor
 from .framework_interface import TensorDescriptor as ParamDescriptor
 from .enums import DType, PType
 from .generic_tensor import GenericTensor
+from . import generic_tensor as f
 
 T = TypeVar("T")
 
@@ -208,13 +212,6 @@ class Bias(PointwiseOp, ShapePreserveOp, OpBase):
         self.init_method = init_method
 
 
-# Transpose
-@final
-class Transpose(PassthroughOp):
-    def describe_parallellism(self) -> list[tuple[PType, PType]]:
-        return [NORMAL]
-
-
 # Attention
 HEAD_PARALLEL_SCATTERING = (PType.NA, PType.NCS)
 HEAD_PARALLEL_GATHERING = (PType.NCS, PType.NA)
@@ -251,27 +248,57 @@ class DotProductAttention(PassthroughOp, ShapePreserveOp):
 @final
 class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
     end: ResidualEnd | None = None
+    fwd_residue: GenericTensor
 
     def __init__(self, name: str, end: ResidualEnd | None = None):
         super().__init__(name, DType.default, DType.default)
         self.end = end
 
-    def describe_supplementary_tensors(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> dict[str, TensorDescriptor]:
-        return {"residue": TensorDescriptor(input_shape, typing[0])}
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        assert self.end is not None
+        f.copy(x, out=self.fwd_residue)
+        grad = yield x
+        f.add(self.end.bwd_residue, grad, out=self.end.bwd_residue)
+        return self.end.bwd_residue
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.copy(x, out=self.fwd_residue)
+        return x
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {"fwd_residue": TensorDescriptor(self.input_shape, self.input_type)}
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
 
 
 @final
 class ResidualEnd(PointwiseOp, PassthroughOp, ShapePreserveOp):
     begin: ResidualBegin
+    bwd_residue: GenericTensor
 
     def __init__(self, name: str, begin: ResidualBegin):
         super().__init__(name, DType.default, DType.default)
         self.begin = begin
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
+        grad = yield self.begin.fwd_residue
+        f.copy(grad, out=self.bwd_residue)
+        return grad
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
+        return self.begin.fwd_residue
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {"bwd_residue": TensorDescriptor(self.input_shape, self.input_type)}
+
+    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
 
 # Dropout
@@ -282,6 +309,21 @@ class Dropout(PointwiseOp, PassthroughOp, ShapePreserveOp):
     def __init__(self, name: str, p: float):
         super().__init__(name, DType.infer, DType.infer)
         self.p = p
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.dropout(x, self.p, out=x)
+        grad = yield x
+        f.dropout(grad, self.p, out=grad)
+        return grad
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.dropout(x, self.p, out=x)
+        return x
+
+    describe_supplementary_tensors_training = returning(dict[str, TensorDescriptor]())
+    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
 
 # Activation
@@ -295,14 +337,14 @@ class Gelu(PointwiseOp, PassthroughOp, ShapePreserveOp):
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
         f.gelu(x, out=self.x_copy)
         grad = yield self.x_copy
-        f.dgelu_(grad, x)
+        f.dgelu(grad, x, out=grad)
         return grad
 
     def inference(
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.gelu_(x)
+        f.gelu(x, out=x)
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -321,17 +363,44 @@ class Relu(PointwiseOp, PassthroughOp, ShapePreserveOp):
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
         f.relu(x, out=self.x_copy)
         grad = yield self.x_copy
-        f.drelu_(grad, x)
+        f.drelu(grad, x, out=grad)
         return grad
 
     def inference(
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.relu_(x)
+        f.relu(x, out=x)
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
         return {"x_copy": TensorDescriptor(self.input_shape, self.input_type)}
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
+
+
+@final
+class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
+    cast: GenericTensor
+
+    def training(
+        self,
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.cast(x, out=self.cast)
+        grad = yield self.cast
+        f.cast(grad, out=x)
+        return x
+
+    def inference(
+        self,
+        x: GenericTensor,
+    ) -> GenericTensor:
+        f.cast(x, out=self.cast)
+        return self.cast
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {"cast": TensorDescriptor(self.input_shape, self.output_type)}
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()

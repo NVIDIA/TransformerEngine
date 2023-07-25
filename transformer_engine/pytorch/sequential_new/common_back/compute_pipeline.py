@@ -1,15 +1,6 @@
-from typing import Any, Callable, final
-
-from torch import Generator
-
-from .ops import (
-    OpBase,
-    PassthroughOp,
-    PointwiseOp,
-    ShapePreserveOp,
-    returning,
-)
-from .enums import DType, PType
+from typing import Any, Callable
+from .ops import OpBase, Cast
+from .enums import DType
 from .framework_interface import FrameworkInterface, TensorType, TensorDescriptor
 from .tensor_manager import TensorManager
 
@@ -156,28 +147,3 @@ class ComputePipeline:
 
 
 __all__ = ["ComputePipeline"]
-
-
-@final
-class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
-    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
-    describe_supplementary_tensors_training = returning(dict[str, TensorDescriptor]())
-
-    def training(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-        x_copy: TensorHandle,
-    ) -> Generator:
-        raise RuntimeError("Cast is not supposed to be invoked directly")
-
-    def inference(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-    ) -> TensorHandle:
-        raise RuntimeError("Cast is not supposed to be invoked directly")

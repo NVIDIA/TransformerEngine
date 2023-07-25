@@ -40,27 +40,6 @@ class FP8Tensor(GenericTensor[TensorType]):
     _index: int
 
 
-def is_hopper():
-    gpu_name = (
-        subprocess.check_output(
-            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
-        )
-        .decode("utf-8")
-        .strip()
-    )
-    return "H100" in gpu_name
-
-
-def cublas_workspace(fw: type[FrameworkInterface[TensorType]]) -> TensorType:
-    global _cublas_workspace
-    if "_cublas_workspace" not in globals():
-        workspace_size = 33_554_432 if is_hopper() else 4_194_304
-        _cublas_workspace: TensorType = fi.empty(
-            fw, (workspace_size,), DType.FP8E4M3  # type: ignore
-        )
-    return _cublas_workspace
-
-
 class TensorManager(ABC, Generic[TensorType]):
     tensor_descriptors = dict[str, TensorDescriptor]()
     meta_storage: TransformerEngineExtensionsFP8TensorMeta[TensorType]
