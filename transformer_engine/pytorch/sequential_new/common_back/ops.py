@@ -1,14 +1,14 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Generator, Never, NewType, TypeVar, TypedDict, final
+from typing import Any, Callable, Generator, TypeVar, TypedDict, final
 
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from . import framework_interface as fi
-from .framework_interface import Activation, Gradient, ParamConstructor, TensorType
+from .framework_interface import ParamConstructor
 from .framework_interface import TensorDescriptor as ParamDescriptor
 from .enums import DType, PType
-from .tensor_operations import TensorHandle, OpMan
+from .generic_tensor import GenericTensor
 
 T = TypeVar("T")
 
@@ -61,19 +61,15 @@ class Op(ABC):
     @abstractmethod
     def training(
         self,
-        f: OpMan,
-        x: TensorHandle,
-    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
         raise NotImplementedError()
 
     @abstractmethod
     def inference(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-    ) -> TensorHandle:
+        x: GenericTensor,
+    ) -> GenericTensor:
         raise NotImplementedError()
 
 
@@ -111,13 +107,8 @@ class RowwiseOp(OpBase):
 
 
 class ShapePreserveOp(OpBase):
-    def describe_activation_shape(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> tuple[int, ...]:
-        return input_shape
+    def describe_activation_shape(self) -> tuple[int, ...]:
+        return self.input_shape
 
 
 # Normalization
@@ -296,71 +287,51 @@ class Dropout(PointwiseOp, PassthroughOp, ShapePreserveOp):
 # Activation
 @final
 class Gelu(PointwiseOp, PassthroughOp, ShapePreserveOp):
+    x_copy: GenericTensor
+
     def training(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-        x_copy: TensorHandle,
-    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
-        f.gelu(x, out=x_copy)
-        grad = yield x_copy
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.gelu(x, out=self.x_copy)
+        grad = yield self.x_copy
         f.dgelu_(grad, x)
         return grad
 
     def inference(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-    ) -> TensorHandle:
+        x: GenericTensor,
+    ) -> GenericTensor:
         f.gelu_(x)
         return x
 
-    def describe_supplementary_tensors_training(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(input_shape, typing[0])}
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {"x_copy": TensorDescriptor(self.input_shape, self.input_type)}
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
 
 @final
 class Relu(PointwiseOp, PassthroughOp, ShapePreserveOp):
+    x_copy: GenericTensor
+
     def training(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-        x_copy: TensorHandle,
-    ) -> Generator[TensorHandle, TensorHandle, TensorHandle]:
-        f.relu(x, out=x_copy)
-        grad = yield x_copy
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.relu(x, out=self.x_copy)
+        grad = yield self.x_copy
         f.drelu_(grad, x)
         return grad
 
     def inference(
         self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        f: OpMan,
-        x: TensorHandle,
-    ) -> TensorHandle:
+        x: GenericTensor,
+    ) -> GenericTensor:
         f.relu_(x)
         return x
 
-    def describe_supplementary_tensors_training(
-        self,
-        typing: tuple[DType, DType],
-        parallel: tuple[PType, PType],
-        input_shape: tuple[int, ...],
-    ) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(input_shape, typing[0])}
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {"x_copy": TensorDescriptor(self.input_shape, self.input_type)}
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
