@@ -1,11 +1,11 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Callable, Generator, TypeVar, final
 
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
     GenericTensor,
+    TensorDescriptor,
     ParamInitializer,
 )
 from .enums import DType, PType
@@ -24,12 +24,6 @@ def returning(x: T) -> Callable[..., T]:
 
 
 # Op Protocol
-@dataclass
-class TensorDescriptor:
-    shape: tuple[int, ...]
-    dtype: DType
-
-
 class Op(ABC):
     input_type: DType
     output_type: DType
@@ -41,7 +35,7 @@ class Op(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_params(self) -> dict[str, ParamInitializer]:
+    def describe_params(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -88,7 +82,7 @@ class OpBase(Op):
 
 
 class PassthroughOp(OpBase):
-    describe_params = returning(dict[str, ParamDescriptor]())
+    describe_params = returning(dict[str, TensorDescriptor]())
 
 
 NORMAL = (PType.NA, PType.NA)
@@ -262,7 +256,9 @@ class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"fwd_residue": TensorDescriptor(self.input_shape, self.input_type)}
+        return {
+            "fwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
+        }
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
         return self.describe_supplementary_tensors_training()
@@ -290,7 +286,9 @@ class ResidualEnd(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return self.begin.fwd_residue
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"bwd_residue": TensorDescriptor(self.input_shape, self.input_type)}
+        return {
+            "bwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
+        }
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
@@ -342,7 +340,7 @@ class Gelu(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(self.input_shape, self.input_type)}
+        return {"x_copy": TensorDescriptor(self.input_shape, None, self.input_type)}
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
@@ -368,7 +366,7 @@ class Relu(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(self.input_shape, self.input_type)}
+        return {"x_copy": TensorDescriptor(self.input_shape, None, self.input_type)}
 
     describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
 
@@ -394,7 +392,7 @@ class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
         return self.cast
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"cast": TensorDescriptor(self.input_shape, self.output_type)}
+        return {"cast": TensorDescriptor(self.input_shape, None, self.output_type)}
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
         return self.describe_supplementary_tensors_training()
