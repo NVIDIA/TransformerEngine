@@ -2,7 +2,6 @@ from typing import Any, Callable, final
 
 from torch import Generator
 
-from .tensor_operations import OpMan, TensorHandle
 from .ops import (
     OpBase,
     PassthroughOp,

@@ -6,9 +6,7 @@ from ... import cpp_extensions
 
 class GenericTensor:
     tensor: torch.Tensor
-
-    def dtype(self) -> DType:
-        raise NotImplementedError()
+    dtype: DType
 
 
 class TorchTensor(GenericTensor):
@@ -30,14 +28,14 @@ class TEFP8TorchTensor(GenericTensor):
 
 # GEMM
 def gemm(a: GenericTensor, b: GenericTensor, out: GenericTensor):
-    if a.dtype().is_fp8() != b.dtype().is_fp8():
+    if a.dtype.is_fp8() != b.dtype.is_fp8():
         raise NotImplementedError("Mixed precision GEMM(FP8, not FP8) is not supported")
-    elif a.dtype().is_fp8():  # and b.dtype().is_fp8()
+    elif a.dtype.is_fp8():  # and b.dtype.is_fp8()
         assert isinstance(a, TEFP8TorchTensor)
         assert isinstance(b, TEFP8TorchTensor)
         _gemm_fp8(a, b, out)
     else:  # neither is fp8
-        if out.dtype().is_fp8():
+        if out.dtype.is_fp8():
             raise NotImplementedError(
                 "Mixed precision GEMM(not FP8, not FP8) -> FP8 is not supported"
             )
@@ -52,17 +50,17 @@ def _gemm_fp8(a: TEFP8TorchTensor, b: TEFP8TorchTensor, out: GenericTensor):
         a.tensor,
         a.meta_ref.scale_inv,
         a.index_in_meta,
-        a.dtype().tex_dtype(),
+        a.dtype.tex_dtype,
         b.tensor,
         b.meta_ref.scale_inv,
         b.index_in_meta,
-        b.dtype().tex_dtype(),
-        out.dtype().torch_dtype(),
+        b.dtype.tex_dtype,
+        out.dtype.torch_dtype(),
         _cublas_workspace(),
         out=out.tensor,
         fp8_meta_tensor=out.meta_ref if isinstance(out, TEFP8TorchTensor) else None,
         out_index=out.index_in_meta if isinstance(out, TEFP8TorchTensor) else None,
-        D_dtype=out.dtype().tex_dtype(),
+        D_dtype=out.dtype.tex_dtype,
     )
 
 
@@ -70,7 +68,7 @@ def _gemm(a: TorchTensor, b: TorchTensor, out: TorchTensor):
     cpp_extensions.gemm(  # type: ignore
         a.tensor,
         b.tensor,
-        out.dtype().torch_dtype(),
+        out.dtype.torch_dtype(),
         _cublas_workspace(),
         out=out.tensor,
     )
