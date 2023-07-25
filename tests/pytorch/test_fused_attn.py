@@ -14,6 +14,7 @@ from transformer_engine.pytorch.attention import DotProductAttention
 import os
 
 from pkg_resources import packaging
+from importlib.metadata import version
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
@@ -212,7 +213,7 @@ def _run_transformer_layer(dtype, bs, config, backend):
 
     return op, inp.grad
 
-@pytests.mark.skipif(not _flash_attn_2_available)
+@pytest.mark.skipif(not _flash_attn_2_available)
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
