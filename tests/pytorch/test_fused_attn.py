@@ -213,7 +213,7 @@ def _run_transformer_layer(dtype, bs, config, backend):
 
     return op, inp.grad
 
-@pytest.mark.skipif(not _flash_attn_2_available)
+@pytest.mark.skipif(not _flash_attn_2_available, reason="FA2.0 is not available")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
