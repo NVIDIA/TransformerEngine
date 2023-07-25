@@ -1,4 +1,9 @@
-from ..common_back.generic_tensor import GenericTensor
+from ..common_back.generic_tensor import (
+    TransformerEngineExtensionsFP8TensorMeta,
+    FP8Tensor,
+    NativeTensor,
+)
+from ..common_back.enums import DType
 import torch
 from dataclasses import dataclass
 from ..multiple_dispatch import multiple_dispatch
@@ -6,20 +11,23 @@ from ... import cpp_extensions
 import subprocess
 
 
-class TorchTensor(GenericTensor):
-    pass
-
-
 @dataclass
-class TEFP8TorchTensorMetadata:
+class PytorchTransformerEngineExtensionsFP8TensorMeta(
+    TransformerEngineExtensionsFP8TensorMeta
+):
     scale: torch.Tensor
     scale_inv: torch.Tensor
     amax_history: torch.Tensor
 
 
-class TEFP8TorchTensor(GenericTensor):
+class PytorchNativeTensor(NativeTensor):
+    dtype: DType
     tensor: torch.Tensor
-    meta_ref: TEFP8TorchTensorMetadata
+
+
+class PytorchFP8Tensor(FP8Tensor):
+    tensor: torch.Tensor
+    meta_ref: PytorchTransformerEngineExtensionsFP8TensorMeta
     index_in_meta: int
 
 
@@ -46,27 +54,31 @@ def cublas_workspace():
 
 
 @multiple_dispatch
-def gemm(a: TEFP8TorchTensor, b: TEFP8TorchTensor, out: GenericTensor):
+def gemm(
+    a: PytorchFP8Tensor,
+    b: PytorchFP8Tensor,
+    out: PytorchNativeTensor | PytorchFP8Tensor,
+):
     cpp_extensions.fp8_gemm(  # type: ignore
         a.tensor,
         a.meta_ref.scale_inv,
         a.index_in_meta,
-        a.dtype.tex_dtype,
+        a.dtype.tex_dtype(),
         b.tensor,
         b.meta_ref.scale_inv,
         b.index_in_meta,
-        b.dtype.tex_dtype,
+        b.dtype.tex_dtype(),
         out.dtype.torch_dtype(),
         cublas_workspace(),
         out=out.tensor,
-        fp8_meta_tensor=out.meta_ref if isinstance(out, TEFP8TorchTensor) else None,
-        out_index=out.index_in_meta if isinstance(out, TEFP8TorchTensor) else None,
-        D_dtype=out.dtype.tex_dtype,
+        fp8_meta_tensor=out.meta_ref if isinstance(out, PytorchFP8Tensor) else None,
+        out_index=out.index_in_meta if isinstance(out, PytorchFP8Tensor) else None,
+        D_dtype=out.dtype.tex_dtype(),
     )
 
 
 @multiple_dispatch
-def gemm(a: TorchTensor, b: TorchTensor, out: TorchTensor):
+def gemm(a: PytorchNativeTensor, b: PytorchNativeTensor, out: PytorchNativeTensor):
     cpp_extensions.gemm(  # type: ignore
         a.tensor,
         b.tensor,

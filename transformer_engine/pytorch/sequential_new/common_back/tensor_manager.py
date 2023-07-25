@@ -91,25 +91,20 @@ class TensorManager:
 
     def _allocate_fp8_meta(self):
         self.meta_storage = self.make_tensor_meta()
-        self.meta_storage.scale = NativeTensor(
-            DType.FP32, f.empty((len(self.tensor_descriptors),), DType.FP32)
+        self.meta_storage.scale = f.empty((len(self.tensor_descriptors),), DType.FP32)
+        self.meta_storage.scale_inv = f.empty(
+            (len(self.tensor_descriptors),), DType.FP32
         )
-        self.meta_storage.scale_inv = NativeTensor(
-            DType.FP32, f.empty((len(self.tensor_descriptors),), DType.FP32)
-        )
-        self.meta_storage.amax_history = NativeTensor(
-            DType.FP32,
-            f.empty(
-                (
-                    AMAX_HISTORY_LEN,
-                    len(self.tensor_descriptors),
-                ),
-                DType.FP32,
+        self.meta_storage.amax_history = f.empty(
+            (
+                AMAX_HISTORY_LEN,
+                len(self.tensor_descriptors),
             ),
+            DType.FP32,
         )
-        f.ones(self.meta_storage.scale)
-        f.ones(self.meta_storage.scale_inv)
-        f.zeros(self.meta_storage.amax_history)
+        f.ones(NativeTensor(DType.FP32, self.meta_storage.scale))
+        f.ones(NativeTensor(DType.FP32, self.meta_storage.scale_inv))
+        f.zeros(NativeTensor(DType.FP32, self.meta_storage.amax_history))
         self.tensor_indices = {
             name: i for i, name in enumerate(self.tensor_descriptors.keys())
         }

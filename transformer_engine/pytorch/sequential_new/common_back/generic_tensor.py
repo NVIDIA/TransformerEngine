@@ -50,9 +50,9 @@ class NativeTensor(GenericTensor):
 
 
 class TransformerEngineExtensionsFP8TensorMeta:
-    scale: NativeTensor
-    scale_inv: NativeTensor
-    amax_history: NativeTensor
+    scale: FrameworkTensor
+    scale_inv: FrameworkTensor
+    amax_history: FrameworkTensor
 
 
 @dataclass
