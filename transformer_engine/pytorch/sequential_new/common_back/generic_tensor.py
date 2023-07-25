@@ -5,14 +5,14 @@ from .enums import DType
 from ..multiple_dispatch import multiple_dispatch
 
 
-TensorType = TypeVar("TensorType", bound="NativeTensor")
+TensorType = TypeVar("TensorType", bound="FrameworkTensor")
 
 
 class GenericTensor(Protocol):
     dtype: DType
 
 
-ParamInitializer = Callable[[tuple[int, ...], DType, GenericTensor], None]
+ParamInitializer = Callable[[GenericTensor], None]
 
 
 @dataclass
@@ -22,7 +22,7 @@ class TensorDescriptor:
     dtype: DType
 
 
-class NativeTensor(GenericTensor, Protocol):
+class FrameworkTensor(Protocol):
     @overload
     def view(self: TensorType, size: Sequence[int], /) -> TensorType:
         ...
@@ -43,6 +43,12 @@ class NativeTensor(GenericTensor, Protocol):
         raise NotImplementedError()
 
 
+@dataclass
+class NativeTensor(GenericTensor):
+    dtype: DType
+    tensor: FrameworkTensor
+
+
 class TransformerEngineExtensionsFP8TensorMeta:
     scale: NativeTensor
     scale_inv: NativeTensor
@@ -52,14 +58,14 @@ class TransformerEngineExtensionsFP8TensorMeta:
 @dataclass
 class FP8Tensor(GenericTensor):
     dtype: DType
-    tensor: NativeTensor
+    tensor: FrameworkTensor
     meta: TransformerEngineExtensionsFP8TensorMeta
     index: int
 
 
 # Allocation
 @multiple_dispatch
-def empty(shape: tuple[int, ...], dtype: DType) -> NativeTensor:
+def empty(shape: tuple[int, ...], dtype: DType) -> FrameworkTensor:
     raise NotImplementedError()
 
 
