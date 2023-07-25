@@ -1,25 +1,22 @@
 from typing import Any, Callable
 from .ops import OpBase, Cast
 from .enums import DType
-from .framework_interface import FrameworkInterface, TensorType, TensorDescriptor
+from .generic_tensor import TensorDescriptor
 from .tensor_manager import TensorManager
 
 
 class ComputePipeline:
     def __init__(
         self,
-        framework_interface: FrameworkInterface[TensorType],
         ops: list[OpBase],
         input_shape: tuple[int, ...],
         training: bool,
         extra_transformations: list[Callable[[list[OpBase]], list[OpBase]]] = [],
     ):
-        self._framework_interface = framework_interface
-        self._framework = type(framework_interface)
         self._training = training
         self._input_shape = input_shape
         self._fwd = ComputePipeline.compile(ops, extra_transformations)
-        self._tensor_manager = TensorManager(self._framework_interface)
+        self._tensor_manager = TensorManager()
         self.allocate_tensors()
 
     def allocate_tensors(self):

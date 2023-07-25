@@ -1,56 +1,27 @@
-from abc import ABC, abstractmethod
 from math import prod
-import subprocess
-from typing import Any, Generic
-from attr import dataclass
+from typing import Any
 from .enums import DType
-from .framework_interface import FrameworkInterface, TensorType, TensorDescriptor
-from . import framework_interface as fi
 import transformer_engine_extensions as tex  # TODO: make this framework agnostic
-
+from .generic_tensor import (
+    GenericTensor,
+    NativeTensor,
+    FP8Tensor,
+    TransformerEngineExtensionsFP8TensorMeta,
+    TensorDescriptor,
+)
+from . import generic_tensor as f
 
 AMAX_HISTORY_LEN = 1024
 ALIGN_BYTES = 32
 
 
-@dataclass
-class GenericTensor(Generic[TensorType]):
-    _dtype: DType
-
-    def dtype(self) -> DType:
-        return self._dtype
-
-
-@dataclass
-class TransformerEngineExtensionsFP8TensorMeta(Generic[TensorType]):
-    scale: TensorType
-    scale_inv: TensorType
-    amax_history: TensorType
-
-
-@dataclass
-class NativeTensor(GenericTensor[TensorType]):
-    _tensor: TensorType
-
-
-@dataclass
-class FP8Tensor(GenericTensor[TensorType]):
-    _tensor: TensorType
-    _meta: TransformerEngineExtensionsFP8TensorMeta[TensorType]
-    _index: int
-
-
-class TensorManager(ABC, Generic[TensorType]):
+class TensorManager:
     tensor_descriptors = dict[str, TensorDescriptor]()
-    meta_storage: TransformerEngineExtensionsFP8TensorMeta[TensorType]
-    tensor_storage = dict[DType, TensorType]()
+    meta_storage: TransformerEngineExtensionsFP8TensorMeta
+    tensor_storage = dict[DType, NativeTensor]()
     tensor_indices = dict[str, int]()
-    tensors = dict[str, TensorType]()
+    tensors = dict[str, NativeTensor]()
     allocated = False
-
-    def __init__(self, framework_interface: FrameworkInterface[TensorType]) -> None:
-        self.framework_interface = framework_interface
-        self.framework = type(framework_interface)
 
     def register_tensor(self, name: str, desc: TensorDescriptor):
         if not self.allocated:
@@ -84,7 +55,7 @@ class TensorManager(ABC, Generic[TensorType]):
 
             assert dtype not in self.tensor_storage
 
-            self.tensor_storage[dtype] = self.framework.fi_empty((prev_offset,), dtype)
+            self.tensor_storage[dtype] = f.empty((prev_offset,), dtype)
 
             for name, desc in self.tensor_descriptors.items():
                 if desc.dtype != dtype:
@@ -97,11 +68,11 @@ class TensorManager(ABC, Generic[TensorType]):
                 assert tensor.is_contiguous()
 
                 if desc.constructor is not None:
-                    desc.constructor(self.framework, desc.shape, desc.dtype, tensor)
+                    desc.constructor(desc.shape, desc.dtype, tensor)
 
                 self.tensors[name] = tensor
 
-    def retrieve_tensor(self, name: str) -> GenericTensor[TensorType]:
+    def retrieve_tensor(self, name: str) -> GenericTensor:
         if not self.allocated:
             raise RuntimeError("Storage not yet allocated")
         if name not in self.tensors:
@@ -113,29 +84,26 @@ class TensorManager(ABC, Generic[TensorType]):
         if dtype.is_fp8():
             meta = self.meta_storage
             index = self.tensor_indices[name]
-            return FP8Tensor[TensorType](dtype, tensor, meta, index)
+            return FP8Tensor(dtype, tensor, meta, index)
         else:
-            return NativeTensor[TensorType](dtype, tensor)
+            return tensor
 
-    def _allocate_fp8_meta(
-        self,
-    ):
+    def _allocate_fp8_meta(self):
         self.meta_storage = self.make_tensor_meta()
-        self.meta_storage.scale = fi.ones(
-            self.framework,
-            (len(self.tensor_descriptors),),
+        self.meta_storage.scale = f.empty((len(self.tensor_descriptors),), DType.FP32)
+        self.meta_storage.scale_inv = f.empty(
+            (len(self.tensor_descriptors),), DType.FP32
+        )
+        self.meta_storage.amax_history = f.empty(
+            (
+                AMAX_HISTORY_LEN,
+                len(self.tensor_descriptors),
+            ),
             DType.FP32,
         )
-        self.meta_storage.scale_inv = fi.ones(
-            self.framework,
-            (len(self.tensor_descriptors),),
-            DType.FP32,
-        )
-        self.meta_storage.amax_history = fi.zeros(
-            self.framework,
-            (AMAX_HISTORY_LEN, len(self.tensor_descriptors)),
-            DType.FP32,
-        )
+        f.ones(self.meta_storage.scale)
+        f.ones(self.meta_storage.scale_inv)
+        f.zeros(self.meta_storage.amax_history)
         self.tensor_indices = {
             name: i for i, name in enumerate(self.tensor_descriptors.keys())
         }
@@ -149,5 +117,5 @@ class TensorManager(ABC, Generic[TensorType]):
             if arg not in self.tensors:
                 raise RuntimeError(f"Tensor {arg} not registered")
 
-    def make_tensor_meta(self) -> TransformerEngineExtensionsFP8TensorMeta[TensorType]:
+    def make_tensor_meta(self) -> TransformerEngineExtensionsFP8TensorMeta:
         return tex.FP8TensorMeta()  # type: ignore

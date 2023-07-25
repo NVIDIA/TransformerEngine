@@ -1,15 +1,13 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Generator, TypeVar, TypedDict, final
+from typing import Any, Callable, Generator, TypeVar, final
 
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
     GenericTensor,
+    ParamInitializer,
 )
-from . import framework_interface as fi
-from .framework_interface import ParamConstructor
-from .framework_interface import TensorDescriptor as ParamDescriptor
 from .enums import DType, PType
 from .generic_tensor import GenericTensor
 from . import generic_tensor as f
@@ -32,10 +30,6 @@ class TensorDescriptor:
     dtype: DType
 
 
-class AnyKwargs(TypedDict, total=False):
-    pass
-
-
 class Op(ABC):
     input_type: DType
     output_type: DType
@@ -47,7 +41,7 @@ class Op(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_params(self) -> dict[str, ParamDescriptor]:
+    def describe_params(self) -> dict[str, ParamInitializer]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -157,7 +151,7 @@ AG_CGEMM = (PType.NRS, PType.NCS)
 class Gemm(OpBase):
     in_features: int
     out_features: int
-    init_method: ParamConstructor
+    init_method: ParamInitializer
 
     def __init__(
         self,
@@ -166,7 +160,7 @@ class Gemm(OpBase):
         output_type: DType,
         in_features: int,
         out_features: int,
-        init_method: ParamConstructor,
+        init_method: ParamInitializer,
     ):
         super().__init__(
             name,
@@ -192,7 +186,7 @@ class Gemm(OpBase):
 @final
 class Bias(PointwiseOp, ShapePreserveOp, OpBase):
     features: int
-    init_method: ParamConstructor
+    init_method: ParamInitializer
 
     def __init__(
         self,
@@ -200,7 +194,7 @@ class Bias(PointwiseOp, ShapePreserveOp, OpBase):
         input_type: DType,
         output_type: DType,
         features: int,
-        init_method: ParamConstructor,
+        init_method: ParamInitializer,
     ):
         super().__init__(
             name,
