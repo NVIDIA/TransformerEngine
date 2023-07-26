@@ -8,7 +8,7 @@ from .ops import OpBase
 class Connection:
     src: PType
     dst: PType
-    op: OpBase
+    ops: list[OpBase]
 
     def cost(self):
         weight: int
@@ -18,7 +18,7 @@ class Connection:
             weight = 1
         else:
             weight = 0
-        return weight
+        return weight * len(self.ops)
 
 
 @dataclass
@@ -26,16 +26,29 @@ class Node:
     connections: list[Connection]
 
 
-def model_parallel_transform(ops: list[OpBase]):
+def model_parallel_transform(ops: list[OpBase]) -> list[OpBase]:
     graph: list[Node] = []
     for op in ops:
-        graph.append(
-            Node([Connection(src, dst, op) for src, dst in op.describe_parallellism()])
-        )
-    _bfs01(graph)
+        possible_chains: list[list[OpBase]] = op.describe_parallellism()
+        connections = list[Connection]()
+        for subops in possible_chains:
+            for i, subop in enumerate(subops[:-1]):
+                after = subops[i + 1]
+                if subop.parallellism[1] != after.parallellism[0]:
+                    raise ValueError("Parallelism type mismatch in chain")
+            connections.append(
+                Connection(
+                    subops[0].parallellism[0],
+                    subops[-1].parallellism[1],
+                    subops,
+                )
+            )
+        graph.append(Node(connections))
+    graph = [_pre(ops[0])] + graph + [_post(ops[-1])]
+    return _bfs01(graph)
 
 
-def _bfs01(graph: list[Node]):
+def _bfs01(graph: list[Node]) -> list[OpBase]:
     vertices = (len(graph) + 1) * len(PType)
     START = 0
     FINISH = vertices - (len(PType))
@@ -79,6 +92,6 @@ def _bfs01(graph: list[Node]):
         path.append(conn)
         node = v // len(PType)
         v = (node - 1) * len(PType) + conn.src.value
-    for conn in path:
-        conn.op.parallellism = (conn.src, conn.dst)
     path.reverse()
+    ops = [op for conn in path for op in conn.ops]
+    return ops

@@ -31,7 +31,7 @@ class Op(ABC):
     input_shape: tuple[int, ...]
 
     @abstractmethod
-    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+    def describe_parallellism(self) -> list[list[OpBase]]:
         raise NotImplementedError()
 
     @abstractmethod
