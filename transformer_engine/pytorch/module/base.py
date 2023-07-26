@@ -200,6 +200,7 @@ def get_ub(name: str):
     global _ub_communicators
     assert _ub_communicators is not None, "UB manager is not initialized."
     assert name in _ub_communicators, f"UB for {name} is not registered."
+    print (f'return _ub_communicators[{name}]')
     return _ub_communicators[name]
 
 

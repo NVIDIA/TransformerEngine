@@ -277,6 +277,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=fc2_out,
                 ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
+                #ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_split_rs else None,
                 ub=ub_obj_fc2out if ub_split_rs else None,
                 extra_output_tensor=rs_out if ub_split_rs else None,
             )

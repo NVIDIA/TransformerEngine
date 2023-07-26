@@ -51,6 +51,10 @@ void nvte_cublas_gemm(const NVTETensor A,
                       bool accumulate,
                       bool use_split_accumulator,
                       int math_sm_count,
+                      int m_split,
+                      int n_split,
+                      bool gemm_producer,
+                      const NVTETensor counter,
                       cudaStream_t stream
 );
 

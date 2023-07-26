@@ -35,6 +35,25 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
 
 namespace transformer_engine {
 
+static __global__ void producer_kernel(void* atomic_ptr, int chunk_i) {
+    // Decrement atomic val to signal current output tile finish
+    if ( blockIdx.x == 0 && threadIdx.x == 0 ) {
+        ((unsigned int*)atomic_ptr)[chunk_i] = 0;
+        //printf("producer chunk_i:%d val:%d\n",chunk_i,((unsigned int*)atomic_ptr)[chunk_i]);
+    }
+
+    // COMM kernel need to explicitely flash gmem.
+    // GEMM kernel already executed, and can not see gmem change without COMM kernel explicitely make change
+    asm volatile ("fence.sc.gpu;\n");
+}
+
+void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
+    dim3 block(1);
+    dim3 grid(1);
+    producer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
+}
+
+
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -50,6 +69,10 @@ void cublas_gemm(const Tensor *inputA,
                  bool accumulate,
                  bool use_split_accumulator,
                  int math_sm_count,
+                 int m_split,
+                 int n_split,
+                 bool gemm_producer,
+                 const Tensor *inputCounter,
                  cudaStream_t stream
 ) {
   void *A = inputA->data.dptr;
@@ -63,6 +86,7 @@ void cublas_gemm(const Tensor *inputA,
   void *bias_ptr = inputBias->data.dptr;
   const bool bias = bias_ptr != nullptr;
   void *pre_gelu_out = outputPreGelu->data.dptr;
+  void *counter = inputCounter->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) ||
                        is_fp8_dtype(inputB->data.dtype);
@@ -253,7 +277,9 @@ void cublas_gemm(const Tensor *inputA,
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
-
+  for (int i=0; i<m_split; i++) {
+    producer(counter, i, stream);
+  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
@@ -277,6 +303,10 @@ void nvte_cublas_gemm(const NVTETensor A,
                       bool accumulate,
                       bool use_split_accumulator,
                       int math_sm_count,
+                      int m_split,
+                      int n_split,
+                      bool gemm_producer,
+                      const NVTETensor counter,
                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
   using namespace transformer_engine;
@@ -285,6 +315,7 @@ void nvte_cublas_gemm(const NVTETensor A,
   Tensor *outputD = reinterpret_cast<Tensor*>(D);
   const Tensor *biasTensor = reinterpret_cast<const Tensor*>(bias);
   Tensor *outputGelu = reinterpret_cast<Tensor*>(pre_gelu_out);
+  const Tensor *inputCounter = reinterpret_cast<const Tensor*>(counter);
   Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
 
   const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
@@ -320,5 +351,9 @@ void nvte_cublas_gemm(const NVTETensor A,
               wspace->data.shape[0],
               accumulate, use_split_accumulator,
               math_sm_count,
+              m_split,
+              n_split,
+              gemm_producer,
+              inputCounter,
               stream);
 }

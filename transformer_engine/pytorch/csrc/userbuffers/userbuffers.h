@@ -183,6 +183,7 @@ for(int slice=0;slice<ncslices;slice++)
 
  allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
 */
+void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
                                      communicator *comm, cudaStream_t stream = 0);
 void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,

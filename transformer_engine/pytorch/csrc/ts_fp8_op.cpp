@@ -282,7 +282,11 @@ at::Tensor te_gemm_ts(at::Tensor A,
           workspaceSize_arg,
           accumulate_arg,
           use_split_accumulator_arg,
-          0);
+          0,
+          0, /* m_split */
+          0, /* n_split */
+          false, /*gemm_producer*/
+          torch::Tensor());
   return D;
 }
 

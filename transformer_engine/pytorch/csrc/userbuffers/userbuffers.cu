@@ -1336,6 +1336,24 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
         kernelArgs));                                                                          \
   }
 
+// consumer
+static __global__ void consumer_kernel(void* atomic_ptr, int chunk_i) {
+    // Wait for producer to change the val to 0, which signal producer ready
+    if ( blockIdx.x == 0 && threadIdx.x == 0 ) {
+        int old_val;
+        while ( 0 != ( old_val = atomicCAS( (unsigned int*)atomic_ptr + chunk_i , 0, 0) ) ) {}
+	((unsigned int*)atomic_ptr)[chunk_i] = 1;
+        asm volatile ("fence.sc.gpu;\n");
+        //printf("consumer chunk_i:%d val:%d\n",chunk_i,((unsigned int*)atomic_ptr)[chunk_i]);
+    }
+}
+
+void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
+    dim3 block(1);
+    dim3 grid(1);
+    consumer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
+}
+
 int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
                                         const int elements, const int blocksize, communicator *comm,
                                         cudaStream_t stream, int op) {

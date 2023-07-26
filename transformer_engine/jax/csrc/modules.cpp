@@ -279,7 +279,8 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
     nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), null_tensor.data(),
                      null_tensor.data(), (desc.transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
                      (desc.transb) ? CUBLAS_OP_T : CUBLAS_OP_N, false, wk_tensor.data(), false,
-                     desc.use_split_accumulator, 0, stream);
+                     desc.use_split_accumulator, 0, 0 /*m_split*/, 0 /*n_split*/,
+                     false /*gemm_producer*/, null_tensor.data() /*counter*/, stream);
 }
 
 void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps, void *input,
