@@ -221,7 +221,7 @@ def gemm(
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (extra_output_tensor,))
+            args = tuple(args + (extra_output_tensor, empty_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
             assert (

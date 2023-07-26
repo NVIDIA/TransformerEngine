@@ -510,7 +510,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                                  at::Tensor D_amax, at::Tensor bias,
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
-                                 bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
+                                 bool accumulate, bool use_split_accumulator, at::Tensor B_copy, at::Tensor counter) {
     // Get GEMM dimensions between TN and NN input layouts
     const int m = (transa) ? A.size(0) : A.size(1);
     const int k = (transa) ? A.size(1) : A.size(0);
@@ -578,7 +578,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         te_gemm(A, A_scale_inverse, A_type, transa, input_b_chunk, B_scale_inverse, B_type, transb,
                 output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, torch::Tensor());
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, counter);
 
         if (i < num_steps - 1) {
           // P2P communication
@@ -630,7 +630,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         te_gemm(A, A_scale_inverse, A_type, transa, _ubufs[send_chunk_id], B_scale_inverse, B_type,
                 transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, torch::Tensor());
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, counter);
 
         if (i < _tp_size - 1) {
           // P2P communication
