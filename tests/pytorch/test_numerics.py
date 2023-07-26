@@ -393,9 +393,15 @@ class TorchGLU(nn.Module):
 
 class TorchLayerNormMLP(nn.Module):
     def __init__(self, hidden_size: int, ffn_hidden_size: int,
-                 eps: float = 1e-5, activation = 'gelu'):
+                 eps: float = 1e-5, activation = 'gelu',
+                 normalization: str = "LayerNorm"):
         super().__init__()
-        self.ln = nn.LayerNorm(hidden_size, eps=eps)
+        if normalization == "LayerNorm":
+            self.ln = nn.LayerNorm(hidden_size, eps=eps)
+        elif normalization == "RMSNorm":
+            self.ln = TorchRMSNorm(hidden_size, eps=eps)
+        else:
+            raise RuntimeError("Unsupported normalization")
         if 'glu' in activation:
             fc1_output_features = 2 * ffn_hidden_size
             self.gelu = TorchGLU(activation)
@@ -960,7 +966,8 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("activation", all_activations)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     config = model_configs[model]
 
     te_ln_mlp = (
@@ -968,6 +975,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
             config.hidden_size,
             4 * config.hidden_size,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -979,6 +987,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
             config.hidden_size,
             4 * config.hidden_size,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -988,7 +997,8 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
     # Share params
     with torch.no_grad():
         torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
-        torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        if normalization != "RMSNorm":
+            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
         torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
         torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
         torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())

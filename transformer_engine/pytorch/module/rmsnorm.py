@@ -10,7 +10,8 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
-import transformer_engine_extensions as tex
+from .. import cpp_extensions as tex
+from ..jit import no_torch_dynamo
 
 
 __all__ = ["RMSNorm"]
@@ -28,6 +29,7 @@ class _RMSNorm(torch.autograd.Function):
         fwd_rmsnorm_sm_margin: int,
         bwd_rmsnorm_sm_margin: int,
         zero_centered_gamma: bool,
+        is_grad_enabled: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.numel()
@@ -35,13 +37,18 @@ class _RMSNorm(torch.autograd.Function):
         assert inp.shape[-1] == in_features, "RMSNorm not possible"
         inputmat = inp.view((-1, in_features))
 
-        rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
-                                              eps, fwd_rmsnorm_sm_margin,
+        if is_grad_enabled:
+            rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
+                                                  eps, fwd_rmsnorm_sm_margin,
+                                                  zero_centered_gamma)
+            ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
+            ctx.inp_shape = inp.shape
+            ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
+            ctx.zero_centered_gamma = zero_centered_gamma
+        else:
+            rmsnorm_out = tex.rmsnorm_fwd_inf(inputmat, rmsnorm_weight,
+                                              eps,
                                               zero_centered_gamma)
-        ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
-        ctx.inp_shape = inp.shape
-        ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
-        ctx.zero_centered_gamma = zero_centered_gamma
         return rmsnorm_out.view_as(inp)
 
     @staticmethod
@@ -130,13 +137,24 @@ class RMSNorm(torch.nn.Module):
             init.zeros_(self.weight)
 
 
+    @no_torch_dynamo
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """RMSNorm FWD"""
-        return _RMSNorm.apply(
+        if torch.is_grad_enabled():
+            fwd_fn = _RMSNorm.apply
+            args = []
+        else:
+            fwd_fn = _RMSNorm.forward
+            args = [None]
+
+        args += (
             inp,
             self.weight,
             self.eps,
             self.fwd_rmsnorm_sm_margin,
             self.bwd_rmsnorm_sm_margin,
-            self.zero_centered_gamma
+            self.zero_centered_gamma,
+            torch.is_grad_enabled()
         )
+
+        return fwd_fn(*args)
