@@ -1,27 +1,28 @@
 from functools import partial
 from math import sqrt
 from torch import nn
+
+from ..common_back.enums import DType, DTypeInfer
 from .custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from .custom_expand_for_sequential import expand
 from ..common_back.compile_env import CompileEnv
-from ..common_back.ops import DType
 from ..common_back import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ...attention import DotProductAttention
-from ..common_back import framework_interface as fi
+from ..common_back import generic_tensor as fi
 
 
 def _gemm_param_init_methods(te: bool, in_features: int):
     if te:
         return (
-            partial(fi.normal, 0, 0.023),
+            partial(fi.normal_dist, 0, 0.023),
             fi.zeros,
         )
     else:
         k = 1 / sqrt(in_features)
         return (
-            partial(fi.uniform, -sqrt(k), sqrt(k)),
-            partial(fi.uniform, -sqrt(k), sqrt(k)),
+            partial(fi.uniform_dist, -sqrt(k), sqrt(k)),
+            partial(fi.uniform_dist, -sqrt(k), sqrt(k)),
         )
 
 
@@ -46,6 +47,7 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 "gemm",
                 tensor_type,
                 tensor_type,
+                ...,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -57,7 +59,8 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
             ops.Gemm(
                 "gemm",
                 tensor_type,
-                DType.infer,
+                DTypeInfer(),
+                ...,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -83,7 +86,12 @@ def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
 
     return [
         ops.LayerNorm(
-            "layernorm", DType.infer, DType.infer, hidden_size, eps, zero_centered_gamma
+            "layernorm",
+            DTypeInfer(),
+            DTypeInfer(),
+            hidden_size,
+            eps,
+            zero_centered_gamma,
         )
     ]
 
@@ -104,7 +112,7 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         return [
             ops.LayerNorm(
                 "layernorm",
-                DType.infer,
+                DTypeInfer(),
                 tensor_type,
                 in_features,
                 eps,
@@ -114,6 +122,7 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 "gemm",
                 tensor_type,
                 tensor_type,
+                ...,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -124,7 +133,7 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         return [
             ops.LayerNorm(
                 "layernorm",
-                DType.infer,
+                DTypeInfer(),
                 tensor_type,
                 in_features,
                 eps,
@@ -133,7 +142,8 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
             ops.Gemm(
                 "gemm",
                 tensor_type,
-                DType.infer,
+                DTypeInfer(),
+                ...,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -157,7 +167,7 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         return [
             ops.LayerNorm(
                 "layernorm",
-                DType.infer,
+                DTypeInfer(),
                 tensor_type,
                 in_features,
                 eps,
@@ -167,27 +177,33 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 "gemm1",
                 tensor_type,
                 tensor_type,
+                ...,
                 in_features,
                 ffn_size,
                 weight_init_method,
             ),
-            ops.Bias("bias1", tensor_type, tensor_type, ffn_size, bias_init_method),
-            ops.Gelu("act"),
+            ops.Bias(
+                "bias1", tensor_type, tensor_type, ..., ffn_size, bias_init_method
+            ),
+            ops.Gelu("act", DTypeInfer(), DTypeInfer()),
             ops.Gemm(
                 "gemm2",
                 tensor_type,
                 tensor_type,
+                ...,
                 ffn_size,
                 in_features,
                 weight_init_method,
             ),
-            ops.Bias("bias1", tensor_type, DType.infer, in_features, bias_init_method),
+            ops.Bias(
+                "bias1", tensor_type, DTypeInfer(), ..., in_features, bias_init_method
+            ),
         ]
     else:
         return [
             ops.LayerNorm(
                 "layernorm",
-                DType.infer,
+                DTypeInfer(),
                 tensor_type,
                 in_features,
                 eps,
@@ -197,15 +213,17 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
                 "gemm1",
                 tensor_type,
                 tensor_type,
+                ...,
                 in_features,
                 ffn_size,
                 weight_init_method,
             ),
-            ops.Gelu("act"),
+            ops.Gelu("act", DTypeInfer(), DTypeInfer()),
             ops.Gemm(
                 "gemm2",
                 tensor_type,
-                DType.infer,
+                DTypeInfer(),
+                ...,
                 ffn_size,
                 in_features,
                 weight_init_method,
@@ -245,5 +263,9 @@ CUSTOM_EXPAND_FOR_SEQUENTIAL[LayerNormMLP] = expand_layerNormMLP
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.Sequential] = expand_sequential
 CUSTOM_EXPAND_FOR_SEQUENTIAL[DotProductAttention] = expand_dot_product_attention
 CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.Dropout] = expand_dropout
-CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [ops.Gelu("act")]
-CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [ops.Relu("act")]
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.GELU] = lambda m, e: [
+    ops.Gelu("act", DTypeInfer(), DTypeInfer())
+]
+CUSTOM_EXPAND_FOR_SEQUENTIAL[nn.ReLU] = lambda m, e: [
+    ops.Relu("act", DTypeInfer(), DTypeInfer())
+]

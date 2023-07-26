@@ -90,6 +90,40 @@ def uniform_dist(low: float, high: float, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
+# Transpose
+@multiple_dispatch
+def transpose(x: GenericTensor, out: GenericTensor) -> None:
+    raise NotImplementedError()
+
+
+# LayerNorm
+# usage: f.layer_norm(x, self.weight, self.bias, self.eps, out=self.layernorm)
+
+
+@multiple_dispatch
+def layer_norm(
+    x: GenericTensor,
+    weight: GenericTensor,
+    bias: GenericTensor,
+    eps: float,
+    out: GenericTensor,
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def dlayer_norm(
+    grad: GenericTensor,
+    x: GenericTensor,
+    weight: GenericTensor,
+    eps: float,
+    out_dgrad: GenericTensor,
+    out_wgrad: GenericTensor,
+    out_bgrad: GenericTensor,
+) -> None:
+    raise NotImplementedError()
+
+
 # Gemm
 @multiple_dispatch
 def gemm(a: GenericTensor, b: GenericTensor, out: GenericTensor) -> None:
@@ -146,25 +180,25 @@ def swiglu(x: GenericTensor, out: GenericTensor) -> None:
 
 
 @multiple_dispatch
-def drelu(grad: GenericTensor, x: GenericTensor, out: GenericTensor) -> None:
+def drelu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 @multiple_dispatch
-def dgelu(grad: GenericTensor, x: GenericTensor, out: GenericTensor) -> None:
+def dgelu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 @multiple_dispatch
-def dgeglu(grad: GenericTensor, x: GenericTensor, out: GenericTensor) -> None:
+def dgeglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 @multiple_dispatch
-def dreglu(grad: GenericTensor, x: GenericTensor, out: GenericTensor) -> None:
+def dreglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 @multiple_dispatch
-def dswiglu(grad: GenericTensor, x: GenericTensor, out: GenericTensor) -> None:
+def dswiglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()

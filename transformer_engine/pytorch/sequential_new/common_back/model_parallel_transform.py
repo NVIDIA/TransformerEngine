@@ -1,14 +1,30 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from .enums import PType
-from .ops import OpBase
+from typing import final
+
+from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
+    GenericTensor,
+)
+from .enums import DTypeInfer, PType
+from .ops import (
+    NoSupplementaryTensorsOp,
+    Op,
+    ParameterFreeOp,
+    ShapePreserveOp,
+    Identity,
+    Transpose,
+    Scatter,
+    AllGather,
+    AllReduce,
+    _normal,
+)
 
 
 @dataclass
 class Connection:
     src: PType
     dst: PType
-    ops: list[OpBase]
+    ops: list[Op]
 
     def cost(self):
         weight: int
@@ -26,10 +42,11 @@ class Node:
     connections: list[Connection]
 
 
-def model_parallel_transform(ops: list[OpBase]) -> list[OpBase]:
+def model_parallel_transform(ops: list[Op]) -> list[Op]:
+    ops = [Input("input")] + ops + [Output("output")]
     graph: list[Node] = []
     for op in ops:
-        possible_chains: list[list[OpBase]] = op.describe_parallellism()
+        possible_chains: list[list[Op]] = op.describe_parallellism()
         connections = list[Connection]()
         for subops in possible_chains:
             for i, subop in enumerate(subops[:-1]):
@@ -44,11 +61,10 @@ def model_parallel_transform(ops: list[OpBase]) -> list[OpBase]:
                 )
             )
         graph.append(Node(connections))
-    graph = [_pre(ops[0])] + graph + [_post(ops[-1])]
     return _bfs01(graph)
 
 
-def _bfs01(graph: list[Node]) -> list[OpBase]:
+def _bfs01(graph: list[Node]) -> list[Op]:
     vertices = (len(graph) + 1) * len(PType)
     START = 0
     FINISH = vertices - (len(PType))
@@ -95,3 +111,49 @@ def _bfs01(graph: list[Node]) -> list[OpBase]:
     path.reverse()
     ops = [op for conn in path for op in conn.ops]
     return ops
+
+
+@final
+class Input(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+    def __init__(self, name: str):
+        super().__init__(name, DTypeInfer(), DTypeInfer())
+
+    def training(self, x: GenericTensor):
+        raise RuntimeError("Input op should not be called directly")
+
+    def inference(self, x: GenericTensor):
+        raise RuntimeError("Input op should not be called directly")
+
+    def describe_parallellism(self) -> list[list[Op]]:
+        i = Identity("identity", self.input_type, self.output_type).named(self.name)
+        s = Scatter("scatter").named(self.name)
+        t = Transpose("transpose").named(self.name)
+        return [
+            _normal(i),
+            [s, t],
+            [s],
+        ]
+
+
+@final
+class Output(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+    def __init__(self, name: str):
+        super().__init__(name, DTypeInfer(), DTypeInfer())
+
+    def training(self, x: GenericTensor):
+        raise RuntimeError("Output op should not be called directly")
+
+    def inference(self, x: GenericTensor):
+        raise RuntimeError("Output op should not be called directly")
+
+    def describe_parallellism(self) -> list[list[Op]]:
+        i = Identity("identity", self.input_type, self.output_type).named(self.name)
+        ar = AllReduce("allreduce").named(self.name)
+        ag = AllGather("allgather").named(self.name)
+        t = Transpose("transpose", self.input_type, self.output_type).named(self.name)
+        return [
+            _normal(i),
+            [t, ag],
+            [ar],
+            [ag],
+        ]

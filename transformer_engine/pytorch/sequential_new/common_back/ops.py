@@ -1,6 +1,9 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Generator, TypeVar, final
+from copy import deepcopy
+from enum import Enum
+import enum
+from typing import Generator, final
 
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
@@ -8,39 +11,161 @@ from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import
     TensorDescriptor,
     ParamInitializer,
 )
-from .enums import DType, PType
+from .enums import DType, DTypeInfer, PType
 from .generic_tensor import GenericTensor
 from . import generic_tensor as f
 
-T = TypeVar("T")
-
-
-def returning(x: T) -> Callable[..., T]:
-    def func(*args: Any, **kwargs: Any):
-        del args, kwargs
-        return x
-
-    return func
+ExecutionFlow = list["Op"]
+Parallelism = tuple[PType, PType]
 
 
 # Op Protocol
+class _OpState(Enum):
+    POST_INIT = enum.auto()
+    POST_SET_TYPES_INFERRED = enum.auto()
+    POST_SET_PARALLELISM = enum.auto()
+    POST_DESCRIBE_PARALLELISM = enum.auto()
+    POST_SET_INPUT_SHAPE = enum.auto()
+    POST_DESCRIBE_PARAMS = enum.auto()
+    POST_DESCRIBE_ACTIVATION_SHAPE = enum.auto()
+    POST_DESCRIBE_SUPPLEMENTARY_TENSORS = enum.auto()
+    POST_SET_TENSORS_ALLOCATED = enum.auto()
+
+    def __ge__(self, other: _OpState):
+        return self.value >= other.value
+
+    def __gt__(self, other: _OpState):
+        return self.value > other.value
+
+    def __le__(self, other: _OpState):
+        return self.value <= other.value
+
+    def __lt__(self, other: _OpState):
+        return self.value < other.value
+
+
 class Op(ABC):
-    input_type: DType
-    output_type: DType
-    parallellism: tuple[PType, PType]
-    input_shape: tuple[int, ...]
+    """
+    An Op represents a transformation applied to the main data tensor.
+    It is akin to an nn.Module + autograd.Function pair in PyTorch.
+
+    Inside ComputePipeline, the following methods are called in the order
+    in which they are declared below.
+    """
+
+    name: str
+    __input_type: DType | DTypeInfer
+    __output_type: DType | DTypeInfer
+    __parallellism: Parallelism | None
+    __input_shape: tuple[int, ...] | None
+    __state: _OpState
+
+    @property
+    def raw_input_type(self):
+        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
+        return self.__input_type
+
+    @raw_input_type.setter
+    def raw_input_type(self, value: DType):
+        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
+        self.__input_type = value
+
+    @property
+    def raw_output_type(self):
+        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
+        return self.__output_type
+
+    @raw_output_type.setter
+    def raw_output_type(self, value: DType):
+        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
+        self.__output_type = value
+
+    @property
+    def input_type(self):
+        assert self.__state >= _OpState.POST_SET_TYPES_INFERRED
+        assert isinstance(self.__input_type, DType)
+        return self.__input_type
+
+    @property
+    def output_type(self):
+        assert self.__state >= _OpState.POST_SET_TYPES_INFERRED
+        assert isinstance(self.__output_type, DType)
+        return self.__output_type
+
+    @property
+    def parallellism(self):
+        assert self.__state >= _OpState.POST_SET_PARALLELISM
+        assert self.__parallellism is not None
+        return self.__parallellism
+
+    @property
+    def input_shape(self):
+        assert self.__state >= _OpState.POST_SET_INPUT_SHAPE
+        assert self.__input_shape is not None
+        return self.__input_shape
+
+    def __init__(
+        self,
+        relative_name: str,
+        input_type: DType | DTypeInfer,
+        output_type: DType | DTypeInfer,
+    ):
+        self.name = relative_name
+        self.__input_type = input_type
+        self.__output_type = output_type
+        self.__parallellism = None
+        self.__input_shape = None
+        self.__state = _OpState.POST_INIT
+
+    def named(self, parent_module_name: str):
+        self.name = parent_module_name + "." + self.name
+        return self
+
+    def set_types_inferred(
+        self, inferred_input_type: DType, inferred_output_type: DType
+    ):
+        assert self.__state == _OpState.POST_INIT
+        self.__input_type = inferred_input_type
+        self.__output_type = inferred_output_type
+        self.__state = _OpState.POST_SET_TYPES_INFERRED
+
+    def set_parallelism(self, chosen_parallelism: Parallelism):
+        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
+        self.__parallellism = chosen_parallelism
+        self.__state = _OpState.POST_SET_PARALLELISM
+
+    def _pre_describe_parallellism_hook(self):
+        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
+        self.__state = _OpState.POST_DESCRIBE_PARALLELISM
 
     @abstractmethod
-    def describe_parallellism(self) -> list[list[OpBase]]:
+    def describe_parallellism(self) -> list[ExecutionFlow]:
         raise NotImplementedError()
+
+    def set_input_shape(self, input_shape: tuple[int, ...]):
+        assert self.__state == _OpState.POST_SET_PARALLELISM
+        self.__input_shape = input_shape
+        self.__state = _OpState.POST_SET_INPUT_SHAPE
+
+    def _pre_describe_params_hook(self):
+        assert self.__state == _OpState.POST_SET_INPUT_SHAPE
+        self.__state = _OpState.POST_DESCRIBE_PARAMS
 
     @abstractmethod
     def describe_params(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
+    def _pre_describe_activation_shape_hook(self):
+        assert self.__state == _OpState.POST_DESCRIBE_PARAMS
+        self.__state = _OpState.POST_DESCRIBE_ACTIVATION_SHAPE
+
     @abstractmethod
     def describe_activation_shape(self) -> tuple[int, ...]:
         raise NotImplementedError()
+
+    def _pre_describe_supplementary_tensors_hook(self):
+        assert self.__state == _OpState.POST_DESCRIBE_ACTIVATION_SHAPE
+        self.__state = _OpState.POST_DESCRIBE_SUPPLEMENTARY_TENSORS
 
     @abstractmethod
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -49,6 +174,12 @@ class Op(ABC):
     @abstractmethod
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
+
+    def set_tensors_allocated(self, **tensors: GenericTensor):
+        assert self.__state == _OpState.POST_DESCRIBE_SUPPLEMENTARY_TENSORS
+        for name, tensor in tensors.items():
+            setattr(self, name, tensor)
+        self.__state = _OpState.POST_SET_TENSORS_ALLOCATED
 
     @abstractmethod
     def training(
@@ -66,71 +197,229 @@ class Op(ABC):
 
 
 # Base classes
-class OpBase(Op):
-    name: str
-    input_type: DType
-    output_type: DType
+class ParameterFreeOp(Op):
+    """
+    Base class for ops that do not have any trainable parameters.
+    """
 
-    def __init__(self, relative_name: str, input_type: DType, output_type: DType):
-        self.name = relative_name
-        self.input_type = input_type
-        self.output_type = output_type
-
-    def named(self, parent_module_name: str):
-        self.name = parent_module_name + "." + self.name
-        return self
+    def describe_params(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_params_hook()
+        return {}
 
 
-class PassthroughOp(OpBase):
-    describe_params = returning(dict[str, TensorDescriptor]())
+class ShapePreserveOp(Op):
+    """
+    Base class for ops, whose activation's shape is the same as the input's.
+    """
 
+    def describe_activation_shape(self):
+        self._pre_describe_activation_shape_hook()
+        return self.input_shape
+
+
+class NoSupplementaryTensorsOp(Op):
+    """
+    Base class for ops that do not need any additional tensors.
+    """
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        return {}
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        return self.describe_supplementary_tensors_training()
+
+
+# Parallelism base classes
 
 NORMAL = (PType.NA, PType.NA)
 ROW_PARALLEL = (PType.NRS, PType.NRS)
 COLUMN_PARALLEL = (PType.NCS, PType.NCS)
 
 
-class PointwiseOp(OpBase):
-    describe_parallellism = returning([NORMAL, ROW_PARALLEL, COLUMN_PARALLEL])
+def _normal(op: Op):
+    op = deepcopy(op)
+    op.set_parallelism(NORMAL)
+    return [op]
 
 
-class RowwiseOp(OpBase):
-    describe_parallellism = returning([NORMAL, ROW_PARALLEL])
+def _row_parallel(op: Op):
+    op = deepcopy(op)
+    op.set_parallelism(ROW_PARALLEL)
+    return [op]
 
 
-class ShapePreserveOp(OpBase):
+def _column_parallel(op: Op):
+    op = deepcopy(op)
+    op.set_parallelism(COLUMN_PARALLEL)
+    return [op]
+
+
+class PointwiseOp(Op):
+    def describe_parallellism(self):
+        self._pre_describe_parallellism_hook()
+        return [_normal(self), _row_parallel(self), _column_parallel(self)]
+
+
+class RowwiseOp(Op):
+    def describe_parallellism(self):
+        self._pre_describe_parallellism_hook()
+        return [_normal(self), _row_parallel(self)]
+
+
+class ColumnwiseOp(Op):
+    def describe_parallellism(self):
+        self._pre_describe_parallellism_hook()
+        return [_normal(self), _column_parallel(self)]
+
+
+class NonParallelOp(Op):
+    def describe_parallellism(self):
+        self._pre_describe_parallellism_hook()
+        return [_normal(self)]
+
+
+# Identity
+@final
+class Identity(PointwiseOp, ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+    def training(
+        self,
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        grad = yield x
+        return grad
+
+    def inference(
+        self,
+        x: GenericTensor,
+    ) -> GenericTensor:
+        return x
+
+
+# Transpose
+@final
+class Transpose(NonParallelOp, ParameterFreeOp):
+    act: GenericTensor
+
+    def _act_shape(self):
+        return self.input_shape[:-2] + (self.input_shape[-1], self.input_shape[-2])
+
     def describe_activation_shape(self) -> tuple[int, ...]:
-        return self.input_shape
+        self._pre_describe_activation_shape_hook()
+        return self._act_shape()
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        if self.input_shape != self._act_shape():
+            return {"act": TensorDescriptor(self._act_shape(), None, self.output_type)}
+        else:
+            return {}
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        if self.input_shape != self._act_shape():
+            f.transpose(x, out=self.act)
+            grad = yield self.act
+            f.transpose(grad, out=x)
+            return x
+        else:
+            f.transpose(x, out=x)
+            grad = yield x
+            f.transpose(grad, out=grad)
+            return grad
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        if self.input_shape != self._act_shape():
+            f.transpose(x, out=self.act)
+            return self.act
+        else:
+            f.transpose(x, out=x)
+            return x
 
 
 # Normalization
 @final
-class LayerNorm(RowwiseOp, ShapePreserveOp, OpBase):
-    features: int
-    eps: float
-    zero_centered_gamma: bool
+class LayerNorm(RowwiseOp, ShapePreserveOp):
+    weight: GenericTensor
+    weight_grad: GenericTensor
+    bias: GenericTensor
+    bias_grad: GenericTensor
+    act: GenericTensor
 
     def __init__(
         self,
         name: str,
-        input_type: DType,
-        output_type: DType,
+        input_type: DType | DTypeInfer,
+        output_type: DType | DTypeInfer,
         features: int,
         eps: float,
         zero_centered_gamma: bool,
     ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-            weight=ParamDescriptor(
-                (features,), fi.zeros if zero_centered_gamma else fi.ones
-            ),
-            bias=ParamDescriptor((features,), fi.zeros),
-        )
+        super().__init__(name, input_type, output_type)
         self.features = features
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
+
+    def describe_params(
+        self,
+    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+        self._pre_describe_params_hook()
+        return {
+            "weight": TensorDescriptor(
+                (self.features,),
+                f.zeros if self.zero_centered_gamma else f.ones,
+                self.output_type,
+            ),
+            "bias": TensorDescriptor((self.features,), f.zeros, self.output_type),
+        }
+
+    def describe_supplementary_tensors_training(
+        self,
+    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+        self._pre_describe_supplementary_tensors_hook()
+        return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
+
+    def describe_supplementary_tensors_inference(
+        self,
+    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+        self._pre_describe_supplementary_tensors_hook()
+        if self.output_type != self.input_type:
+            return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
+        else:
+            return {}
+
+    def training(
+        self,
+        x: GenericTensor,
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.layer_norm(x, self.weight, self.bias, self.eps, out=self.act)
+        grad = yield self.act
+        f.dlayer_norm(
+            grad,
+            x,
+            self.weight,
+            self.eps,
+            out_dgrad=grad,
+            out_wgrad=self.weight_grad,
+            out_bgrad=self.bias_grad,
+        )
+        return grad
+
+    def inference(
+        self,
+        x: GenericTensor,
+    ) -> GenericTensor:
+        if self.output_type != self.input_type:
+            f.layer_norm(x, self.weight, self.bias, self.eps, out=self.act)
+            return self.act
+        else:
+            f.layer_norm(x, self.weight, self.bias, self.eps, out=x)
+            return x
 
 
 # Linear
@@ -141,63 +430,166 @@ RGEMM_RS = (PType.NCS, PType.NRS)
 AG_CGEMM = (PType.NRS, PType.NCS)
 
 
+def _cgemm(op: Gemm) -> list[Op]:
+    op = deepcopy(op)
+    op.set_parallelism(CGEMM)
+    return [op]
+
+
+def _rgemm(op: Gemm) -> list[Op]:
+    op = deepcopy(op)
+    op.set_parallelism(RGEMM)
+    return [op]
+
+
+def _rgemm_split(op: Gemm) -> list[Op]:
+    op = deepcopy(op)
+    op.set_parallelism(RGEMM_SPLIT)
+    return [op]
+
+
+def _rgemm_rs(op: Gemm) -> list[Op]:
+    op = deepcopy(op)
+    op.set_parallelism(RGEMM_RS)
+    rs = ReduceScatter()
+    return [op, rs]
+
+
+def _ag_cgemm(op: Gemm) -> list[Op]:
+    op = deepcopy(op)
+    op.set_parallelism(AG_CGEMM)
+    ag = AllGather()
+    return [ag, op]
+
+
 @final
-class Gemm(OpBase):
-    in_features: int
-    out_features: int
-    init_method: ParamInitializer
+class Gemm(Op):  # TODO: take self.parallelism into account
+    weight: GenericTensor
+    weight_grad: GenericTensor
+    weight_t: GenericTensor
+    x_t: GenericTensor
+    act: GenericTensor
 
     def __init__(
         self,
         name: str,
-        input_type: DType,
-        output_type: DType,
+        input_type: DType | DTypeInfer,
+        output_type: DType | DTypeInfer,
+        param_type: DType,
         in_features: int,
         out_features: int,
         init_method: ParamInitializer,
     ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-            weight=ParamDescriptor((out_features, in_features), init_method),
-        )
+        super().__init__(name, input_type, output_type)
         self.in_features = in_features
         self.out_features = out_features
+        self.param_dtype = param_type
         self.init_method = init_method
 
-    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+    def describe_parallellism(self):
+        self._pre_describe_parallellism_hook()
         return [
-            NORMAL,
-            CGEMM,
-            RGEMM,
-            RGEMM_SPLIT,
-            RGEMM_RS,
-            AG_CGEMM,
+            _normal(self),
+            _cgemm(self),
+            _rgemm(self),
+            _rgemm_split(self),
+            _rgemm_rs(self),
+            _ag_cgemm(self),
         ]
+
+    def describe_params(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_params_hook()
+        return {
+            "weight": TensorDescriptor(
+                (self.in_features, self.out_features),
+                self.init_method,
+                self.param_dtype,
+            ),
+        }
+
+    def _act_shape(self):
+        return self.input_shape[:-1] + (self.out_features,)
+
+    def describe_activation_shape(self) -> tuple[int, ...]:
+        self._pre_describe_activation_shape_hook()
+        return self._act_shape()
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        return {
+            "act": TensorDescriptor(self._act_shape(), None, self.output_type),
+            "weight_t": TensorDescriptor(
+                (self.out_features, self.in_features), None, self.param_dtype
+            ),
+            "x_t": TensorDescriptor(
+                (self.input_shape[-1], self.input_shape[-2]), None, self.input_type
+            ),
+        }
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        if self.output_type != self.input_type or self.input_shape != self._act_shape():
+            return {"act": TensorDescriptor(self._act_shape(), None, self.output_type)}
+        else:
+            return {}
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.transpose(self.weight, out=self.weight_t)
+        f.gemm(x, self.weight, out=self.act)
+        grad = yield self.act
+        f.gemm(grad, self.weight_t, out=x)
+        f.gemm(grad, self.x_t, out=self.weight_grad)
+        return x
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        if self.output_type != self.input_type or self.input_shape != self._act_shape():
+            f.gemm(x, self.weight, out=self.act)
+            return self.act
+        else:
+            f.gemm(x, self.weight, out=x)
+            return x
 
 
 @final
-class Bias(PointwiseOp, ShapePreserveOp, OpBase):
-    features: int
-    init_method: ParamInitializer
+class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+    bias: GenericTensor
+    bias_grad: GenericTensor
 
     def __init__(
         self,
         name: str,
-        input_type: DType,
-        output_type: DType,
+        input_type: DType | DTypeInfer,
+        output_type: DType | DTypeInfer,
+        param_type: DType,
         features: int,
         init_method: ParamInitializer,
     ):
-        super().__init__(
-            name,
-            input_type,
-            output_type,
-            bias=ParamDescriptor((features,), init_method),
-        )
+        super().__init__(name, input_type, output_type)
+        self.param_dtype = param_type
         self.features = features
         self.init_method = init_method
+
+    def describe_params(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_params_hook()
+        return {
+            "bias": TensorDescriptor(
+                (self.features,), self.init_method, self.param_dtype
+            ),
+        }
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+        f.add(x, self.bias, out=x)
+        grad = yield x
+        f.copy(grad, out=self.bias_grad)
+        return grad
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.add(x, self.bias, out=x)
+        return x
 
 
 # Attention
@@ -206,14 +598,14 @@ HEAD_PARALLEL_GATHERING = (PType.NCS, PType.NA)
 
 
 @final
-class DotProductAttention(PassthroughOp, ShapePreserveOp):
+class DotProductAttention(ParameterFreeOp, ShapePreserveOp):  # TODO
     features_per_head: int
 
     def __init__(
         self,
         name: str,
-        input_type: DType,
-        output_type: DType,
+        input_type: DType | DTypeInfer,
+        output_type: DType | DTypeInfer,
         features_per_head: int,
     ):
         super().__init__(
@@ -223,10 +615,10 @@ class DotProductAttention(PassthroughOp, ShapePreserveOp):
         )
         self.features_per_head = features_per_head
 
-    def describe_parallellism(self) -> list[tuple[PType, PType]]:
+    def describe_parallellism(self):
         return [
-            NORMAL,
-            COLUMN_PARALLEL,
+            _normal(self),
+            _column_parallel(self),
             HEAD_PARALLEL_SCATTERING,
             HEAD_PARALLEL_GATHERING,
         ]
@@ -234,7 +626,7 @@ class DotProductAttention(PassthroughOp, ShapePreserveOp):
 
 # Residual
 @final
-class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
+class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
     end: ResidualEnd | None = None
     fwd_residue: GenericTensor
 
@@ -256,6 +648,7 @@ class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
         return {
             "fwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
         }
@@ -265,7 +658,7 @@ class ResidualBegin(PointwiseOp, PassthroughOp, ShapePreserveOp):
 
 
 @final
-class ResidualEnd(PointwiseOp, PassthroughOp, ShapePreserveOp):
+class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
     begin: ResidualBegin
     bwd_residue: GenericTensor
 
@@ -286,20 +679,23 @@ class ResidualEnd(PointwiseOp, PassthroughOp, ShapePreserveOp):
         return self.begin.fwd_residue
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
         return {
             "bwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
         }
 
-    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        return {}
 
 
 # Dropout
 @final
-class Dropout(PointwiseOp, PassthroughOp, ShapePreserveOp):
+class Dropout(PointwiseOp, ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
     p: float
 
     def __init__(self, name: str, p: float):
-        super().__init__(name, DType.infer, DType.infer)
+        super().__init__(name, DTypeInfer(), DTypeInfer())
         self.p = p
 
     def training(
@@ -314,73 +710,91 @@ class Dropout(PointwiseOp, PassthroughOp, ShapePreserveOp):
         f.dropout(x, self.p, out=x)
         return x
 
-    describe_supplementary_tensors_training = returning(dict[str, TensorDescriptor]())
-    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
-
 
 # Activation
 @final
-class Gelu(PointwiseOp, PassthroughOp, ShapePreserveOp):
-    x_copy: GenericTensor
+class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+    act: GenericTensor
 
     def training(
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
-        f.gelu(x, out=self.x_copy)
-        grad = yield self.x_copy
-        f.dgelu(grad, x, out=grad)
+        f.gelu(x, out=self.act)
+        grad = yield self.act
+        f.dgelu(grad, x, out_dgrad=grad)
         return grad
 
     def inference(
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.gelu(x, out=x)
-        return x
+        if self.output_type != self.input_type:
+            f.gelu(x, out=self.act)
+            return self.act
+        else:
+            f.gelu(x, out=x)
+            return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(self.input_shape, None, self.input_type)}
+        self._pre_describe_supplementary_tensors_hook()
+        return {"act": TensorDescriptor(self.input_shape, None, self.input_type)}
 
-    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        if self.output_type != self.input_type:
+            return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
+        else:
+            return {}
 
 
 @final
-class Relu(PointwiseOp, PassthroughOp, ShapePreserveOp):
-    x_copy: GenericTensor
+class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+    act: GenericTensor
 
     def training(
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
-        f.relu(x, out=self.x_copy)
-        grad = yield self.x_copy
-        f.drelu(grad, x, out=grad)
+        f.relu(x, out=self.act)
+        grad = yield self.act
+        f.drelu(grad, x, out_dgrad=grad)
         return grad
 
     def inference(
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.relu(x, out=x)
-        return x
+        if self.output_type != self.input_type:
+            f.relu(x, out=self.act)
+            return self.act
+        else:
+            f.relu(x, out=x)
+            return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"x_copy": TensorDescriptor(self.input_shape, None, self.input_type)}
+        self._pre_describe_supplementary_tensors_hook()
+        return {"act": TensorDescriptor(self.input_shape, None, self.input_type)}
 
-    describe_supplementary_tensors_inference = returning(dict[str, TensorDescriptor]())
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        self._pre_describe_supplementary_tensors_hook()
+        if self.output_type != self.input_type:
+            return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
+        else:
+            return {}
 
 
+# Cast
 @final
-class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
-    cast: GenericTensor
+class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp):
+    act: GenericTensor
 
     def training(
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
-        f.cast(x, out=self.cast)
-        grad = yield self.cast
+        f.cast(x, out=self.act)
+        grad = yield self.act
         f.cast(grad, out=x)
         return x
 
@@ -388,11 +802,32 @@ class Cast(PointwiseOp, ShapePreserveOp, PassthroughOp):
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.cast(x, out=self.cast)
-        return self.cast
+        f.cast(x, out=self.act)
+        return self.act
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        return {"cast": TensorDescriptor(self.input_shape, None, self.output_type)}
+        return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
         return self.describe_supplementary_tensors_training()
+
+
+# Communication
+@final
+class ReduceScatter(Op):
+    ...
+
+
+@final
+class AllGather(Op):
+    ...
+
+
+@final
+class AllReduce(Op):
+    ...
+
+
+@final
+class Scatter(Op):
+    ...
