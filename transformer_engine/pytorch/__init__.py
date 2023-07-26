@@ -22,4 +22,6 @@ from .te_onnx_extensions import (
     onnx_te_gemm,
     onnx_layernorm_fwd_fp8,
     onnx_layernorm_fwd,
+    onnx_rmsnorm_fwd,
+    onnx_rmsnorm_fwd_fp8
 )
