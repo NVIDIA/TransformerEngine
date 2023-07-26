@@ -4,10 +4,12 @@
 
 """Internal function used by multiple modules."""
 
+from typing import Union, Dict, Any
+
 import torch
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 from .. import cpp_extensions as tex
+from ..fp8 import get_fp8_te_dtype
 
 def _get_normalization_func(normalization: str,
                             fp8_output: bool,
@@ -89,5 +91,3 @@ def _apply_normalization(inputmat:torch.Tensor,
     elif normalization == "LayerNorm":
         output = (ln_out, output[1], output[2])
     return output
-
-
