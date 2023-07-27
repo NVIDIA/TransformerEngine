@@ -97,9 +97,6 @@ def transpose(x: GenericTensor, out: GenericTensor) -> None:
 
 
 # LayerNorm
-# usage: f.layer_norm(x, self.weight, self.bias, self.eps, out=self.layernorm)
-
-
 @multiple_dispatch
 def layer_norm(
     x: GenericTensor,
