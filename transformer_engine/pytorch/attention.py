@@ -33,6 +33,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
+    AttnBiasTypes,
     dist_group_type,
     TE_DType,
 )
@@ -167,6 +168,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -206,13 +209,35 @@ class UnfusedDotProductAttention(torch.nn.Module):
             scale *= self.layer_number
 
         # Raw attention scores. [b * np, sq, sk]
-        matmul_result = torch.baddbmm(
-            matmul_result,
-            query_layer.transpose(0, 1),  # [b * np, sq, hn]
-            key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-            beta=0.0,
-            alpha=(1.0 / scale),
-        )
+        if core_attention_bias_type == "no_bias":
+            matmul_result = torch.baddbmm(
+                matmul_result,
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                beta=0.0,
+                alpha=(1.0 / scale),
+            )
+        elif core_attention_bias_type == "pre_scale_bias":
+            assert core_attention_bias is not None, "core_attention_bias should not be None!"
+            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
+                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            matmul_result = torch.bmm(
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+            )
+            matmul_result = (matmul_result + core_attention_bias) / scale
+        elif core_attention_bias_type == "post_scale_bias":
+            assert core_attention_bias is not None, "core_attention_bias should not be None!"
+            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
+                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            matmul_result = torch.baddbmm(
+                matmul_result,
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                beta=0.0,
+                alpha=(1.0 / scale),
+            )
+            matmul_result = matmul_result + core_attention_bias
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
@@ -530,20 +555,20 @@ class FusedAttention(torch.nn.Module):
 
     Support matrix:
 
-    | backend       | 1                       | 2               |
-    | flash based   | no                      | yes             |
-    | cuDNN based   | yes                     | yes             |
-    | qkv dtype     | fp16/bf16               | fp16/bf16       |
-    | attn_type     | self/cross              | self            |
-    | qkv_layout    |                         |                 |
-    |  - qkv        | qkv_interleaved         | qkv_interleaved |
-    |  - (q,kv)     | kv_interleaved          |                 |
-    | mask_type     | causal/no_mask          | causal          |
-    | bias_type     | no_bias/post_scale_bias | no_bias         |
-    | dropout       | yes                     | yes             |
-    | max_seqlen    | <=512                   | any             |
-    | head_dim      | 64                      | 64,128          |
-    | output dtype  | fp16/bf16               | fp16/bf16       |
+    | backend       | max512_seqlen              | arbitrary_seqlen           |
+    | flash based   | no                         | yes                        |
+    | cuDNN based   | yes                        | yes                        |
+    | qkv dtype     | fp16/bf16                  | fp16/bf16                  |
+    | attn_type     | self/cross                 | self                       |
+    | qkv_layout    |                            |                            |
+    |  - qkv        | qkv_interleaved            | qkv_interleaved            |
+    |  - (q,kv)     | kv_interleaved             |                            |
+    | mask_type     | padding/causal/no_mask     | causal_mask                |
+    | bias_type     | no/post_scale_bias         | no_bias                    |
+    | dropout       | yes                        | yes                        |
+    | max_seqlen    | <=512 (cuDNN8.9.1: %64==0) | any (cuDNN 8.9.3+: %32==0) |
+    | head_dim      | 64                         | 64,128                     |
+    | output dtype  | fp16/bf16                  | fp16/bf16                  |
     """
 
     def __init__(
@@ -567,7 +592,8 @@ class FusedAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+        fused_attention_backend:
+            tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
@@ -724,7 +750,7 @@ class DotProductAttention(torch.nn.Module):
                 number of key-value channels.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: {'causal', 'padding'}, default = `causal`
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation.
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
@@ -902,6 +928,9 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
             use_fused_attention = False
 
+        if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
+            use_flash_attention = False
+
         if is_in_onnx_export_mode():
             use_flash_attention = False
             use_fused_attention = False
@@ -952,8 +981,16 @@ class DotProductAttention(torch.nn.Module):
                 key_layer,
                 value_layer,
                 attention_mask,
+                core_attention_bias_type,
+                core_attention_bias,
             )
-        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
+        return self.unfused_attention(query_layer,
+                key_layer,
+                value_layer,
+                attention_mask,
+                core_attention_bias_type,
+                core_attention_bias,
+        )
 
 
 class MultiHeadAttention(torch.nn.Module):
@@ -1159,6 +1196,8 @@ class MultiHeadAttention(torch.nn.Module):
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
 
+        assert (core_attention_bias_type in AttnBiasTypes
+                ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================

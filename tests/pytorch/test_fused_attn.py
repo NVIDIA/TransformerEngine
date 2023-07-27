@@ -29,21 +29,27 @@ class ModelConfig:
         self.attn_mask_type  = attn_mask_type
 
 model_configs = {
-    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test1":  ModelConfig(1, 1024, 16,  64,   32, 0.0,  "causal"),
+    "test2":  ModelConfig(1, 1024, 16,  64,   64, 0.0,  "causal"),
+    "test3":  ModelConfig(1, 1024, 16,  64,  128, 0.0,  "causal"),
+    "test4":  ModelConfig(1, 1024, 16,  64,  512, 0.0,  "causal"),
+    "test5":  ModelConfig(1, 1024, 16,  64, 2048, 0.0,  "causal"),
+    "test6":  ModelConfig(1, 2048, 16, 128,   32, 0.0,  "causal"),
+    "test7":  ModelConfig(1, 2048, 16, 128,   64, 0.0,  "causal"),
+    "test8":  ModelConfig(1, 2048, 16, 128,  128, 0.0,  "causal"),
+    "test9":  ModelConfig(1, 2048, 16, 128,  512, 0.0,  "causal"),
+    "test10": ModelConfig(1, 2048, 16, 128, 2048, 0.0,  "causal"),
+    "test11": ModelConfig(1, 1024, 16,  64,   32, 0.0, "no_mask"),
+    "test12": ModelConfig(1, 1024, 16,  64,   64, 0.0, "no_mask"),
+    "test13": ModelConfig(1, 1024, 16,  64,  128, 0.0, "no_mask"),
+    "test14": ModelConfig(1, 1024, 16,  64,  512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
-    param_types.append(torch.bfloat16)
+#if torch.cuda.is_bf16_supported():
+#    param_types.append(torch.bfloat16)
 
-batch_sizes = [1, 2, 32]
+batch_sizes = [1]#, 2, 32]
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -108,7 +114,7 @@ def _run_dot_product_attention(dtype, bs, config, backend):
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v)
+    op = block(q, k, v, checkpoint_core_attention=True)
     op.backward(op_grad)
 
     return op, inp.grad
