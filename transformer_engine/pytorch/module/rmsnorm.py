@@ -79,7 +79,7 @@ class RMSNorm(torch.nn.Module):
     the paper `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x}{RMS\(x\) + \varepsilon}} * \gamma
+        y = \frac{x}{RMS(x) + \varepsilon} * \gamma
 
     where
 
@@ -105,7 +105,7 @@ class RMSNorm(torch.nn.Module):
                          the RMSNorm formula changes to
 
                          .. math::
-                            y = \frac{x}{RMS\(x\) + \varepsilon}} * (1 + \gamma)
+                            y = \frac{x}{RMS(x) + \varepsilon} * (1 + \gamma)
     """
 
     def __init__(
