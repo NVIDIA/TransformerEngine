@@ -74,6 +74,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8 = False
         self.fp8_calibration = False
         self.fp8_meta = {}
+        self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = get_default_fp8_recipe()
         self.fp8_meta_tensors_initialized = False
@@ -189,7 +190,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     def _get_fp8_state(self) -> paddle.Tensor:
         """Dump FP8 state to paddle.Tensor."""
         state = None
-        if self.fp8 or self.fp8_calibration:
+        if self.fp8_meta["fp8_checkpoint"]:
             state = {}
             state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale.numpy()
             state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv.numpy()
@@ -240,6 +241,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         """Initialize fp8 related metadata and tensors during fprop."""
         self.fp8 = is_fp8_enabled()
         self.fp8_calibration = is_fp8_calibration()
+        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
