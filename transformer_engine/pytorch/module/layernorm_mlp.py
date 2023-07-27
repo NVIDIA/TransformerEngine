@@ -161,14 +161,15 @@ class _LayerNormMLP(torch.autograd.Function):
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
-        if fp8 and return_layernorm_output:
+        if return_layernorm_output:
             ln_out_return = ln_out
-            ln_out = tex.cast_to_fp8(
-                ln_out,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-            )
+            if fp8:
+                ln_out = tex.cast_to_fp8(
+                    ln_out,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                )
         # Column Parallel Linear
         if ub_split_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
