@@ -62,7 +62,15 @@ class _RMSNorm(torch.autograd.Function):
             d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
             ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, None, None, None, None
+        return (
+            dxmat.view(ctx.inp_shape),
+            dgamma,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class RMSNorm(torch.nn.Module):

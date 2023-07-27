@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional, Tuple, Union
 import torch
 
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm
+from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention import MultiHeadAttention
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
@@ -128,6 +128,8 @@ class TransformerLayer(torch.nn.Module):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
     qkv_weight_interleaved : bool, default = `True`
                             if set to `False`, the QKV weight is interpreted as a concatenation of
                             query, key, and value weights along the `0th` dimension. The default
@@ -220,7 +222,8 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
         bias: bool = True,
-        activation: str = 'gelu'
+        activation: str = 'gelu',
+        normalization: str = "LayerNorm",
     ) -> None:
         super().__init__()
 
@@ -312,6 +315,7 @@ class TransformerLayer(torch.nn.Module):
             input_layernorm=not output_layernorm,
             attention_type="self",
             bias=bias,
+            normalization=normalization,
         )
 
         if layer_type == "decoder":
@@ -322,6 +326,7 @@ class TransformerLayer(torch.nn.Module):
                 input_layernorm=True,
                 attention_type="cross",
                 bias=bias,
+                normalization=normalization,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -353,6 +358,7 @@ class TransformerLayer(torch.nn.Module):
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
             activation=activation,
+            normalization=normalization,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -376,8 +382,12 @@ class TransformerLayer(torch.nn.Module):
                     hidden_size, seq_length, micro_batch_size
                 )
 
+        norm_module = {
+                "LayerNorm": LayerNorm,
+                "RMSNorm": RMSNorm,
+        }
         if self.output_layernorm:
-            self.layernorm = LayerNorm(
+            self.layernorm = norm_module[normalization](
                 hidden_size,
                 eps=layernorm_epsilon,
                 sequence_parallel=self.sequence_parallel,

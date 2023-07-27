@@ -523,7 +523,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     bias : bool, default = `True`
           if set to `False`, the layer will not learn an additive bias.
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
-          type of normalization applied.
+                   type of normalization applied.
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.

@@ -990,6 +990,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         bias: bool = True,
+        normalization: str = "LayerNorm",
     ) -> None:
         super().__init__()
         self.layer_number = layer_number
@@ -1044,6 +1045,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:
@@ -1072,6 +1074,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:

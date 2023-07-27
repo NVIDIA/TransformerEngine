@@ -847,7 +847,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     bias : bool, default = `True`
           if set to `False`, the FC1 and FC2 layers will not learn an additive bias.
     normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
-          type of normalization applied.
+                   type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
           Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu'.
