@@ -38,8 +38,8 @@ namespace transformer_engine {
 static __global__ void producer_kernel(void* atomic_ptr, int chunk_i) {
     // Decrement atomic val to signal current output tile finish
     if ( blockIdx.x == 0 && threadIdx.x == 0 ) {
-        ((unsigned int*)atomic_ptr)[chunk_i] = 0;
-        //printf("producer chunk_i:%d val:%d\n",chunk_i,((unsigned int*)atomic_ptr)[chunk_i]);
+    //    ((unsigned int*)atomic_ptr)[chunk_i] = 0;
+        printf("producer chunk_i:%d val:%d\n",chunk_i,((int*)atomic_ptr)[chunk_i]);
     }
 
     // COMM kernel need to explicitely flash gmem.
@@ -247,6 +247,27 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                    CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
+  if ((m_split > 0) || (n_split > 0)) {
+    printf ("!!! cublasLtMatmul m_split %d n_split %d\n", m_split, n_split);
+    if (m_split == 0) m_split=1;
+    if (n_split == 0) n_split=1;
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                   CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_ROWS,
+                                                   &m_split, sizeof(m_split)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                   CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_COLS,
+                                                   &n_split, sizeof(n_split)));
+    if (gemm_producer) {
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_OUT_COUNTERS_POINTER,
+                                                       &counter, sizeof(counter)));
+    }
+    else {
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_IN_COUNTERS_POINTER,
+                                                       &counter, sizeof(counter)));
+    }
+  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -277,8 +298,15 @@ void cublas_gemm(const Tensor *inputA,
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
-  for (int i=0; i<m_split; i++) {
-    producer(counter, i, stream);
+  if (m_split > 1) {
+    for (int i=0; i<m_split; i++) {
+        producer(counter, i, stream);
+    }
+  }
+  else if(n_split > 1) {
+    for (int i=0; i<n_split; i++) {
+        producer(counter, i, stream);
+    }
   }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
