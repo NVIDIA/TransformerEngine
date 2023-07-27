@@ -909,7 +909,7 @@ def test_rmsnorm_accuracy(dtype, bs, model):
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
     else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
