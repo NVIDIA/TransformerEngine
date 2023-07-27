@@ -138,7 +138,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
-            ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
+            ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
         if ub_split_rs:
             tp_world_size = get_distributed_world_size(tp_group)
