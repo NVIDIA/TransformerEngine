@@ -7,6 +7,7 @@ from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import
 )
 from .enums import DTypeInfer, PType
 from .ops import (
+    ParallelismClass,
     NoSupplementaryTensorsOp,
     Op,
     ParameterFreeOp,
@@ -125,9 +126,27 @@ class Input(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         raise RuntimeError("Input op should not be called directly")
 
     def describe_parallellism(self) -> list[list[Op]]:
-        i = Identity("identity", self.input_type, self.output_type).named(self.name)
-        s = Scatter("scatter").named(self.name)
-        t = Transpose("transpose").named(self.name)
+        i = (
+            Identity("identity", self.input_type, self.input_type)
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.input_type, self.input_type)
+            .set_parallelism(ParallelismClass.NORMAL)
+        )
+        s = (
+            Scatter("scatter")
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.input_type, self.input_type)
+            .set_parallelism(ParallelismClass.S)
+        )
+        t = (
+            Transpose("transpose")
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.input_type, self.input_type)
+            .set_parallelism(ParallelismClass.NORMAL)
+        )
         return [
             _normal(i),
             [s, t],
@@ -147,10 +166,34 @@ class Output(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         raise RuntimeError("Output op should not be called directly")
 
     def describe_parallellism(self) -> list[list[Op]]:
-        i = Identity("identity", self.input_type, self.output_type).named(self.name)
-        ar = AllReduce("allreduce").named(self.name)
-        ag = AllGather("allgather").named(self.name)
-        t = Transpose("transpose", self.input_type, self.output_type).named(self.name)
+        i = (
+            Identity("identity", self.output_type, self.output_type)
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.output_type, self.output_type)
+            .set_parallelism(ParallelismClass.NORMAL)
+        )
+        ar = (
+            AllReduce("allreduce")
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.output_type, self.output_type)
+            .set_parallelism(ParallelismClass.AR)
+        )
+        ag = (
+            AllGather("allgather")
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.output_type, self.output_type)
+            .set_parallelism(ParallelismClass.AG)
+        )
+        t = (
+            Transpose("transpose", self.input_type, self.output_type)
+            .set_parent_name(self.name)
+            .set_environment(self.environment)
+            .set_types_inferred(self.output_type, self.output_type)
+            .set_parallelism(ParallelismClass.NORMAL)
+        )
         return [
             _normal(i),
             [t, ag],

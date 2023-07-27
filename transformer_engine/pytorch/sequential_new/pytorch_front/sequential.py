@@ -20,7 +20,7 @@ class Sequential(nn.Module):
     _had_run: bool
     _args: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _distributed_group: dist_group_type | None
-    _env: PytorchExecutionEnv
+    _env: ExecutionEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _compiled_op_list: list[Op]
     _pipeline: ComputePipeline
@@ -73,13 +73,12 @@ class Sequential(nn.Module):
     def __rmul__(self, other: int):
         return self * other
 
-    def forward(self, x: Any) -> Any:
-        self._compile_checked(self.current_execution_env())
+    def forward(self, x: torch.Tensor) -> Any:
+        self._compile_checked(x.shape, self.current_execution_env())
         return self._pipeline(x)
 
     def expand_for_sequential(self, compile_env: ExecutionEnv):
-        self._compile_checked(compile_env)
-        return self._compiled_op_list
+        return Sequential._create_op_list(self._args, compile_env)
 
     def current_execution_env(self):
         return PytorchExecutionEnv(
@@ -90,21 +89,31 @@ class Sequential(nn.Module):
             else None,
         )
 
-    def _compile_checked(self, compile_env: ExecutionEnv):
+    def _compile_checked(self, input_shape: tuple[int, ...], compile_env: ExecutionEnv):
         if not self._had_run:
             self._had_run = True
+            self._env = compile_env
             self._args_during_compilation = self._args
-            modules = Sequential._flatten(self._args)
-            self._compiled_op_list = [
-                op.named(name)
-                for name, module in modules
-                for op in expand(module, compile_env)
-            ]
+            self._compiled_op_list = Sequential._create_op_list(self._args, compile_env)
 
-            self._pipeline = ComputePipeline(self._compiled_op_list, ..., self._env)
+            self._pipeline = ComputePipeline(
+                self._compiled_op_list, input_shape, self._env
+            )
         else:
             assert self._env == compile_env
             assert self._args_during_compilation == self._args
+
+    @staticmethod
+    def _create_op_list(
+        args: tuple[nn.Module | OrderedDict[str, nn.Module], ...],
+        compile_env: ExecutionEnv,
+    ):
+        modules = Sequential._flatten(args)
+        return [
+            op.set_parent_name(name).set_environment(compile_env)
+            for name, module in modules
+            for op in expand(module, compile_env)
+        ]
 
     @staticmethod
     def _flatten(

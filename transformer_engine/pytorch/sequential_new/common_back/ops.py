@@ -3,9 +3,11 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from enum import Enum
 import enum
-from typing import Generator, final
-
+from functools import partial
+from types import NoneType
+from typing import Generator, NewType, final
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
+from .generic_environment import ExecutionEnv
 from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
     GenericTensor,
     TensorDescriptor,
@@ -22,6 +24,8 @@ Parallelism = tuple[PType, PType]
 # Op Protocol
 class _OpState(Enum):
     POST_INIT = enum.auto()
+    POST_SET_PARENT_NAME = enum.auto()
+    POST_SET_ENVIRONMENT = enum.auto()
     POST_SET_TYPES_INFERRED = enum.auto()
     POST_SET_PARALLELISM = enum.auto()
     POST_DESCRIBE_PARALLELISM = enum.auto()
@@ -44,6 +48,10 @@ class _OpState(Enum):
         return self.value < other.value
 
 
+class Unset:
+    pass
+
+
 class Op(ABC):
     """
     An Op represents a transformation applied to the main data tensor.
@@ -54,11 +62,30 @@ class Op(ABC):
     """
 
     name: str
+    __environment: ExecutionEnv | Unset
+    __dist_group_size: int | Unset | None
     __input_type: DType | DTypeInfer
     __output_type: DType | DTypeInfer
-    __parallellism: Parallelism | None
-    __input_shape: tuple[int, ...] | None
+    __parallellism: Parallelism | Unset
+    __input_shape: tuple[int, ...] | Unset
     __state: _OpState
+
+    @property
+    def environment(self):
+        assert self.__state >= _OpState.POST_SET_ENVIRONMENT
+        assert not isinstance(self.__environment, Unset)
+        return self.__environment
+
+    @property
+    def dist_group_size(self):
+        assert self.__state >= _OpState.POST_SET_ENVIRONMENT
+        assert not isinstance(self.__dist_group_size, Unset)
+        if self.__dist_group_size is None:
+            raise ValueError(
+                "Operation is not distributed, but distributed group size is requested"
+            )
+        else:
+            return self.__dist_group_size
 
     @property
     def raw_input_type(self):
@@ -95,13 +122,13 @@ class Op(ABC):
     @property
     def parallellism(self):
         assert self.__state >= _OpState.POST_SET_PARALLELISM
-        assert self.__parallellism is not None
+        assert not isinstance(self.__parallellism, Unset)
         return self.__parallellism
 
     @property
     def input_shape(self):
         assert self.__state >= _OpState.POST_SET_INPUT_SHAPE
-        assert self.__input_shape is not None
+        assert not isinstance(self.__input_shape, Unset)
         return self.__input_shape
 
     def __init__(
@@ -113,26 +140,48 @@ class Op(ABC):
         self.name = relative_name
         self.__input_type = input_type
         self.__output_type = output_type
-        self.__parallellism = None
-        self.__input_shape = None
+        self.__environment = Unset()
+        self.__dist_group_size = Unset()
+        self.__parallellism = Unset()
+        self.__input_shape = Unset()
         self.__state = _OpState.POST_INIT
 
-    def named(self, parent_module_name: str):
+    def set_parent_name(self, parent_module_name: str):
+        assert self.__state == _OpState.POST_INIT
         self.name = parent_module_name + "." + self.name
+        self.__state = _OpState.POST_SET_PARENT_NAME
         return self
+
+    def set_environment(self, env: ExecutionEnv):
+        assert self.__state == _OpState.POST_SET_PARENT_NAME
+        self.__environment = env
+        self.__state = _OpState.POST_SET_ENVIRONMENT
+        self.__dist_group_size = (
+            self.__environment.distributed_group.size()
+            if self.__environment.distributed_group is not None
+            else None
+        )
+        self._post_set_environment_hook()
+        return self
+
+    @abstractmethod
+    def _post_set_environment_hook(self) -> None:
+        raise NotImplementedError()
 
     def set_types_inferred(
         self, inferred_input_type: DType, inferred_output_type: DType
     ):
-        assert self.__state == _OpState.POST_INIT
+        assert self.__state == _OpState.POST_SET_ENVIRONMENT
         self.__input_type = inferred_input_type
         self.__output_type = inferred_output_type
         self.__state = _OpState.POST_SET_TYPES_INFERRED
+        return self
 
     def set_parallelism(self, chosen_parallelism: Parallelism):
         assert self.__state == _OpState.POST_SET_TYPES_INFERRED
         self.__parallellism = chosen_parallelism
         self.__state = _OpState.POST_SET_PARALLELISM
+        return self
 
     def _pre_describe_parallellism_hook(self):
         assert self.__state == _OpState.POST_SET_TYPES_INFERRED
@@ -146,6 +195,7 @@ class Op(ABC):
         assert self.__state == _OpState.POST_SET_PARALLELISM
         self.__input_shape = input_shape
         self.__state = _OpState.POST_SET_INPUT_SHAPE
+        return self
 
     def _pre_describe_params_hook(self):
         assert self.__state == _OpState.POST_SET_INPUT_SHAPE
@@ -233,27 +283,28 @@ class NoSupplementaryTensorsOp(Op):
 
 # Parallelism base classes
 
-NORMAL = (PType.NA, PType.NA)
-ROW_PARALLEL = (PType.NRS, PType.NRS)
-COLUMN_PARALLEL = (PType.NCS, PType.NCS)
+
+class ParallelismClass:
+    NORMAL = (PType.NA, PType.NA)
+    ROWP = (PType.NRS, PType.NRS)
+    COLP = (PType.NCS, PType.NCS)
+    CGEMM = (PType.NA, PType.NCS)
+    RGEMM = (PType.NCS, PType.PA)
+    S = (PType.NA, PType.NRS)
+    RS = (PType.PA, PType.NRS)
+    AG = (PType.NRS, PType.NA)
+    AR = (PType.PA, PType.NA)
 
 
-def _normal(op: Op):
+def __single_parallel(parallelism: Parallelism, op: Op):
     op = deepcopy(op)
-    op.set_parallelism(NORMAL)
+    op.set_parallelism(parallelism)
     return [op]
 
 
-def _row_parallel(op: Op):
-    op = deepcopy(op)
-    op.set_parallelism(ROW_PARALLEL)
-    return [op]
-
-
-def _column_parallel(op: Op):
-    op = deepcopy(op)
-    op.set_parallelism(COLUMN_PARALLEL)
-    return [op]
+_normal = partial(__single_parallel, ParallelismClass.NORMAL)
+_row_parallel = partial(__single_parallel, ParallelismClass.ROWP)
+_column_parallel = partial(__single_parallel, ParallelismClass.COLP)
 
 
 class PointwiseOp(Op):
@@ -274,7 +325,12 @@ class ColumnwiseOp(Op):
         return [_normal(self), _column_parallel(self)]
 
 
-class NonParallelOp(Op):
+class EnvObliviousOp(Op):
+    def _post_set_environment_hook(self) -> None:
+        return
+
+
+class NonParallelOp(EnvObliviousOp):
     def describe_parallellism(self):
         self._pre_describe_parallellism_hook()
         return [_normal(self)]
@@ -282,7 +338,13 @@ class NonParallelOp(Op):
 
 # Identity
 @final
-class Identity(PointwiseOp, ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+class Identity(
+    PointwiseOp,
+    ParameterFreeOp,
+    ShapePreserveOp,
+    NoSupplementaryTensorsOp,
+    EnvObliviousOp,
+):
     def training(
         self,
         x: GenericTensor,
@@ -344,7 +406,7 @@ class Transpose(NonParallelOp, ParameterFreeOp):
 
 # Normalization
 @final
-class LayerNorm(RowwiseOp, ShapePreserveOp):
+class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     weight: GenericTensor
     weight_grad: GenericTensor
     bias: GenericTensor
@@ -367,7 +429,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp):
 
     def describe_params(
         self,
-    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+    ) -> dict[str, TensorDescriptor]:
         self._pre_describe_params_hook()
         return {
             "weight": TensorDescriptor(
@@ -380,13 +442,13 @@ class LayerNorm(RowwiseOp, ShapePreserveOp):
 
     def describe_supplementary_tensors_training(
         self,
-    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+    ) -> dict[str, TensorDescriptor]:
         self._pre_describe_supplementary_tensors_hook()
         return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
 
     def describe_supplementary_tensors_inference(
         self,
-    ) -> dict[str, TensorDescriptor]:  # TODO: take self.parallelism into account
+    ) -> dict[str, TensorDescriptor]:
         self._pre_describe_supplementary_tensors_hook()
         if self.output_type != self.input_type:
             return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
@@ -423,47 +485,38 @@ class LayerNorm(RowwiseOp, ShapePreserveOp):
 
 
 # Linear
-CGEMM = (PType.NA, PType.NCS)
-RGEMM = (PType.NA, PType.PA)
-RGEMM_SPLIT = (PType.NCS, PType.PA)
-RGEMM_RS = (PType.NCS, PType.NRS)
-AG_CGEMM = (PType.NRS, PType.NCS)
-
-
-def _cgemm(op: Gemm) -> list[Op]:
-    op = deepcopy(op)
-    op.set_parallelism(CGEMM)
-    return [op]
-
-
-def _rgemm(op: Gemm) -> list[Op]:
-    op = deepcopy(op)
-    op.set_parallelism(RGEMM)
-    return [op]
-
-
-def _rgemm_split(op: Gemm) -> list[Op]:
-    op = deepcopy(op)
-    op.set_parallelism(RGEMM_SPLIT)
-    return [op]
+_rgemm = partial(__single_parallel, ParallelismClass.RGEMM)
+_cgemm = partial(__single_parallel, ParallelismClass.CGEMM)
 
 
 def _rgemm_rs(op: Gemm) -> list[Op]:
     op = deepcopy(op)
-    op.set_parallelism(RGEMM_RS)
-    rs = ReduceScatter()
-    return [op, rs]
+    op.set_parallelism(ParallelismClass.RGEMM)
+    rs = (
+        ReduceScatter("post-rs", op.output_type, op.output_type)
+        .set_parent_name(op.name)
+        .set_environment(op.environment)
+        .set_types_inferred(op.output_type, op.output_type)
+        .set_parallelism(ParallelismClass.RS)
+    )
+    return _rgemm(op) + [rs]
 
 
 def _ag_cgemm(op: Gemm) -> list[Op]:
     op = deepcopy(op)
-    op.set_parallelism(AG_CGEMM)
-    ag = AllGather()
-    return [ag, op]
+    ag = (
+        AllGather("pre-ag", op.input_type, op.input_type)
+        .set_parent_name(op.name)
+        .set_environment(op.environment)
+        .set_types_inferred(op.output_type, op.output_type)
+        .set_parallelism(ParallelismClass.AG)
+    )
+    op.set_parallelism(ParallelismClass.CGEMM)
+    return [ag] + _cgemm(op)
 
 
 @final
-class Gemm(Op):  # TODO: take self.parallelism into account
+class Gemm(Op):
     weight: GenericTensor
     weight_grad: GenericTensor
     weight_t: GenericTensor
@@ -486,13 +539,37 @@ class Gemm(Op):  # TODO: take self.parallelism into account
         self.param_dtype = param_type
         self.init_method = init_method
 
+    def _post_set_environment_hook(self):
+        assert self.parallellism in [
+            ParallelismClass.NORMAL,
+            ParallelismClass.RGEMM,
+            ParallelismClass.CGEMM,
+        ]
+
+        workers = (
+            self.dist_group_size
+            if self.parallellism in [ParallelismClass.RGEMM, ParallelismClass.CGEMM]
+            else 1
+        )
+        if self.parallellism == ParallelismClass.RGEMM:
+            if self.in_features % workers != 0:
+                raise ValueError(
+                    "Number of input features must be divisible by the distributed group size"
+                )
+            self.in_features //= workers
+        elif self.parallellism == ParallelismClass.CGEMM:
+            if self.out_features % workers != 0:
+                raise ValueError(
+                    "Number of output features must be divisible by the distributed group size"
+                )
+            self.out_features //= workers
+
     def describe_parallellism(self):
         self._pre_describe_parallellism_hook()
         return [
             _normal(self),
-            _cgemm(self),
             _rgemm(self),
-            _rgemm_split(self),
+            _cgemm(self),
             _rgemm_rs(self),
             _ag_cgemm(self),
         ]
@@ -571,6 +648,21 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         self.features = features
         self.init_method = init_method
 
+    def _post_set_environment_hook(self):
+        assert self.parallellism in [
+            ParallelismClass.NORMAL,
+            ParallelismClass.ROWP,
+            ParallelismClass.COLP,
+        ]
+        workers = (
+            self.dist_group_size if self.parallellism == ParallelismClass.COLP else 1
+        )
+        if self.features % workers != 0:
+            raise ValueError(
+                "Number of features must be divisible by the distributed group size"
+            )
+        self.features //= workers
+
     def describe_params(self) -> dict[str, TensorDescriptor]:
         self._pre_describe_params_hook()
         return {
@@ -626,7 +718,7 @@ class DotProductAttention(ParameterFreeOp, ShapePreserveOp):  # TODO
 
 # Residual
 @final
-class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     end: ResidualEnd | None = None
     fwd_residue: GenericTensor
 
@@ -658,7 +750,7 @@ class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
 
 
 @final
-class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     begin: ResidualBegin
     bwd_residue: GenericTensor
 
@@ -691,7 +783,13 @@ class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
 
 # Dropout
 @final
-class Dropout(PointwiseOp, ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+class Dropout(
+    PointwiseOp,
+    ParameterFreeOp,
+    ShapePreserveOp,
+    NoSupplementaryTensorsOp,
+    EnvObliviousOp,
+):
     p: float
 
     def __init__(self, name: str, p: float):
@@ -713,7 +811,7 @@ class Dropout(PointwiseOp, ParameterFreeOp, ShapePreserveOp, NoSupplementaryTens
 
 # Activation
 @final
-class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     act: GenericTensor
 
     def training(
@@ -749,7 +847,7 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
 
 
 @final
-class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
+class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     act: GenericTensor
 
     def training(
@@ -786,7 +884,7 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp):
 
 # Cast
 @final
-class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp):
+class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp, EnvObliviousOp):
     act: GenericTensor
 
     def training(
@@ -813,21 +911,52 @@ class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp):
 
 
 # Communication
-@final
-class ReduceScatter(Op):
-    ...
+
+_scatter = partial(__single_parallel, ParallelismClass.S)
+_reduce_scatter = partial(__single_parallel, ParallelismClass.RS)
+_all_gather = partial(__single_parallel, ParallelismClass.AG)
+_all_reduce = partial(__single_parallel, ParallelismClass.AR)
+
+
+def row_split_shape(shape: tuple[int, ...], workers: int) -> tuple[int, ...]:
+    assert len(shape) >= 2
+    assert shape[-2] % workers == 0
+    return shape[:-2] + (shape[-2] // workers, shape[-1])
+
+
+def row_merge_shape(shape: tuple[int, ...], workers: int) -> tuple[int, ...]:
+    assert len(shape) >= 2
+    return shape[:-2] + (shape[-2] * workers, shape[-1])
 
 
 @final
-class AllGather(Op):
-    ...
+class Scatter(ParameterFreeOp, EnvObliviousOp):
+    def describe_parallellism(self) -> list[ExecutionFlow]:
+        return [_scatter(self)]
+
+    def describe_activation_shape(self) -> tuple[int, ...]:
+        return row_split_shape(self.input_shape, self.dist_group_size)
 
 
 @final
-class AllReduce(Op):
-    ...
+class ReduceScatter(ParameterFreeOp, EnvObliviousOp):
+    def describe_parallellism(self) -> list[ExecutionFlow]:
+        return [_reduce_scatter(self)]
+
+    def describe_activation_shape(self) -> tuple[int, ...]:
+        return row_split_shape(self.input_shape, self.dist_group_size)
 
 
 @final
-class Scatter(Op):
-    ...
+class AllGather(ParameterFreeOp, EnvObliviousOp):
+    def describe_parallellism(self) -> list[ExecutionFlow]:
+        return [_all_gather(self)]
+
+    def describe_activation_shape(self) -> tuple[int, ...]:
+        return row_merge_shape(self.input_shape, self.dist_group_size)
+
+
+@final
+class AllReduce(ParameterFreeOp, EnvObliviousOp, ShapePreserveOp):
+    def describe_parallellism(self) -> list[ExecutionFlow]:
+        return [_all_reduce(self)]
