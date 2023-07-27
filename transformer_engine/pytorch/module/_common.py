@@ -57,6 +57,8 @@ def _apply_normalization(inputmat:torch.Tensor,
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
         if is_grad_enabled:
+            output_key = "ln_out" if normalization == "LayerNorm" else "rmsnorm_out"
+            output_kwarg = {output_key: ln_out}
             output = normalization_func(
                 *inputs,
                 eps,
@@ -65,7 +67,7 @@ def _apply_normalization(inputmat:torch.Tensor,
                 fp8_dtype_forward,
                 fwd_ln_sm_margin,
                 zero_centered_gamma,
-                ln_out = ln_out
+                **output_kwarg,
             )
         else:
             return normalization_func(
