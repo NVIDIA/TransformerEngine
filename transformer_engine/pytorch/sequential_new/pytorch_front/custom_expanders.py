@@ -5,7 +5,7 @@ from torch import nn
 from ..common_back.enums import DType, DTypeInfer
 from .custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from .custom_expand_for_sequential import expand
-from ..common_back.compile_env import CompileEnv
+from ..common_back.generic_environment import ExecutionEnv
 from ..common_back import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ...attention import DotProductAttention
@@ -26,7 +26,7 @@ def _gemm_param_init_methods(te: bool, in_features: int):
         )
 
 
-def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_linear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, nn.Linear) or isinstance(module, Linear)
     has_bias = (
         getattr(module, "bias") is not None
@@ -68,7 +68,7 @@ def expand_linear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         ]
 
 
-def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_layerNorm(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, nn.LayerNorm) or isinstance(module, LayerNorm)
 
     hidden_size = (
@@ -96,7 +96,7 @@ def expand_layerNorm(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
     ]
 
 
-def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, LayerNormLinear)
 
     has_bias = module.use_bias
@@ -151,7 +151,7 @@ def expand_layerNormLinear(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         ]
 
 
-def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, LayerNormMLP)
 
     has_bias = module.use_bias
@@ -231,12 +231,12 @@ def expand_layerNormMLP(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
         ]
 
 
-def expand_sequential(module: nn.Module, env: CompileEnv):
+def expand_sequential(module: nn.Module, env: ExecutionEnv):
     assert isinstance(module, nn.Sequential)
     return [op for submodule in module for op in expand(submodule, env)]
 
 
-def expand_dot_product_attention(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_dot_product_attention(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, DotProductAttention)
 
     features_per_head = module.hidden_size_per_attention_head
@@ -249,7 +249,7 @@ def expand_dot_product_attention(module: nn.Module, env: CompileEnv) -> list[ops
     ]
 
 
-def expand_dropout(module: nn.Module, env: CompileEnv) -> list[ops.Op]:
+def expand_dropout(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     assert isinstance(module, nn.Dropout)
     return [ops.Dropout("dropout", module.p)]
 

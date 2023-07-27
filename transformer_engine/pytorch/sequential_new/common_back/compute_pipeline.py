@@ -1,6 +1,7 @@
 from typing import Any
 from .ops import Op, Cast
 from .enums import DTypeInfer
+from .generic_environment import ExecutionEnv
 from .generic_tensor import GenericTensor, TensorDescriptor
 from .tensor_manager import TensorManager
 from .model_parallel_transform import model_parallel_transform
@@ -8,16 +9,13 @@ from .model_parallel_transform import model_parallel_transform
 
 class ComputePipeline:
     def __init__(
-        self,
-        ops: list[Op],
-        input_shape: tuple[int, ...],
-        training: bool,
-        model_parallel: bool,
+        self, ops: list[Op], input_shape: tuple[int, ...], environment: ExecutionEnv
     ):
-        self._training = training
         self._input_shape = input_shape
-        self._model_parallel = model_parallel
-        self._fwd = ComputePipeline.compile(ops, model_parallel)
+        self._environment = environment
+        self._fwd = ComputePipeline.compile(
+            ops, environment.distributed_group is not None
+        )
         self._tensor_manager = TensorManager()
         self.allocate_tensors()
 
@@ -36,7 +34,7 @@ class ComputePipeline:
 
             supplementary_tensors.append(
                 op.describe_supplementary_tensors_training()
-                if self._training
+                if self._environment.training
                 else op.describe_supplementary_tensors_inference()
             )
 

@@ -1,10 +1,15 @@
 from typing import Any, OrderedDict, overload
+import torch
 
 import torch.nn as nn
 
+from ...fp8 import is_fp8_enabled
+
 from .expand_for_sequential import expand
 from ..common_back.compute_pipeline import ComputePipeline
-from ..common_back.compile_env import CompileEnv
+from ..pytorch_back.environment import PytorchExecutionEnv, PytorchDistributedGroup
+from ..common_back.generic_environment import ExecutionEnv
+from ...distributed import dist_group_type
 from ..common_back.ops import Op
 
 
@@ -14,14 +19,16 @@ class Sequential(nn.Module):
 
     _had_run: bool
     _args: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
-    _model_parallel: bool
-    _compile_env: CompileEnv
+    _distributed_group: dist_group_type | None
+    _env: PytorchExecutionEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
     _compiled_op_list: list[Op]
     _pipeline: ComputePipeline
 
     @overload
-    def __init__(self, *modules: nn.Module, model_parallel: bool = False) -> None:
+    def __init__(
+        self, *modules: nn.Module, distributed_group: dist_group_type | None = None
+    ) -> None:
         ...
 
     @overload
@@ -30,52 +37,62 @@ class Sequential(nn.Module):
         module_dict: OrderedDict[str, nn.Module],
         /,
         *,
-        model_parallel: bool = False,
+        distributed_group: dist_group_type | None = None,
     ) -> None:
         ...
 
     def __init__(
         self,
         *args: nn.Module | OrderedDict[str, nn.Module],
-        model_parallel: bool = False,
+        distributed_group: dist_group_type | None = None,
     ):
         super().__init__()  # type: ignore
 
         self._had_run = False
         self._args = args
-        self._model_parallel = model_parallel
+        self._distributed_group = distributed_group
 
     def __len__(self):
         return len(self._modules)
 
     def __add__(self, other: "Sequential") -> "Sequential":
-        return Sequential(
-            self, other, model_parallel=self._model_parallel and other._model_parallel
-        )
+        if self._distributed_group is not other._distributed_group:
+            raise ValueError(
+                "Cannot add two sequentials with different distributed groups"
+            )
+        return Sequential(self, other, distributed_group=self._distributed_group)
 
     def __mul__(self, other: int):
         if other <= 0:
             raise ValueError("Repetition factor must be >= 1")
         else:
             return Sequential(
-                *(self for _ in range(other)), model_parallel=self._model_parallel
+                *(self for _ in range(other)), distributed_group=self._distributed_group
             )
 
     def __rmul__(self, other: int):
         return self * other
 
     def forward(self, x: Any) -> Any:
-        self._compile_checked(CompileEnv.current())
+        self._compile_checked(self.current_execution_env())
         return self._pipeline(x)
 
-    def expand_for_sequential(self, compile_env: CompileEnv):
+    def expand_for_sequential(self, compile_env: ExecutionEnv):
         self._compile_checked(compile_env)
         return self._compiled_op_list
 
-    def _compile_checked(self, compile_env: CompileEnv):
+    def current_execution_env(self):
+        return PytorchExecutionEnv(
+            is_fp8_enabled(),
+            torch.is_grad_enabled(),
+            PytorchDistributedGroup(self._distributed_group)
+            if self._distributed_group is not None
+            else None,
+        )
+
+    def _compile_checked(self, compile_env: ExecutionEnv):
         if not self._had_run:
             self._had_run = True
-            self._compile_env = compile_env
             self._args_during_compilation = self._args
             modules = Sequential._flatten(self._args)
             self._compiled_op_list = [
@@ -84,11 +101,9 @@ class Sequential(nn.Module):
                 for op in expand(module, compile_env)
             ]
 
-            self._pipeline = ComputePipeline(
-                self._compiled_op_list, ..., ..., self._model_parallel
-            )
+            self._pipeline = ComputePipeline(self._compiled_op_list, ..., self._env)
         else:
-            assert self._compile_env == compile_env
+            assert self._env == compile_env
             assert self._args_during_compilation == self._args
 
     @staticmethod

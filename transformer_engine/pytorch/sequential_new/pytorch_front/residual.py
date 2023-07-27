@@ -1,6 +1,6 @@
 from torch import nn
 
-from ..common_back.compile_env import CompileEnv
+from ..common_back.generic_environment import ExecutionEnv
 from .expand_for_sequential import expand
 from ..common_back.ops import ResidualBegin, ResidualEnd
 
@@ -10,7 +10,7 @@ class Residual(nn.Module):
         super().__init__()  # type: ignore
         self.module_list = [*modules]
 
-    def expand_for_sequential(self, compile_env: CompileEnv):
+    def expand_for_sequential(self, compile_env: ExecutionEnv):
         begin = ResidualBegin("residual_begin")
         end = ResidualEnd("residual_end", begin)
         begin.end = end
