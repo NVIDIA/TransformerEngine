@@ -95,6 +95,7 @@ batch_sizes = [1, 2]
 all_boolean = [True, False]
 
 all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+all_normalizations = ["LayerNorm", "RMSNorm"]
 
 def _disable_wgrads(block):
     for p in block.parameters():
@@ -314,9 +315,15 @@ def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_d
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
-def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad,
+                                 zero_centered_gamma, skip_dgrad,
+                                 normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -330,6 +337,7 @@ def test_sanity_layernorm_linear(dtype, bs, fp8_recipe, model, skip_wgrad, zero_
             eps=config.eps,
             init_method=init_method,
             zero_centered_gamma=zero_centered_gamma,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -370,9 +378,15 @@ def test_sanity_linear(dtype, bs, fp8_recipe, model, skip_wgrad, skip_dgrad):
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("activation", all_activations)
-def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad, activation):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad,
+                              zero_centered_gamma, skip_dgrad, activation,
+                              normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -389,6 +403,7 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
             output_layer_init_method=output_layer_init_method,
             zero_centered_gamma=zero_centered_gamma,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -404,9 +419,15 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad, zero_cen
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("activation", all_activations)
-def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma, bias, activation):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad,
+                    zero_centered_gamma, bias, activation,
+                    normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -430,6 +451,7 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamm
             zero_centered_gamma=zero_centered_gamma,
             bias=bias,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -444,9 +466,14 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamm
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
+                     normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -468,6 +495,7 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
             apply_residual_connection_post_layernorm=True,
             output_layernorm=True,
             zero_centered_gamma=zero_centered_gamma,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -482,9 +510,14 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
+                   normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -507,6 +540,7 @@ def test_sanity_T5(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma
             output_layernorm=False,
             layer_type="decoder",
             zero_centered_gamma=zero_centered_gamma,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -669,9 +703,14 @@ def test_sanity_gradient_accumulation_fusion(dtype, bs, fp8_recipe, model, skip_
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
+                        normalization):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     config = model_configs[model]
 
@@ -694,6 +733,7 @@ def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_
             output_layernorm=False,
             zero_centered_gamma=zero_centered_gamma,
             fuse_qkv_params=True,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()

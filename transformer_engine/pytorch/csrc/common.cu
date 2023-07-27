@@ -137,3 +137,11 @@ at::Tensor allocateTorchTensor(int M,
     return at::empty({static_cast<int64_t>(M)},
                      at::CUDA(GetATenDType(dtype)));
 }
+
+void *getDataPtr(at::Tensor t) {
+    if (t.numel() > 0) {
+        return t.data_ptr();
+    } else {
+        return nullptr;
+    }
+}

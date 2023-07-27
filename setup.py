@@ -461,16 +461,20 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags=cmake_flags,
     )
 
+def _all_files_in_dir(path):
+    return list(path.iterdir())
+
 def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CUDA extension for PyTorch support"""
 
     # Source files
     src_dir = root_path / "transformer_engine" / "pytorch" / "csrc"
+    extensions_dir = src_dir / "extensions"
     sources = [
-        src_dir / "extensions.cu",
         src_dir / "common.cu",
         src_dir / "ts_fp8_op.cpp",
-    ]
+    ] + \
+    _all_files_in_dir(extensions_dir)
 
     # Header files
     include_dirs = [
