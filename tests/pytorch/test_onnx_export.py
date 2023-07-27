@@ -71,6 +71,8 @@ skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
+all_normalizations = ["LayerNorm", "RMSNorm"]
+
 
 @pytest.fixture()
 def seed_default_rng():
@@ -676,6 +678,90 @@ def test_export_layernorm(
         validate_result(
             fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
 
+@pytest.mark.parametrize("scale_factor", [448, 112])
+@pytest.mark.parametrize(
+    "use_fp8, precision,             atol", [
+    [False,   torch.float32,         1e-7],
+    [False,   torch.float16,         1e-7],
+    [False,   torch.bfloat16,        1e-7],
+    [False,   "fake-torch.bfloat16", 1e-7],
+    [True,    torch.float32,         1e-7],
+    [True,    torch.float16,         1e-7],
+    [True,    torch.bfloat16,        1e-2],
+    [True,    "fake-torch.bfloat16", 1e-2]
+])
+def test_export_rmsnorm(
+    seed_default_rng,
+    use_fp8: bool,
+    scale_factor: float,
+    precision: torch.dtype,
+    atol: float
+):
+    fake_bf16_io = precision == "fake-torch.bfloat16"
+    # reset precision to torch.bfloat16 after capturing fake BF16 mode
+    precision = torch.bfloat16 if precision == "fake-torch.bfloat16" else precision
+
+    # Skip FP8 tests on non-hopper devices
+    if use_fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    # Set dimensions (these are arbitrary).
+    inp_shape = [64, 32]
+
+    class Test_RMSnorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            eps = 1e-6 # An arbitrary small value
+            dtype = torch.float if fake_bf16_io else precision
+            self.ln = te.RMSNorm(inp_shape[1], eps, params_dtype=dtype).eval().cuda()
+
+        def forward(self, inp):
+            ret = self.ln(inp)
+            return ret
+
+    class TestFP8_RMSnorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            normalized_shape = torch.Size(inp.shape[1:])
+            self.weight = torch.randn(*normalized_shape, device="cuda",
+                dtype=torch.float32 if fake_bf16_io else precision)
+            self.eps = 1e-6 # An arbitrary small value
+
+            self.fp8_tensor = tex.FP8FwdTensors.GEMM1_INPUT
+            self.meta = create_meta(scale_factor)
+            self.fp8_type = tex.DType.kFloat8E4M3
+
+        def forward(self, inp):
+            ret = texcpp.rmsnorm_fwd_fp8_inf(
+                inp,
+                self.weight,
+                self.eps,
+                self.meta,
+                self.fp8_tensor,
+                self.fp8_type,
+                False)
+
+            ret = cast_from_fp8(
+                ret,
+                self.meta,
+                self.fp8_tensor,
+                self.fp8_type,
+                as_te_type(precision))
+            if fake_bf16_io:
+                ret = ret.type(torch.float32)
+            return ret
+
+    inp = torch.randn(*inp_shape, device="cuda", dtype=torch.float32 if fake_bf16_io else precision)
+    model = TestFP8_RMSnorm() if use_fp8 else Test_RMSnorm()
+    high_prec_str = dtype2str(precision, fake_bf16_io=fake_bf16_io)
+    fp8_str = f"_fp8-{scale_factor}" if use_fp8 else ""
+    fname = f"te.layernorm{fp8_str}{high_prec_str}.onnx"
+    do_export(model, inp, fname, use_fp8=use_fp8)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+    serialize_inputs_outputs(fname, inp, te_outputs)
+    if fake_bf16_io or precision != torch.bfloat16:
+        validate_result(
+            fname, inp, model, atol=atol, is_fp8=use_fp8, allow_cnt_errors=3, te_outputs=te_outputs)
 
 @skip_FP8
 @pytest.mark.parametrize("softmax_fn", [
@@ -916,6 +1002,7 @@ def test_export_linear(
     (torch.bfloat16, False),
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("normalization", all_normalizations)
 def test_export_layernorm_linear(
     seed_default_rng,
     scale_factor: float,
@@ -924,11 +1011,15 @@ def test_export_layernorm_linear(
     return_bias: bool,
     return_layernorm_output: bool,
     precision: torch.dtype,
-    zero_centered_gamma: bool
+    zero_centered_gamma: bool,
+    normalization: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -950,6 +1041,7 @@ def test_export_layernorm_linear(
             return_layernorm_output=return_layernorm_output,
             params_dtype=precision,
             zero_centered_gamma=zero_centered_gamma,
+            normalization=normalization,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=1)
@@ -980,6 +1072,7 @@ def test_export_layernorm_linear(
 ])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("activation", supported_activations)
+@pytest.mark.parametrize("normalization", all_normalizations)
 def test_export_layernorm_mlp(
     seed_default_rng,
     scale_factor: float,
@@ -990,10 +1083,14 @@ def test_export_layernorm_mlp(
     precision: torch.dtype,
     zero_centered_gamma: bool,
     activation: str,
+    normalization: str,
 ):
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    if normalization == "RMSNorm" and zero_centered_gamma:
+        pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -1016,6 +1113,7 @@ def test_export_layernorm_mlp(
             params_dtype=precision,
             zero_centered_gamma=zero_centered_gamma,
             activation=activation,
+            normalization=normalization,
         ).to(device='cuda')
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=2)
