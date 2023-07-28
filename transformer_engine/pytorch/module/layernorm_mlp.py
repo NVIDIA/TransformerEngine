@@ -61,7 +61,7 @@ def _act_func(activation: str):
             'swiglu': (tex.swiglu, tex.dswiglu),
     }
     if activation not in funcs:
-        raise "Activation type " + activation + " is not supported!"
+        raise NotImplementedError("Activation type " + activation + " is not supported!")
     return funcs[activation]
 
 
