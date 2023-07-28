@@ -21,7 +21,7 @@ from transformer_engine.pytorch.utils import (
     attention_mask_func,
 )
 from transformer_engine.pytorch import (
-    DotProductAttention, Linear, LayerNormLinear, LayerNormMLP, TransformerLayer
+    DotProductAttention, Linear, LayerNormLinear, LayerNormMLP, TransformerLayer, RMSNorm
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
@@ -59,6 +59,8 @@ all_boolean = [True, False]
 
 all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
+all_normalizations = ["LayerNorm", "RMSNorm"]
+
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
@@ -74,7 +76,16 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for t1, t2 in zip(l1, l2):
-        assert torch.allclose(t1, t2, atol=atol), "Outputs not close enough."
+        result = torch.allclose(t1, t2, atol=atol)
+        if not result:
+            diff = torch.abs(t1 - t2).flatten()
+            m = torch.argmax(diff)
+            msg = (f"Outputs not close enough."
+                   f"Location of the maximum difference: {m.item()} "
+                   f"with {t1.flatten()[m].item()} vs {t2.flatten()[m].item()} "
+                   f"(diff {diff[m].item()})."
+            )
+            raise AssertionError(msg)
 
 
 def _set_cuda_rng_state(new_state, device=-1):
@@ -310,11 +321,38 @@ class TorchDotProductAttention(torch.nn.Module):
 
         return context_layer
 
+# Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
+class TorchRMSNorm(nn.Module):
+    def __init__(self, in_features, eps=1e-5):
+        super().__init__()
+
+        self.eps = eps
+        self.in_features = in_features
+
+        self.weight = nn.Parameter(torch.ones(in_features))
+        self.register_parameter("weight", self.weight)
+
+    def forward(self, x):
+        norm_x = x.norm(2, dim=-1, keepdim=True)
+        d_x = self.in_features
+
+        rms_x = norm_x * d_x ** (-1. / 2)
+        x_normed = x / (rms_x + self.eps)
+
+        return self.weight * x_normed
 
 class TorchLayerNormLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, eps: float, bias: bool = True):
+    def __init__(self, in_features: int, out_features: int,
+                 eps: float, bias: bool = True,
+                 normalization: str = "LayerNorm"):
         super().__init__()
-        self.layernorm = nn.LayerNorm(in_features, eps=eps)
+        if normalization == "LayerNorm":
+            self.layernorm = nn.LayerNorm(in_features, eps=eps)
+        elif normalization == "RMSNorm":
+            self.layernorm = TorchRMSNorm(in_features, eps=eps)
+        else:
+            raise RuntimeError("Unsupported normalization")
+
         self.linear = nn.Linear(in_features, out_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -355,9 +393,15 @@ class TorchGLU(nn.Module):
 
 class TorchLayerNormMLP(nn.Module):
     def __init__(self, hidden_size: int, ffn_hidden_size: int,
-                 eps: float = 1e-5, activation = 'gelu'):
+                 eps: float = 1e-5, activation = 'gelu',
+                 normalization: str = "LayerNorm"):
         super().__init__()
-        self.ln = nn.LayerNorm(hidden_size, eps=eps)
+        if normalization == "LayerNorm":
+            self.ln = nn.LayerNorm(hidden_size, eps=eps)
+        elif normalization == "RMSNorm":
+            self.ln = TorchRMSNorm(hidden_size, eps=eps)
+        else:
+            raise RuntimeError("Unsupported normalization")
         if 'glu' in activation:
             fc1_output_features = 2 * ffn_hidden_size
             self.gelu = TorchGLU(activation)
@@ -830,11 +874,48 @@ def test_linear_accuracy(dtype, bs, model):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_rmsnorm_accuracy(dtype, bs, model):
+    config = model_configs[model]
+
+    te_rmsnorm = (
+        RMSNorm(
+            config.hidden_size,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_rmsnorm = (
+        TorchRMSNorm(
+            config.hidden_size,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_rmsnorm.weight = Parameter(te_rmsnorm.weight.clone())
+
+    te_outputs = _test_granular_accuracy(te_rmsnorm, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_rmsnorm, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_layernorm_linear_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_layernorm_linear_accuracy(dtype, bs, model, normalization):
     config = model_configs[model]
 
     te_ln_linear = (
@@ -843,6 +924,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
             4 * config.hidden_size,
             config.eps,
             bias=True,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -855,6 +937,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
             4 * config.hidden_size,
             config.eps,
             bias=True,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -864,7 +947,8 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
     # Share params
     with torch.no_grad():
         torch_ln_linear.layernorm.weight = Parameter(te_ln_linear.layer_norm_weight.clone())
-        torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.layer_norm_bias.clone())
+        if normalization != "RMSNorm":
+            torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.layer_norm_bias.clone())
         torch_ln_linear.linear.weight = Parameter(te_ln_linear.weight.clone())
         torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
 
@@ -882,7 +966,8 @@ def test_layernorm_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("activation", all_activations)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     config = model_configs[model]
 
     te_ln_mlp = (
@@ -890,6 +975,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
             config.hidden_size,
             4 * config.hidden_size,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -901,6 +987,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
             config.hidden_size,
             4 * config.hidden_size,
             activation=activation,
+            normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
@@ -910,7 +997,8 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation):
     # Share params
     with torch.no_grad():
         torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
-        torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
+        if normalization != "RMSNorm":
+            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
         torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
         torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
         torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())

@@ -157,6 +157,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # on average it should not be partition dependent.
         self.attention_dropout = torch.nn.Dropout(attention_dropout)
 
+        # An FP16 training trick required for certain GPT-like models.
+        self.apply_qk_layer_scaling = (
+            bool(int(os.getenv("NVTE_APPLY_QK_LAYER_SCALING", "0"))) and layer_number is not None)
+
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -166,7 +170,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """core attention fprop"""
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
-        apply_qk_layer_scaling = self.layer_number is not None and key_layer.dtype == torch.float16
+        apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
         # [b, np, sq, sk]
         output_size = (
@@ -1016,6 +1020,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         bias: bool = True,
+        normalization: str = "LayerNorm",
     ) -> None:
         super().__init__()
         self.layer_number = layer_number
@@ -1080,6 +1085,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:
@@ -1110,6 +1116,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:

@@ -106,6 +106,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 c10::optional<at::Tensor> amax_dP,
                 c10::optional<at::Tensor> amax_dQKV);
 
+at::Tensor fa_prepare_fwd(at::Tensor qkvi);
+
+at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
 void te_gemm(at::Tensor A,
              at::Tensor A_scale_inverse,
              transformer_engine::DType A_type,
@@ -318,6 +322,77 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
                              const bool zero_centered_gamma
 );
 
+/***************************************************************************************************
+ * RMSNorm
+ **************************************************************************************************/
+
+std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
+                                    const at::Tensor &x,
+                                    const at::Tensor &rsigma,
+                                    const at::Tensor &gamma,
+                                    const int sm_margin,
+                                    const bool zero_centered_gamma
+);
+
+
+std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input,
+                                        const at::Tensor &weight,
+                                        float eps,
+                                        at::Tensor scale,
+                                        at::Tensor amax,
+                                        at::Tensor scale_inv,
+                                        transformer_engine::DType otype,
+                                        const int sm_margin,
+                                        const bool zero_centered_gamma
+);
+
+std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input,
+                                                const at::Tensor &weight,
+                                                float eps,
+                                                at::Tensor scale,
+                                                at::Tensor ln_out,
+                                                at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                const int sm_margin,
+                                                const bool zero_centered_gamma
+);
+
+at::Tensor rmsnorm_fwd_fp8_inf(const at::Tensor &input,
+                               const at::Tensor &weight,
+                               float eps,
+                               at::Tensor scale,
+                               at::Tensor amax,
+                               at::Tensor scale_inv,
+                               transformer_engine::DType otype,
+                               const bool zero_centered_gamma
+);
+
+std::vector<at::Tensor> rmsnorm_fwd(const at::Tensor &input,
+                                    const at::Tensor &weight,
+                                    float eps,
+                                    const int sm_margin,
+                                    const bool zero_centered_gamma
+);
+
+std::vector<at::Tensor> rmsnorm_fwd_noalloc(const at::Tensor &input,
+                                    const at::Tensor &weight,
+                                    at::Tensor ln_out,
+                                    float eps,
+                                    const int sm_margin,
+                                    const bool zero_centered_gamma
+);
+
+at::Tensor rmsnorm_fwd_inf(const at::Tensor &input,
+                           const at::Tensor &weight,
+                           float eps,
+                           const bool zero_centered_gamma
+);
+
+/***************************************************************************************************
+ * Cast
+ **************************************************************************************************/
+
 at::Tensor cast_to_fp8(const at::Tensor &input,
                        const at::Tensor &scale,
                        at::Tensor amax,
@@ -374,3 +449,9 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
                                                        float scale_factor
 );
+
+size_t get_cublasLt_version();
+
+bool userbuf_comm_available();
+
+void placeholder();
