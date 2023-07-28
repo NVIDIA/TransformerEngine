@@ -8,13 +8,16 @@ import pytest
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
+    get_device_compute_capability,
 )
+from transformer_engine.pytorch.fp8 import is_fp8_available
 from transformer_engine.pytorch import TransformerLayer
 from transformer_engine.pytorch.attention import DotProductAttention
 import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
+fp8_available, reason_for_no_fp8 = is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
@@ -50,6 +53,8 @@ if torch.cuda.is_bf16_supported():
 
 batch_sizes = [1, 2, 32]
 
+@pytest.mark.skipif(
+    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -118,6 +123,8 @@ def _run_dot_product_attention(dtype, bs, config, backend):
 
     return op, inp.grad
 
+@pytest.mark.skipif(
+    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -214,6 +221,8 @@ def _run_transformer_layer(dtype, bs, config, backend):
     return op, inp.grad
 
 @pytest.mark.skipif(not _flash_attn_2_available, reason="FA2.0 is not available")
+@pytest.mark.skipif(
+    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -318,6 +327,7 @@ model_configs_fp8 = {
 batch_sizes_fp8 = [1, 4]
 param_types_fp8 = [torch.float16]
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("bs", batch_sizes_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8.keys())
