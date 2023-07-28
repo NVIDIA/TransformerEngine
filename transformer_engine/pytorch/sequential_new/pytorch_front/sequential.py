@@ -1,16 +1,15 @@
 from typing import Any, OrderedDict, overload
 import torch
-
 import torch.nn as nn
-
-from ...fp8 import is_fp8_enabled
-
 from .expand_for_sequential import expand
 from ..common_back.compute_pipeline import ComputePipeline
 from ..pytorch_back.environment import PytorchExecutionEnv, PytorchDistributedGroup
+from ..pytorch_back.pipeline_function import PipelineFunction
 from ..common_back.generic_environment import ExecutionEnv
+from ..common_back.ops import Op, ParallelismClass
+from ..common_back.enums import DType
+from ...fp8 import is_fp8_enabled
 from ...distributed import dist_group_type
-from ..common_back.ops import Op
 
 
 class Sequential(nn.Module):
@@ -19,15 +18,18 @@ class Sequential(nn.Module):
 
     _had_run: bool
     _args: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
+    _out_dtype: torch.dtype
     _distributed_group: dist_group_type | None
     _env: ExecutionEnv
     _args_during_compilation: tuple[nn.Module | OrderedDict[str, nn.Module], ...]
-    _compiled_op_list: list[Op]
     _pipeline: ComputePipeline
 
     @overload
     def __init__(
-        self, *modules: nn.Module, distributed_group: dist_group_type | None = None
+        self,
+        *modules: nn.Module,
+        out_dtype: torch.dtype = DType.default.torch_dtype(),
+        distributed_group: dist_group_type | None = None,
     ) -> None:
         ...
 
@@ -37,6 +39,7 @@ class Sequential(nn.Module):
         module_dict: OrderedDict[str, nn.Module],
         /,
         *,
+        out_dtype: torch.dtype = DType.default.torch_dtype(),
         distributed_group: dist_group_type | None = None,
     ) -> None:
         ...
@@ -44,12 +47,14 @@ class Sequential(nn.Module):
     def __init__(
         self,
         *args: nn.Module | OrderedDict[str, nn.Module],
+        out_dtype: torch.dtype = DType.default.torch_dtype(),
         distributed_group: dist_group_type | None = None,
     ):
         super().__init__()  # type: ignore
 
         self._had_run = False
         self._args = args
+        self._out_dtype = out_dtype
         self._distributed_group = distributed_group
 
     def __len__(self):
@@ -60,22 +65,32 @@ class Sequential(nn.Module):
             raise ValueError(
                 "Cannot add two sequentials with different distributed groups"
             )
-        return Sequential(self, other, distributed_group=self._distributed_group)
+        return Sequential(
+            self,
+            other,
+            out_dtype=other._out_dtype,
+            distributed_group=self._distributed_group,
+        )
 
     def __mul__(self, other: int):
         if other <= 0:
             raise ValueError("Repetition factor must be >= 1")
         else:
             return Sequential(
-                *(self for _ in range(other)), distributed_group=self._distributed_group
+                *(self for _ in range(other)),
+                out_dtype=self._out_dtype,
+                distributed_group=self._distributed_group,
             )
 
     def __rmul__(self, other: int):
         return self * other
 
     def forward(self, x: torch.Tensor) -> Any:
-        self._compile_checked(x.shape, self.current_execution_env())
-        return self._pipeline(x)
+        self._compile_checked(x, self._out_dtype, self.current_execution_env())
+        if self._env.training:
+            return PipelineFunction.apply(x, self._pipeline)  # type: ignore
+        else:
+            return PipelineFunction.forward(None, x, self._pipeline)
 
     def expand_for_sequential(self, compile_env: ExecutionEnv):
         return Sequential._create_op_list(self._args, compile_env)
@@ -89,19 +104,51 @@ class Sequential(nn.Module):
             else None,
         )
 
-    def _compile_checked(self, input_shape: tuple[int, ...], compile_env: ExecutionEnv):
+    def _compile_checked(
+        self,
+        input_like: torch.Tensor,
+        out_dtype: torch.dtype,
+        compile_env: ExecutionEnv,
+    ):
         if not self._had_run:
             self._had_run = True
             self._env = compile_env
             self._args_during_compilation = self._args
-            self._compiled_op_list = Sequential._create_op_list(self._args, compile_env)
-
-            self._pipeline = ComputePipeline(
-                self._compiled_op_list, input_shape, self._env
+            compiled_op_list = Sequential._create_op_list(self._args, compile_env)
+            self._pipeline = Sequential._create_pipeline(
+                compiled_op_list, input_like, out_dtype, compile_env
             )
         else:
             assert self._env == compile_env
             assert self._args_during_compilation == self._args
+
+    @staticmethod
+    def _create_pipeline(
+        ops: list[Op],
+        input_like: torch.Tensor,
+        out_dtype: torch.dtype,
+        compile_env: ExecutionEnv,
+    ):
+        pipeline = (
+            ComputePipeline(ops)
+            .set_environment(compile_env)
+            .set_types_inferred(
+                DType.from_torch_dtype(input_like.dtype),
+                DType.from_torch_dtype(out_dtype),
+            )
+            .set_parallelism(ParallelismClass.NORMAL)
+            .set_input_shape(input_like.shape)
+        )
+        params = pipeline.describe_params()
+        assert params == {}
+
+        pipeline.describe_activation_shape()
+
+        tensors = pipeline.describe_supplementary_tensors_training()
+        assert tensors == {}
+        pipeline.set_tensors_allocated()
+
+        return pipeline
 
     @staticmethod
     def _create_op_list(

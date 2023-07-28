@@ -4,8 +4,7 @@ from copy import deepcopy
 from enum import Enum
 import enum
 from functools import partial
-from types import NoneType
-from typing import Generator, NewType, final
+from typing import Generator, final
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
 from .generic_environment import ExecutionEnv
 from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
@@ -161,12 +160,7 @@ class Op(ABC):
             if self.__environment.distributed_group is not None
             else None
         )
-        self._post_set_environment_hook()
         return self
-
-    @abstractmethod
-    def _post_set_environment_hook(self) -> None:
-        raise NotImplementedError()
 
     def set_types_inferred(
         self, inferred_input_type: DType, inferred_output_type: DType
@@ -177,18 +171,23 @@ class Op(ABC):
         self.__state = _OpState.POST_SET_TYPES_INFERRED
         return self
 
-    def set_parallelism(self, chosen_parallelism: Parallelism):
-        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
-        self.__parallellism = chosen_parallelism
-        self.__state = _OpState.POST_SET_PARALLELISM
-        return self
-
     def _pre_describe_parallellism_hook(self):
         assert self.__state == _OpState.POST_SET_TYPES_INFERRED
         self.__state = _OpState.POST_DESCRIBE_PARALLELISM
 
     @abstractmethod
     def describe_parallellism(self) -> list[ExecutionFlow]:
+        raise NotImplementedError()
+
+    def set_parallelism(self, chosen_parallelism: Parallelism):
+        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
+        self.__parallellism = chosen_parallelism
+        self.__state = _OpState.POST_SET_PARALLELISM
+        self._post_set_parallelism_hook()
+        return self
+
+    @abstractmethod
+    def _post_set_parallelism_hook(self) -> None:
         raise NotImplementedError()
 
     def set_input_shape(self, input_shape: tuple[int, ...]):
@@ -235,7 +234,7 @@ class Op(ABC):
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -326,7 +325,7 @@ class ColumnwiseOp(Op):
 
 
 class EnvObliviousOp(Op):
-    def _post_set_environment_hook(self) -> None:
+    def _post_set_parallelism_hook(self) -> None:
         return
 
 
@@ -348,9 +347,9 @@ class Identity(
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         grad = yield x
-        return grad
+        yield grad
 
     def inference(
         self,
@@ -383,17 +382,17 @@ class Transpose(NonParallelOp, ParameterFreeOp):
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         if self.input_shape != self._act_shape():
             f.transpose(x, out=self.act)
             grad = yield self.act
             f.transpose(grad, out=x)
-            return x
+            yield x
         else:
             f.transpose(x, out=x)
             grad = yield x
             f.transpose(grad, out=grad)
-            return grad
+            yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         if self.input_shape != self._act_shape():
@@ -464,7 +463,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.layer_norm(
             x,
             self.weight,
@@ -487,7 +486,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
             out_wgrad=self.weight_grad,
             out_bgrad=self.bias_grad,
         )
-        return grad
+        yield grad
 
     def inference(
         self,
@@ -570,7 +569,7 @@ class Gemm(Op):
         self.param_dtype = param_type
         self.init_method = init_method
 
-    def _post_set_environment_hook(self):
+    def _post_set_parallelism_hook(self):
         assert self.parallellism in [
             ParallelismClass.NORMAL,
             ParallelismClass.RGEMM,
@@ -643,13 +642,13 @@ class Gemm(Op):
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.transpose(self.weight, out=self.weight_t)
         f.gemm(x, self.weight, out=self.act)
         grad = yield self.act
         f.gemm(grad, self.weight_t, out=x)
         f.gemm(grad, self.x_t, out=self.weight_grad)
-        return x
+        yield x
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         if self.output_type != self.input_type or self.input_shape != self._act_shape():
@@ -679,7 +678,7 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         self.features = features
         self.init_method = init_method
 
-    def _post_set_environment_hook(self):
+    def _post_set_parallelism_hook(self):
         assert self.parallellism in [
             ParallelismClass.NORMAL,
             ParallelismClass.ROWP,
@@ -704,11 +703,11 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.add(x, self.bias, out=x)
         grad = yield x
         f.copy(grad, out=self.bias_grad)
-        return grad
+        yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         f.add(x, self.bias, out=x)
@@ -759,12 +758,12 @@ class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousO
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         assert self.end is not None
         f.copy(x, out=self.fwd_residue)
         grad = yield x
         f.add(self.end.bwd_residue, grad, out=self.end.bwd_residue)
-        return self.end.bwd_residue
+        yield self.end.bwd_residue
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         f.copy(x, out=self.fwd_residue)
@@ -791,11 +790,11 @@ class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp)
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
         grad = yield self.begin.fwd_residue
         f.copy(grad, out=self.bwd_residue)
-        return grad
+        yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
@@ -829,11 +828,11 @@ class Dropout(
 
     def training(
         self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.dropout(x, self.p, out=x)
         grad = yield x
         f.dropout(grad, self.p, out=grad)
-        return grad
+        yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         f.dropout(x, self.p, out=x)
@@ -848,11 +847,11 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.gelu(x, out=self.act)
         grad = yield self.act
         f.dgelu(grad, x, out_dgrad=grad)
-        return grad
+        yield grad
 
     def inference(
         self,
@@ -884,11 +883,11 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.relu(x, out=self.act)
         grad = yield self.act
         f.drelu(grad, x, out_dgrad=grad)
-        return grad
+        yield grad
 
     def inference(
         self,
@@ -921,11 +920,11 @@ class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
+    ) -> Generator[GenericTensor, GenericTensor, None]:
         f.cast(x, out=self.act)
         grad = yield self.act
         f.cast(grad, out=x)
-        return x
+        yield x
 
     def inference(
         self,

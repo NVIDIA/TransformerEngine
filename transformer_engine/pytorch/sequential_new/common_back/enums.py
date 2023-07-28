@@ -14,6 +14,17 @@ class DType(Enum):
     FP32 = "FP32"
     default = BF16
 
+    @staticmethod
+    def from_torch_dtype(torch_dtype: torch.dtype):
+        if torch_dtype == torch.float16:
+            return DType.FP16
+        elif torch_dtype == torch.bfloat16:
+            return DType.BF16
+        elif torch_dtype == torch.float32:
+            return DType.FP32
+        else:
+            raise ValueError(f"Unsupported torch dtype {torch_dtype}")
+
     def is_fp8(self):
         return "FP8" in self.name
 

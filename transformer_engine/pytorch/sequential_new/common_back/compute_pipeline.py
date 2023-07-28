@@ -1,29 +1,51 @@
-from typing import Any
-from .ops import Op, Cast
-from .enums import DTypeInfer
-from .generic_environment import ExecutionEnv
+from typing import Generator, final
+
+from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
+    GenericTensor,
+)
+
+
+from .ops import (
+    NonParallelOp,
+    Op,
+    Cast,
+    ParallelismClass,
+    ParameterFreeOp,
+    NoSupplementaryTensorsOp,
+)
+from .enums import DType, DTypeInfer
+
 from .generic_tensor import GenericTensor, TensorDescriptor
 from .tensor_manager import TensorManager
 from .model_parallel_transform import model_parallel_transform
 
 
-class ComputePipeline:
-    def __init__(
-        self, ops: list[Op], input_shape: tuple[int, ...], environment: ExecutionEnv
-    ):
-        self._input_shape = input_shape
-        self._environment = environment
-        self._fwd = ComputePipeline.compile(
-            ops, environment.distributed_group is not None
-        )
+@final
+class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
+    def __init__(self, ops: list[Op]):
+        self._ops = ops
         self._tensor_manager = TensorManager()
-        self.allocate_tensors()
+        self._compiled = None
+        super().__init__("ComputePipeline", ops[0].input_type, ops[-1].output_type)
+
+    def _post_set_parallelism_hook(self) -> None:
+        assert self.parallellism == ParallelismClass.NORMAL
+
+    def describe_activation_shape(self):
+        self._compiled = ComputePipeline.compile(
+            self._ops,
+            self.environment.distributed_group is not None,
+            self.input_type,
+            self.output_type,
+        )
+        return self.allocate_tensors()
 
     def allocate_tensors(self):
-        input_shape = self._input_shape
+        assert self._compiled is not None
+        input_shape = self.input_shape
         params = list[dict[str, TensorDescriptor]]()
         supplementary_tensors = list[dict[str, TensorDescriptor]]()
-        for op in self._fwd:
+        for op in self._compiled:
             op.set_input_shape(input_shape)
             params.append(op.describe_params())
             for name, param in params[-1].items():
@@ -34,7 +56,7 @@ class ComputePipeline:
 
             supplementary_tensors.append(
                 op.describe_supplementary_tensors_training()
-                if self._environment.training
+                if self.environment.training
                 else op.describe_supplementary_tensors_inference()
             )
 
@@ -49,7 +71,9 @@ class ComputePipeline:
 
         self._tensor_manager.allocate_storage()
 
-        for op, p_tensors, s_tensors in zip(self._fwd, params, supplementary_tensors):
+        for op, p_tensors, s_tensors in zip(
+            self._compiled, params, supplementary_tensors
+        ):
             tensors = dict[str, GenericTensor]()
             for name, _ in (p_tensors | s_tensors).items():
                 tensors[name] = self._tensor_manager.retrieve_tensor(
@@ -57,20 +81,61 @@ class ComputePipeline:
                 )
             op.set_tensors_allocated(**tensors)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError()
+        return input_shape
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, None]:
+        assert self._compiled is not None
+        assert self.environment.training
+
+        backwards = list[Generator[GenericTensor, GenericTensor, None]]()
+        for op in self._compiled:
+            gen = op.training(x)
+            x = next(gen)
+            backwards.append(gen)
+        backwards.reverse()
+
+        grad = yield x
+
+        for bwd in backwards:
+            grad = bwd.send(grad)
+
+        yield grad
+
+    def inference(self, x: GenericTensor):
+        assert self._compiled is not None
+        assert not self.environment.training
+
+        for op in self._compiled:
+            x = op.inference(x)
+        return x
 
     @staticmethod
-    def compile(_ops: list[Op], _model_parallel: bool):
+    def compile(
+        _ops: list[Op], _model_parallel: bool, _input_type: DType, _output_type: DType
+    ):
         if _model_parallel:
-            _ops = ComputePipeline.infer_types(_ops)
+            _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
             _ops = model_parallel_transform(_ops)
-        _ops = ComputePipeline.infer_types(_ops)
+        _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
         _ops = ComputePipeline.insert_casts(_ops)
+        _ops = ComputePipeline.set_types(_ops)
         return _ops
 
     @staticmethod
-    def infer_types(_ops: list[Op]):
+    def infer_types(_ops: list[Op], _input_type: DType, _output_type: DType):
+        assert (
+            _ops[0].raw_input_type is DTypeInfer
+            or _ops[0].raw_input_type is _input_type
+        )
+        assert (
+            _ops[-1].raw_output_type is DTypeInfer
+            or _ops[-1].raw_output_type is _output_type
+        )
+        _ops[0].raw_input_type = _input_type
+        _ops[-1].raw_output_type = _output_type
+
         for i, op in enumerate(_ops):
             prev = _ops[i - 1] if i > 0 else None
             nxt_ = _ops[i + 1] if i < len(_ops) - 1 else None
@@ -109,10 +174,6 @@ class ComputePipeline:
                             break
                     if isinstance(op.raw_output_type, DTypeInfer):
                         raise RuntimeError("Cannot infer output type")
-            for op in _ops:
-                assert not isinstance(op.raw_input_type, DTypeInfer)
-                assert not isinstance(op.raw_output_type, DTypeInfer)
-                op.set_types_inferred(op.raw_input_type, op.raw_output_type)
         return _ops
 
     @staticmethod
@@ -122,11 +183,21 @@ class ComputePipeline:
         while i < len(_ops) - 1:
             op = _ops[i]
             nxt_ = _ops[i + 1]
-            if op.output_type is not nxt_.input_type:
+            assert op.raw_output_type is not DTypeInfer
+            assert nxt_.raw_input_type is not DTypeInfer
+            if op.raw_output_type is not nxt_.raw_input_type:
                 name = f"Cast({op.name}, {nxt_.name})"
                 _ops.insert(i + 1, Cast(name, op.output_type, nxt_.input_type))
                 i += 1  # skip cast
             i += 1
+        return _ops
+
+    @staticmethod
+    def set_types(_ops: list[Op]):
+        for op in _ops:
+            assert not isinstance(op.raw_input_type, DTypeInfer)
+            assert not isinstance(op.raw_output_type, DTypeInfer)
+            op.set_types_inferred(op.raw_input_type, op.raw_output_type)
         return _ops
 
 
