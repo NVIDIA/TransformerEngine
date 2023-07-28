@@ -220,7 +220,8 @@ def cast(
     x: PytorchNativeTensor,
     out: PytorchNativeTensor,
 ):
-    x.tensor.copy_(out.tensor)
+    if x is not out:
+        x.tensor.copy_(out.tensor)
 
 
 @multiple_dispatch
@@ -250,3 +251,26 @@ def cast(
         out.dtype.tex_dtype(),
         out.tensor,
     )
+
+
+# Copy
+@multiple_dispatch
+def copy(
+    x: PytorchNativeTensor,
+    out: PytorchNativeTensor,
+):
+    if x is not out:
+        out.tensor.copy_(x.tensor)
+
+
+# Pointwise
+@multiple_dispatch
+def add(x: PytorchNativeTensor, y: PytorchNativeTensor, out: PytorchNativeTensor):
+    if x is not out and y is not out:
+        torch.add(x.tensor, y.tensor, out=out.tensor)
+    elif x is out and y is not out:
+        x.tensor.add_(y.tensor)
+    elif x is not out and y is out:
+        y.tensor.add_(x.tensor)
+    else:  # x is out and y is out
+        x.tensor.add_(x.tensor)
