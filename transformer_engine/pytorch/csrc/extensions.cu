@@ -1164,6 +1164,24 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dx = at::empty_like(x);
     auto dgamma = at::empty_like(gamma);
     auto dbeta = at::empty_like(gamma);
+    
+    return layernorm_bwd_noalloc(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma,
+                                 dx, dgamma, dbeta);
+
+    return { dx, dgamma, dbeta };
+}
+
+void layernorm_bwd_noalloc_ex(const at::Tensor &dz,
+                              const at::Tensor &x,
+                              const at::Tensor &mu,
+                              const at::Tensor &rsigma,
+                              const at::Tensor &gamma,
+                              const int sm_margin,
+                              const bool zero_centered_gamma,
+                              at::Tensor dx,
+                              at::Tensor dgamma,
+                              at::Tensor dbeta,
+) {
     transformer_engine::TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
 
     auto dz_cu      = makeTransformerEngineTensor(dz);
@@ -1207,8 +1225,6 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
             dbeta_part.data(), at::cuda::getCurrentCUDAStream(),
             at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
             workspace.data(), barrier.data());
-
-    return { dx, dgamma, dbeta };
 }
 
 
@@ -1246,20 +1262,45 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
     using namespace transformer_engine;
 
     size_t N = static_cast<size_t>(input.size(0));
+
+    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
+
+    layernorm_fwd_fp8_noalloc_ex(input, weight, bias, eps, scale, ln_out, amax, scale_inv,
+                                 otype, sm_margin, zero_centered_gamma, mu, rsigma);
+
+    return {ln_out, mu, rsigma};
+}
+
+void layernorm_fwd_fp8_noalloc_ex(const at::Tensor &input,
+                                  const at::Tensor &weight,
+                                  const at::Tensor &bias,
+                                  float eps,
+                                  at::Tensor scale,
+                                  at::Tensor ln_out,
+                                  at::Tensor amax,
+                                  at::Tensor scale_inv,
+                                  transformer_engine::DType otype,
+                                  const int sm_margin,
+                                  const bool zero_centered_gamma,
+                                  at::Tensor mu_out,
+                                  at::Tensor rsigma_out
+) {
+    using namespace transformer_engine;
+
+    size_t N = static_cast<size_t>(input.size(0));
     size_t H = static_cast<size_t>(input.size(1));
 
     DType itype = GetTransformerEngineDType(input.scalar_type());
 
-    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
-    auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
     auto gamma_cu     = makeTransformerEngineTensor(weight);
     auto beta_cu      = makeTransformerEngineTensor(bias);
     auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
                                                     amax.data_ptr(), scale.data_ptr(),
                                                     scale_inv.data_ptr());
-    auto mu_cu        = makeTransformerEngineTensor(mu);
-    auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
+    auto mu_cu        = makeTransformerEngineTensor(mu_out);
+    auto rsigma_cu    = makeTransformerEngineTensor(rsigma_out);
     transformer_engine::TensorWrapper workspace, barrier;
 
     // This call populates workspace and barrier tensors with the required config
@@ -1287,8 +1328,6 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
          mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
          workspace.data(), barrier.data());
-
-    return {ln_out, mu, rsigma};
 }
 
 
@@ -1943,7 +1982,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8");
   m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8");
+  m.def("layernorm_fwd_fp8_noalloc_ex", &layernorm_fwd_fp8_noalloc_ex, "LN FWD FP8");
   m.def("layernorm_bwd", &layernorm_bwd, "LN BWD");
+  m.def("layernorm_bwd_noalloc_ex", &layernorm_bwd_noalloc_ex, "LN BWD");
   m.def("layernorm_fwd", &layernorm_fwd, "LN FWD");
   m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD");
   m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose");

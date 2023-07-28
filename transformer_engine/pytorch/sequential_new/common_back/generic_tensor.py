@@ -103,7 +103,10 @@ def layer_norm(
     weight: GenericTensor,
     bias: GenericTensor,
     eps: float,
-    out: GenericTensor,
+    zero_centered_gamma: bool,
+    out_act: GenericTensor,
+    out_mu: GenericTensor,
+    out_rsigma: GenericTensor,
 ) -> None:
     raise NotImplementedError()
 
@@ -113,10 +116,24 @@ def dlayer_norm(
     grad: GenericTensor,
     x: GenericTensor,
     weight: GenericTensor,
-    eps: float,
+    zero_centered_gamma: bool,
+    mu: GenericTensor,
+    rsigma: GenericTensor,
     out_dgrad: GenericTensor,
     out_wgrad: GenericTensor,
     out_bgrad: GenericTensor,
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def layer_norm_inf(
+    x: GenericTensor,
+    weight: GenericTensor,
+    bias: GenericTensor,
+    eps: float,
+    zero_centered_gamma: bool,
+    out_act: GenericTensor,
 ) -> None:
     raise NotImplementedError()
 

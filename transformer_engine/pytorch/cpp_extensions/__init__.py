@@ -29,6 +29,7 @@ __all__ = [
     "layernorm_fwd_fp8",
     "layernorm_fwd_fp8_inf",
     "layernorm_fwd_inf",
+    "layernorm_bwd",
     # Fused attention
     "fused_attn_fwd_qkvpacked",
     "fused_attn_bwd_qkvpacked",

@@ -412,6 +412,8 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     bias: GenericTensor
     bias_grad: GenericTensor
     act: GenericTensor
+    mu: GenericTensor
+    rsigma: GenericTensor
 
     def __init__(
         self,
@@ -444,7 +446,11 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         self,
     ) -> dict[str, TensorDescriptor]:
         self._pre_describe_supplementary_tensors_hook()
-        return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
+        return {
+            "act": TensorDescriptor(self.input_shape, None, self.output_type),
+            "mu": TensorDescriptor((self.features,), None, DType.FP32),
+            "sigma": TensorDescriptor((self.features,), None, DType.FP32),
+        }
 
     def describe_supplementary_tensors_inference(
         self,
@@ -459,13 +465,24 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, GenericTensor]:
-        f.layer_norm(x, self.weight, self.bias, self.eps, out=self.act)
+        f.layer_norm(
+            x,
+            self.weight,
+            self.bias,
+            self.eps,
+            self.zero_centered_gamma,
+            out_act=self.act,
+            out_mu=self.mu,
+            out_rsigma=self.rsigma,
+        )
         grad = yield self.act
         f.dlayer_norm(
             grad,
             x,
             self.weight,
-            self.eps,
+            self.zero_centered_gamma,
+            self.mu,
+            self.rsigma,
             out_dgrad=grad,
             out_wgrad=self.weight_grad,
             out_bgrad=self.bias_grad,
@@ -477,10 +494,24 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         x: GenericTensor,
     ) -> GenericTensor:
         if self.output_type != self.input_type:
-            f.layer_norm(x, self.weight, self.bias, self.eps, out=self.act)
+            f.layer_norm_inf(
+                x,
+                self.weight,
+                self.bias,
+                self.eps,
+                self.zero_centered_gamma,
+                out_act=self.act,
+            )
             return self.act
         else:
-            f.layer_norm(x, self.weight, self.bias, self.eps, out=x)
+            f.layer_norm_inf(
+                x,
+                self.weight,
+                self.bias,
+                self.eps,
+                self.zero_centered_gamma,
+                out_act=x,
+            )
             return x
 
 
