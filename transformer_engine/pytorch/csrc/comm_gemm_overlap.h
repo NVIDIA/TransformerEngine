@@ -188,8 +188,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
+    CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
     for (int i = 0; i < _stream_compute.size(); i++) {
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _stop_comm, 0));
     }
 
     if (A_scale_inverse.numel()) A_scale_inverse = A_scale_inverse[A_fp8_tensor];
@@ -198,12 +200,9 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     assert(pre_gelu_out.numel() == 0);
 
-#define BUG
-
-#ifdef BUG
     torch::Tensor input_a = torch::from_blob(input_a_chunk_ptr, {m, k}, A.options());
     torch::Tensor output_d =
-        torch::from_blob(output_buf_chunk_ptr, {n, m}, _ubuf.options());
+        torch::zeros({n, m}, _ubuf.options());
     torch::Tensor workspace_chunk =
         torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
     at::cuda::setCurrentCUDAStream(_stream_compute[0]);
@@ -211,34 +210,16 @@ struct UbufCommOverlap : torch::CustomClassHolder {
             output_d, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
             workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator, _math_sms,
             _num_splits /*m_split*/, 0 /*n_split*/, true /*gemm_producer*/, counter);
-    CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t)_stream_compute[0]));
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
-#endif
+    //CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t)_stream_compute[0]));
+    //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
     for (int i = 0; i < _num_splits; i++) {
-#ifndef BUG
-      // Communication chunk
-      torch::Tensor input_a_chunk =
-            torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
+      consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
+      at::cuda::setCurrentCUDAStream(_stream_comm);
       torch::Tensor output_chunk =
             torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-      torch::Tensor workspace_chunk =
-            torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-            {workspace_size_chunk}, workspace.options());
-      at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
-      te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
-            output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
-            workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-            _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, pre_gelu_out);
+      torch::Tensor d_chunk = output_d.slice(1, i*m_chunk, (i+1)*m_chunk);
+      output_chunk.copy_(d_chunk);
 
-      CHECK_CUDA(cudaEventRecord(_start_comm,
-           (cudaStream_t)_stream_compute[i % _stream_compute.size()]));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
-      input_a_chunk_ptr += input_a_chunk_size * B.element_size();
-      output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
-#else
-      // consumer_sentinel kernel here
-      consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
-#endif
       reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
                                             m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
 

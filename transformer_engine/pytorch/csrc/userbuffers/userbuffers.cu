@@ -1752,7 +1752,7 @@ static __global__ void consumer_kernel(void* atomic_ptr, int chunk_i) {
     if ( blockIdx.x == 0 && threadIdx.x == 0 ) {
         int old_val;
         while ( 0 != ( old_val = atomicCAS( (unsigned int*)atomic_ptr + chunk_i , 0, 0) ) ) {}
-	((unsigned int*)atomic_ptr)[chunk_i] = 1;
+        ((unsigned int*)atomic_ptr)[chunk_i] = 1;
         asm volatile ("fence.sc.gpu;\n");
         //printf("consumer chunk_i:%d val:%d\n",chunk_i,((unsigned int*)atomic_ptr)[chunk_i]);
     }

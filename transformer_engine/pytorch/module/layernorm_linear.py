@@ -23,7 +23,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import get_fp8_te_dtype
+from ..fp8 import get_fp8_te_dtype, amax_and_scale_update
 from ..utils import (
     divide,
     get_default_init_method,
@@ -155,6 +155,9 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             bias = cast_if_needed(bias, bias_dtype) if use_bias else bias
 
+            fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
+                torch.amax(weight).float()
+            amax_and_scale_update(fp8_meta, True)
             if update_fp8_weights:
                 if is_grad_enabled:
                     tex.fp8_cast_transpose_fused(
@@ -187,8 +190,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
-                #ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
-                ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_split_ag else None,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                #ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_split_ag else None,
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
@@ -212,8 +215,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
-                #ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
-                ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_split_ag else None,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )

@@ -35,25 +35,6 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
 
 namespace transformer_engine {
 
-static __global__ void producer_kernel(void* atomic_ptr, int chunk_i) {
-    // Decrement atomic val to signal current output tile finish
-    if ( blockIdx.x == 0 && threadIdx.x == 0 ) {
-    //    ((unsigned int*)atomic_ptr)[chunk_i] = 0;
-        printf("producer chunk_i:%d val:%d\n",chunk_i,((int*)atomic_ptr)[chunk_i]);
-    }
-
-    // COMM kernel need to explicitely flash gmem.
-    // GEMM kernel already executed, and can not see gmem change without COMM kernel explicitely make change
-    asm volatile ("fence.sc.gpu;\n");
-}
-
-void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
-    dim3 block(1);
-    dim3 grid(1);
-    producer_kernel<<<grid, block, 0, stream>>>(atomic_ptr, chunk_i);
-}
-
-
 void cublas_gemm(const Tensor *inputA,
                  const Tensor *inputB,
                  Tensor *outputD,
@@ -247,7 +228,7 @@ void cublas_gemm(const Tensor *inputA,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                    CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
-  if ((m_split > 0) || (n_split > 0)) {
+  if (counter != nullptr) {
     printf ("!!! cublasLtMatmul m_split %d n_split %d\n", m_split, n_split);
     if (m_split == 0) m_split=1;
     if (n_split == 0) n_split=1;
@@ -298,16 +279,6 @@ void cublas_gemm(const Tensor *inputA,
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
-  if (m_split > 1) {
-    for (int i=0; i<m_split; i++) {
-        producer(counter, i, stream);
-    }
-  }
-  else if(n_split > 1) {
-    for (int i=0; i<n_split; i++) {
-        producer(counter, i, stream);
-    }
-  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));

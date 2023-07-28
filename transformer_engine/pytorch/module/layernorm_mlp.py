@@ -19,7 +19,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import get_fp8_te_dtype
+from ..fp8 import get_fp8_te_dtype, amax_and_scale_update
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -107,6 +107,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_split_rs: bool,
+        ub_atomic_gemm_rs: bool,
         ub_split_ag: bool,
         activation: str,
         normalization: str,
@@ -144,6 +145,10 @@ class _LayerNormMLP(torch.autograd.Function):
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
+        if ub_atomic_gemm_rs:
+            tp_world_size = get_distributed_world_size(tp_group)
+            if tp_world_size == 1:
+                ub_atomic_gemm_rs = False
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -242,14 +247,28 @@ class _LayerNormMLP(torch.autograd.Function):
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
 
-            gelu_out = activation_func(
-                fc1_out,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM2_INPUT,
-                fp8_dtype_forward,
-            )
+            fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
+                torch.amax(fc1_out).float()
+            amax_and_scale_update(fp8_meta, True)
+            #print (f'fc2 inp shape {fc1_out.shape}')
 
-            if ub_split_rs:
+            fake_fc2_inp = torch.arange(tp_size, dtype=activation_dtype, device=fc1_out.device).view(tp_size,1,1).repeat(1,fc1_out.size(0)//tp_size,fc1_out.size(1)).view_as(fc1_out)/8
+            #fc1_out = fake_fc2_inp
+            #print (f'fake fc2 inp {fake_fc2_inp.shape} {fake_fc2_inp}')
+            gelu_out = tex.cast_to_fp8(
+                    fc1_out,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM2_INPUT,
+                    fp8_dtype_forward,
+                )
+            #gelu_out = activation_func(
+            #    fc1_out,
+            #    fp8_meta["scaling_fwd"],
+            #    tex.FP8FwdTensors.GEMM2_INPUT,
+            #    fp8_dtype_forward,
+            #)
+
+            if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
                 dim_size = list(gelu_out.size())
@@ -261,6 +280,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[1] = fc2_weight.size(0)
                 fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
 
+            ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
+            ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
             _ = tex.fp8_gemm(
                 fc2_weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -277,9 +298,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=fc2_out,
                 #ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_split_rs else None,
-                ub=ub_obj_fc2out if ub_split_rs else None,
-                extra_output_tensor=rs_out if ub_split_rs else None,
+                ub_algo=ub_algo,
+                ub=ub_obj_fc2out if ub_split_rs or ub_atomic_gemm_rs else None,
+                extra_output_tensor=rs_out if ub_split_rs or ub_atomic_gemm_rs else None,
             )
         else:
             # Cast for native AMP
@@ -312,7 +333,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
-
+            bias_gelu_nvfusion
             if bias_gelu_nvfusion:
                 fc1_out, _, _ = fc1_outputs
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
@@ -353,8 +374,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 bias=fc2_bias,
                 use_bias=use_fc2_bias,
                 out=fc2_out,
-                #ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_split_rs else None,
+                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
                 ub=ub_obj_fc2out if ub_split_rs else None,
                 extra_output_tensor=rs_out if ub_split_rs else None,
             )
@@ -401,7 +421,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Row Parallel Linear
         fc2_out2 = fc2_out
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             fc2_out = rs_out
         elif set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
@@ -950,6 +970,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
+        ub_atomic_gemm_rs: bool = False,
         ub_split_ag: bool = False,
         device: Union[torch.device, str] = "cuda",
     ) -> None:
@@ -972,8 +993,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+        self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
 
-        if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag:
+        if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
@@ -1195,6 +1217,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_split_rs,
+                self.ub_atomic_gemm_rs,
                 self.ub_split_ag,
                 self.activation,
                 self.normalization,
