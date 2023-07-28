@@ -1476,11 +1476,21 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType itype,
                          transformer_engine::DType otype
 ) {
+    auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
+
+    cast_from_fp8_noalloc(input, scale_inv, itype, output);
+
+    return output;
+}
+
+void cast_from_fp8_noalloc(const at::Tensor &input,
+                           const at::Tensor &scale_inv,
+                           transformer_engine::DType itype,
+                           at::Tensor output
+) {
     using namespace transformer_engine;
     auto input_shape = input.sizes().vec();
     std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
-
-    auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
 
     auto input_cu     = makeTransformerEngineTensor(input.data_ptr(), shape, itype,
                                                     nullptr, nullptr, scale_inv.data_ptr());
@@ -1999,6 +2009,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8");
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8");
   m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8");
+  m.def("cast_from_fp8_noalloc", &cast_from_fp8_noalloc, "Cast from FP8");
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
                   "Fused Attention FP8/BF16/FP16 FWD with packed QKV");

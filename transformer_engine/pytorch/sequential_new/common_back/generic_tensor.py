@@ -144,12 +144,13 @@ def gemm(a: GenericTensor, b: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-# Special
+# Cast
 @multiple_dispatch
 def cast(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
+# Copy
 @multiple_dispatch
 def copy(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()

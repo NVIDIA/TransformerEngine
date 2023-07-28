@@ -212,3 +212,41 @@ def gemm(a: PytorchNativeTensor, b: PytorchNativeTensor, out: PytorchNativeTenso
         cublas_workspace(),
         out=out.tensor,
     )
+
+
+# Cast
+@multiple_dispatch
+def cast(
+    x: PytorchNativeTensor,
+    out: PytorchNativeTensor,
+):
+    x.tensor.copy_(out.tensor)
+
+
+@multiple_dispatch
+def cast(
+    x: PytorchNativeTensor,
+    out: PytorchFP8Tensor,
+):
+    cpp_extensions.cast_to_fp8(  # type: ignore
+        x.tensor,
+        out.meta_ref,
+        out.index_in_meta,
+        out.dtype.tex_dtype(),
+        out.tensor,
+    )
+
+
+@multiple_dispatch
+def cast(
+    x: PytorchFP8Tensor,
+    out: PytorchNativeTensor,
+):
+    cpp_extensions.cast_from_fp8(  # type: ignore
+        x.tensor,
+        x.meta_ref,
+        x.index_in_meta,
+        x.dtype.tex_dtype(),
+        out.dtype.tex_dtype(),
+        out.tensor,
+    )

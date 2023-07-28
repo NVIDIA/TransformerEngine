@@ -47,8 +47,19 @@ def cast_from_fp8(
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
     itype: tex.DType,
     otype: tex.DType,
-) -> torch.Tensor:
+    out: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
     """Cast input from FP8"""
+
+    if out is not None:
+        tex.cast_from_fp8_noalloc(
+            inp,
+            fp8_meta_tensor.scale_inv[fp8_tensor],
+            itype,
+            out
+        )
+        return None
+
     return torch.ops.tex_ts.cast_from_fp8_ts(
         inp,
         fp8_meta_tensor.scale_inv,

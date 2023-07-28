@@ -367,6 +367,11 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
                          transformer_engine::DType otype
 );
 
+void cast_from_fp8_noalloc(const at::Tensor &input,
+                           const at::Tensor &scale_inv,
+                           transformer_engine::DType itype,
+                           at::Tensor output
+)
 
 at::Tensor scaled_softmax_forward(at::Tensor input,
                                   float scale_factor
