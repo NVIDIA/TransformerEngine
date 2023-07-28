@@ -782,7 +782,9 @@ class DotProductAttention(torch.nn.Module):
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
-        assert (num_attention_heads%self.num_gqa_groups == 0
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+
+        assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of attention heads must be divisible by the number of GQA groups!"
 
         if sequence_parallel or get_rng_state_tracker is None:
@@ -903,8 +905,8 @@ class DotProductAttention(torch.nn.Module):
                     Whether to use the fast path to set output tensors to 0 or not.
         """
 
-        assert (key_layer.shape[-2] == self.num_gqa_groups
-                and value_layer.shape[-2] == self.num_gqa_groups
+        assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
+                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
                 ), f"Keys and values must have {self.num_gqa_groups} heads!"
 
         use_flash_attention = self.use_flash_attention
@@ -1051,9 +1053,9 @@ class MultiHeadAttention(torch.nn.Module):
         self.num_gqa_groups = (
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
-        assert (num_attention_heads%self.num_gqa_groups == 0
+        assert (num_attention_heads % self.num_gqa_groups == 0
                 ), "The number of GQA groups must be divisible by the number of attention heads!"
-        assert (num_attention_heads%tp_size == 0
+        assert (num_attention_heads % tp_size == 0
                 ), "The number of GQA groups must be divisible by tensor parallel size!"
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
         self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // num_attention_heads)
