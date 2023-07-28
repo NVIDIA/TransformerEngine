@@ -237,7 +237,7 @@ def test_transformer_layer_gqa(dtype, bs, model):
         unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer_gqa(
                 dtype, bs, config, "UnfusedDotProductAttention", num_q_per_gqa_group)
 
-        atol, rtol = (5e-1, 5e-1) if dtype == torch.bfloat16 else (5e-1, 5e-1)
+        atol, rtol = 5e-1, 5e-1
         assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
         assert torch.allclose(flash_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
