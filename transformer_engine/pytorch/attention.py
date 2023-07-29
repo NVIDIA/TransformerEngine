@@ -180,6 +180,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.size(0),
         )
 
+        assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
+        if key_layer.shape[2] != query_layer.shape[2]:
+            assert (query_layer.shape[2]%key_layer.shape[2]==0
+                ),"The number of attention heads must be divisible by the number of GQA groups!"
+            key_layer = key_layer.repeat_interleave(
+                    int(query_layer.shape[2]/key_layer.shape[2]), dim = 2)
+            value_layer = value_layer.repeat_interleave(
+                    int(query_layer.shape[2]/value_layer.shape[2]), dim = 2)
+
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.reshape(
             output_size[2], output_size[0] * output_size[1], -1
@@ -722,6 +731,14 @@ class DotProductAttention(torch.nn.Module):
                          number of attention heads in the transformer layer.
     kv_channels : int
                 number of key-value channels.
+    num_gqa_groups : Optional[int] = None
+                    number of GQA groups in the transformer layer.
+                    Grouped Query Attention is described in
+                    `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                    This only affects the keys and values, not the queries.
+                    GQA-1 is equivalent to Multi-Query Attention
+                    (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: {'causal', 'padding'}, default = `causal`
@@ -744,6 +761,7 @@ class DotProductAttention(torch.nn.Module):
         self,
         num_attention_heads: int,
         kv_channels: int,
+        num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
@@ -758,12 +776,16 @@ class DotProductAttention(torch.nn.Module):
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
+        self.num_attention_heads = num_attention_heads
 
-        projection_size = kv_channels * num_attention_heads
-        self.hidden_size_per_partition = divide(projection_size, self.tp_size)
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
+        self.hidden_size_per_attention_head = kv_channels
+        self.num_gqa_groups = (
+            num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+
+        assert (num_attention_heads % self.num_gqa_groups == 0
+                ), "The number of attention heads must be divisible by the number of GQA groups!"
 
         if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
@@ -883,6 +905,10 @@ class DotProductAttention(torch.nn.Module):
                     Whether to use the fast path to set output tensors to 0 or not.
         """
 
+        assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
+                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
+                ), f"Keys and values must have {self.num_gqa_groups} heads!"
+
         use_flash_attention = self.use_flash_attention
         use_fused_attention = self.use_fused_attention
 
@@ -897,6 +923,9 @@ class DotProductAttention(torch.nn.Module):
                 use_flash_attention = False
             elif not _flash_attn_2_available and self.device_compute_capability == 8.9:
                 use_flash_attention = False
+
+        if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
+            use_flash_attention = False
 
         if self.attn_mask_type == "padding" and attention_mask is not None:
             use_flash_attention = False
@@ -919,7 +948,9 @@ class DotProductAttention(torch.nn.Module):
         # DPA does not support FP8; for FP8, use cpp_extensions modules directly
         is_backend_avail = (fused_attention_backend in
             [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
-        use_fused_attention = use_fused_attention and is_backend_avail
+        use_fused_attention = (use_fused_attention
+                              and is_backend_avail
+                              and self.num_gqa_groups == self.num_attention_heads)
 
         if use_flash_attention:
             if checkpoint_core_attention:
@@ -974,6 +1005,7 @@ class MultiHeadAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
+        num_gqa_groups: Optional[int] = None,
         fuse_wgrad_accumulation: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
@@ -1002,6 +1034,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.init_method = init_method
         self.attn_mask_type = attn_mask_type
+        self.num_attention_heads = num_attention_heads
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -1017,6 +1050,15 @@ class MultiHeadAttention(torch.nn.Module):
 
         self.hidden_size_per_attention_head = kv_channels
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
+        self.num_gqa_groups = (
+            num_attention_heads if num_gqa_groups is None else num_gqa_groups
+        )
+        assert (num_attention_heads % self.num_gqa_groups == 0
+                ), "The number of GQA groups must be divisible by the number of attention heads!"
+        assert (num_attention_heads % tp_size == 0
+                ), "The number of GQA groups must be divisible by tensor parallel size!"
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // num_attention_heads)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -1029,7 +1071,7 @@ class MultiHeadAttention(torch.nn.Module):
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
-        if self.attention_type == "self":
+        if self.attention_type == "self" and self.num_gqa_groups == self.num_attention_heads:
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
@@ -1059,7 +1101,9 @@ class MultiHeadAttention(torch.nn.Module):
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     **common_gemm_kwargs,
                 )
-        else:
+        elif ((self.attention_type == "cross")
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
@@ -1089,7 +1133,7 @@ class MultiHeadAttention(torch.nn.Module):
                 )
             self.key_value = Linear(
                 hidden_size,
-                2 * hidden_size,
+                2 * self.hidden_size_kv,
                 init_method=init_method,
                 bias=bias,
                 return_bias=False,
@@ -1102,7 +1146,8 @@ class MultiHeadAttention(torch.nn.Module):
         self.core_attention = DotProductAttention(
             num_attention_heads,
             kv_channels,
-            attention_dropout,
+            num_gqa_groups=self.num_gqa_groups,
+            attention_dropout=attention_dropout,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
             attn_mask_type=attn_mask_type,
@@ -1131,7 +1176,7 @@ class MultiHeadAttention(torch.nn.Module):
         return torch.empty(
             inference_max_sequence_len,
             batch_size,
-            self.num_attention_heads_per_partition,
+            self.num_gqa_groups_per_partition,
             self.hidden_size_per_attention_head,
             dtype=dtype,
             device=torch.cuda.current_device(),
@@ -1192,7 +1237,7 @@ class MultiHeadAttention(torch.nn.Module):
         # Query, Key, and Value
         # =====================
 
-        if self.attention_type == "self":
+        if self.attention_type == "self" and self.num_gqa_groups == self.num_attention_heads:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             if self.input_layernorm:
                 layernorm_qkv_outputs = self.layernorm_qkv(
@@ -1235,17 +1280,25 @@ class MultiHeadAttention(torch.nn.Module):
                 query_layer, key_layer, value_layer = split_tensor_along_dim(
                     mixed_x_layer, split_dim, 3
                 )
-        else:
+        elif ((self.attention_type == "cross")
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
+
+            if self.attention_type == "cross":
+                input_tensor = encoder_output
+            else:
+                input_tensor = hidden_states
+
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer = self.key_value(
-                encoder_output,
+                input_tensor,
                 is_first_microbatch=is_first_microbatch,
             )
 
             if self.qkv_weight_interleaved:
                 # [sq, b, (np * 2 * hn)] --> [sq, b, np, 2 * hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
-                    self.num_attention_heads_per_partition,
+                    self.num_gqa_groups_per_partition,
                     2 * self.hidden_size_per_attention_head,
                 )
                 # split along last dimension
@@ -1253,7 +1306,7 @@ class MultiHeadAttention(torch.nn.Module):
             else:
                 # [sq, b, (np * 2 * hn)] --> [sq, b, 2 * np, hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
-                    2 * self.num_attention_heads_per_partition,
+                    2 * self.num_gqa_groups_per_partition,
                     self.hidden_size_per_attention_head,
                 )
                 # split along second last dimension

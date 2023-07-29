@@ -86,6 +86,14 @@ class TransformerLayer(torch.nn.Module):
                      intermediate size to which input samples are projected.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
+    num_gqa_groups : int, default = `None`
+                         number of GQA groups in the transformer layer.
+                         Grouped Query Attention is described in
+                         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                         This only affects the keys and values, not the querys.
+                         GQA-1 is equivalent to Multi-Query Attention
+                         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
                        for numerical stability.
@@ -194,6 +202,7 @@ class TransformerLayer(torch.nn.Module):
         hidden_size: int,
         ffn_hidden_size: int,
         num_attention_heads: int,
+        num_gqa_groups: Optional[int] = None,
         layernorm_epsilon: float = 1e-5,
         hidden_dropout: float = 0.1,
         attention_dropout: float = 0.1,
@@ -293,6 +302,7 @@ class TransformerLayer(torch.nn.Module):
             "layer_number": layer_number,
             "tp_group": tp_group,
             "tp_size": self.tp_size,
+            "num_gqa_groups": num_gqa_groups,
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": self.sequence_parallel,
