@@ -805,7 +805,7 @@ def test_dpa_accuracy(dtype, bs, model):
         DotProductAttention(
             config.num_attention_heads,
             config.embed,
-            0.1,  # dropout
+            attention_dropout=0.1,  # dropout
         )
         .to(dtype=dtype)
         .cuda()
