@@ -15,7 +15,7 @@ from ..common_back import generic_tensor as fi
 def _gemm_param_init_methods(te: bool, in_features: int):
     if te:
         return (
-            partial(fi.normal_dist, 0, 0.023),
+            partial(fi.normal_dist, 0.0, 0.023),
             fi.zeros,
         )
     else:

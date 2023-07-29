@@ -19,7 +19,7 @@ ALIGN_BYTES = 32
 class TensorManager:
     tensor_descriptors = dict[str, TensorDescriptor]()
     meta_storage: TransformerEngineExtensionsFP8TensorMeta
-    tensor_storage = dict[DType, FrameworkTensor]()
+    tensor_storage = dict[DType, NativeTensor]()
     tensor_indices = dict[str, int]()
     tensors = dict[str, FrameworkTensor]()
     allocated = False
@@ -63,13 +63,15 @@ class TensorManager:
                     continue
 
                 offset = tensor_offsets[name]
-                tensor = self.tensor_storage[dtype][
-                    offset : offset + prod(desc.shape)
-                ].view(desc.shape)
+                tensor = (
+                    self.tensor_storage[dtype]
+                    .tensor[offset : offset + prod(desc.shape)]
+                    .view(desc.shape)
+                )
                 assert tensor.is_contiguous()
 
                 if desc.constructor is not None:
-                    desc.constructor(NativeTensor(desc.dtype, tensor))
+                    desc.constructor(f.as_native_tensor(desc.dtype, tensor))
 
                 self.tensors[name] = tensor
 
@@ -85,26 +87,30 @@ class TensorManager:
         if dtype.is_fp8():
             meta = self.meta_storage
             index = self.tensor_indices[name]
-            return FP8Tensor(dtype, tensor, meta, index)
+            return f.as_fp8_tensor(dtype, tensor, meta, index)
         else:
-            return NativeTensor(dtype, tensor)
+            return f.as_native_tensor(dtype, tensor)
 
     def _allocate_fp8_meta(self):
-        self.meta_storage = self.make_tensor_meta()
-        self.meta_storage.scale = f.empty((len(self.tensor_descriptors),), DType.FP32)
-        self.meta_storage.scale_inv = f.empty(
-            (len(self.tensor_descriptors),), DType.FP32
-        )
-        self.meta_storage.amax_history = f.empty(
+        scale = f.empty((len(self.tensor_descriptors),), DType.FP32)
+        scale_inv = f.empty((len(self.tensor_descriptors),), DType.FP32)
+        amax_history = f.empty(
             (
                 AMAX_HISTORY_LEN,
                 len(self.tensor_descriptors),
             ),
             DType.FP32,
         )
-        f.ones(NativeTensor(DType.FP32, self.meta_storage.scale))
-        f.ones(NativeTensor(DType.FP32, self.meta_storage.scale_inv))
-        f.zeros(NativeTensor(DType.FP32, self.meta_storage.amax_history))
+
+        f.ones(scale)
+        f.ones(scale_inv)
+        f.zeros(amax_history)
+
+        self.meta_storage = self.make_tensor_meta()
+        self.meta_storage.scale = scale.tensor
+        self.meta_storage.scale_inv = scale_inv.tensor
+        self.meta_storage.amax_history = amax_history.tensor
+
         self.tensor_indices = {
             name: i for i, name in enumerate(self.tensor_descriptors.keys())
         }

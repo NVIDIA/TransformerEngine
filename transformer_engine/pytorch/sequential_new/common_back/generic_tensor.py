@@ -1,6 +1,7 @@
 from __future__ import annotations
+from abc import ABC
 from dataclasses import dataclass
-from typing import Protocol, Sequence, TypeVar, overload, Callable
+from typing import Protocol, Sequence, TypeVar, overload, Callable, runtime_checkable
 from .enums import DType
 from ..multiple_dispatch import multiple_dispatch
 
@@ -8,7 +9,7 @@ from ..multiple_dispatch import multiple_dispatch
 TensorType = TypeVar("TensorType", bound="FrameworkTensor")
 
 
-class GenericTensor(Protocol):
+class GenericTensor(ABC):
     dtype: DType
 
 
@@ -22,6 +23,7 @@ class TensorDescriptor:
     dtype: DType
 
 
+@runtime_checkable
 class FrameworkTensor(Protocol):
     @overload
     def view(self: TensorType, size: Sequence[int], /) -> TensorType:
@@ -43,61 +45,76 @@ class FrameworkTensor(Protocol):
         raise NotImplementedError()
 
 
-@dataclass
-class NativeTensor(GenericTensor):
+class NativeTensor(GenericTensor, ABC):
     dtype: DType
     tensor: FrameworkTensor
 
 
-class TransformerEngineExtensionsFP8TensorMeta:
+@runtime_checkable
+class TransformerEngineExtensionsFP8TensorMeta(Protocol):
     scale: FrameworkTensor
     scale_inv: FrameworkTensor
     amax_history: FrameworkTensor
 
 
-@dataclass
-class FP8Tensor(GenericTensor):
+class FP8Tensor(GenericTensor, ABC):
     dtype: DType
     tensor: FrameworkTensor
     meta: TransformerEngineExtensionsFP8TensorMeta
     index: int
 
 
+# Converters
+@multiple_dispatch(False)
+def as_native_tensor(dtype: DType, tensor: FrameworkTensor) -> NativeTensor:
+    raise NotImplementedError()
+
+
+@multiple_dispatch(False)
+def as_fp8_tensor(
+    dtype: DType,
+    tensor: FrameworkTensor,
+    meta: TransformerEngineExtensionsFP8TensorMeta,
+    index: int,
+) -> FP8Tensor:
+    raise NotImplementedError()
+
+
 # Allocation
-@multiple_dispatch
-def empty(shape: tuple[int, ...], dtype: DType) -> FrameworkTensor:
+@multiple_dispatch(False)
+def empty(shape: tuple[int, ...], dtype: DType) -> NativeTensor:
     raise NotImplementedError()
 
 
 # Initialization
-@multiple_dispatch
+@multiple_dispatch(False)
 def zeros(out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def ones(out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def normal_dist(mean: float, std: float, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def uniform_dist(low: float, high: float, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Transpose
-@multiple_dispatch
+@multiple_dispatch(False)
 def transpose(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # LayerNorm
-@multiple_dispatch
+@multiple_dispatch(False)
 def layer_norm(
     x: GenericTensor,
     weight: GenericTensor,
@@ -111,7 +128,7 @@ def layer_norm(
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def dlayer_norm(
     grad: GenericTensor,
     x: GenericTensor,
@@ -126,7 +143,7 @@ def dlayer_norm(
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def layer_norm_inf(
     x: GenericTensor,
     weight: GenericTensor,
@@ -139,81 +156,81 @@ def layer_norm_inf(
 
 
 # Gemm
-@multiple_dispatch
+@multiple_dispatch(False)
 def gemm(a: GenericTensor, b: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Cast
-@multiple_dispatch
+@multiple_dispatch(False)
 def cast(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Copy
-@multiple_dispatch
+@multiple_dispatch(False)
 def copy(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Pointwise
-@multiple_dispatch
+@multiple_dispatch(False)
 def add(x: GenericTensor, y: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Dropout
-@multiple_dispatch
+@multiple_dispatch(False)
 def dropout(x: GenericTensor, p: float, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
 # Activation
-@multiple_dispatch
+@multiple_dispatch(False)
 def relu(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def gelu(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def geglu(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def reglu(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def swiglu(x: GenericTensor, out: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def drelu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def dgelu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def dgeglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def dreglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()
 
 
-@multiple_dispatch
+@multiple_dispatch(False)
 def dswiglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
     raise NotImplementedError()

@@ -1,5 +1,6 @@
+from abc import ABC
 from functools import cache
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from ..common_back.generic_tensor import (
     GenericTensor,
     TransformerEngineExtensionsFP8TensorMeta,
@@ -15,9 +16,9 @@ import subprocess
 import os
 
 
-@dataclass
+@runtime_checkable
 class PytorchTransformerEngineExtensionsFP8TensorMeta(
-    TransformerEngineExtensionsFP8TensorMeta
+    TransformerEngineExtensionsFP8TensorMeta, Protocol
 ):
     scale: torch.Tensor
     scale_inv: torch.Tensor
@@ -53,16 +54,18 @@ def bwd_ln_sm_margin():
 
 
 # Tesnsor types
-class PytorchTensor(GenericTensor, Protocol):
+class PytorchTensor(GenericTensor, ABC):
     dtype: DType
     tensor: torch.Tensor
 
 
+@dataclass
 class PytorchNativeTensor(PytorchTensor, NativeTensor):
     dtype: DType
     tensor: torch.Tensor
 
 
+@dataclass
 class PytorchFP8Tensor(PytorchTensor, FP8Tensor):
     dtype: DType
     tensor: torch.Tensor
@@ -70,10 +73,27 @@ class PytorchFP8Tensor(PytorchTensor, FP8Tensor):
     index_in_meta: int
 
 
+# Converters
+@multiple_dispatch
+def as_native_tensor(dtype: DType, tensor: torch.Tensor):
+    return PytorchNativeTensor(dtype, tensor)
+
+
+@multiple_dispatch
+def as_fp8_tensor(
+    dtype: DType,
+    tensor: torch.Tensor,
+    meta: PytorchTransformerEngineExtensionsFP8TensorMeta,
+    index: int,
+):
+    return PytorchFP8Tensor(dtype, tensor, meta, index)
+
+
 # Allocation
 @multiple_dispatch
-def empty(shape: tuple[int, ...], dtype: DType) -> torch.Tensor:
-    return torch.empty(shape, dtype=dtype.torch_dtype(), device="cuda")
+def empty(shape: tuple[int, ...], dtype: DType):
+    tensor = torch.empty(shape, dtype=dtype.torch_dtype(), device="cuda")
+    return PytorchNativeTensor(dtype, tensor)
 
 
 # Initialization
@@ -208,7 +228,7 @@ def gemm(a: PytorchNativeTensor, b: PytorchNativeTensor, out: PytorchNativeTenso
     cpp_extensions.gemm(  # type: ignore
         a.tensor,
         b.tensor,
-        out.dtype.torch_dtype(),
+        a.dtype.torch_dtype(),
         cublas_workspace(),
         out=out.tensor,
     )

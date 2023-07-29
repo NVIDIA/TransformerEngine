@@ -306,22 +306,22 @@ class Transpose(NonParallelOp, ParameterFreeOp):
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
         if self.input_shape != self._act_shape():
-            f.transpose(x, out=self.act)
+            f.transpose(x, self.act)
             grad = yield self.act
-            f.transpose(grad, out=x)
+            f.transpose(grad, x)
             yield x
         else:
-            f.transpose(x, out=x)
+            f.transpose(x, x)
             grad = yield x
-            f.transpose(grad, out=grad)
+            f.transpose(grad, grad)
             yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         if self.input_shape != self._act_shape():
-            f.transpose(x, out=self.act)
+            f.transpose(x, self.act)
             return self.act
         else:
-            f.transpose(x, out=x)
+            f.transpose(x, x)
             return x
 
 
@@ -370,7 +370,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         return {
             "act": TensorDescriptor(self.input_shape, None, self.output_type),
             "mu": TensorDescriptor((self.features,), None, DType.FP32),
-            "sigma": TensorDescriptor((self.features,), None, DType.FP32),
+            "rsigma": TensorDescriptor((self.features,), None, DType.FP32),
         }
 
     def describe_supplementary_tensors_inference(
@@ -391,9 +391,9 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
             self.bias,
             self.eps,
             self.zero_centered_gamma,
-            out_act=self.act,
-            out_mu=self.mu,
-            out_rsigma=self.rsigma,
+            self.act,
+            self.mu,
+            self.rsigma,
         )
         grad = yield self.act
         f.dlayer_norm(
@@ -403,9 +403,9 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
             self.zero_centered_gamma,
             self.mu,
             self.rsigma,
-            out_dgrad=grad,
-            out_wgrad=self.weight_grad,
-            out_bgrad=self.bias_grad,
+            grad,
+            self.weight_grad,
+            self.bias_grad,
         )
         yield grad
 
@@ -420,7 +420,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
                 self.bias,
                 self.eps,
                 self.zero_centered_gamma,
-                out_act=self.act,
+                self.act,
             )
             return self.act
         else:
@@ -430,7 +430,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
                 self.bias,
                 self.eps,
                 self.zero_centered_gamma,
-                out_act=x,
+                x,
             )
             return x
 
@@ -559,19 +559,19 @@ class Gemm(Op):
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.transpose(self.weight, out=self.weight_t)
-        f.gemm(x, self.weight, out=self.act)
+        f.transpose(self.weight, self.weight_t)
+        f.gemm(x, self.weight, self.act)
         grad = yield self.act
-        f.gemm(grad, self.weight_t, out=x)
-        f.gemm(grad, self.x_t, out=self.weight_grad)
+        f.gemm(grad, self.weight_t, x)
+        f.gemm(grad, self.x_t, self.weight_grad)
         yield x
 
     def inference(self, x: GenericTensor) -> GenericTensor:
         if self.output_type != self.input_type or self.input_shape != self._act_shape():
-            f.gemm(x, self.weight, out=self.act)
+            f.gemm(x, self.weight, self.act)
             return self.act
         else:
-            f.gemm(x, self.weight, out=x)
+            f.gemm(x, self.weight, x)
             return x
 
 
@@ -619,13 +619,13 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.add(x, self.bias, out=x)
+        f.add(x, self.bias, x)
         grad = yield x
-        f.copy(grad, out=self.bias_grad)
+        f.copy(grad, self.bias_grad)
         yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        f.add(x, self.bias, out=x)
+        f.add(x, self.bias, x)
         return x
 
 
@@ -675,13 +675,13 @@ class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousO
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
         assert self.end is not None
-        f.copy(x, out=self.fwd_residue)
+        f.copy(x, self.fwd_residue)
         grad = yield x
-        f.add(self.end.bwd_residue, grad, out=self.end.bwd_residue)
+        f.add(self.end.bwd_residue, grad, self.end.bwd_residue)
         yield self.end.bwd_residue
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        f.copy(x, out=self.fwd_residue)
+        f.copy(x, self.fwd_residue)
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -705,13 +705,13 @@ class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp)
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
+        f.add(self.begin.fwd_residue, x, self.begin.fwd_residue)
         grad = yield self.begin.fwd_residue
-        f.copy(grad, out=self.bwd_residue)
+        f.copy(grad, self.bwd_residue)
         yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        f.add(self.begin.fwd_residue, x, out=self.begin.fwd_residue)
+        f.add(self.begin.fwd_residue, x, self.begin.fwd_residue)
         return self.begin.fwd_residue
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -741,13 +741,13 @@ class Dropout(
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.dropout(x, self.p, out=x)
+        f.dropout(x, self.p, x)
         grad = yield x
-        f.dropout(grad, self.p, out=grad)
+        f.dropout(grad, self.p, grad)
         yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        f.dropout(x, self.p, out=x)
+        f.dropout(x, self.p, x)
         return x
 
 
@@ -760,9 +760,9 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.gelu(x, out=self.act)
+        f.gelu(x, self.act)
         grad = yield self.act
-        f.dgelu(grad, x, out_dgrad=grad)
+        f.dgelu(grad, x, grad)
         yield grad
 
     def inference(
@@ -770,10 +770,10 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
         x: GenericTensor,
     ) -> GenericTensor:
         if self.output_type != self.input_type:
-            f.gelu(x, out=self.act)
+            f.gelu(x, self.act)
             return self.act
         else:
-            f.gelu(x, out=x)
+            f.gelu(x, x)
             return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -794,9 +794,9 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.relu(x, out=self.act)
+        f.relu(x, self.act)
         grad = yield self.act
-        f.drelu(grad, x, out_dgrad=grad)
+        f.drelu(grad, x, grad)
         yield grad
 
     def inference(
@@ -804,10 +804,10 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
         x: GenericTensor,
     ) -> GenericTensor:
         if self.output_type != self.input_type:
-            f.relu(x, out=self.act)
+            f.relu(x, self.act)
             return self.act
         else:
-            f.relu(x, out=x)
+            f.relu(x, x)
             return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -829,16 +829,16 @@ class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp, EnvObliviousOp):
         self,
         x: GenericTensor,
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        f.cast(x, out=self.act)
+        f.cast(x, self.act)
         grad = yield self.act
-        f.cast(grad, out=x)
+        f.cast(grad, x)
         yield x
 
     def inference(
         self,
         x: GenericTensor,
     ) -> GenericTensor:
-        f.cast(x, out=self.act)
+        f.cast(x, self.act)
         return self.act
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:

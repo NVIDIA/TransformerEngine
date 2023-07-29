@@ -85,7 +85,7 @@ class Sequential(nn.Module):
     def __rmul__(self, other: int):
         return self * other
 
-    def forward(self, x: torch.Tensor) -> Any:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._compile_checked(x, self._out_dtype, self.current_execution_env())
         if self._env.training:
             return PipelineFunction.apply(x, self._pipeline)  # type: ignore

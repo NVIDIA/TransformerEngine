@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import functools
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, Callable, Sequence
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, Callable, Sequence, overload
+import typing
+from pydantic import ValidationError, parse_obj_as
 
 
 DispatchSet = dict[tuple[type, ...], Callable[..., Any]]
@@ -39,6 +41,20 @@ def _get_memo(func: Callable[..., Any]):
     return memos[func.__qualname__]
 
 
+def _generic_isinstance(obj: Any, type_: type) -> bool:
+    try:
+        return isinstance(obj, type_)
+    except TypeError:
+        try:
+            parse_obj_as(type_, obj)
+            return True
+        except ValidationError:
+            return False
+        except TypeError:
+            print((obj, type_))
+            raise
+
+
 def _make_wrapper(func: Callable[..., Any]):
     @functools.wraps(func)
     def wrapper(*args: Any):
@@ -50,7 +66,10 @@ def _make_wrapper(func: Callable[..., Any]):
                 (arg_types, candidate)
                 for arg_types, candidate in dispatch_set.items()
                 if len(tuple(arg_types)) == len(args)
-                and all(isinstance(arg, type_) for arg, type_ in zip(args, arg_types))
+                and all(
+                    _generic_isinstance(arg, type_)
+                    for arg, type_ in zip(args, arg_types)
+                )
             ]
 
             scores = list[int]()
@@ -74,14 +93,16 @@ def _make_wrapper(func: Callable[..., Any]):
             if len(scored_candidates) == 0:
 
                 def error(*_: Any):
-                    raise TypeError(f"no dispatch for {func.__qualname__} with {args}")
+                    raise TypeError(f"no dispatch for {func.__qualname__} with {types}")
 
                 memo[types] = error
+            elif len(scored_candidates) == 1:
+                memo[types] = scored_candidates[0][1][1]
             elif scored_candidates[0][0] == scored_candidates[1][0]:
 
                 def error(*_: Any):
                     raise TypeError(
-                        f"ambiguous dispatch for {func.__qualname__} with {args}"
+                        f"ambiguous dispatch for {func.__qualname__} with {types}"
                     )
 
                 memo[types] = error
@@ -103,11 +124,35 @@ def _get_wrapper(func: Callable[..., Any]):
 PS = ParamSpec("PS")
 
 
-def multiple_dispatch(func: Callable[PS, RT]) -> Callable[PS, RT]:
-    disset = _get_dispatch_set(func)
-    arg_types = tuple(func.__annotations__.values())
-    if arg_types in disset:
-        raise ValueError(f"Duplicate dispatch for {func.__qualname__}")
-    disset[arg_types] = func
+def _decorator(register: bool, func: Callable[PS, RT]) -> Callable[PS, RT]:
+    if register:
+        disset = _get_dispatch_set(func)
+        annotations = typing.get_type_hints(func)
+        annotations.pop("return", None)
+        arg_types = tuple(annotations.values())
+        if arg_types in disset:
+            raise ValueError(f"Duplicate dispatch for {func.__qualname__}")
+        disset[arg_types] = func
 
     return _get_wrapper(func)  # type: ignore
+
+
+@overload
+def multiple_dispatch(func: Callable[PS, RT], /) -> Callable[PS, RT]:
+    ...
+
+
+@overload
+def multiple_dispatch(
+    register: bool, /
+) -> Callable[[Callable[PS, RT]], Callable[PS, RT]]:
+    ...
+
+
+def multiple_dispatch(
+    x: Callable[PS, RT] | bool, /
+) -> Callable[PS, RT] | Callable[[Callable[PS, RT]], Callable[PS, RT]]:
+    if isinstance(x, bool):
+        return functools.partial(_decorator, x)
+    else:
+        return _decorator(True, x)
