@@ -25,7 +25,7 @@ class TensorManager:
     allocated = False
 
     def register_tensor(self, name: str, desc: TensorDescriptor):
-        if not self.allocated:
+        if self.allocated:
             raise RuntimeError("Storage already allocated")
         if name in self.tensor_descriptors:
             raise RuntimeError(f"Tensor {name} already registered")

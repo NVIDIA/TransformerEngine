@@ -131,6 +131,7 @@ class Sequential(nn.Module):
     ):
         pipeline = (
             ComputePipeline(ops)
+            .set_parent_name("Sequential")
             .set_environment(compile_env)
             .set_types_inferred(
                 DType.from_torch_dtype(input_like.dtype),

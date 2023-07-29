@@ -26,9 +26,11 @@ class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
         self._ops = ops
         self._tensor_manager = TensorManager()
         self._compiled = None
-        super().__init__("ComputePipeline", ops[0].input_type, ops[-1].output_type)
+        super().__init__(
+            "ComputePipeline", ops[0].raw_input_type, ops[-1].raw_output_type
+        )
 
-    def _post_set_parallelism_hook(self) -> None:
+    def _pre_describe_tensors(self) -> None:
         assert self.parallellism == ParallelismClass.NORMAL
 
     def describe_activation_shape(self):
@@ -118,6 +120,10 @@ class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
         if _model_parallel:
             _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
             _ops = model_parallel_transform(_ops)
+        else:
+            _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
+            for op in _ops:
+                op.set_parallelism(ParallelismClass.NORMAL)
         _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
         _ops = ComputePipeline.insert_casts(_ops)
         _ops = ComputePipeline.set_types(_ops)
@@ -125,14 +131,6 @@ class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
 
     @staticmethod
     def infer_types(_ops: list[Op], _input_type: DType, _output_type: DType):
-        assert (
-            _ops[0].raw_input_type is DTypeInfer
-            or _ops[0].raw_input_type is _input_type
-        )
-        assert (
-            _ops[-1].raw_output_type is DTypeInfer
-            or _ops[-1].raw_output_type is _output_type
-        )
         _ops[0].raw_input_type = _input_type
         _ops[-1].raw_output_type = _output_type
 

@@ -36,6 +36,7 @@ def expand_linear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     in_features = module.in_features
     out_features = module.out_features
     tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
+    param_type = DType.from_torch_dtype(module.weight.dtype)
 
     weight_init_method, bias_init_method = _gemm_param_init_methods(
         isinstance(module, Linear), in_features
@@ -47,12 +48,19 @@ def expand_linear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "gemm",
                 tensor_type,
                 tensor_type,
-                ...,
+                param_type,
                 in_features,
                 out_features,
                 weight_init_method,
             ),
-            ops.Bias("bias", tensor_type, DType.infer, out_features, bias_init_method),
+            ops.Bias(
+                "bias",
+                tensor_type,
+                DTypeInfer(),
+                param_type,
+                out_features,
+                bias_init_method,
+            ),
         ]
     else:
         return [
@@ -60,7 +68,7 @@ def expand_linear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "gemm",
                 tensor_type,
                 DTypeInfer(),
-                ...,
+                param_type,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -83,12 +91,14 @@ def expand_layerNorm(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     if isinstance(module, nn.LayerNorm):
         if not module.elementwise_affine:
             raise ValueError("nn.LayerNorm must have elementwise_affine=True")
+    param_type = DType.from_torch_dtype(module.weight.dtype)
 
     return [
         ops.LayerNorm(
             "layernorm",
             DTypeInfer(),
             DTypeInfer(),
+            param_type,
             hidden_size,
             eps,
             zero_centered_gamma,
@@ -107,6 +117,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
     tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
 
     weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
+    param_type = DType.from_torch_dtype(module.layer_norm_weight.dtype)
 
     if has_bias:
         return [
@@ -114,6 +125,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
+                param_type,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -122,12 +134,19 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "gemm",
                 tensor_type,
                 tensor_type,
-                ...,
+                param_type,
                 in_features,
                 out_features,
                 weight_init_method,
             ),
-            ops.Bias("bias", tensor_type, DType.infer, out_features, bias_init_method),
+            ops.Bias(
+                "bias",
+                tensor_type,
+                DTypeInfer(),
+                param_type,
+                out_features,
+                bias_init_method,
+            ),
         ]
     else:
         return [
@@ -135,6 +154,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
+                param_type,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -143,7 +163,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "gemm",
                 tensor_type,
                 DTypeInfer(),
-                ...,
+                param_type,
                 in_features,
                 out_features,
                 weight_init_method,
@@ -160,7 +180,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     eps = module.eps
     zero_centered_gamma = module.zero_centered_gamma
     tensor_type = DType.FP8E4M3 if env.fp8 else DType.default
-
+    param_type = DType.from_torch_dtype(module.layer_norm_weight.dtype)
     weight_init_method, bias_init_method = _gemm_param_init_methods(True, in_features)
 
     if has_bias:
@@ -169,6 +189,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
+                param_type,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -177,26 +198,36 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "gemm1",
                 tensor_type,
                 tensor_type,
-                ...,
+                param_type,
                 in_features,
                 ffn_size,
                 weight_init_method,
             ),
             ops.Bias(
-                "bias1", tensor_type, tensor_type, ..., ffn_size, bias_init_method
+                "bias1",
+                tensor_type,
+                tensor_type,
+                param_type,
+                ffn_size,
+                bias_init_method,
             ),
             ops.Gelu("act", DTypeInfer(), DTypeInfer()),
             ops.Gemm(
                 "gemm2",
                 tensor_type,
                 tensor_type,
-                ...,
+                param_type,
                 ffn_size,
                 in_features,
                 weight_init_method,
             ),
             ops.Bias(
-                "bias1", tensor_type, DTypeInfer(), ..., in_features, bias_init_method
+                "bias1",
+                tensor_type,
+                DTypeInfer(),
+                param_type,
+                in_features,
+                bias_init_method,
             ),
         ]
     else:
@@ -205,6 +236,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
+                param_type,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -213,7 +245,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "gemm1",
                 tensor_type,
                 tensor_type,
-                ...,
+                param_type,
                 in_features,
                 ffn_size,
                 weight_init_method,
@@ -223,7 +255,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "gemm2",
                 tensor_type,
                 DTypeInfer(),
-                ...,
+                param_type,
                 ffn_size,
                 in_features,
                 weight_init_method,

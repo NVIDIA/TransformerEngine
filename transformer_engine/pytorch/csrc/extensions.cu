@@ -1165,7 +1165,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dgamma = at::empty_like(gamma);
     auto dbeta = at::empty_like(gamma);
     
-    return layernorm_bwd_noalloc(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma,
+    layernorm_bwd_noalloc_ex(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma,
                                  dx, dgamma, dbeta);
 
     return { dx, dgamma, dbeta };
@@ -1180,7 +1180,7 @@ void layernorm_bwd_noalloc_ex(const at::Tensor &dz,
                               const bool zero_centered_gamma,
                               at::Tensor dx,
                               at::Tensor dgamma,
-                              at::Tensor dbeta,
+                              at::Tensor dbeta
 ) {
     transformer_engine::TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
 
@@ -1498,8 +1498,6 @@ void cast_from_fp8_noalloc(const at::Tensor &input,
 
     nvte_fp8_dequantize(input_cu.data(), output_cu.data(),
                         at::cuda::getCurrentCUDAStream());
-
-    return output;
 }
 
 

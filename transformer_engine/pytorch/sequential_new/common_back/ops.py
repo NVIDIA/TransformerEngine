@@ -1,8 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from enum import Enum
-import enum
 from functools import partial
 from typing import Generator, final
 from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
@@ -21,32 +19,6 @@ Parallelism = tuple[PType, PType]
 
 
 # Op Protocol
-class _OpState(Enum):
-    POST_INIT = enum.auto()
-    POST_SET_PARENT_NAME = enum.auto()
-    POST_SET_ENVIRONMENT = enum.auto()
-    POST_SET_TYPES_INFERRED = enum.auto()
-    POST_SET_PARALLELISM = enum.auto()
-    POST_DESCRIBE_PARALLELISM = enum.auto()
-    POST_SET_INPUT_SHAPE = enum.auto()
-    POST_DESCRIBE_PARAMS = enum.auto()
-    POST_DESCRIBE_ACTIVATION_SHAPE = enum.auto()
-    POST_DESCRIBE_SUPPLEMENTARY_TENSORS = enum.auto()
-    POST_SET_TENSORS_ALLOCATED = enum.auto()
-
-    def __ge__(self, other: _OpState):
-        return self.value >= other.value
-
-    def __gt__(self, other: _OpState):
-        return self.value > other.value
-
-    def __le__(self, other: _OpState):
-        return self.value <= other.value
-
-    def __lt__(self, other: _OpState):
-        return self.value < other.value
-
-
 class Unset:
     pass
 
@@ -67,17 +39,14 @@ class Op(ABC):
     __output_type: DType | DTypeInfer
     __parallellism: Parallelism | Unset
     __input_shape: tuple[int, ...] | Unset
-    __state: _OpState
 
     @property
     def environment(self):
-        assert self.__state >= _OpState.POST_SET_ENVIRONMENT
         assert not isinstance(self.__environment, Unset)
         return self.__environment
 
     @property
     def dist_group_size(self):
-        assert self.__state >= _OpState.POST_SET_ENVIRONMENT
         assert not isinstance(self.__dist_group_size, Unset)
         if self.__dist_group_size is None:
             raise ValueError(
@@ -88,45 +57,37 @@ class Op(ABC):
 
     @property
     def raw_input_type(self):
-        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
         return self.__input_type
 
     @raw_input_type.setter
     def raw_input_type(self, value: DType):
-        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
         self.__input_type = value
 
     @property
     def raw_output_type(self):
-        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
         return self.__output_type
 
     @raw_output_type.setter
     def raw_output_type(self, value: DType):
-        assert self.__state < _OpState.POST_SET_TYPES_INFERRED
         self.__output_type = value
 
     @property
     def input_type(self):
-        assert self.__state >= _OpState.POST_SET_TYPES_INFERRED
         assert isinstance(self.__input_type, DType)
         return self.__input_type
 
     @property
     def output_type(self):
-        assert self.__state >= _OpState.POST_SET_TYPES_INFERRED
         assert isinstance(self.__output_type, DType)
         return self.__output_type
 
     @property
     def parallellism(self):
-        assert self.__state >= _OpState.POST_SET_PARALLELISM
         assert not isinstance(self.__parallellism, Unset)
         return self.__parallellism
 
     @property
     def input_shape(self):
-        assert self.__state >= _OpState.POST_SET_INPUT_SHAPE
         assert not isinstance(self.__input_shape, Unset)
         return self.__input_shape
 
@@ -143,18 +104,13 @@ class Op(ABC):
         self.__dist_group_size = Unset()
         self.__parallellism = Unset()
         self.__input_shape = Unset()
-        self.__state = _OpState.POST_INIT
 
     def set_parent_name(self, parent_module_name: str):
-        assert self.__state == _OpState.POST_INIT
         self.name = parent_module_name + "." + self.name
-        self.__state = _OpState.POST_SET_PARENT_NAME
         return self
 
     def set_environment(self, env: ExecutionEnv):
-        assert self.__state == _OpState.POST_SET_PARENT_NAME
         self.__environment = env
-        self.__state = _OpState.POST_SET_ENVIRONMENT
         self.__dist_group_size = (
             self.__environment.distributed_group.size()
             if self.__environment.distributed_group is not None
@@ -165,56 +121,34 @@ class Op(ABC):
     def set_types_inferred(
         self, inferred_input_type: DType, inferred_output_type: DType
     ):
-        assert self.__state == _OpState.POST_SET_ENVIRONMENT
         self.__input_type = inferred_input_type
         self.__output_type = inferred_output_type
-        self.__state = _OpState.POST_SET_TYPES_INFERRED
         return self
-
-    def _pre_describe_parallellism_hook(self):
-        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
-        self.__state = _OpState.POST_DESCRIBE_PARALLELISM
 
     @abstractmethod
     def describe_parallellism(self) -> list[ExecutionFlow]:
         raise NotImplementedError()
 
     def set_parallelism(self, chosen_parallelism: Parallelism):
-        assert self.__state == _OpState.POST_SET_TYPES_INFERRED
         self.__parallellism = chosen_parallelism
-        self.__state = _OpState.POST_SET_PARALLELISM
-        self._post_set_parallelism_hook()
+        return self
+
+    def set_input_shape(self, input_shape: tuple[int, ...]):
+        self.__input_shape = input_shape
+        self._pre_describe_tensors()
         return self
 
     @abstractmethod
-    def _post_set_parallelism_hook(self) -> None:
+    def _pre_describe_tensors(self) -> None:
         raise NotImplementedError()
-
-    def set_input_shape(self, input_shape: tuple[int, ...]):
-        assert self.__state == _OpState.POST_SET_PARALLELISM
-        self.__input_shape = input_shape
-        self.__state = _OpState.POST_SET_INPUT_SHAPE
-        return self
-
-    def _pre_describe_params_hook(self):
-        assert self.__state == _OpState.POST_SET_INPUT_SHAPE
-        self.__state = _OpState.POST_DESCRIBE_PARAMS
 
     @abstractmethod
     def describe_params(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
-    def _pre_describe_activation_shape_hook(self):
-        assert self.__state == _OpState.POST_DESCRIBE_PARAMS
-        self.__state = _OpState.POST_DESCRIBE_ACTIVATION_SHAPE
-
     @abstractmethod
     def describe_activation_shape(self) -> tuple[int, ...]:
         raise NotImplementedError()
-
-    def _pre_describe_supplementary_tensors_hook(self):
-        assert self.__state == _OpState.POST_DESCRIBE_ACTIVATION_SHAPE
-        self.__state = _OpState.POST_DESCRIBE_SUPPLEMENTARY_TENSORS
 
     @abstractmethod
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
@@ -225,10 +159,8 @@ class Op(ABC):
         raise NotImplementedError()
 
     def set_tensors_allocated(self, **tensors: GenericTensor):
-        assert self.__state == _OpState.POST_DESCRIBE_SUPPLEMENTARY_TENSORS
         for name, tensor in tensors.items():
             setattr(self, name, tensor)
-        self.__state = _OpState.POST_SET_TENSORS_ALLOCATED
 
     @abstractmethod
     def training(
@@ -252,7 +184,6 @@ class ParameterFreeOp(Op):
     """
 
     def describe_params(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_params_hook()
         return {}
 
 
@@ -262,7 +193,6 @@ class ShapePreserveOp(Op):
     """
 
     def describe_activation_shape(self):
-        self._pre_describe_activation_shape_hook()
         return self.input_shape
 
 
@@ -272,11 +202,9 @@ class NoSupplementaryTensorsOp(Op):
     """
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {}
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return self.describe_supplementary_tensors_training()
 
 
@@ -308,30 +236,26 @@ _column_parallel = partial(__single_parallel, ParallelismClass.COLP)
 
 class PointwiseOp(Op):
     def describe_parallellism(self):
-        self._pre_describe_parallellism_hook()
         return [_normal(self), _row_parallel(self), _column_parallel(self)]
 
 
 class RowwiseOp(Op):
     def describe_parallellism(self):
-        self._pre_describe_parallellism_hook()
         return [_normal(self), _row_parallel(self)]
 
 
 class ColumnwiseOp(Op):
     def describe_parallellism(self):
-        self._pre_describe_parallellism_hook()
         return [_normal(self), _column_parallel(self)]
 
 
 class EnvObliviousOp(Op):
-    def _post_set_parallelism_hook(self) -> None:
+    def _pre_describe_tensors(self) -> None:
         return
 
 
 class NonParallelOp(EnvObliviousOp):
     def describe_parallellism(self):
-        self._pre_describe_parallellism_hook()
         return [_normal(self)]
 
 
@@ -367,11 +291,9 @@ class Transpose(NonParallelOp, ParameterFreeOp):
         return self.input_shape[:-2] + (self.input_shape[-1], self.input_shape[-2])
 
     def describe_activation_shape(self) -> tuple[int, ...]:
-        self._pre_describe_activation_shape_hook()
         return self._act_shape()
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         if self.input_shape != self._act_shape():
             return {"act": TensorDescriptor(self._act_shape(), None, self.output_type)}
         else:
@@ -419,11 +341,13 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         name: str,
         input_type: DType | DTypeInfer,
         output_type: DType | DTypeInfer,
+        param_type: DType,
         features: int,
         eps: float,
         zero_centered_gamma: bool,
     ):
         super().__init__(name, input_type, output_type)
+        self.param_type = param_type
         self.features = features
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
@@ -431,20 +355,18 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     def describe_params(
         self,
     ) -> dict[str, TensorDescriptor]:
-        self._pre_describe_params_hook()
         return {
             "weight": TensorDescriptor(
                 (self.features,),
                 f.zeros if self.zero_centered_gamma else f.ones,
-                self.output_type,
+                self.param_type,
             ),
-            "bias": TensorDescriptor((self.features,), f.zeros, self.output_type),
+            "bias": TensorDescriptor((self.features,), f.zeros, self.param_type),
         }
 
     def describe_supplementary_tensors_training(
         self,
     ) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {
             "act": TensorDescriptor(self.input_shape, None, self.output_type),
             "mu": TensorDescriptor((self.features,), None, DType.FP32),
@@ -454,7 +376,6 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     def describe_supplementary_tensors_inference(
         self,
     ) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         if self.output_type != self.input_type:
             return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
         else:
@@ -569,7 +490,7 @@ class Gemm(Op):
         self.param_dtype = param_type
         self.init_method = init_method
 
-    def _post_set_parallelism_hook(self):
+    def _pre_describe_tensors(self):
         assert self.parallellism in [
             ParallelismClass.NORMAL,
             ParallelismClass.RGEMM,
@@ -595,7 +516,6 @@ class Gemm(Op):
             self.out_features //= workers
 
     def describe_parallellism(self):
-        self._pre_describe_parallellism_hook()
         return [
             _normal(self),
             _rgemm(self),
@@ -605,7 +525,6 @@ class Gemm(Op):
         ]
 
     def describe_params(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_params_hook()
         return {
             "weight": TensorDescriptor(
                 (self.in_features, self.out_features),
@@ -618,11 +537,9 @@ class Gemm(Op):
         return self.input_shape[:-1] + (self.out_features,)
 
     def describe_activation_shape(self) -> tuple[int, ...]:
-        self._pre_describe_activation_shape_hook()
         return self._act_shape()
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {
             "act": TensorDescriptor(self._act_shape(), None, self.output_type),
             "weight_t": TensorDescriptor(
@@ -634,7 +551,6 @@ class Gemm(Op):
         }
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         if self.output_type != self.input_type or self.input_shape != self._act_shape():
             return {"act": TensorDescriptor(self._act_shape(), None, self.output_type)}
         else:
@@ -678,7 +594,7 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         self.features = features
         self.init_method = init_method
 
-    def _post_set_parallelism_hook(self):
+    def _pre_describe_tensors(self):
         assert self.parallellism in [
             ParallelismClass.NORMAL,
             ParallelismClass.ROWP,
@@ -694,7 +610,6 @@ class Bias(PointwiseOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         self.features //= workers
 
     def describe_params(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_params_hook()
         return {
             "bias": TensorDescriptor(
                 (self.features,), self.init_method, self.param_dtype
@@ -770,7 +685,6 @@ class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousO
         return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {
             "fwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
         }
@@ -801,13 +715,11 @@ class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp)
         return self.begin.fwd_residue
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {
             "bwd_residue": TensorDescriptor(self.input_shape, None, self.input_type)
         }
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {}
 
 
@@ -865,11 +777,9 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
             return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {"act": TensorDescriptor(self.input_shape, None, self.input_type)}
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         if self.output_type != self.input_type:
             return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
         else:
@@ -901,11 +811,9 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
             return x
 
     def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         return {"act": TensorDescriptor(self.input_shape, None, self.input_type)}
 
     def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
-        self._pre_describe_supplementary_tensors_hook()
         if self.output_type != self.input_type:
             return {"act": TensorDescriptor(self.input_shape, None, self.output_type)}
         else:

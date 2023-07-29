@@ -266,8 +266,8 @@ void layernorm_bwd_noalloc_ex(const at::Tensor &dz,
                               const bool zero_centered_gamma,
                               at::Tensor dx,
                               at::Tensor dgamma,
-                              at::Tensor dbeta,
-)
+                              at::Tensor dbeta
+);
 
 std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input,
                                           const at::Tensor &weight,
@@ -304,7 +304,7 @@ void layernorm_fwd_fp8_noalloc_ex(const at::Tensor &input,
                                   at::Tensor scale_inv,
                                   transformer_engine::DType otype,
                                   const int sm_margin,
-                                  const bool zero_centered_gamma
+                                  const bool zero_centered_gamma,
                                   at::Tensor mu_out,
                                   at::Tensor rsigma_out
 );
@@ -371,7 +371,7 @@ void cast_from_fp8_noalloc(const at::Tensor &input,
                            const at::Tensor &scale_inv,
                            transformer_engine::DType itype,
                            at::Tensor output
-)
+);
 
 at::Tensor scaled_softmax_forward(at::Tensor input,
                                   float scale_factor
