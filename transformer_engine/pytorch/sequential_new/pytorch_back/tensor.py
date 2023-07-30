@@ -1,6 +1,8 @@
 from abc import ABC
 from functools import cache
 from typing import Protocol, runtime_checkable
+
+from .environment import PytorchDistributedGroup
 from ..common_back.generic_tensor import (
     GenericTensor,
     TransformerEngineExtensionsFP8TensorMeta,
@@ -14,6 +16,7 @@ from ..multiple_dispatch import multiple_dispatch
 from ... import cpp_extensions
 import subprocess
 import os
+import torch.distributed as dist
 
 
 @runtime_checkable
@@ -294,3 +297,41 @@ def add(x: PytorchNativeTensor, y: PytorchNativeTensor, out: PytorchNativeTensor
         y.tensor.add_(x.tensor)
     else:  # x is out and y is out
         x.tensor.add_(x.tensor)
+
+
+# Communication
+
+
+@multiple_dispatch
+def gather(
+    x: PytorchTensor, out: PytorchTensor, group: PytorchDistributedGroup
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def scatter(
+    x: PytorchTensor, out: PytorchTensor, group: PytorchDistributedGroup
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def all_gather(
+    x: PytorchTensor, out: PytorchTensor, group: PytorchDistributedGroup
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def reduce_scatter(
+    x: PytorchTensor, out: PytorchTensor, group: PytorchDistributedGroup
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch
+def all_reduce(
+    x: PytorchTensor, out: PytorchTensor, group: PytorchDistributedGroup
+) -> None:
+    raise NotImplementedError()

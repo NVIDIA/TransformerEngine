@@ -869,32 +869,127 @@ def row_merge_shape(shape: tuple[int, ...], workers: int) -> tuple[int, ...]:
 
 @final
 class Scatter(ParameterFreeOp, EnvObliviousOp):
+    act: GenericTensor
+
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_scatter(self)]
 
     def describe_activation_shape(self) -> tuple[int, ...]:
         return row_split_shape(self.input_shape, self.dist_group_size)
 
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {
+            "act": TensorDescriptor(
+                self.describe_activation_shape(), None, self.output_type
+            )
+        }
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, None]:
+        f.scatter(x, self.act, self.environment.distributed_group)
+        grad = yield self.act
+        f.gather(grad, x, self.environment.distributed_group)
+        yield x
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.scatter(x, self.act, self.environment.distributed_group)
+        return self.act
+
 
 @final
 class ReduceScatter(ParameterFreeOp, EnvObliviousOp):
+    act: GenericTensor
+
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_reduce_scatter(self)]
 
     def describe_activation_shape(self) -> tuple[int, ...]:
         return row_split_shape(self.input_shape, self.dist_group_size)
 
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {
+            "act": TensorDescriptor(
+                self.describe_activation_shape(), None, self.output_type
+            )
+        }
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, None]:
+        f.reduce_scatter(x, self.act, self.environment.distributed_group)
+        grad = yield self.act
+        f.all_gather(grad, x, self.environment.distributed_group)
+        yield x
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.reduce_scatter(x, self.act, self.environment.distributed_group)
+        return self.act
+
 
 @final
 class AllGather(ParameterFreeOp, EnvObliviousOp):
+    act: GenericTensor
+
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_all_gather(self)]
 
     def describe_activation_shape(self) -> tuple[int, ...]:
         return row_merge_shape(self.input_shape, self.dist_group_size)
 
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {
+            "act": TensorDescriptor(
+                self.describe_activation_shape(), None, self.output_type
+            )
+        }
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, None]:
+        f.all_gather(x, self.act, self.environment.distributed_group)
+        grad = yield self.act
+        f.reduce_scatter(grad, x, self.environment.distributed_group)
+        yield x
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.all_gather(x, self.act, self.environment.distributed_group)
+        return self.act
+
 
 @final
 class AllReduce(ParameterFreeOp, EnvObliviousOp, ShapePreserveOp):
+    act: GenericTensor
+
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_all_reduce(self)]
+
+    def describe_supplementary_tensors_training(self) -> dict[str, TensorDescriptor]:
+        return {
+            "act": TensorDescriptor(
+                self.describe_activation_shape(), None, self.output_type
+            )
+        }
+
+    def describe_supplementary_tensors_inference(self) -> dict[str, TensorDescriptor]:
+        return self.describe_supplementary_tensors_training()
+
+    def training(
+        self, x: GenericTensor
+    ) -> Generator[GenericTensor, GenericTensor, None]:
+        f.all_reduce(x, self.act, self.environment.distributed_group)
+        grad = yield self.act
+        yield grad
+
+    def inference(self, x: GenericTensor) -> GenericTensor:
+        f.all_reduce(x, self.act, self.environment.distributed_group)
+        return self.act

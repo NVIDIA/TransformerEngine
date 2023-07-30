@@ -2,6 +2,8 @@ from __future__ import annotations
 from abc import ABC
 from dataclasses import dataclass
 from typing import Protocol, Sequence, TypeVar, overload, Callable, runtime_checkable
+
+from .generic_environment import DistributedGroup
 from .enums import DType
 from ..multiple_dispatch import multiple_dispatch
 
@@ -233,4 +235,32 @@ def dreglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> N
 
 @multiple_dispatch(False)
 def dswiglu(grad: GenericTensor, x: GenericTensor, out_dgrad: GenericTensor) -> None:
+    raise NotImplementedError()
+
+
+# Communication
+@multiple_dispatch(False)
+def gather(x: GenericTensor, out: GenericTensor, group: DistributedGroup) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch(False)
+def scatter(x: GenericTensor, out: GenericTensor, group: DistributedGroup) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch(False)
+def all_gather(x: GenericTensor, out: GenericTensor, group: DistributedGroup) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch(False)
+def reduce_scatter(
+    x: GenericTensor, out: GenericTensor, group: DistributedGroup
+) -> None:
+    raise NotImplementedError()
+
+
+@multiple_dispatch(False)
+def all_reduce(x: GenericTensor, out: GenericTensor, group: DistributedGroup) -> None:
     raise NotImplementedError()
