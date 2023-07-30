@@ -146,7 +146,7 @@ def amax_and_scale_update(
                          "moment.")
 
 
-class FP8TensorMeta():    # pylint: disable=too-few-public-methods
+class FP8TensorMeta():
     """Holds FP8 scaling and amax history for FP8 layers"""
 
     def __init__(self, is_forward: bool):
