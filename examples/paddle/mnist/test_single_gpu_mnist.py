@@ -94,6 +94,17 @@ def evaluate(model, test_loader, epoch, use_fp8):
     return metric.accumulate()
 
 
+def calibrate(model, test_loader):
+    """Calibration function."""
+    model.eval()
+
+    with paddle.no_grad():
+        for data, _ in test_loader:
+            with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
+                with te.fp8_autocast(enabled=False, calibrating=True):
+                    _ = model(data)
+
+
 def mnist_parser(args):
     """Parse training settings"""
     parser = argparse.ArgumentParser(description="Paddle MNIST Example")
@@ -150,6 +161,11 @@ def mnist_parser(args):
                         default=False,
                         help="Use FP8 for inference and training without recalibration. " \
                              "It also enables Transformer Engine implicitly.")
+    parser.add_argument("--use-fp8-infer",
+                        action="store_true",
+                        default=False,
+                        help="Use FP8 for inference only. If not using FP8 for training, "
+                        "calibration is performed for FP8 infernece.")
     parser.add_argument("--use-te",
                         action="store_true",
                         default=False,
@@ -184,7 +200,10 @@ def train_and_evaluate(args):
         loss = train(args, model, train_loader, optimizer, epoch, args.use_fp8)
         acc = evaluate(model, val_loader, epoch, args.use_fp8)
 
-    if args.save_model:
+    if args.use_fp8_infer and not args.use_fp8:
+        calibrate(model, val_loader)
+
+    if args.save_model or args.use_fp8_infer:
         paddle.save(model.state_dict(), "mnist_cnn.pdparams")
         print('Eval with reloaded checkpoint : fp8=' + str(args.use_fp8))
         weights = paddle.load("mnist_cnn.pdparams")
@@ -230,6 +249,17 @@ class TestMNIST(unittest.TestCase):
         self.args.use_te = True
         self.args.use_fp8 = True
         self.args.save_model = True
+        actual = train_and_evaluate(self.args)
+        if os.path.exists("mnist_cnn.pdparams"):
+            os.remove("mnist_cnn.pdparams")
+        self.verify(actual)
+
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_te_fp8_calibration(self):
+        """Test Transformer Engine with FP8 calibration"""
+        self.args.use_te = True
+        self.args.use_fp8 = False
+        self.args.use_fp8_infer = True
         actual = train_and_evaluate(self.args)
         if os.path.exists("mnist_cnn.pdparams"):
             os.remove("mnist_cnn.pdparams")

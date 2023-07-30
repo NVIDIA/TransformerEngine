@@ -14,8 +14,7 @@ import paddle
 from paddle.fluid import core
 from paddle.fluid.framework import _dygraph_tracer
 
-import transformer_engine_paddle as tex
-
+from ..constants import FP8BwdTensors
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8
 from ..fp8 import (
     get_fp8_recipe,
@@ -24,6 +23,7 @@ from ..fp8 import (
     is_fp8_calibration,
     amax_and_scale_update,
     get_fp8_te_dtype,
+    FP8TensorMeta,
 )
 from ..profile import nvtx_range
 from ..utils import get_bias_dtype, cast_if_needed
@@ -52,18 +52,6 @@ def get_workspace() -> paddle.Tensor:
     return _cublas_workspace
 
 
-@contextmanager
-def _prepare_backward(fp8: bool,
-                      fp8_meta: Dict[str, Any],
-                      name: str = "") -> Generator[None, None, None]:
-    """Checks and prep for BWD."""
-    if fp8:
-        amax_and_scale_update(fp8_meta, False)
-
-    with nvtx_range(name + " backward"):
-        yield
-
-
 class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     """Base TE Layer."""
 
@@ -71,19 +59,19 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         super().__init__()
         assert 'gpu' in paddle.device.get_device(), "TransformerEngine needs CUDA."
         self.fp8_initialized = False
-        self.fp8 = False
+        self.fp8_enabled = False
         self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
-        self.fp8_meta["fp8_group"] = None
         self.fp8_meta["recipe"] = get_default_fp8_recipe()
-        self.fp8_meta_tensors_initialized = False
+        self.fp8_meta["scaling_fwd"] = FP8TensorMeta(is_forward=True)
+        self.fp8_meta["scaling_bwd"] = FP8TensorMeta(is_forward=False)
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
-        # Native AMP (`paddle.amp.auto_cast`) gets highest priority
         tracer = _dygraph_tracer()
         if tracer and tracer._amp_level != core.AmpLevel.O0:
+            # Set activation_dtype to the Paddle AMP dtype if under 'paddle.amp.auto_cast' context
             if tracer._amp_dtype == 'float32':
                 self.activation_dtype = paddle.float32
             elif tracer._amp_dtype == 'bfloat16':
@@ -92,74 +80,74 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 self.activation_dtype = paddle.float16
             else:
                 raise RuntimeError(f"AMP format {tracer._amp_dtype} is not supported.")
-            return
-
-        # All checks after this have already been performed once, thus skip
-        # We assume that user doesn't change input types across iterations
-        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
-            return
-
-        dtype = inp.dtype
-
-        for name, param in self.named_parameters():
-            if param is not None:
-                assert dtype == param.dtype, (
-                    "Data types for parameters must match when outside of autocasted region. "
-                    f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}")
-
-        self.activation_dtype = dtype
-
-    def set_meta_tensor(self, fwd: bool) -> None:
-        """Init scales and amaxes for fwd | bwd."""
-        fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
-
-        if self.fp8_meta_tensors_initialized:
-            # Handle changed amax history size.
-            curr_len = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[0]
-            num_fp8_tensors = self.fp8_meta[fp8_meta_tensor_key].amax_history.shape[1]
-            need_len = self.fp8_meta["recipe"].amax_history_len
-            if need_len < curr_len:
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = (
-                    self.fp8_meta[fp8_meta_tensor_key].amax_history[:self.fp8_meta["recipe"].
-                                                                    amax_history_len])
-            elif need_len > curr_len:
-                extra_rows = need_len - curr_len
-                self.fp8_meta[fp8_meta_tensor_key].amax_history = paddle.concat([
-                    self.fp8_meta[fp8_meta_tensor_key].amax_history,
-                    paddle.zeros((extra_rows, num_fp8_tensors), dtype='float32')
-                ],
-                                                                                axis=0)
-            return
-
-        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
-        # 2 (grad_output and grad_input) for bwd
-        num_fp8_tensors = (self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] *
-                           2)
-
-        self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
-        self.fp8_meta[fp8_meta_tensor_key].scale = paddle.ones(num_fp8_tensors, dtype='float32')
-        self.fp8_meta[fp8_meta_tensor_key].scale_inv = paddle.ones(num_fp8_tensors, dtype='float32')
-        self.fp8_meta[fp8_meta_tensor_key].amax_history = paddle.zeros(
-            (self.fp8_meta["recipe"].amax_history_len, num_fp8_tensors), dtype='float32')
-
-        # Needed for calculation of scale inverses to
-        # preserve scale_inv when caching FP8 weights
-        if fwd:
-            # [True, False, True]: -> [input, weight, output]
-            self.fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] = \
-                paddle.to_tensor([True, False, True] * self.fp8_meta["num_gemms"],
-                                stop_gradient=True, dtype='bool')
         else:
-            # [True, True]: -> [grad_output, grad_input]
-            self.fp8_meta[fp8_meta_tensor_key + "_non_weight_mask"] = \
-                paddle.to_tensor([True, True] * self.fp8_meta["num_gemms"],
-                                stop_gradient=True, dtype='bool')
+            # If not under paddle.amp.auto_cast, set activation_dtype to the input dtype.
+            # Also, make sure the parameters match the input dtype.
 
-    def init_fp8_meta_tensors(self) -> None:
-        """Init scales and amaxes."""
-        self.set_meta_tensor(True)
-        self.set_meta_tensor(False)
-        self.fp8_meta_tensors_initialized = True
+            # Skip the check if activation_dtype is already set and if activation_dtype
+            # matches input dtype. If they do not match, e.g, when user switch from AMP
+            # training to normal training, activation_dtype will still be updated.
+            if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
+                return
+
+            dtype = inp.dtype
+
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}")
+
+            self.activation_dtype = dtype
+
+    # This routine is shared across FP8 and FP8_calibration paths so should not actually
+    # assume FP8 execution.
+    def fp8_init(self, num_gemms: int = 1) -> None:
+        """Initialize fp8 related metadata and tensors during fprop."""
+        self.fp8_enabled = is_fp8_enabled()
+        self.fp8_calibration = is_fp8_calibration()
+        self.fp8_meta["fp8_checkpoint"] = self.fp8_enabled or self.fp8_calibration
+
+        if self.fp8_enabled or self.fp8_calibration:
+            # FP8 init has already been run and recipe is the same, don't do anything.
+            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+                return
+
+            # Set FP8, recipe, and other FP8 metadata
+            self.fp8_meta["recipe"] = get_fp8_recipe()
+
+            # Set FP8_MAX per tensor according to recipe
+            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+
+            # Allocate scales and amaxes
+            amax_history_len = self.fp8_meta["recipe"].amax_history_len
+            self.fp8_meta["scaling_fwd"].prepare(num_gemms, amax_history_len)
+            self.fp8_meta["scaling_bwd"].prepare(num_gemms, amax_history_len)
+            self.fp8_initialized = True
+        else:
+            # If fp8 isn't enabled, turn off and return.
+            self.fp8_initialized = False
+            return
+
+    def _get_fp8_state(self) -> paddle.Tensor:
+        """Dump FP8 state to paddle.Tensor."""
+        state = None
+        if self.fp8_meta["fp8_checkpoint"]:
+            state = {}
+            state["scaling_fwd"] = self.fp8_meta["scaling_fwd"].to_numpy()
+            state["scaling_bwd"] = self.fp8_meta["scaling_bwd"].to_numpy()
+            # Store other pickelable values.
+            extra = {}
+            for k, v in self.fp8_meta.items():
+                if isinstance(v, (bool, int, float, str)):
+                    extra[k] = v
+            state["extra_fp8_variables"] = extra
+
+        state_serialized = pickle.dumps(state)
+        state_tensor = paddle.to_tensor(np.frombuffer(state_serialized, dtype=np.uint8))
+
+        return state_tensor
 
     @paddle.no_grad()
     def state_dict(
@@ -179,38 +167,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         st["fp8_state"] = self._get_fp8_state()
         return st
 
-    @paddle.no_grad()
-    def set_state_dict(self, state_dict, use_structured_name=True):
-        """Restore FP8 State from checkpoint."""
-        fp8_state_tensor = state_dict.pop("fp8_state")
-        self._set_fp8_state(fp8_state_tensor)
-
-        return super().set_state_dict(state_dict)
-
-    def _get_fp8_state(self) -> paddle.Tensor:
-        """Dump FP8 state to paddle.Tensor."""
-        state = None
-        if self.fp8_meta["fp8_checkpoint"]:
-            state = {}
-            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale.numpy()
-            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv.numpy()
-            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history.numpy()
-            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale.numpy()
-            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv.numpy()
-            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history.numpy()
-
-            # Store other pickelable values.
-            extra = {}
-            for k, v in self.fp8_meta.items():
-                if isinstance(v, (bool, int, float, str)):
-                    extra[k] = v
-            state["extra_fp8_variables"] = extra
-
-        state_serialized = pickle.dumps(state)
-        state_tensor = paddle.to_tensor(np.frombuffer(state_serialized, dtype=np.uint8))
-
-        return state_tensor
-
     def _set_fp8_state(self, state: paddle.Tensor) -> None:
         """Load previous state."""
         if state is None:
@@ -220,49 +176,22 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         if state is None:
             return
 
+        # Load fp8 meta tensors.
+        self.fp8_meta["scaling_fwd"].from_numpy(state["scaling_fwd"])
+        self.fp8_meta["scaling_bwd"].from_numpy(state["scaling_bwd"])
+
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
-        self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
+        self.fp8_meta["recipe"].amax_history_len = self.fp8_meta["scaling_fwd"].amax_history.shape[
+            0]
 
-        # Initialize before loading.
-        self.init_fp8_meta_tensors()
-        self.fp8_meta["scaling_fwd"].scale.copy_(paddle.to_tensor(state["scale_fwd"]), True)
-        self.fp8_meta["scaling_fwd"].amax_history.copy_(paddle.to_tensor(state["amax_history_fwd"]),
-                                                        True)
-        self.fp8_meta["scaling_fwd"].scale_inv.copy_(paddle.to_tensor(state["scale_inv_fwd"]), True)
-        self.fp8_meta["scaling_bwd"].scale.copy_(paddle.to_tensor(state["scale_bwd"]), True)
-        self.fp8_meta["scaling_bwd"].amax_history.copy_(paddle.to_tensor(state["amax_history_bwd"]),
-                                                        True)
-        self.fp8_meta["scaling_bwd"].scale_inv.copy_(paddle.to_tensor(state["scale_inv_bwd"]), True)
+    @paddle.no_grad()
+    def set_state_dict(self, state_dict, use_structured_name=True):
+        """Restore FP8 State from checkpoint."""
+        fp8_state_tensor = state_dict.pop("fp8_state")
+        self._set_fp8_state(fp8_state_tensor)
 
-    # This routine is shared across FP8 and FP8_calibration paths so should not actually
-    # assume FP8 execution.
-    def fp8_init(self, num_gemms: int = 1) -> None:
-        """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8 = is_fp8_enabled()
-        self.fp8_calibration = is_fp8_calibration()
-        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
-
-        if self.fp8 or self.fp8_calibration:
-            # FP8 init has already been run and recipe is the same, don't do anything.
-            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
-                return
-
-            # Set FP8, recipe, and other FP8 metadata
-            self.fp8_meta["recipe"] = get_fp8_recipe()
-            self.fp8_meta["num_gemms"] = num_gemms
-
-            # Set FP8_MAX per tensor according to recipe
-            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
-
-            # Allocate scales and amaxes
-            self.init_fp8_meta_tensors()
-            self.fp8_initialized = True
-        else:
-            # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
-            return
+        return super().set_state_dict(state_dict)
 
     @contextmanager
     def prepare_forward(
@@ -284,13 +213,25 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
             amax_and_scale_update(self.fp8_meta, True)
 
-        if self.fp8 and self.training:
+        if self.fp8_enabled and self.training:
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
             self.fp8_meta["update_amax_and_scale_fwd"] = False
 
         with nvtx_range(self.__class__.__name__ + " forward"):
             yield inp
+
+    @staticmethod
+    @contextmanager
+    def prepare_backward(fp8_enabled: bool,
+                         fp8_meta: Dict[str, Any],
+                         name: str = "") -> Generator[None, None, None]:
+        """Checks and prep for BWD."""
+        if fp8_enabled:
+            amax_and_scale_update(fp8_meta, False)
+
+        with nvtx_range(name + " backward"):
+            yield
 
     @staticmethod
     def grad_output_preprocess(
@@ -305,27 +246,27 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         grad_output_mat = grad_output.reshape((-1, grad_output.shape[-1]))
 
         # No-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8:
+        if not ctx.fp8_enabled:
             return grad_output_mat, None, None, None
 
         fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
         # FP8 case without gather: cast, transpose, bgrad fused
         if ctx.use_bias:
-            grad_bias, grad_output_c, grad_output_t = cast_transpose_bgrad(
+            bgrad, grad_output_c, grad_output_t = cast_transpose_bgrad(
                 grad_output_mat,
                 ctx.fp8_meta["scaling_bwd"],
-                tex.FP8BwdTensors.GRAD_OUTPUT1,
+                FP8BwdTensors.GRAD_OUTPUT1,
                 fp8_dtype_backward,
             )
             bias_dtype = get_bias_dtype(ctx.activation_dtype)
-            grad_bias = cast_if_needed(grad_bias, bias_dtype)
+            bgrad = cast_if_needed(bgrad, bias_dtype)
         else:
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                 grad_output_c, grad_output_t = cast_transpose(
                     grad_output_mat,
                     ctx.fp8_meta["scaling_bwd"],
-                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    FP8BwdTensors.GRAD_OUTPUT1,
                     fp8_dtype_backward,
                 )
             else:
@@ -333,12 +274,12 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 grad_output_c = cast_to_fp8(
                     grad_output_mat,
                     ctx.fp8_meta["scaling_bwd"],
-                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    FP8BwdTensors.GRAD_OUTPUT1,
                     fp8_dtype_backward,
                 )
-            grad_bias = None
+            bgrad = None
 
-        return grad_output_mat, grad_output_c, grad_output_t, grad_bias
+        return grad_output_mat, grad_output_c, grad_output_t, bgrad
 
     @abstractmethod
     def forward(self):
