@@ -2102,8 +2102,8 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndar
     """
     seed = _check_seed(seed, dropout_probability, is_training)
 
-    if bias is None:
-        assert attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
+    if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        assert bias is None
         bias = jnp.zeros(0, dtype=qkv.dtype)
     return _self_fused_attn_fwd_p.bind(qkv,
                                        bias,
@@ -2146,7 +2146,10 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
         _, seqlen, _, num_head, _ = qkv.shape
 
-        bias_shape = (1, num_head, seqlen, seqlen)
+        if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+            bias_shape = (0,)
+        else:
+            bias_shape = (1, num_head, seqlen, seqlen)
         bias_dtype = qkv_dtype
 
         return (

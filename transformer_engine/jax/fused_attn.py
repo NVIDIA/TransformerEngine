@@ -155,6 +155,9 @@ def _self_fused_attn_bwd(attn_bias_type, attn_mask_type, scaling_factor, dropout
                                               dropout_probability=dropout_probability,
                                               is_training=is_training)
 
+    if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+        grad_bias = None
+
     return grad_qkv, grad_bias, None, None
 
 
