@@ -91,14 +91,12 @@ def expand_layerNorm(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
     if isinstance(module, nn.LayerNorm):
         if not module.elementwise_affine:
             raise ValueError("nn.LayerNorm must have elementwise_affine=True")
-    param_type = DType.from_torch_dtype(module.weight.dtype)
-
     return [
         ops.LayerNorm(
             "layernorm",
             DTypeInfer(),
             DTypeInfer(),
-            param_type,
+            DType.BF16,
             hidden_size,
             eps,
             zero_centered_gamma,
@@ -125,7 +123,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
-                param_type,
+                DType.BF16,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -154,7 +152,7 @@ def expand_layerNormLinear(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
-                param_type,
+                DType.BF16,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -189,7 +187,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
-                param_type,
+                DType.BF16,
                 in_features,
                 eps,
                 zero_centered_gamma,
@@ -236,7 +234,7 @@ def expand_layerNormMLP(module: nn.Module, env: ExecutionEnv) -> list[ops.Op]:
                 "layernorm",
                 DTypeInfer(),
                 tensor_type,
-                param_type,
+                DType.BF16,
                 in_features,
                 eps,
                 zero_centered_gamma,
