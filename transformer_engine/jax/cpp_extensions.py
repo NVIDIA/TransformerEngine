@@ -15,7 +15,7 @@ from jaxlib.hlo_helpers import custom_call
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
-from jax.abstract_arrays import ShapedArray
+from jax.core import ShapedArray
 from jax.interpreters import xla, mlir
 from jax.interpreters.mlir import ir, dtype_to_ir_type
 
