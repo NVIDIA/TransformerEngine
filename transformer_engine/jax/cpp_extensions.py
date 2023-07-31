@@ -1983,25 +1983,43 @@ def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_ou
                                                           scale_factor=scale_factor)
 
 
-def _check_seed(seed, dropout_probability, is_training):
-    # Jax can't bind None, create a dummy tensor for None
-    if seed is None:
-        dropout_enabled = dropout_probability > 0 and is_training
-        assert not dropout_enabled, "seed is not allowed to be None when dropout is enabled."
-        seed = jnp.zeros(2, dtype=jnp.uint32)
+@dataclass(frozen=True)
+class _FusedAttnRNGStateChecker:
+    """
+    Checker for guarding the fused attention rng state.
+    The fused attention backend requires a 64 bits seed and a 64 bits offset.
+    However, JAX doesn't enable 64 bits by default,
+    so we have to emulate seed as two 32 bits array.
+    The offset calculation is maintained in the backend.
+    """
+    rng_state_dtype: jnp.dtype = jnp.uint32
+    # (seed,) with internal dtype int64
+    seed_size: int = 2
+    # (seed, offset) with internal dtype int64
+    rng_state_size: int = 2 * 2
 
-    if seed.dtype != jnp.uint32:
-        warnings.warn(
-            f"Requested {seed.dtype=} is not available, and will be "
-            f"casted to dtype uint32. "
-            f"Please use threefry/rbg/unsafe_rbg PRNG implementations to remove this warning.")
-        seed = seed.astype(jnp.uint32)
+    def check_seed(self, seed, dropout_probability, is_training):
+        """
+        Check the seed and convert the data type of seed if possible.
+        """
+        # Jax can't bind None, create a dummy tensor for None
+        if seed is None:
+            dropout_enabled = dropout_probability > 0 and is_training
+            assert not dropout_enabled, "seed is not allowed to be None when dropout is enabled."
+            seed = jnp.zeros(2, dtype=self.rng_state_dtype)
 
-    assert seed.dtype == jnp.uint32
-    # Only the first 2 u32 elements are taken
-    assert seed.size >= 2
+        if seed.dtype != self.rng_state_dtype:
+            warnings.warn(
+                f"Requested {seed.dtype=} is not available, and will be "
+                f"casted to dtype {self.rng_state_dtype}. "
+                f"Please use threefry/rbg/unsafe_rbg PRNG implementations to remove this warning.")
+            seed = seed.astype(self.rng_state_dtype)
 
-    return seed
+        assert seed.dtype == self.rng_state_dtype
+        # Backend takes an int64_t seed, so only the first two u32 elements are taken
+        assert seed.size >= self.seed_size
+
+        return seed
 
 
 class SelfFusedAttnFwdPrimitive(BasePrimitive):
@@ -2049,9 +2067,10 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         else:
             raise ValueError(f'Not supported {backend=}')
 
+        checker = _FusedAttnRNGStateChecker()
         seed_dtype = dtypes.canonicalize_dtype(seed.dtype)
-        assert seed_dtype == jnp.uint32    # _check_seed
-        rng_state_shape = (2 * 2,)    # (seed, offset) with internal dtype int64
+        assert seed_dtype == checker.rng_state_dtype
+        rng_state_shape = (checker.rng_state_size,)
         rng_state_dtype = seed_dtype
 
         return (
@@ -2100,7 +2119,8 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndar
     Wrapper for TE self fused attention fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
-    seed = _check_seed(seed, dropout_probability, is_training)
+    checker = _FusedAttnRNGStateChecker()
+    seed = checker.check_seed(seed, dropout_probability, is_training)
 
     if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
         assert bias is None
@@ -2175,8 +2195,6 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        # the dropout elements are encoded in the forward auxiliary tensor
-        # so seed is not needed in backward
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
             batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
@@ -2298,7 +2316,8 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarr
     Wrapper for TE cross fused attention fwd
     Return BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
     """
-    seed = _check_seed(seed, dropout_probability, is_training)
+    checker = _FusedAttnRNGStateChecker()
+    seed = checker.check_seed(seed, dropout_probability, is_training)
 
     return _cross_fused_attn_fwd_p.bind(q,
                                         kv,
