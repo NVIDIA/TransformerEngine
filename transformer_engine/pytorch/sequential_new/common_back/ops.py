@@ -369,8 +369,8 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
     ) -> dict[str, TensorDescriptor]:
         return {
             "act": TensorDescriptor(self.input_shape, None, self.output_type),
-            "mu": TensorDescriptor((self.features,), None, DType.FP32),
-            "rsigma": TensorDescriptor((self.features,), None, DType.FP32),
+            "mu": TensorDescriptor((self.input_shape[-2],), None, DType.FP32),
+            "rsigma": TensorDescriptor((self.input_shape[-2],), None, DType.FP32),
         }
 
     def describe_supplementary_tensors_inference(
