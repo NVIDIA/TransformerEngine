@@ -17,7 +17,7 @@ model = Sequential(
 rec = recipe.DelayedScaling()
 
 tensor = torch.full((TOKENS, HIDDEN), 10.0, device="cuda", requires_grad=True)
-with fp8_autocast():
+with fp8_autocast(True):
     out = model(tensor)
 print(out)
 out.sum().backward()
