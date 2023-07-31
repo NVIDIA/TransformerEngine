@@ -26,21 +26,24 @@ class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
         self._ops = ops
         self._tensor_manager = TensorManager()
         self._compiled = None
+        self._act_shape = None
         super().__init__(
             "ComputePipeline", ops[0].raw_input_type, ops[-1].raw_output_type
         )
 
     def _pre_describe_tensors(self) -> None:
         assert self.parallellism == ParallelismClass.NORMAL
-
-    def describe_activation_shape(self):
         self._compiled = ComputePipeline.compile(
             self._ops,
             self.environment.distributed_group is not None,
             self.input_type,
             self.output_type,
         )
-        return self.allocate_tensors()
+        self._act_shape = self.allocate_tensors()
+
+    def describe_activation_shape(self):
+        assert self._act_shape is not None
+        return self._act_shape
 
     def allocate_tensors(self):
         assert self._compiled is not None
@@ -118,22 +121,23 @@ class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
         _ops: list[Op], _model_parallel: bool, _input_type: DType, _output_type: DType
     ):
         if _model_parallel:
-            _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
+            _ops = ComputePipeline.infer_types(_ops)
             _ops = model_parallel_transform(_ops)
         else:
-            _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
+            _ops = ComputePipeline.infer_types(_ops)
             for op in _ops:
                 op.set_parallelism(ParallelismClass.NORMAL)
-        _ops = ComputePipeline.infer_types(_ops, _input_type, _output_type)
+        _ops = ComputePipeline.infer_types(_ops)
         _ops = ComputePipeline.insert_casts(_ops)
         _ops = ComputePipeline.set_types(_ops)
+        if _ops[0].input_type is not _input_type:
+            _ops = [Cast("CastInput", _input_type, _ops[0].input_type)] + _ops
+        if _ops[-1].output_type is not _output_type:
+            _ops = _ops + [Cast("CastOutput", _ops[-1].output_type, _output_type)]
         return _ops
 
     @staticmethod
-    def infer_types(_ops: list[Op], _input_type: DType, _output_type: DType):
-        _ops[0].raw_input_type = _input_type
-        _ops[-1].raw_output_type = _output_type
-
+    def infer_types(_ops: list[Op]):
         for i, op in enumerate(_ops):
             prev = _ops[i - 1] if i > 0 else None
             nxt_ = _ops[i + 1] if i < len(_ops) - 1 else None
