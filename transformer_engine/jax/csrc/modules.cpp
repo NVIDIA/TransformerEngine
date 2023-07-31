@@ -819,8 +819,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    auto workspace_size =
-        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    auto workspace_size = query_workspace_tensor.shape().data[0];
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
@@ -849,7 +848,6 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     // output
     void *dqkv = buffers[6];
-    void *dp = softmax_aux;
     void *dbias = buffers[7];
 
     auto batch = descriptor.batch;
@@ -857,6 +855,10 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -884,7 +886,6 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     aux_output_tensors.size = 2;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
-    output_s->data.shape = std::vector<size_t>{batch, num_head, q_max_seqlen, kv_max_seqlen};
     output_s->data.dptr = softmax_aux;
     auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
     rng_state_tensor->data.shape = std::vector<size_t>{2};
@@ -898,12 +899,10 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
                                   s_tensor.data(),  // not used for F16
                                   &aux_output_tensors, dqkv_tensor.data(), dbias_tensor.data(),
                                   cu_seqlens_tensor.data(), q_max_seqlen, descriptor.scaling_factor,
-                                  descriptor.dropout_probability,
-                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
-                                  descriptor.mask_type, query_workspace_tensor.data(), stream);
+                                  dropout_probability, qkv_layout, bias_type, mask_type,
+                                  query_workspace_tensor.data(), stream);
 
-    size_t workspace_size =
-        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    size_t workspace_size = query_workspace_tensor.shape().data[0];
     auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
@@ -913,9 +912,8 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
                                   s_tensor.data(),  // not used for F16
                                   &aux_output_tensors, dqkv_tensor.data(), dbias_tensor.data(),
                                   cu_seqlens_tensor.data(), q_max_seqlen, descriptor.scaling_factor,
-                                  descriptor.dropout_probability,
-                                  NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, descriptor.bias_type,
-                                  descriptor.mask_type, workspace_tensor.data(), stream);
+                                  dropout_probability, qkv_layout, bias_type, mask_type,
+                                  workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
