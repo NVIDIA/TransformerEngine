@@ -72,7 +72,7 @@ def layernorm(inputs: jnp.ndarray,
                             epsilon=epsilon,
                             sharding_type=sharding_type,
                             dp_axis_name="",
-                            fsdp_axis_name=None)
+                            fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -157,7 +157,7 @@ def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, 
         grad_gamma = jax.lax.psum(grad_gamma, dp_axis_name)
         if grad_beta is not None:
             grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
-    if fsdp_axis_name is not None:
+    if len(fsdp_axis_name) > 0:
         grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
         if grad_beta is not None:
             grad_beta = jax.lax.psum(grad_beta, fsdp_axis_name)
@@ -217,7 +217,7 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                     sharding_type=sharding_type,
                                     dp_axis_name="",
                                     tp_axis_name="",
-                                    fsdp_axis_name=None)
+                                    fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -449,7 +449,7 @@ def _layernorm_fp8_dot_bwd(
             grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
         amax = jax.lax.pmax(amax, dp_axis_name)
 
-    if fsdp_axis_name is not None:
+    if len(fsdp_axis_name) > 0:
         wgrad = jax.lax.psum(wgrad, fsdp_axis_name)
         grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
         if grad_beta is not None:

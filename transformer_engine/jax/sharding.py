@@ -1031,16 +1031,16 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
 
     mst = infer_major_sharding_type()
     if mst is MajorShardingType.SINGLE:
-        return sharding_meta, None
+        return sharding_meta, ""
 
     gsr = global_shard_resource()
     dp_mesh_axis = gsr.dp_resource
     fsdp_mesh_axis = gsr.fsdp_resource
 
     if fsdp_mesh_axis == dp_mesh_axis:
-        return sharding_meta
+        return sharding_meta, ""
     if fsdp_mesh_axis is None:
-        return sharding_meta
+        return sharding_meta, ""
 
     fsdp_dim_size, _ = _get_mesh_info(fsdp_mesh_axis)
     fsdp_axis_name = "fsdp"

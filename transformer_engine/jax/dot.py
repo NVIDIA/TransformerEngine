@@ -50,7 +50,7 @@ def fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                        sharding_type=sharding_type,
                        dp_axis_name="",
                        tp_axis_name="",
-                       fsdp_axis_name=None)
+                       fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -212,7 +212,7 @@ def _fp8_dot_bwd(
         wgrad = jax.lax.psum(wgrad, dp_axis_name)
         amax = jax.lax.pmax(amax, dp_axis_name)
 
-    if fsdp_axis_name is not None:
+    if len(fsdp_axis_name) > 0:
         wgrad = jax.lax.psum(wgrad, fsdp_axis_name)
         amax = jax.lax.pmax(amax, fsdp_axis_name)
 
