@@ -49,9 +49,9 @@ _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
-    import flash_attn_2_cuda as flash_attn_cuda
+    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
 else:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 
 
 __all__ = ["DotProductAttention"]
@@ -130,8 +130,8 @@ class _CombineQKV(torch.autograd.Function):
     @staticmethod
     def forward(ctx,
                 query_layer: torch.Tensor,
-                key_layer: torch.Tensor,
-                value_layer: torch.Tensor,
+                key_layer: torch.Tensor, # pylint: disable=unused-argument
+                value_layer: torch.Tensor, # pylint: disable=unused-argument
                 dim: int,
     ) -> torch.Tensor:
 
@@ -160,7 +160,7 @@ class _CombineKV(torch.autograd.Function):
     @staticmethod
     def forward(ctx,
                 key_layer: torch.Tensor,
-                value_layer: torch.Tensor,
+                value_layer: torch.Tensor, # pylint: disable=unused-argument
                 dim: int,
     ) -> torch.Tensor:
 
@@ -379,13 +379,13 @@ def _check_qkv_layout(q, k, v):
     check_offsets = all(i * last_dim_size == x.storage_offset()
                         for i, x in enumerate([q, k, v]))
     if check_offsets:
-         return "sbh3d"
+        return "sbh3d"
 
     last_dims_size = shape[-1] * shape[-2]
     check_offsets = all(i * last_dims_size == x.storage_offset()
                         for i, x in enumerate([q, k, v]))
     if check_offsets:
-         return "sb3hd"
+        return "sb3hd"
 
     return "other"
 
@@ -409,13 +409,13 @@ def _check_kv_layout(k, v):
     check_offsets = all(i * last_dim_size == x.storage_offset()
                         for i, x in enumerate([k, v]))
     if check_offsets:
-         return "sbh2d"
+        return "sbh2d"
 
     last_dims_size = shape[-1] * shape[-2]
     check_offsets = all(i * last_dims_size == x.storage_offset()
-                        for i, x in enumerate([q, k, v]))
+                        for i, x in enumerate([k, v]))
     if check_offsets:
-         return "sb2hd"
+        return "sb2hd"
 
     return "other"
 
@@ -537,17 +537,16 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         qkv, out, cu_seqlens = ctx.saved_tensors
         use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
                         and (ctx.fused_attention_backend
-                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen) 
+                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
                         and ctx.attn_bias_type == "no_bias"
                         and _flash_attn_2_available)
         if use_FAv2_bwd:
-            print("=------------ using FAv2 bwd")
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x)
                 for x in (d_out, qkv[:,0], qkv[:,1], qkv[:,2], out)]
-            flash_attn_cuda.varlen_bwd(
+            flash_attn_cuda_bwd(
                 d_out, q, k, v, out, softmax_lse, dqkv[:,0], dqkv[:,1], dqkv[:,2],
                 cu_seqlens, cu_seqlens, ctx.max_seqlen, ctx.max_seqlen,
                 ctx.dropout_p, ctx.attn_scale, False,
@@ -616,7 +615,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x)
                 for x in (d_out, q, kv[:,0], kv[:,1], out)]
-            flash_attn_cuda.varlen_bwd(
+            flash_attn_cuda_bwd(
                 d_out, q, k, v, out, softmax_lse, dq, dkv[:,0], dkv[:,1],
                 cu_seqlens_q, cu_seqlens_kv, ctx.max_seqlen_q, ctx.max_seqlen_kv,
                 ctx.dropout_p, ctx.attn_scale, False,
