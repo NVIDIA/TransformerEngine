@@ -137,6 +137,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta["scaling_fwd"],
                     tex.FP8FwdTensors.GEMM1_INPUT,
                     fp8_dtype_forward,
+                    out=ln_out,
                 )
         # Column Parallel Linear
         if ub_split_ag:
@@ -190,8 +191,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
-                #ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_split_ag else None,
+                #ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None,
+                ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_split_ag else None,
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
