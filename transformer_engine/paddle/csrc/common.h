@@ -16,36 +16,13 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <cstdlib>
 #include <vector>
 
 #include "paddle/extension.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
-// Each tensor here is shape (N, ) holding all scaling
-// data for a single FP8 block, e.g. LayerNormLinear
-class FP8TensorMeta {
- public:
-    paddle::Tensor scale;
-    paddle::Tensor scale_inv;
-    paddle::Tensor amax_history;
-};
-
-// Used as named indices on the `scale`, `scale_inv`,
-// and `amax` tensors in the `FP8TensorMeta` class.
-enum class FP8FwdTensors {
-    GEMM1_INPUT = 0,
-    GEMM1_WEIGHT = 1,
-    GEMM1_OUTPUT = 2,
-    GEMM2_INPUT = 3,
-    GEMM2_WEIGHT = 4,
-    GEMM2_OUTPUT = 5
-};
-
-// Used as named indices on the `scale`, `scale_inv`,
-// and `amax` tensors in the `FP8TensorMeta` class.
-enum class FP8BwdTensors { GRAD_OUTPUT1 = 0, GRAD_INPUT1 = 1, GRAD_OUTPUT2 = 2, GRAD_INPUT2 = 3 };
-
 // Paddle Tensor Utils
 template <typename T>
 inline const void *GetDataPtr(const paddle::Tensor &x, int64_t index) {
