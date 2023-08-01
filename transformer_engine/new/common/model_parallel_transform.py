@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import final
 
-from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
+from .generic_tensor import (
     GenericTensor,
 )
 from .enums import DTypeInfer, PType

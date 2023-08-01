@@ -1,7 +1,9 @@
+from typing_extensions import deprecated
 from ..base_modules.sequential_module_base import SequentialModuleBase
 from ..atomic_modules import LayerNorm, Linear
 
 
+@deprecated
 class LayerNormLinear(SequentialModuleBase):
     def __init__(
         self,

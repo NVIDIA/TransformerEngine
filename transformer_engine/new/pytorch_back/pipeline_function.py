@@ -2,11 +2,11 @@ from typing import Generator
 import torch
 from torch.autograd.function import FunctionCtx
 
-from ..common_back.generic_tensor import GenericTensor
+from ..common.generic_tensor import GenericTensor
 
 from .tensor import PytorchNativeTensor
-from ..common_back.enums import DType
-from ..common_back.compute_pipeline import ComputePipeline
+from ..common.enums import DType
+from ..common.compute_pipeline import ComputePipeline
 
 
 class PipelineFunction(torch.autograd.Function):

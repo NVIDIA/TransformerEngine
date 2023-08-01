@@ -1,11 +1,13 @@
+from typing_extensions import deprecated
+from torch import nn
 from ..base_modules.sequential_module_base import SequentialModuleBase
 from ..atomic_modules import LayerNorm, Linear
-from torch import nn
 
 Activation = nn.ReLU | nn.GELU
 
 
-class LayerNormLinear(SequentialModuleBase):
+@deprecated
+class LayerNormMLP(SequentialModuleBase):
     def __init__(
         self,
         in_features: int,

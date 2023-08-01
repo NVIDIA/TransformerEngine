@@ -3,13 +3,13 @@ from functools import cache
 from typing import Protocol, runtime_checkable
 
 from .environment import PytorchDistributedGroup
-from ..common_back.generic_tensor import (
+from ..common.generic_tensor import (
     GenericTensor,
     TransformerEngineExtensionsFP8TensorMeta,
     FP8Tensor,
     NativeTensor,
 )
-from ..common_back.enums import DType
+from ..common.enums import DType
 import torch
 from dataclasses import dataclass
 from ..multiple_dispatch import multiple_dispatch

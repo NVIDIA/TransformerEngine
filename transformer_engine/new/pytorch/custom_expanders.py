@@ -2,14 +2,14 @@ from functools import partial
 from math import sqrt
 from torch import nn
 
-from ..common_back.enums import DType, DTypeInfer
+from ..common.enums import DType, DTypeInfer
 from .custom_expand_for_sequential import CUSTOM_EXPAND_FOR_SEQUENTIAL
 from .custom_expand_for_sequential import expand
-from ..common_back.generic_environment import ExecutionEnv
-from ..common_back import ops
+from ..common.generic_environment import ExecutionEnv
+from ..common import ops
 from ...module import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
 from ...attention import DotProductAttention
-from ..common_back import generic_tensor as fi
+from ..common import generic_tensor as fi
 
 
 def _gemm_param_init_methods(te: bool, in_features: int):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from ..common_back.generic_environment import DistributedGroup, ExecutionEnv
+from ..common.generic_environment import DistributedGroup, ExecutionEnv
 import torch.distributed
 from torch.distributed import ProcessGroup
 

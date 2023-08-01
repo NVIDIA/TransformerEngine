@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from ....pytorch_back.environment import PytorchExecutionEnv, PytorchDistributedGroup
 
-from ....common_back import ComputePipeline, Op
+from ....common import ComputePipeline, Op
 from ...implementation.compute_pipeline_function import apply
 from ...implementation.environment import Environment, get_current_environment
 

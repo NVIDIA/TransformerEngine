@@ -2,12 +2,12 @@ from typing import Any, OrderedDict, overload
 import torch
 import torch.nn as nn
 from ...expand_for_sequential import expand
-from ....common_back.compute_pipeline import ComputePipeline
+from ....common.compute_pipeline import ComputePipeline
 from ....pytorch_back.environment import PytorchExecutionEnv, PytorchDistributedGroup
 from ....pytorch_back.pipeline_function import PipelineFunction
-from ....common_back.generic_environment import ExecutionEnv
-from ....common_back.ops import Op, ParallelismClass
-from ....common_back.enums import DType
+from ....common.generic_environment import ExecutionEnv
+from ....common.ops import Op, ParallelismClass
+from ....common.enums import DType
 from .....fp8 import is_fp8_enabled
 from .....distributed import dist_group_type
 

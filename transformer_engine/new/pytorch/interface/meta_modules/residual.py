@@ -1,8 +1,8 @@
 from torch import nn
 
-from ....common_back.generic_environment import ExecutionEnv
+from ....common.generic_environment import ExecutionEnv
 from ...expand_for_sequential import expand
-from ....common_back.ops import ResidualBegin, ResidualEnd
+from ....common.ops import ResidualBegin, ResidualEnd
 
 
 class Residual(nn.Module):

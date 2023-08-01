@@ -3,9 +3,9 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
 from typing import Generator, final
-from transformer_engine.pytorch.sequential_new.common_back.enums import DType, PType
+from .enums import DType, PType
 from .generic_environment import ExecutionEnv
-from transformer_engine.pytorch.sequential_new.common_back.generic_tensor import (
+from .generic_tensor import (
     GenericTensor,
     TensorDescriptor,
     ParamInitializer,

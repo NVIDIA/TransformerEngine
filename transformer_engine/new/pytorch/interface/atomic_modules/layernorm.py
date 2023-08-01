@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from ....common_back import ops, DType
+from ....common import ops, DType
 
 from ..base_modules.compute_pipeline_module_base import (
     ComputePipelineModuleBase,
