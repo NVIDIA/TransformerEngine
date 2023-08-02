@@ -34,7 +34,7 @@ def generate_test_rngs():
 def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
     layer = layer_cls()
     variables = layer.init(init_rng, *diff_inputs, *no_diff_inputs)
-    others, params = variables.pop('params')
+    others, params = flax.core.pop(variables, 'params')
     del variables
     return layer, params, others
 
@@ -46,7 +46,7 @@ def compare_frozen_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
         assert isinstance(test_fd[key], type(ref_fd[key])), \
             f"The data type is not match between ref and test " \
             f"FrozenDict on {key=}"
-        if isinstance(ref_fd[key], flax.core.frozen_dict.FrozenDict):
+        if isinstance(ref_fd[key], dict):
             compare_frozen_dict(ref_fd[key], test_fd[key], rtol, atol)
         else:
             assert_allclose(ref_fd[key],
@@ -126,7 +126,7 @@ class TestEncoderLayer:
     def sync_params(ref, target, attrs):
         fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
 
-        unfreeze_target = target.unfreeze()
+        unfreeze_target = flax.core.unfreeze(target)
         if fuse_qkv:
             unfreeze_target['attention']['qkv']['kernel'] = \
                 jnp.reshape(ref['attention']['qkv']['kernel'],
@@ -142,7 +142,7 @@ class TestEncoderLayer:
             jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
         unfreeze_target['mlp']['wo_kernel'] = \
             ref['mlp']['wo']['kernel']
-        return ref, flax.core.frozen_dict.FrozenDict(unfreeze_target)
+        return ref, unfreeze_target
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
         transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
@@ -231,7 +231,7 @@ class TestEncoderLayer:
                 _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
                                                  has_aux=False)(inputs, test_masks, test_params,
                                                                 test_others, test_layer, apply_rng)
-                _, fp8_meta_grad = tmp_grad[0].pop(FP8Helper.FP8_COLLECTION_NAME)
+                _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
                 test_others = FP8Helper.update_collections(
                     {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others)
                 test_others = FP8Helper.update_fp8_metas(test_others)
@@ -251,7 +251,7 @@ class TestEncoderLayer:
             fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
 
             attn_name = 'attention'
-            unfreeze_test_wgrad = test_wgrad.unfreeze()
+            unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
             if "output_layernorm" not in attrs:
                 unfreeze_test_wgrad['pre_attention_layer_norm'] = {}
                 pre_attn_layer_key = 'qkv' if fuse_qkv else 'query'
@@ -283,7 +283,7 @@ class TestEncoderLayer:
             unfreeze_test_wgrad['mlp']['wo']['kernel'] = \
                 unfreeze_test_wgrad['mlp']['wo_kernel']
             del unfreeze_test_wgrad['mlp']['wo_kernel']
-            return flax.core.frozen_dict.FrozenDict(unfreeze_test_wgrad)
+            return unfreeze_test_wgrad
 
         compare_frozen_dict(ref_grads[1],
                             reorganize_test_wgrad(test_grads[1], attrs),
@@ -333,7 +333,7 @@ class TestDecoderLayer:
     def sync_params(ref, target, attrs):
         fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
 
-        unfreeze_target = target.unfreeze()
+        unfreeze_target = flax.core.unfreeze(target)
         if fuse_qkv:
             unfreeze_target['self_attention']['qkv']['kernel'] = \
                 jnp.reshape(ref['self_attention']['qkv']['kernel'],
@@ -354,7 +354,7 @@ class TestDecoderLayer:
             jnp.reshape(ref['mlp']['wi']['kernel'], unfreeze_target['mlp']['wi_kernel'].shape)
         unfreeze_target['mlp']['wo_kernel'] = \
             ref['mlp']['wo']['kernel']
-        return ref, flax.core.frozen_dict.FrozenDict(unfreeze_target)
+        return ref, unfreeze_target
 
     def forward_runner(self, data_shape, dtype, attrs, rtol=1e-05, atol=1e-08):
         transpose_batch_sequence = _KEY_OF_TRANSPOSE_BS in attrs and attrs[_KEY_OF_TRANSPOSE_BS]
@@ -444,7 +444,7 @@ class TestDecoderLayer:
                 _, tmp_grad = jax.value_and_grad(loss_fn, argnums=(3,),
                                                  has_aux=False)(inputs, test_masks, test_params,
                                                                 test_others, test_layer, apply_rng)
-                _, fp8_meta_grad = tmp_grad[0].pop(FP8Helper.FP8_COLLECTION_NAME)
+                _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
                 test_others = FP8Helper.update_collections(
                     {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others)
                 test_others = FP8Helper.update_fp8_metas(test_others)
@@ -464,7 +464,7 @@ class TestDecoderLayer:
             fuse_qkv = attrs.get(_KEY_OF_FUSE_QKV_PARAMS, True)
             attn_name = 'self_attention'
 
-            unfreeze_test_wgrad = test_wgrad.unfreeze()
+            unfreeze_test_wgrad = flax.core.unfreeze(test_wgrad)
             if "output_layernorm" not in attrs:
                 unfreeze_test_wgrad['pre_self_attention_layer_norm'] = {}
                 pre_attn_layer_key = 'qkv' if fuse_qkv else 'query'
@@ -510,7 +510,7 @@ class TestDecoderLayer:
             unfreeze_test_wgrad['mlp']['wo']['kernel'] = \
                 unfreeze_test_wgrad['mlp']['wo_kernel']
             del unfreeze_test_wgrad['mlp']['wo_kernel']
-            return flax.core.frozen_dict.FrozenDict(unfreeze_test_wgrad)
+            return unfreeze_test_wgrad
 
         compare_frozen_dict(ref_grads[1],
                             reorganize_test_wgrad(test_grads[1], attrs),
