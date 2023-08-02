@@ -24,6 +24,14 @@
 #define NVTE_LAUNCH_CPU 2
 #define NVTE_MAX_NVLINK 8
 
+#define NVTE_UB_MEM_UC_CONTIG 1
+#define NVTE_UB_MEM_MC_CREATED 2
+#define NVTE_UB_MEM_ALLOCATED 4
+
+#ifdef UCP
+#include <ucp/api/ucp.h>
+#endif
+
 // region 0 flag offsets
 #define NVTE_REG0_OPFLAGS 1024
 #define NVTE_REG0_RECV (NVTE_REG0_OPFLAGS * userbuffers_op_types)
@@ -81,6 +89,19 @@ struct communicator {
 
   void *mem_ptr[NVTE_MAX_REGIONS];
   void **peer_ptr[NVTE_MAX_REGIONS];
+
+  int memflags[NVTE_MAX_REGIONS]; //UC,MC, user/lib allocated
+
+  CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
+  void* ucbase_ptr[NVTE_MAX_REGIONS]; //only for cuMem allocated memory
+  size_t mem_size[NVTE_MAX_REGIONS];
+
+  void* mc_ptr[NVTE_MAX_REGIONS];
+  void* mc_baseptr;
+  CUmemGenericAllocationHandle mc_handle;
+  size_t mc_offset,mc_maxsize;
+  int use_mc; //1: use MC if available, 0: override not to use MC
+
   int ar_nvsize, ar_firstgpu,
       ar_nvrank;  // number of gpus(and first gpu in a group) of gpus per node in reduction subgroup
                   // (_splitar init used) would be equal to (nvsize,0) for regular comm_create
@@ -193,6 +214,9 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
                                            cudaStream_t stream = 0);
+void reducescatter2_userbuff_strided(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
 /* everything should be 16byte aligned = 8 elts aligned
 output is strided: row starts separated by stride elements*/
 

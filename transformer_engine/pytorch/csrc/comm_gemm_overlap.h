@@ -28,6 +28,7 @@
     }                                                                                        \
   } while (0)
 
+using namespace torch::indexing;
 namespace ubuf {
 
 enum class COMM_TYPE { RS = 0, AG = 1 };
@@ -89,7 +90,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     output_tensor = torch::Tensor();
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    counter = torch::ones({num_splits}, counter_options);
+    counter = torch::zeros({num_splits*2}, counter_options);
+    counter.index_put_({Slice(None, num_splits)}, 1);
     // CUDA event creation
     cudaEventCreateWithFlags(&_start_compute, 0);
     cudaEventCreateWithFlags(&_stop_compute, 0);
@@ -179,8 +181,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     char *input_a_chunk_ptr = reinterpret_cast<char *>(A.data_ptr());
     char *output_buf_chunk_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
-    void *counter_ptr = reinterpret_cast<void *>(counter.data_ptr());
-
+    int *counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
+//    printf ("rs_output size=%d,%d\m", rs_output.size(0), rs_output.size(1));
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
     int ubuf_offset = 0;
     int ori_sms = _ub_comm->sms;
@@ -201,8 +203,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     assert(pre_gelu_out.numel() == 0);
 
     torch::Tensor input_a = torch::from_blob(input_a_chunk_ptr, {m, k}, A.options());
-    torch::Tensor output_d =
-        torch::zeros({n, m}, _ubuf.options());
+    torch::Tensor output_d = torch::from_blob(output_buf_chunk_ptr, {n, m}, _ubuf.options());
+    //    torch::zeros({n, m}, _ubuf.options());
     torch::Tensor workspace_chunk =
         torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
     at::cuda::setCurrentCUDAStream(_stream_compute[0]);
@@ -213,15 +215,24 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     //CHECK_CUDA(cudaEventRecord(_start_comm, (cudaStream_t)_stream_compute[0]));
     //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
     for (int i = 0; i < _num_splits; i++) {
-      consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
-      at::cuda::setCurrentCUDAStream(_stream_comm);
-      torch::Tensor output_chunk =
-            torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-      torch::Tensor d_chunk = output_d.slice(1, i*m_chunk, (i+1)*m_chunk);
-      output_chunk.copy_(d_chunk);
-
-      reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
+      const char* env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
+      if (env_p != nullptr && env_p[0]=='1') {
+        printf ("!! Using reducescatter2_userbuff_strided_atomic\n");
+        reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i*m_chunk,
+                                            m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+      }
+      else if (env_p != nullptr && env_p[0]=='2') {
+        printf ("!! TODO reducescatter2_userbuff_strided_multiatomic\n");
+        // reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, i*m_chunk,
+        //                                     m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        break;
+      }
+      else {
+        printf ("!! Using reducescatter2_userbuff_strided\n");
+        consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
+        reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i*m_chunk,
                                             m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+      }
 
       rs_output_ptr += m_chunk * _ubuf.element_size();
     }
