@@ -28,7 +28,8 @@ from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
-from ..sharding import global_shard_resource, ShardingType
+from ..sharding import global_shard_resource, with_sharding_constraint
+from ..sharding import ShardingType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -152,7 +153,7 @@ def _with_sharding_constraint(x: Array, logical_axis_names: Shape):
 
     mesh_axis_names = [rules_dict[name] for name in logical_axis_names]
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
-    return lax.with_sharding_constraint(x, pspec)
+    return with_sharding_constraint(x, pspec)
 
 
 def _merge_mask(func, *masks: Optional[Array]):

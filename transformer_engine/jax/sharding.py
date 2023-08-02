@@ -14,6 +14,7 @@ from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
 from jax.experimental.maps import xmap
+from jax.sharding import PartitionSpec
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -26,6 +27,17 @@ def _get_mesh_info(resource: str):
     assert resource in mesh.axis_names, \
         f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
+
+
+def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
+    """
+    A wrapper function to jax.lax.with_sharding_constraint to
+    support the case that Mesh is empty.
+    """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return x
+    return jax.lax.with_sharding_constraint(x, pspec)
 
 
 @dataclass
