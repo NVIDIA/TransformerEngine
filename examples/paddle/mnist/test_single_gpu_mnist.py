@@ -4,6 +4,7 @@
 """MNIST example of Transformer Engine Paddle"""
 
 import argparse
+import os
 import unittest
 
 import paddle
@@ -16,6 +17,7 @@ from paddle.vision.datasets import MNIST
 from paddle.metric import Accuracy
 
 import transformer_engine.paddle as te
+from transformer_engine.paddle.fp8 import is_fp8_available
 
 
 class Net(nn.Layer):
@@ -52,12 +54,13 @@ class Net(nn.Layer):
         return x
 
 
-def train(args, model, train_loader, optimizer, epoch):
+def train(args, model, train_loader, optimizer, epoch, use_fp8):
     """Training function."""
     model.train()
     for batch_id, (data, labels) in enumerate(train_loader):
         with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
-            outputs = model(data)
+            with te.fp8_autocast(enabled=use_fp8):
+                outputs = model(data)
             loss = F.cross_entropy(outputs, labels)
 
         loss.backward()
@@ -74,7 +77,7 @@ def train(args, model, train_loader, optimizer, epoch):
     return loss.item()
 
 
-def evaluate(model, test_loader, epoch):
+def evaluate(model, test_loader, epoch, use_fp8):
     """Testing function."""
     model.eval()
     metric = Accuracy()
@@ -83,11 +86,23 @@ def evaluate(model, test_loader, epoch):
     with paddle.no_grad():
         for data, labels in test_loader:
             with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
-                outputs = model(data)
+                with te.fp8_autocast(enabled=use_fp8):
+                    outputs = model(data)
                 acc = metric.compute(outputs, labels)
             metric.update(acc)
     print(f"Epoch[{epoch}] - accuracy: {metric.accumulate():.6f}")
     return metric.accumulate()
+
+
+def calibrate(model, test_loader):
+    """Calibration function."""
+    model.eval()
+
+    with paddle.no_grad():
+        for data, _ in test_loader:
+            with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
+                with te.fp8_autocast(enabled=False, calibrating=True):
+                    _ = model(data)
 
 
 def mnist_parser(args):
@@ -127,6 +142,12 @@ def mnist_parser(args):
         default=False,
         help="quickly check a single pass",
     )
+    parser.add_argument(
+        "--save-model",
+        action="store_true",
+        default=False,
+        help="For Saving the current Model",
+    )
     parser.add_argument("--seed", type=int, default=1, metavar="S", help="random seed (default: 1)")
     parser.add_argument(
         "--log-interval",
@@ -135,11 +156,22 @@ def mnist_parser(args):
         metavar="N",
         help="how many batches to wait before logging training status",
     )
+    parser.add_argument("--use-fp8",
+                        action="store_true",
+                        default=False,
+                        help="Use FP8 for inference and training without recalibration. " \
+                             "It also enables Transformer Engine implicitly.")
+    parser.add_argument("--use-fp8-infer",
+                        action="store_true",
+                        default=False,
+                        help="Use FP8 for inference only. If not using FP8 for training, "
+                        "calibration is performed for FP8 infernece.")
     parser.add_argument("--use-te",
                         action="store_true",
                         default=False,
                         help="Use Transformer Engine")
-    return parser.parse_args(args)
+    args = parser.parse_args(args)
+    return args
 
 
 def train_and_evaluate(args):
@@ -165,14 +197,26 @@ def train_and_evaluate(args):
     model = paddle.amp.decorate(models=model, level='O2', dtype='bfloat16')
 
     for epoch in range(1, args.epochs + 1):
-        loss = train(args, model, train_loader, optimizer, epoch)
-        acc = evaluate(model, val_loader, epoch)
+        loss = train(args, model, train_loader, optimizer, epoch, args.use_fp8)
+        acc = evaluate(model, val_loader, epoch, args.use_fp8)
+
+    if args.use_fp8_infer and not args.use_fp8:
+        calibrate(model, val_loader)
+
+    if args.save_model or args.use_fp8_infer:
+        paddle.save(model.state_dict(), "mnist_cnn.pdparams")
+        print('Eval with reloaded checkpoint : fp8=' + str(args.use_fp8))
+        weights = paddle.load("mnist_cnn.pdparams")
+        model.set_state_dict(weights)
+        acc = evaluate(model, val_loader, 0, args.use_fp8)
 
     return loss, acc
 
 
 class TestMNIST(unittest.TestCase):
     """MNIST unittests"""
+
+    gpu_has_fp8, reason = is_fp8_available()
 
     @classmethod
     def setUpClass(cls):
@@ -192,7 +236,33 @@ class TestMNIST(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         self.args.use_te = True
+        self.args.use_fp8 = False
+        self.args.save_model = True
         actual = train_and_evaluate(self.args)
+        if os.path.exists("mnist_cnn.pdparams"):
+            os.remove("mnist_cnn.pdparams")
+        self.verify(actual)
+
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_te_fp8(self):
+        """Test Transformer Engine with FP8"""
+        self.args.use_te = True
+        self.args.use_fp8 = True
+        self.args.save_model = True
+        actual = train_and_evaluate(self.args)
+        if os.path.exists("mnist_cnn.pdparams"):
+            os.remove("mnist_cnn.pdparams")
+        self.verify(actual)
+
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_te_fp8_calibration(self):
+        """Test Transformer Engine with FP8 calibration"""
+        self.args.use_te = True
+        self.args.use_fp8 = False
+        self.args.use_fp8_infer = True
+        actual = train_and_evaluate(self.args)
+        if os.path.exists("mnist_cnn.pdparams"):
+            os.remove("mnist_cnn.pdparams")
         self.verify(actual)
 
 

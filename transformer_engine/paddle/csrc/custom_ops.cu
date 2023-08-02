@@ -131,6 +131,50 @@ std::vector<paddle::Tensor> te_cast_transpose(const paddle::Tensor &input,
     return {input_cast, input_transpose};
 }
 
+std::vector<paddle::Tensor> te_cast_transpose_bgrad(const paddle::Tensor &grad_output,
+                                                    const paddle::Tensor &scale,
+                                                    paddle::Tensor &amax,       // NOLINT
+                                                    paddle::Tensor &scale_inv,  // NOLINT
+                                                    int64_t index, int64_t otype) {
+    auto shape = GetShapeArray(grad_output);
+    NVTE_CHECK(shape.size() == 2, "Expect the input to have 2 dimensions.");
+
+    size_t M = shape[0];
+    size_t N = shape[1];
+
+    auto grad_bias =
+        paddle::empty({grad_output.shape()[1]}, grad_output.dtype(), grad_output.place());
+    auto grad_output_cast = paddle::empty_like(grad_output, Nvte2PaddleDType(Int2NvteDType(otype)),
+                                               grad_output.place());
+    auto grad_output_transpose =
+        paddle::empty({grad_output.shape()[1], grad_output.shape()[0]},
+                      Nvte2PaddleDType(Int2NvteDType(otype)), grad_output.place());
+
+    auto input_cu = MakeNvteTensor(grad_output);
+    void *amax_data = GetDataPtr<float>(amax, index);
+    void *scale_data = const_cast<void *>(GetDataPtr<float>(scale, index));
+    void *scale_inv_data = GetDataPtr<float>(scale_inv, index);
+    auto output_cast_cu = MakeNvteTensor(grad_output_cast.data(), {M, N}, Int2NvteDType(otype),
+                                         amax_data, scale_data, scale_inv_data);
+    auto output_transpose_cu =
+        MakeNvteTensor(grad_output_transpose.data(), {N, M}, Int2NvteDType(otype), amax_data,
+                       scale_data, scale_inv_data);
+    auto dbias_cu = MakeNvteTensor(grad_bias);
+    transformer_engine::TensorWrapper workspace;
+
+    nvte_cast_transpose_dbias(input_cu.data(), output_cast_cu.data(), output_transpose_cu.data(),
+                              dbias_cu.data(), workspace.data(), grad_output.stream());
+
+    // Fill workspace
+    auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), grad_output.place());
+    workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
+
+    nvte_cast_transpose_dbias(input_cu.data(), output_cast_cu.data(), output_transpose_cu.data(),
+                              dbias_cu.data(), workspace.data(), grad_output.stream());
+
+    return {grad_bias, grad_output_cast, grad_output_transpose};
+}
+
 void te_gemm(const paddle::Tensor &A, const paddle::optional<paddle::Tensor> &A_scale_inverse,
              const paddle::Tensor &B, const paddle::optional<paddle::Tensor> &B_scale_inverse,
              const paddle::optional<paddle::Tensor> &bias, paddle::Tensor &D,            // NOLINT
@@ -975,6 +1019,30 @@ void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads
         softmax_results.stream());
 }
 
+__global__ void UpdateScalesKernel(const float *amax, const float *scale, float margin,
+                                   float fp8_max, size_t size, float *scale_out) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size) {
+        float exp = floor(log2(fp8_max / amax[idx])) - margin;
+        float sf = round(powf(2.0f, abs(exp)));
+        sf = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
+        scale_out[idx] = exp < 0.0f ? 1 / sf : sf;
+    }
+}
+
+std::vector<paddle::Tensor> update_scale(const paddle::Tensor &amax, const paddle::Tensor &scale,
+                                         float fp8_max, float margin) {
+    const size_t block_size = 512;
+    size_t size = static_cast<size_t>(amax.numel());
+    size_t num_blocks = (size + block_size - 1) / block_size;
+    auto scale_out = paddle::empty_like(scale, scale.dtype(), scale.place());
+    UpdateScalesKernel<<<num_blocks, block_size, 0, amax.stream()>>>(
+        amax.data<float>(), scale.data<float>(), margin, fp8_max, size, scale_out.data<float>());
+
+    return {scale_out};
+}
+
 }  // namespace paddle_ext
 }  // namespace transformer_engine
 
@@ -1020,6 +1088,13 @@ PD_BUILD_OP(te_cast_transpose)
     .SetInplaceMap({{"_Amax", "Amax"}, {"_ScaleInv", "ScaleInv"}})
     .Attrs({"index: int64_t", "otype: int64_t"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_cast_transpose));
+
+PD_BUILD_OP(te_cast_transpose_bgrad)
+    .Inputs({"GradOutput", "Scale", "_Amax", "_ScaleInv"})
+    .Outputs({"dBias", "CastedOutput", "TransposedOutput", "Amax", "ScaleInv"})
+    .SetInplaceMap({{"_Amax", "Amax"}, {"_ScaleInv", "ScaleInv"}})
+    .Attrs({"index: int64_t", "otype: int64_t"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_cast_transpose_bgrad));
 
 PD_BUILD_OP(te_gelu_fp8)
     .Inputs({"Input", "Scale", "_Amax", "_ScaleInv"})
@@ -1166,3 +1241,9 @@ PD_BUILD_OP(te_scaled_upper_triang_masked_softmax_backward)
     .SetInplaceMap({{"out_grad_", "out_grad"}})
     .SetKernelFn(
         PD_KERNEL(transformer_engine::paddle_ext::te_scaled_upper_triang_masked_softmax_backward));
+
+PD_BUILD_OP(update_scale)
+    .Inputs({"Amax", "Scale"})
+    .Outputs({"ScaleOut"})
+    .Attrs({"fp8_max: float", "margin: float"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::update_scale));

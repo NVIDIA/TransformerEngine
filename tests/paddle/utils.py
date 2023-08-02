@@ -8,17 +8,16 @@ import numpy as np
 import paddle
 
 import transformer_engine    # pylint: disable=unused-import
-import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
+
+from transformer_engine.paddle.fp8 import FP8TensorMeta
 
 
-def create_fp8_meta(num_fp8_tensors, amax_history_len):
+def create_fp8_meta(num_gemms=1, amax_history_len=10):
     """
     Create and initialize FP8TensorMeta
     """
-    fp8_meta = tex.FP8TensorMeta()
-    fp8_meta.scale = paddle.ones(num_fp8_tensors, dtype='float32')
-    fp8_meta.scale_inv = paddle.ones(num_fp8_tensors, dtype='float32')
-    fp8_meta.amax_history = paddle.zeros((amax_history_len, num_fp8_tensors), dtype='float32')
+    fp8_meta = FP8TensorMeta(is_forward=True)
+    fp8_meta.prepare(num_gemms, amax_history_len)
     return fp8_meta
 
 
