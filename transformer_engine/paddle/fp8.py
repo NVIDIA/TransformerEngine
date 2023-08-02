@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """FP8 utilities for TransformerEngine"""
 
+import copy
 from contextlib import contextmanager
 from typing import Tuple, Optional, Dict, Any
 
@@ -15,10 +16,6 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 # FP8 support
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
-# FP8 status
-_FP8_ENABLED = False
-_FP8_CALIBRATION = False
-_FP8_RECIPE = None
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
@@ -49,27 +46,40 @@ def is_fp8_available() -> Tuple[bool, str]:
     return _is_fp8_available, _reason_for_no_fp8
 
 
-# Functions used to access fp8 status
-def is_fp8_enabled() -> bool:
-    """Is FP8 enabled"""
-    return _FP8_ENABLED
+class FP8State:
+    """Stores FP8 state"""
+
+    def __init__(self):
+        self.fp8_enabled = False
+        self.fp8_calibration = False
+        self.fp8_recipe = None
+
+    def is_fp8_enabled(self) -> bool:
+        """Is FP8 enabled"""
+        return self.fp8_enabled
+
+    def is_fp8_calibration(self) -> bool:
+        """Is FP8 calibration"""
+        return self.fp8_calibration
+
+    def get_fp8_recipe(self) -> DelayedScaling:
+        """Return the fp8 recipe"""
+        return self.fp8_recipe
+
+    @staticmethod
+    def get_default_fp8_recipe() -> DelayedScaling:
+        """FP8 recipe if not provided by user
+        Margin = 0, interval = 1, E4M3
+        """
+        return DelayedScaling()
 
 
-def is_fp8_calibration() -> bool:
-    """Is FP8 calibration"""
-    return _FP8_CALIBRATION
+_global_fp8_state = FP8State()
 
 
-def get_fp8_recipe() -> DelayedScaling:
-    """Return the fp8 recipe"""
-    return _FP8_RECIPE
-
-
-def get_default_fp8_recipe() -> DelayedScaling:
-    """FP8 recipe if not provided by user
-    Margin = 0, interval = 1, E4M3
-    """
-    return DelayedScaling()
+def get_global_fp8_state() -> FP8State:
+    """Get global fp8 state"""
+    return _global_fp8_state
 
 
 @contextmanager
@@ -82,19 +92,20 @@ def fp8_autocast(
     Context manager for FP8 usage.
     """
 
-    global _FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE
-    fp8_state = (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE)
+    global _global_fp8_state
+    saved_fp8_state = copy.deepcopy(_global_fp8_state)
     try:
-        _FP8_ENABLED = enabled
-        _FP8_CALIBRATION = calibrating
-        _FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        _global_fp8_state.fp8_enabled = enabled
+        _global_fp8_state.fp8_calibration = calibrating
+        _global_fp8_state.fp8_recipe = FP8State.get_default_fp8_recipe(
+        ) if fp8_recipe is None else fp8_recipe
 
         if enabled:
             fp8_available, reason_for_no_fp8 = is_fp8_available()
             assert fp8_available, reason_for_no_fp8
         yield
     finally:
-        (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE) = fp8_state
+        _global_fp8_state = saved_fp8_state
 
 
 def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:

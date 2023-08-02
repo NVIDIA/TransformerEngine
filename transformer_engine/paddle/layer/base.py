@@ -17,13 +17,11 @@ from paddle.fluid.framework import _dygraph_tracer
 from ..constants import FP8BwdTensors
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8
 from ..fp8 import (
-    get_fp8_recipe,
-    get_default_fp8_recipe,
-    is_fp8_enabled,
-    is_fp8_calibration,
-    amax_and_scale_update,
-    get_fp8_te_dtype,
+    FP8State,
     FP8TensorMeta,
+    amax_and_scale_update,
+    get_global_fp8_state,
+    get_fp8_te_dtype,
 )
 from ..profile import nvtx_range
 from ..utils import get_bias_dtype, cast_if_needed
@@ -63,7 +61,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
-        self.fp8_meta["recipe"] = get_default_fp8_recipe()
+        self.fp8_meta["recipe"] = FP8State.get_default_fp8_recipe()
         self.fp8_meta["scaling_fwd"] = FP8TensorMeta(is_forward=True)
         self.fp8_meta["scaling_bwd"] = FP8TensorMeta(is_forward=False)
 
@@ -104,17 +102,18 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8_enabled = is_fp8_enabled()
-        self.fp8_calibration = is_fp8_calibration()
+        state = get_global_fp8_state()
+        self.fp8_enabled = state.is_fp8_enabled()
+        self.fp8_calibration = state.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8_enabled or self.fp8_calibration
 
         if self.fp8_enabled or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
-            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+            if self.fp8_initialized and state.get_fp8_recipe() == self.fp8_meta["recipe"]:
                 return
 
             # Set FP8, recipe, and other FP8 metadata
-            self.fp8_meta["recipe"] = get_fp8_recipe()
+            self.fp8_meta["recipe"] = state.get_fp8_recipe()
 
             # Set FP8_MAX per tensor according to recipe
             self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
