@@ -349,12 +349,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if fp8_checkpoint:
             state = {}
-            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
-            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
-            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
-            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
-            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
-            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
+            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale.cpu()
+            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv.cpu()
+            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history.cpu()
+            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale.cpu()
+            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv.cpu()
+            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history.cpu()
             state["global_fp8_buffer"] = get_global_fp8_buffer()
 
             # Store other pickelable values.
