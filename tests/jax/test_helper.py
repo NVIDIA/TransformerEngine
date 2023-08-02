@@ -64,7 +64,7 @@ class TestFP8Helper(unittest.TestCase):
 
         def select_amax(amaxes):
             if FP8Helper.AMAX_COMPUTE_ALGO == AmaxComputeAlgo.MAX:
-                return jnp.max(amaxes, axis=1, keepdims=True)
+                return jnp.max(amaxes, axis=-1, keepdims=True)
             return amaxes[:, 0:1]
 
         def get_fp8_scale(fp8_max, amax, scale):
@@ -78,15 +78,16 @@ class TestFP8Helper(unittest.TestCase):
             sf = np.where(np.isfinite(amax), sf, scale)
             return np.where(exp < 0, 1 / sf, sf)
 
-        meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
+        amax_meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
+        scale_meta_shape = (num_of_meta, 1)
         fp8_max_array = FP8Helper.generate_fp8_max_array(num_of_meta)
-        fp8_amax_array1 = jax.random.uniform(key1, shape=meta_shape)
+        fp8_amax_array1 = jax.random.uniform(key1, shape=amax_meta_shape)
         fp8_scale_array1 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array1),
-                                         jnp.ones(meta_shape))
+                                         jnp.ones(scale_meta_shape))
         fp8_scale_inv_array1 = 1 / fp8_scale_array1
-        fp8_amax_array2 = jax.random.uniform(key2, shape=meta_shape)
+        fp8_amax_array2 = jax.random.uniform(key2, shape=amax_meta_shape)
         fp8_scale_array2 = get_fp8_scale(fp8_max_array, select_amax(fp8_amax_array2),
-                                         jnp.ones(meta_shape))
+                                         jnp.ones(scale_meta_shape))
         fp8_scale_inv_array2 = 1 / fp8_scale_array2
 
         state = flax.core.frozen_dict.FrozenDict({
@@ -94,14 +95,14 @@ class TestFP8Helper(unittest.TestCase):
                 "test_update_fp8_metas1": {
                     FP8Helper.FP8_MAX_NAME: fp8_max_array,
                     FP8Helper.FP8_AMAX_NAME: fp8_amax_array1,
-                    FP8Helper.FP8_SCALE_NAME: jnp.ones(meta_shape),
-                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(meta_shape)
+                    FP8Helper.FP8_SCALE_NAME: jnp.ones(scale_meta_shape),
+                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(scale_meta_shape)
                 },
                 "test_update_fp8_metas2": {
                     FP8Helper.FP8_MAX_NAME: fp8_max_array,
                     FP8Helper.FP8_AMAX_NAME: fp8_amax_array2,
-                    FP8Helper.FP8_SCALE_NAME: jnp.ones(meta_shape),
-                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(meta_shape)
+                    FP8Helper.FP8_SCALE_NAME: jnp.ones(scale_meta_shape),
+                    FP8Helper.FP8_SCALE_INV_NAME: jnp.ones(scale_meta_shape)
                 }
             }
         })

@@ -8,41 +8,21 @@
 #include <cublasLt.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
 #include <transformer_engine/logging.h>
+#include <transformer_engine/rmsnorm.h>
+#include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <cstdlib>
 #include <vector>
 
 #include "paddle/extension.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
-// Each tensor here is shape (N, ) holding all scaling
-// data for a single FP8 block, e.g. LayerNormLinear
-class FP8TensorMeta {
- public:
-    paddle::Tensor scale;
-    paddle::Tensor scale_inv;
-    paddle::Tensor amax_history;
-};
-
-// Used as named indices on the `scale`, `scale_inv`,
-// and `amax` tensors in the `FP8TensorMeta` class.
-enum class FP8FwdTensors {
-    GEMM1_INPUT = 0,
-    GEMM1_WEIGHT = 1,
-    GEMM1_OUTPUT = 2,
-    GEMM2_INPUT = 3,
-    GEMM2_WEIGHT = 4,
-    GEMM2_OUTPUT = 5
-};
-
-// Used as named indices on the `scale`, `scale_inv`,
-// and `amax` tensors in the `FP8TensorMeta` class.
-enum class FP8BwdTensors { GRAD_OUTPUT1 = 0, GRAD_INPUT1 = 1, GRAD_OUTPUT2 = 2, GRAD_INPUT2 = 3 };
-
 // Paddle Tensor Utils
 template <typename T>
 inline const void *GetDataPtr(const paddle::Tensor &x, int64_t index) {
@@ -78,17 +58,17 @@ inline void *GetOptionalDataPtr(paddle::optional<paddle::Tensor> &x) {  // NOLIN
     return x ? x->data() : nullptr;
 }
 
-inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
-    if (x) return GetShapeArray(x.get());
-    return {0};
-}
-
 inline std::vector<size_t> GetShapeArray(const paddle::Tensor &x) {
     std::vector<size_t> shapes;
     for (auto dim : x.shape()) {
         shapes.push_back(static_cast<size_t>(dim));
     }
     return shapes;
+}
+
+inline std::vector<size_t> GetShapeArray(const paddle::optional<paddle::Tensor> &x) {
+    if (x) return GetShapeArray(x.get());
+    return {0};
 }
 
 paddle::Tensor AllocateSpace(const NVTEShape &shape, const DType type, const paddle::Place &place,
@@ -176,7 +156,8 @@ class cudaDevicePropertiesManager {
 };
 
 // NVTE Tensor Utils
-TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type);
+TensorWrapper MakeNvteTensor(const void *data_ptr, const std::vector<size_t> &shape,
+                             const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const NVTEShape &shape, const DType type);
 TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, const DType type,
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);

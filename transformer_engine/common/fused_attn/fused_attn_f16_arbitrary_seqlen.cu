@@ -373,7 +373,7 @@ createDropoutForward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             .build();
     // scale after dropout
     auto scaleDropoutTensor = tensor_create(
-                            tensorType, D_CONST_ID, scale_dim,
+                            CUDNN_DATA_FLOAT, D_CONST_ID, scale_dim,
                             scale_stride, false, true);  // is by value
     // after Scale
     auto afterScaleTensor = tensor_create(
@@ -454,7 +454,7 @@ createDropoutBackward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d
             .build();
     // scale after dropout
     auto scaleDropoutTensor = tensor_create(
-                            tensorType, D_CONST_ID, scale_dim,
+                            CUDNN_DATA_FLOAT, D_CONST_ID, scale_dim,
                             scale_stride, false, true);  // is by value
     // after Scale
     auto afterScaleTensor = tensor_create(
@@ -738,6 +738,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             b, h, s_q, s_kv, d, o_stride,
                             layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
+            int64_t dqAccum_dim[4] =  {b, h, s_q, d};
+            int64_t dqAccum_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+
             int64_t scale_dim[4] = {1, 1, 1, 1};
             int64_t scale_stride[4] = {1, 1, 1, 1};
 
@@ -770,19 +775,19 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             auto afterReductionTensor = tensor_create(
                             CUDNN_DATA_FLOAT, VIRTUAL_ID + 1, reduction_dim,
                             reduction_stride, true, false);  // is virtual
-            auto reductionMaxDesc = cudnn_frontend::ReductionDescBuilder()
+            auto reductionAddDesc = cudnn_frontend::ReductionDescBuilder()
                             .setComputeType(CUDNN_DATA_FLOAT)
-                            .setReductionOp(CUDNN_REDUCE_TENSOR_MAX)
+                            .setReductionOp(CUDNN_REDUCE_TENSOR_ADD)
                             .build();
 
-            // Create a reduction max node
-            auto reductionMax_op = cudnn_frontend::OperationBuilder(
+            // Create a reduction add node
+            auto reductionAdd_op = cudnn_frontend::OperationBuilder(
                             CUDNN_BACKEND_OPERATION_REDUCTION_DESCRIPTOR)
                             .setxDesc(dotProductTensor)
                             .setyDesc(afterReductionTensor)
-                            .setreductionDesc(reductionMaxDesc)
+                            .setreductionDesc(reductionAddDesc)
                             .build();
-            ops.push_back(std::move(reductionMax_op));
+            ops.push_back(std::move(reductionAdd_op));
 
 
             /*******************************************************************************
@@ -895,16 +900,25 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             ops.push_back(std::move(reshape_op));
 
             // Outputs of bprop
-            int64_t dqkv_dim[4] = {b, h, s_kv, d};
-            int64_t dqkv_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, dqkv_stride,
+            int64_t dq_dim[4] = {b, h, s_q, d};
+            int64_t dq_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dq_stride,
                             layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
+            int64_t dk_dim[4] = {b, h, s_kv, d};
+            int64_t dk_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dk_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+
+            int64_t dv_dim[4] = {b, h, s_kv, d};
+            int64_t dv_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dv_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+
             // Outputs of backprop
-            auto dQTensor = tensor_create(tensorType, dQ_ID, dqkv_dim, dqkv_stride, false, false);
-            auto dKTensor = tensor_create(tensorType, dK_ID, dqkv_dim, dqkv_stride, false, false);
-            auto dVTensor = tensor_create(tensorType, dV_ID, dqkv_dim, dqkv_stride, false, false);
+            auto dQTensor = tensor_create(tensorType, dQ_ID, dq_dim, dq_stride, false, false);
+            auto dKTensor = tensor_create(tensorType, dK_ID, dk_dim, dk_stride, false, false);
+            auto dVTensor = tensor_create(tensorType, dV_ID, dv_dim, dv_stride, false, false);
                             // not virtual
 
             /*******************************************************************************
@@ -1028,8 +1042,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
              *                          dP @ K -> dqAccumTensor                           */
 
             auto dqAccumTensor = cudnn_frontend::TensorBuilder()
-                .setDim(4, dqkv_dim)
-                .setStride(4, dqkv_stride)
+                .setDim(4, dqAccum_dim)
+                .setStride(4, dqAccum_stride)
                 .setId(dQ_ACCUM_ID)
                 .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
                 .setDataType(CUDNN_DATA_FLOAT)
@@ -1044,7 +1058,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .build();
             auto matmul_op3 = cudnn_frontend::OperationBuilder(
                                 CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
-                                .setaMatDesc(dPTensor)
+                                .setaMatDesc(dPScaledTensor)
                                 .setbMatDesc(kTensor)
                                 .setcMatDesc(dqAccumTensor)
                                 .setmatmulDesc(matmul_3_Desc)
@@ -1060,7 +1074,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 p_transpose_stride, true, false);  // is virtual
             auto reshape_op3 = cudnn_frontend::OperationBuilder(
                                 CUDNN_BACKEND_OPERATION_RESHAPE_DESCRIPTOR)
-                                .setxDesc(dPTensor)
+                                .setxDesc(dPScaledTensor)
                                 .setyDesc(dPTransposeTensor)
                                 .build();
             ops.push_back(std::move(reshape_op3));
@@ -1185,7 +1199,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
-    const auto stride = num_head * head_dim;
+    const auto stride = 2 * num_head * head_dim;
 
     void *devPtrQ = static_cast<void *>(devPtrQKV);
     void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -1256,7 +1270,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
 
-    auto stride = num_head * head_dim;
+    auto stride = 2 * num_head * head_dim;
     void *devPtrQ = devPtrQKV;
     void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
     void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);

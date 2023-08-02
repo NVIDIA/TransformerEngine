@@ -20,17 +20,10 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: |
-          mkdir -p wheelhouse && \
-          NVTE_FRAMEWORK=pytorch MAX_JOBS=1 pip wheel -w wheelhouse . -v
-      - name: 'Upload wheel'
-        uses: actions/upload-artifact@v3
-        with:
-          name: te_wheel_pyt
-          path: wheelhouse/transformer_engine*.whl
-          retention-days: 7
-      - name: 'Install'
-        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+        run: pip install . -v --no-deps
+        env:
+          NVTE_FRAMEWORK: pytorch
+          MAX_JOBS: 1
       - name: 'Sanity check'
         run: python tests/pytorch/test_sanity_import.py
   jax:
@@ -48,16 +41,9 @@ jobs:
       - name: 'Build'
         run: |
           pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
-          mkdir -p wheelhouse && \
-          NVTE_FRAMEWORK=jax pip wheel -w wheelhouse . -v
-      - name: 'Upload wheel'
-        uses: actions/upload-artifact@v3
-        with:
-          name: te_wheel_jax
-          path: wheelhouse/transformer_engine*.whl
-          retention-days: 7
-      - name: 'Install'
-        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+          pip install . -v
+        env:
+          NVTE_FRAMEWORK: jax
       - name: 'Sanity check'
         run: python tests/jax/test_sanity_import.py
   tensorflow:
@@ -72,16 +58,8 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: |
-          mkdir -p wheelhouse && \
-          NVTE_FRAMEWORK=tensorflow pip wheel -w wheelhouse . -v
-      - name: 'Upload wheel'
-        uses: actions/upload-artifact@v3
-        with:
-          name: te_wheel_tf
-          path: wheelhouse/transformer_engine*.whl
-          retention-days: 7
-      - name: 'Install'
-        run: pip install --no-cache-dir wheelhouse/transformer_engine*.whl
+        run: pip install . -v
+        env:
+          NVTE_FRAMEWORK: tensorflow
       - name: 'Sanity check'
         run: python tests/tensorflow/test_sanity_import.py

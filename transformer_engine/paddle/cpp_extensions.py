@@ -3,10 +3,12 @@
 # See LICENSE for license information.
 """TE FP8 extensions and GEMMs"""
 
+import math
 from typing import Optional, Tuple, Union
 import paddle
 import transformer_engine_paddle as tex
-from .constants import TE_DType
+from .constants import TE_DType, FP8FwdTensors, FP8BwdTensors
+from .fp8 import FP8TensorMeta
 
 
 def gemm(
@@ -96,11 +98,11 @@ def gemm(
 def fp8_gemm(
     A: paddle.Tensor,
     A_scale_inv: paddle.Tensor,
-    A_fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    A_fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     A_dtype: tex.DType,
     B: paddle.Tensor,
     B_scale_inv: paddle.Tensor,
-    B_fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    B_fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     B_dtype: tex.DType,
     out_dtype: paddle.dtype,
     workspace: paddle.Tensor,
@@ -108,7 +110,7 @@ def fp8_gemm(
     accumulate: bool = False,
     out: Optional[paddle.Tensor] = None,
     out_index=None,
-    fp8_meta_tensor: tex.FP8TensorMeta = None,
+    fp8_meta_tensor: FP8TensorMeta = None,
     bias: Optional[paddle.Tensor] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
@@ -150,8 +152,8 @@ def fp8_gemm(
         None if out_index is None else fp8_meta_tensor.amax_history,
         gelu_input,    # this is pre_gelu_out
         workspace,
-        int(A_fp8_tensor),
-        int(B_fp8_tensor),
+        A_fp8_tensor.value,
+        B_fp8_tensor.value,
         0 if out_index is None else out_index,
         int(A_dtype),
         int(B_dtype),
@@ -177,8 +179,8 @@ def fp8_gemm(
 
 def cast_to_fp8(
     inp: paddle.Tensor,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
 ) -> paddle.Tensor:
     """Cast input to FP8"""
@@ -187,7 +189,7 @@ def cast_to_fp8(
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
-        int(fp8_tensor),
+        fp8_tensor.value,
         int(otype),
     )
     return out
@@ -195,8 +197,8 @@ def cast_to_fp8(
 
 def cast_from_fp8(
     inp: paddle.Tensor,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     itype: tex.DType,
     otype: tex.DType,
 ) -> paddle.Tensor:
@@ -204,7 +206,7 @@ def cast_from_fp8(
     return tex.cast_from_fp8(
         inp,
         fp8_meta_tensor.scale_inv,
-        int(fp8_tensor),
+        fp8_tensor.value,
         int(itype),
         int(otype),
     )
@@ -223,8 +225,8 @@ def transpose(
 
 def cast_transpose(
     inp: paddle.Tensor,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
 ) -> Union[Tuple[paddle.Tensor, paddle.Tensor], None]:
     """Cast + Transpose with FP8 output"""
@@ -233,11 +235,30 @@ def cast_transpose(
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
-        int(fp8_tensor),
+        fp8_tensor.value,
         int(otype),
     )
 
     return cast_out, transpose_out
+
+
+def cast_transpose_bgrad(
+    inp: paddle.Tensor,
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
+    otype: tex.DType,
+) -> Union[Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor], None]:
+    """Fused Cast + Transpose + Bias Grad"""
+    grad_bias, cast_out, transpose_out, _, _ = tex.te_cast_transpose_bgrad(
+        inp,
+        fp8_meta_tensor.scale,
+        fp8_meta_tensor.amax_history,
+        fp8_meta_tensor.scale_inv,
+        fp8_tensor.value,
+        int(otype),
+    )
+
+    return grad_bias, cast_out, transpose_out
 
 
 def te_gelu(
@@ -253,8 +274,8 @@ def te_gelu(
 
 def gelu_fp8(
     inp: paddle.Tensor,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
 ) -> paddle.Tensor:
     """GELU + FP8 cast"""
@@ -263,7 +284,7 @@ def gelu_fp8(
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
-        int(fp8_tensor),
+        fp8_tensor.value,
         int(otype),
     )
 
@@ -273,8 +294,8 @@ def gelu_fp8(
 def dgelu_cast_transpose_bgrad_fp8(
     grad_output: paddle.Tensor,
     gelu_input: paddle.Tensor,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """
@@ -287,7 +308,7 @@ def dgelu_cast_transpose_bgrad_fp8(
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
         fp8_meta_tensor.scale_inv,
-        int(fp8_tensor),
+        fp8_tensor.value,
         int(otype),
     )
 
@@ -299,8 +320,8 @@ def layernorm_fwd_fp8(
     weight: paddle.Tensor,
     bias: paddle.Tensor,
     eps: float,
-    fp8_meta_tensor: tex.FP8TensorMeta,
-    fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors],
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
     otype: tex.DType,
     sm_margin: int = 0,
     zero_centered_gamma: bool = False,
@@ -309,7 +330,7 @@ def layernorm_fwd_fp8(
     out, mu, rsigma, _, _ = tex.te_layernorm_fwd_fp8(inp, weight, bias, fp8_meta_tensor.scale,
                                                      fp8_meta_tensor.amax_history,
                                                      fp8_meta_tensor.scale_inv, eps,
-                                                     int(fp8_tensor), int(otype), sm_margin,
+                                                     fp8_tensor.value, int(otype), sm_margin,
                                                      zero_centered_gamma)
     return out, mu, rsigma
 
@@ -338,3 +359,385 @@ def layernorm_bwd(
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Non-FP8 LayerNorm backward"""
     return tex.te_layernorm_bwd(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma)
+
+
+def rmsnorm_fwd(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    eps: float,
+    otype: tex.DType,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 RMSNorm forward"""
+    return tex.te_rmsnorm_fwd(inp, weight, eps, int(otype), sm_margin)
+
+
+def rmsnorm_fwd_fp8(
+    inp: paddle.Tensor,
+    weight: paddle.Tensor,
+    eps: float,
+    fp8_meta_tensor: FP8TensorMeta,
+    fp8_tensor: Union[FP8FwdTensors, FP8BwdTensors],
+    otype: tex.DType,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """RMSNorm with FP8 output"""
+    out, rsigma, _, _ = tex.te_rmsnorm_fwd_fp8(inp, weight, fp8_meta_tensor.scale,
+                                               fp8_meta_tensor.amax_history,
+                                               fp8_meta_tensor.scale_inv, eps, fp8_tensor.value,
+                                               int(otype), sm_margin)
+    return out, rsigma
+
+
+def rmsnorm_bwd(
+    dz: paddle.Tensor,
+    x: paddle.Tensor,
+    rsigma: paddle.Tensor,
+    gamma: paddle.Tensor,
+    sm_margin: int = 0,
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Non-FP8 RMSNorm backward"""
+    return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin)
+
+
+def fused_attn_fwd_qkvpacked(
+    qkv: paddle.Tensor,
+    cu_seqlens: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    is_training: bool,
+    max_seqlen: int,
+    qkv_dtype: tex.DType,
+    Bias: paddle.Tensor = None,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed QKV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+
+    b = cu_seqlens.shape[0] - 1
+    total_seqs = qkv.shape[0] * qkv.shape[1]
+    h = qkv.shape[3]
+    d = qkv.shape[4]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if bias_type != "no_bias":
+        assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (Bias.shape == [1, h, max_seqlen, max_seqlen
+                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
+
+    if set_zero:
+        out = paddle.full(shape=[total_seqs, h, d], fill_value=0, dtype=qkv.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs, h, d], dtype=qkv.dtype)
+
+    if is_training:
+        softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+    else:
+        softmax_aux = None
+
+    # execute kernel
+    tex.te_fused_attn_fwd_qkvpacked(
+        qkv,
+        cu_seqlens,
+        Bias,
+        out,
+        softmax_aux,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs,
+        max_seqlen,
+        is_training,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return out, softmax_aux
+
+
+def fused_attn_bwd_qkvpacked(
+    qkv: paddle.Tensor,
+    cu_seqlens: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    o: paddle.Tensor,
+    d_o: paddle.Tensor,
+    softmax_aux: paddle.Tensor,
+    max_seqlen: int,
+    qkv_dtype: tex.DType,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention BWD for packed QKV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+
+    b = cu_seqlens.shape[0] - 1
+    total_seqs = qkv.shape[0] * qkv.shape[1]
+    h = qkv.shape[3]
+    d = qkv.shape[4]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if set_zero:
+        dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
+    else:
+        dqkv = paddle.empty(shape=qkv.shape, dtype=qkv.dtype)
+
+    if bias_type != "no_bias":
+        dbias = paddle.empty(shape=[1, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+    else:
+        dbias = None
+    # execute kernel
+    dqkv, dbias = tex.te_fused_attn_bwd_qkvpacked(
+        qkv,
+        cu_seqlens,
+        o,
+        d_o,
+        softmax_aux,
+        dqkv,
+        dbias,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs,
+        max_seqlen,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return dqkv, dbias
+
+
+def fused_attn_fwd_kvpacked(
+    q: paddle.Tensor,
+    kv: paddle.Tensor,
+    cu_seqlens_q: paddle.Tensor,
+    cu_seqlens_kv: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    is_training: bool,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    qkv_dtype: tex.DType,
+    Bias: paddle.Tensor = None,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "kv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Fused Attention FWD for packed KV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
+           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+
+    b = cu_seqlens_q.shape[0] - 1
+    total_seqs_q = q.shape[0] * q.shape[1]
+    total_seqs_kv = kv.shape[0] * kv.shape[1]
+    h = q.shape[2]
+    d = q.shape[3]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if bias_type != "no_bias":
+        assert Bias is not None, "bias tensor cannot be None when bias_type is not no_bias."
+        assert (Bias.shape == [1, h, max_seqlen_q, max_seqlen_kv
+                              ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
+        assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
+
+    if set_zero:
+        out = paddle.full(shape=[total_seqs_q, h, d], fill_value=0, dtype=q.dtype)
+    else:
+        out = paddle.empty(shape=[total_seqs_q, h, d], dtype=q.dtype)
+
+    if is_training:
+        softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+    else:
+        softmax_aux = None
+
+    # execute kernel
+    tex.te_fused_attn_fwd_kvpacked(
+        q,
+        kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        Bias,
+        out,
+        softmax_aux,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs_q,
+        total_seqs_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        is_training,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+
+    return out, softmax_aux
+
+
+def fused_attn_bwd_kvpacked(
+    q: paddle.Tensor,
+    kv: paddle.Tensor,
+    cu_seqlens_q: paddle.Tensor,
+    cu_seqlens_kv: paddle.Tensor,
+    rng_state: paddle.Tensor,
+    o: paddle.Tensor,
+    d_o: paddle.Tensor,
+    softmax_aux: paddle.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    qkv_dtype: tex.DType,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    set_zero: bool = True,
+    qkv_layout: str = "kv_interleaved",
+    bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+    """Fused Attention BWD for packed KV input"""
+
+    assert (qkv_dtype in (tex.DType.kBFloat16,
+                          tex.DType.kFloat16)), "Only support bf16/fp16 for fused attention."
+    assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
+           ), "cu_seqlens_q and cu_seqlens_kv must have the same shape"
+
+    b = cu_seqlens_q.shape[0] - 1
+    total_seqs_q = q.shape[0] * q.shape[1]
+    total_seqs_kv = kv.shape[0] * kv.shape[1]
+    h = q.shape[2]
+    d = q.shape[3]
+
+    if attn_scale is None:
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if set_zero:
+        dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)
+        dkv = paddle.full(shape=kv.shape, fill_value=0, dtype=kv.dtype)
+    else:
+        dq = paddle.empty(shape=q.shape, dtype=q.dtype)
+        dkv = paddle.empty(shape=kv.shape, dtype=kv.dtype)
+    if bias_type != "no_bias":
+        dbias = paddle.empty(shape=[1, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+    else:
+        dbias = None
+    # execute kernel
+    tex.te_fused_attn_bwd_kvpacked(
+        q,
+        kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        o,
+        d_o,
+        softmax_aux,
+        dq,
+        dkv,
+        dbias,
+        rng_state,
+        b,
+        h,
+        d,
+        total_seqs_q,
+        total_seqs_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        attn_scale,
+        dropout,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        int(qkv_dtype),
+    )
+    return dq, dkv, dbias
+
+
+def scaled_softmax_forward(
+    inp: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled softmax forward"""
+    return tex.te_scaled_softmax_forward(inp, scale_factor)
+
+
+def scaled_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled softmax backward"""
+    tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad
+
+
+def scaled_masked_softmax_forward(
+    inp: paddle.Tensor,
+    mask: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled masked softmax forward"""
+
+    return tex.te_scaled_masked_softmax_forward(inp, mask, scale_factor)
+
+
+def scaled_masked_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled masked softmax backward"""
+    tex.te_scaled_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad
+
+
+def scaled_upper_triang_masked_softmax_forward(
+    inp: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled upper triang masked softmax forward"""
+    return tex.te_scaled_upper_triang_masked_softmax_forward(inp, scale_factor)
+
+
+def scaled_upper_triang_masked_softmax_backward(
+    out_grad: paddle.Tensor,
+    softmax_results: paddle.Tensor,
+    scale_factor: float,
+) -> paddle.Tensor:
+    """ scaled upper triang masked softmax backward"""
+    tex.te_scaled_upper_triang_masked_softmax_backward(out_grad, softmax_results, scale_factor)
+    return out_grad

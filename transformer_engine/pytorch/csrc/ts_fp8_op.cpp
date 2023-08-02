@@ -328,6 +328,44 @@ at::Tensor layernorm_fwd_inf_ts(const at::Tensor &input,
   return output;
 }
 
+at::Tensor rmsnorm_fwd_fp8_inf_ts(const at::Tensor &input,
+                                  const at::Tensor &weight,
+                                  double eps,
+                                  at::Tensor scale,
+                                  at::Tensor amax,
+                                  at::Tensor scale_inv,
+                                  int64_t fp8_tensor,
+                                  int64_t otype,
+                                  const bool zero_centered_gamma) {
+  transformer_engine::DType otype_arg = reverse_map_dtype(otype);
+  float eps_float = static_cast<float>(eps);
+
+  at::Tensor output = rmsnorm_fwd_fp8_inf(input,
+                                          weight,
+                                          eps_float,
+                                          scale,
+                                          amax,
+                                          scale_inv,
+                                          otype_arg,
+                                          zero_centered_gamma);
+
+  return output;
+}
+
+at::Tensor rmsnorm_fwd_inf_ts(const at::Tensor &input,
+                              const at::Tensor &weight,
+                              double eps,
+                              const bool zero_centered_gamma) {
+  float eps_float = static_cast<float>(eps);
+
+  at::Tensor output = rmsnorm_fwd_inf(input,
+                                      weight,
+                                      eps_float,
+                                      zero_centered_gamma);
+
+  return output;
+}
+
 TORCH_LIBRARY(tex_ts, m) {
   m.def("cast_to_fp8_ts", &cast_to_fp8_ts);
   m.def("cast_from_fp8_ts", &cast_from_fp8_ts);
@@ -339,4 +377,6 @@ TORCH_LIBRARY(tex_ts, m) {
   m.def("te_gemm_ts", &te_gemm_ts);
   m.def("layernorm_fwd_fp8_inf_ts", &layernorm_fwd_fp8_inf_ts);
   m.def("layernorm_fwd_inf_ts", &layernorm_fwd_inf_ts);
+  m.def("rmsnorm_fwd_fp8_inf_ts", &rmsnorm_fwd_fp8_inf_ts);
+  m.def("rmsnorm_fwd_inf_ts", &rmsnorm_fwd_inf_ts);
 }
