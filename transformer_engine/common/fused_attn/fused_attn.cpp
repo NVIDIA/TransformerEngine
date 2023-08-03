@@ -30,7 +30,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           && (sm_arch_ >= 90)
           && (max_seqlen_q == max_seqlen_kv)
           && (max_seqlen_q <= 512)
-          && (max_seqlen_q%64 == 0)
           && (head_dim == 64)
           && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
           && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
@@ -47,8 +46,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool flag_arb = false;
     if ((sm_arch_ >= 80)
             && (head_dim == 64)
-            && (max_seqlen_q%64 == 0)
-            && (max_seqlen_kv%64 == 0)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
@@ -60,12 +57,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     if ((sm_arch_ >= 80)
             && (max_seqlen_q == max_seqlen_kv)
-#if (CUDNN_VERSION >= 8900)
-            && (max_seqlen_q%64 == 0)
-#endif
-#if (CUDNN_VERSION >= 8903)
-            && (max_seqlen_q%32 == 0)
-#endif
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
@@ -108,7 +99,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   } else {
     backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
-  std::cout << "xxxxxxxxxxx backend is " << static_cast<int>(backend) << std::endl;
   return backend;
 }
 

@@ -564,20 +564,20 @@ class FusedAttention(torch.nn.Module):
 
     Support matrix:
 
-    | backend       | max512_seqlen              | arbitrary_seqlen           |
-    | flash based   | no                         | yes                        |
-    | cuDNN based   | yes                        | yes                        |
-    | qkv dtype     | fp16/bf16                  | fp16/bf16                  |
-    | attn_type     | self/cross                 | self                       |
-    | qkv_layout    |                            |                            |
-    |  - qkv        | qkv_interleaved            | qkv_interleaved            |
-    |  - (q,kv)     | kv_interleaved             |                            |
-    | mask_type     | padding/causal/no_mask     | causal_mask                |
-    | bias_type     | no/post_scale_bias         | no_bias                    |
-    | dropout       | yes                        | yes                        |
-    | max_seqlen    | <=512 (cuDNN8.9.1: %64==0) | any (cuDNN 8.9.3+: %32==0) |
-    | head_dim      | 64                         | 64,128                     |
-    | output dtype  | fp16/bf16                  | fp16/bf16                  |
+    | backend       | 1                       | 2               |
+    | flash based   | no                      | yes             |
+    | cuDNN based   | yes                     | yes             |
+    | qkv dtype     | fp16/bf16               | fp16/bf16       |
+    | attn_type     | self/cross              | self            |
+    | qkv_layout    |                         |                 |
+    |  - qkv        | qkv_interleaved         | qkv_interleaved |
+    |  - (q,kv)     | kv_interleaved          |                 |
+    | mask_type     | causal/no_mask          | causal          |
+    | bias_type     | no_bias/post_scale_bias | no_bias         |
+    | dropout       | yes                     | yes             |
+    | max_seqlen    | <=512                   | any             |
+    | head_dim      | 64                      | 64,128          |
+    | output dtype  | fp16/bf16               | fp16/bf16       |
     """
 
     def __init__(
