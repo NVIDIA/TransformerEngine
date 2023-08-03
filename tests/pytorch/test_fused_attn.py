@@ -4,7 +4,6 @@
 
 import torch
 import pytest
-import contextlib
 
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -50,10 +49,10 @@ model_configs = {
 }
 
 param_types = [torch.float16]
-#if torch.cuda.is_bf16_supported():
-#    param_types.append(torch.bfloat16)
+if torch.cuda.is_bf16_supported():
+    param_types.append(torch.bfloat16)
 
-batch_sizes = [1]#, 2, 32]
+batch_sizes = [1, 2, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
