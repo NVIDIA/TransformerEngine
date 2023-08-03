@@ -510,7 +510,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
     @staticmethod
     def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, attn_scale,
                 dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend):
+                rng_gen, fused_attention_backend, use_FAv2_bwd):
         out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
             is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
             fused_attention_backend, attn_bias,
@@ -529,19 +529,14 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
         qkv, out, cu_seqlens = ctx.saved_tensors
-        use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
-                        and (ctx.fused_attention_backend
-                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
-                        and ctx.attn_bias_type == "no_bias"
-                        and _flash_attn_2_available
-                        and get_device_compute_capability() == 9.0)
-        if use_FAv2_bwd:
+        if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
@@ -580,7 +575,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend):
+                rng_gen, fused_attention_backend, use_FAv2_bwd):
         out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, kv, qkv_dtype, fused_attention_backend, attn_bias,
@@ -600,19 +595,14 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
-        use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
-                        and (ctx.fused_attention_backend
-                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
-                        and ctx.attn_bias_type == "no_bias"
-                        and _flash_attn_2_available
-                        and get_device_compute_capability() == 9.0)
-        if use_FAv2_bwd:
+        if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dq = torch.empty_like(q)
             dkv = torch.empty_like(kv)
@@ -688,6 +678,9 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
+        self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
+                        and _flash_attn_2_available
+                        and get_device_compute_capability() == 9.0)
 
     def forward(
         self,
@@ -747,6 +740,10 @@ class FusedAttention(torch.nn.Module):
                 step=seqlen_q,
                 dtype=torch.int32,
                 device=query_layer.device)
+            use_FAv2_bwd = (self.use_FAv2_bwd
+                        and (fused_attention_backend
+                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+                        and core_attention_bias_type == "no_bias")
 
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc_qkvpacked.apply(
@@ -764,6 +761,7 @@ class FusedAttention(torch.nn.Module):
                     self.attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
+                    use_FAv2_bwd
                 )
             output = output.view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous()
 
@@ -824,6 +822,7 @@ class FusedAttention(torch.nn.Module):
                     self.attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
+                    use_FAv2_bwd
                 )
 
             output = (outputs[0].view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous(),
