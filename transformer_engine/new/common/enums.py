@@ -6,6 +6,10 @@ import transformer_engine_extensions as tex
 TexDType = NewType("TexDType", int)
 
 
+class DTypeInfer:
+    pass
+
+
 class DType(Enum):
     FP8E4M3 = "FP8E4M3"
     FP8E5M2 = "FP8E5M2"
@@ -13,6 +17,10 @@ class DType(Enum):
     BF16 = "BF16"
     FP32 = "FP32"
     default = BF16
+
+    FP8 = property(lambda _: DType.FP8E4M3 if DType.__is_forward() else DType.FP8E5M2)
+    LowestPrec = FP8
+    Infer = property(lambda _: DTypeInfer())
 
     @staticmethod
     def from_torch_dtype(torch_dtype: torch.dtype):
@@ -38,10 +46,6 @@ class DType(Enum):
         else:
             name = self.name.replace("FP", "F").replace("F", "Float")
             return getattr(torch, name.lower())  # type: ignore
-
-
-class DTypeInfer:
-    pass
 
 
 class PType(Enum):

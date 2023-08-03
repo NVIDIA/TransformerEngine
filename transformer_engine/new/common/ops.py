@@ -3,15 +3,13 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
 from typing import Generator, final
-from .enums import DType, PType
+from .enums import DType, PType, DTypeInfer
 from .generic_environment import ExecutionEnv
 from .generic_tensor import (
     GenericTensor,
     TensorDescriptor,
     ParamInitializer,
 )
-from .enums import DType, DTypeInfer, PType
-from .generic_tensor import GenericTensor
 from . import generic_tensor as f
 
 ExecutionFlow = list["Op"]
@@ -33,6 +31,7 @@ class Op(ABC):
     """
 
     name: str
+    original_source: object
     __environment: ExecutionEnv | Unset
     __dist_group_size: int | Unset | None
     __input_type: DType | DTypeInfer

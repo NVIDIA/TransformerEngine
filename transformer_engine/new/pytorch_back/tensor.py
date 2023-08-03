@@ -1,10 +1,11 @@
 from abc import ABC
 from functools import cache
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from .environment import PytorchDistributedGroup
 from ..common.generic_tensor import (
     GenericTensor,
+    ParamInitializer,
     TransformerEngineExtensionsFP8TensorMeta,
     FP8Tensor,
     NativeTensor,
@@ -29,7 +30,7 @@ class PytorchTransformerEngineExtensionsFP8TensorMeta(
 
 
 @cache
-def is_hopper():
+def __is_hopper():
     gpu_name = (
         subprocess.check_output(
             "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
@@ -41,19 +42,27 @@ def is_hopper():
 
 
 @cache
-def cublas_workspace():
-    workspace_size = 33_554_432 if is_hopper() else 4_194_304
+def __cublas_workspace():
+    workspace_size = 33_554_432 if __is_hopper() else 4_194_304
     return torch.empty(workspace_size, dtype=torch.int8, device="cuda")
 
 
 @cache
-def fwd_ln_sm_margin():
+def __fwd_ln_sm_margin():
     return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
 
 
 @cache
-def bwd_ln_sm_margin():
+def __bwd_ln_sm_margin():
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+def init_wrapper(initializer: Callable[[torch.Tensor], None]) -> ParamInitializer:
+    def wrapper(tensor: GenericTensor) -> None:
+        assert isinstance(tensor, PytorchTensor)
+        return initializer(tensor.tensor)
+
+    return wrapper
 
 
 # Tesnsor types
@@ -146,7 +155,7 @@ def layer_norm(
         out.meta_ref,
         out.index_in_meta,
         out.dtype.tex_dtype(),
-        fwd_ln_sm_margin(),
+        __fwd_ln_sm_margin(),
         zero_centered_gamma,
         out.tensor,
         out_mu.tensor,
@@ -186,7 +195,7 @@ def dlayer_norm(
         mu.tensor,
         rsigma.tensor,
         weight.tensor,
-        bwd_ln_sm_margin(),
+        __bwd_ln_sm_margin(),
         zero_centered_gamma,
         out_dgrad.tensor,
         out_wgrad.tensor,
@@ -232,7 +241,7 @@ def gemm(
         b.index_in_meta,
         b.dtype.tex_dtype(),
         out.dtype.torch_dtype(),
-        cublas_workspace(),
+        __cublas_workspace(),
         out=out.tensor,
         fp8_meta_tensor=out.meta_ref if isinstance(out, PytorchFP8Tensor) else None,
         out_index=out.index_in_meta if isinstance(out, PytorchFP8Tensor) else None,
@@ -246,7 +255,7 @@ def gemm(a: PytorchNativeTensor, b: PytorchNativeTensor, out: PytorchNativeTenso
         a.tensor,
         b.tensor,
         a.dtype.torch_dtype(),
-        cublas_workspace(),
+        __cublas_workspace(),
         out=out.tensor,
     )
 

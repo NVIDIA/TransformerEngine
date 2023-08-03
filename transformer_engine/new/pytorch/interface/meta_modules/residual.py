@@ -1,25 +1,44 @@
-from torch import nn
+from typing import OrderedDict, overload
+import torch
 
-from ....common.generic_environment import ExecutionEnv
-from ...expand_for_sequential import expand
-from ....common.ops import ResidualBegin, ResidualEnd
+from transformer_engine.new.common import ops
+from .sequential import Sequential
+from ..base_modules.compute_pipeline_module_base import ComputePipelineModuleBase
 
 
-class Residual(nn.Module):
-    def __init__(self, *modules: nn.Module):
-        super().__init__()  # type: ignore
-        self.module_list = [*modules]
+class Residual(ComputePipelineModuleBase):
+    @overload
+    def __init__(
+        self,
+        *modules: ComputePipelineModuleBase,
+        out_dtype: torch.dtype = torch.get_default_dtype(),
+    ) -> None:
+        ...
 
-    def expand_for_sequential(self, compile_env: ExecutionEnv):
-        begin = ResidualBegin("residual_begin")
-        end = ResidualEnd("residual_end", begin)
+    @overload
+    def __init__(
+        self,
+        module_dict: OrderedDict[str, ComputePipelineModuleBase],
+        /,
+        *,
+        out_dtype: torch.dtype = torch.get_default_dtype(),
+    ) -> None:
+        ...
+
+    def __init__(
+        self,
+        *args: ComputePipelineModuleBase | OrderedDict[str, ComputePipelineModuleBase],
+        out_dtype: torch.dtype = torch.get_default_dtype(),
+    ):
+        begin = ops.ResidualBegin("residual_begin", None)
+        end = ops.ResidualEnd("residual_end", begin)
         begin.end = end
-
-        return [
+        super().__init__(
             begin,
-            *[op for m in self.module_list for op in expand(m, compile_env)],
+            *Sequential(args, out_dtype=out_dtype).ops,  # type: ignore[arg-type]
             end,
-        ]
+            output_type=out_dtype,
+        )
 
 
 __all__ = ["Residual"]

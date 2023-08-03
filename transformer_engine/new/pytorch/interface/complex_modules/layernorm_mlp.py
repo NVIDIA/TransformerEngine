@@ -1,13 +1,11 @@
 from typing_extensions import deprecated
-from torch import nn
-from ..base_modules.sequential_module_base import SequentialModuleBase
-from ..atomic_modules import LayerNorm, Linear
-
-Activation = nn.ReLU | nn.GELU
+from ..meta_modules.sequential import Sequential
+from ..base_modules import ComputePipelineModuleBase
+from ..atomic_modules import LayerNorm, Linear, ReLU, GELU
 
 
 @deprecated
-class LayerNormMLP(SequentialModuleBase):
+class LayerNormMLP(ComputePipelineModuleBase):
     def __init__(
         self,
         in_features: int,
@@ -15,11 +13,13 @@ class LayerNormMLP(SequentialModuleBase):
         eps: float = 1e-5,
         zero_centered_gamma: bool = False,
         bias: bool = True,
-        activation: Activation = nn.GELU(),
+        activation: ReLU | GELU = GELU(),
     ):
         super().__init__(
-            LayerNorm(in_features, eps, zero_centered_gamma),
-            Linear(in_features, out_features, bias=bias),
-            activation,
-            Linear(in_features, out_features, bias=bias),
+            *Sequential(
+                LayerNorm(in_features, eps, zero_centered_gamma),
+                Linear(in_features, out_features, bias=bias),
+                activation,
+                Linear(in_features, out_features, bias=bias),
+            ).ops
         )

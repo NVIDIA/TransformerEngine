@@ -1,10 +1,13 @@
 from typing_extensions import deprecated
-from ..base_modules.sequential_module_base import SequentialModuleBase
+
+from ..meta_modules.sequential import Sequential
+
+from ..base_modules import ComputePipelineModuleBase
 from ..atomic_modules import LayerNorm, Linear
 
 
 @deprecated
-class LayerNormLinear(SequentialModuleBase):
+class LayerNormLinear(ComputePipelineModuleBase):
     def __init__(
         self,
         in_features: int,
@@ -14,6 +17,8 @@ class LayerNormLinear(SequentialModuleBase):
         bias: bool = True,
     ):
         super().__init__(
-            LayerNorm(in_features, eps, zero_centered_gamma),
-            Linear(in_features, out_features, bias=bias),
+            *Sequential(
+                LayerNorm(in_features, eps, zero_centered_gamma),
+                Linear(in_features, out_features, bias=bias),
+            ).ops
         )

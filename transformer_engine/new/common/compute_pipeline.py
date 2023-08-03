@@ -1,17 +1,10 @@
 from typing import Generator, final
-
-from .generic_tensor import (
-    GenericTensor,
-)
-
-
 from .ops import (
     NonParallelOp,
     Op,
     Cast,
     ParallelismClass,
     ParameterFreeOp,
-    NoSupplementaryTensorsOp,
 )
 from .enums import DType, DTypeInfer
 
@@ -21,7 +14,7 @@ from .model_parallel_transform import model_parallel_transform
 
 
 @final
-class ComputePipeline(NonParallelOp, ParameterFreeOp, NoSupplementaryTensorsOp):
+class ComputePipeline(NonParallelOp, ParameterFreeOp):
     def __init__(self, ops: list[Op]):
         self._ops = ops
         self._tensor_manager = TensorManager()
