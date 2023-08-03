@@ -325,11 +325,13 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
         .cuda()
     )
 
-    op = block(inp,
-        checkpoint_core_attention = ckpt_attn,
-        core_attention_bias_type = bias_type,
-        core_attention_bias = bias)
-    op.backward(op_grad)
+    num_iters = 10
+    for i in range(num_iters):
+        op = block(inp,
+            checkpoint_core_attention = ckpt_attn,
+            core_attention_bias_type = bias_type,
+            core_attention_bias = bias)
+        op.backward(op_grad)
 
     return op, inp.grad
 
