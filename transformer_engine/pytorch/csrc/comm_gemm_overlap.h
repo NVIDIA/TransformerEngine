@@ -223,8 +223,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
       }
       else if (env_p != nullptr && env_p[0]=='2') {
         printf ("!! TODO reducescatter2_userbuff_strided_multiatomic\n");
-        // reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, i*m_chunk,
-        //                                     m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
+                                            m_chunk, n, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
         break;
       }
       else {
