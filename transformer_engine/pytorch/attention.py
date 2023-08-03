@@ -539,7 +539,8 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         and (ctx.fused_attention_backend
                             == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
                         and ctx.attn_bias_type == "no_bias"
-                        and _flash_attn_2_available)
+                        and _flash_attn_2_available
+                        and get_device_compute_capability() == 9.0)
         if use_FAv2_bwd:
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
@@ -606,8 +607,11 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
     def backward(ctx, d_out):
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
+                        and (ctx.fused_attention_backend
+                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
                         and ctx.attn_bias_type == "no_bias"
-                        and _flash_attn_2_available)
+                        and _flash_attn_2_available
+                        and get_device_compute_capability() == 9.0)
         if use_FAv2_bwd:
             softmax_lse, rng_state = ctx.aux_ctx_tensors
             dq = torch.empty_like(q)
