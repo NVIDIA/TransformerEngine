@@ -39,15 +39,15 @@ def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
     return layer, params, others
 
 
-def compare_frozen_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
+def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, \
-            f"{key} not found in test FrozenDict {test_fd}"
+            f"{key} not found in test dict {test_fd}"
         assert isinstance(test_fd[key], type(ref_fd[key])), \
             f"The data type is not match between ref and test " \
-            f"FrozenDict on {key=}"
+            f"dict on {key=}"
         if isinstance(ref_fd[key], dict):
-            compare_frozen_dict(ref_fd[key], test_fd[key], rtol, atol)
+            compare_dict(ref_fd[key], test_fd[key], rtol, atol)
         else:
             assert_allclose(ref_fd[key],
                             test_fd[key],
@@ -285,10 +285,10 @@ class TestEncoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_frozen_dict(ref_grads[1],
-                            reorganize_test_wgrad(test_grads[1], attrs),
-                            rtol=rtol,
-                            atol=atol)    # wgrad
+        compare_dict(ref_grads[1],
+                     reorganize_test_wgrad(test_grads[1], attrs),
+                     rtol=rtol,
+                     atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 
@@ -512,10 +512,10 @@ class TestDecoderLayer:
             del unfreeze_test_wgrad['mlp']['wo_kernel']
             return unfreeze_test_wgrad
 
-        compare_frozen_dict(ref_grads[1],
-                            reorganize_test_wgrad(test_grads[1], attrs),
-                            rtol=rtol,
-                            atol=atol)    # wgrad
+        compare_dict(ref_grads[1],
+                     reorganize_test_wgrad(test_grads[1], attrs),
+                     rtol=rtol,
+                     atol=atol)    # wgrad
 
         del data_rng, init_rng, apply_rng
 

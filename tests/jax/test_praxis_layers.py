@@ -5,6 +5,7 @@
 from functools import partial
 from typing import Dict
 
+import flax
 import jax
 import jax.numpy as jnp
 from praxis import pax_fiddle
@@ -40,7 +41,7 @@ FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, \
-            f"{key} not found in test FrozenDict {test_fd}"
+            f"{key} not found in test dict {test_fd}"
         assert isinstance(test_fd[key], type(ref_fd[key])), \
             f"The data type is not match between ref and test " \
             f" Dict on {key=}"
@@ -89,7 +90,7 @@ class TestLayer:
         lyr_name = self.get_layer_name()
 
         synced_praxis_variables['params'][lyr_name]['cld'] = \
-            flax_variables['params'].unfreeze()
+            flax.core.unfreeze(flax_variables['params'])
 
         return synced_praxis_variables, flax_variables
 
@@ -105,7 +106,7 @@ class TestLayer:
             synced_praxis_grads[FP8Helper.FP8_COLLECTION_NAME] = \
                 synced_praxis_grads[FP8Helper.FP8_COLLECTION_NAME][lyr_name]['cld']
 
-        return synced_praxis_grads, flax_wgrads.unfreeze()
+        return synced_praxis_grads, flax.core.unfreeze(flax_wgrads)
 
     def forward_backward_runner(self,
                                 data_shape,
@@ -127,9 +128,10 @@ class TestLayer:
         flax_layer = flax_cls()
         flax_variables = flax_layer.init(init_key, *test_inputs)
         if "params_axes" in flax_variables:
-            flax_variables, _ = flax_variables.pop("params_axes")
+            flax_variables, _ = flax.core.pop(flax_variables, "params_axes")
         if FP8Helper.is_fp8_enabled():
-            flax_variables, _ = flax_variables.pop(FP8Helper.FP8_COLLECTION_NAME + "_axes")
+            flax_variables, _ = flax.core.pop(flax_variables,
+                                              FP8Helper.FP8_COLLECTION_NAME + "_axes")
 
         praxis_variables, flax_variables = self.sync_variables(praxis_variables, flax_variables)
 
@@ -143,7 +145,7 @@ class TestLayer:
             if FP8Helper.is_fp8_enabled():
                 praxis_wgrads.pop('params')
                 praxis_variables = update_collections(praxis_wgrads, praxis_variables)
-                flax_wgrads, _ = flax_wgrads.pop('params')
+                flax_wgrads, _ = flax.core.pop(flax_wgrads, 'params')
                 flax_variables = update_collections(flax_wgrads, flax_variables)
 
         praxis_loss, praxis_wgrads, praxis_dgrad = \
@@ -642,9 +644,10 @@ class TestRelativePositionBias(TestLayer):
             flax_layer = flax_cls()
             flax_variables = flax_layer.init(init_key, *test_input)
             if "params_axes" in flax_variables:
-                flax_variables, _ = flax_variables.pop("params_axes")
+                flax_variables, _ = flax.core.pop(flax_variables, "params_axes")
             if FP8Helper.is_fp8_enabled():
-                flax_variables, _ = flax_variables.pop(FP8Helper.FP8_COLLECTION_NAME + "_axes")
+                flax_variables, _ = flax.core.pop(flax_variables,
+                                                  FP8Helper.FP8_COLLECTION_NAME + "_axes")
 
             praxis_variables, flax_variables = self.sync_variables(praxis_variables, flax_variables)
 
