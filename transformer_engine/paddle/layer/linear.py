@@ -472,7 +472,7 @@ class _Linear(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
-        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8,
+        with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
                                                          ctx.fp8_meta,
                                                          ctx.tp_group,
                                                          ctx.tp_size,
