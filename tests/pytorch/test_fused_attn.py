@@ -4,6 +4,7 @@
 
 import torch
 import pytest
+import contextlib
 
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -21,6 +22,94 @@ fp8_available, reason_for_no_fp8 = is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
+_TEST_RNG_TRACKER_NAME = "test-rng"
+
+def _set_cuda_rng_state(new_state, device=-1):
+    if device == -1:
+        device = torch.device("cuda")
+    elif isinstance(device, str):
+        device = torch.device(device)
+    elif isinstance(device, int):
+        device = torch.device("cuda", device)
+
+    def cb():
+        idx = device.index
+        if idx is None:
+            idx = torch.cuda.current_device()
+        default_generator = torch.cuda.default_generators[idx]
+        default_generator.set_state(new_state)
+
+class CudaRNGStatesTracker:
+    def __init__(self):
+        # Map from a string name to the cuda rng state.
+        self.states_ = {}
+        # Seeds are just for book keeping and ensure no seed is set twice.
+        self.seeds_ = set()
+
+    def reset(self):
+        """Set to the initial state (no tracker)."""
+        self.states_ = {}
+        self.seeds_ = set()
+
+    def get_states(self):
+        """Get rng states. Copy the dictionary so we have direct
+        pointers to the states, not just a pointer to the dictionary."""
+        states = {}
+        for name in self.states_:
+            states[name] = self.states_[name]
+        return states
+
+    def set_states(self, states):
+        """Set the rng states. For efficiency purposes, we do not check
+        the size of seed for compatibility."""
+        self.states_ = states
+
+    def add(self, name, seed):
+        """Track the rng state."""
+        # Check seed is not already used.
+        if seed in self.seeds_:
+            raise Exception("seed {} already exists".format(seed))
+        self.seeds_.add(seed)
+        # Check that state is not already defined.
+        if name in self.states_:
+            raise Exception("cuda rng state {} already exists".format(name))
+        # Get the current rng state.
+        orig_rng_state = torch.cuda.get_rng_state()
+        # Set the new state and store it.
+        torch.cuda.manual_seed(seed)
+        self.states_[name] = torch.cuda.get_rng_state()
+        # Reset rng state to what it was.
+        _set_cuda_rng_state(orig_rng_state)
+
+    @contextlib.contextmanager
+    def fork(self, name=_TEST_RNG_TRACKER_NAME):
+        """Fork the cuda rng state, perform operations, and exit with
+        the original state."""
+        # Check if we have added the state
+        if name not in self.states_:
+            raise Exception("cuda rng state {} is not added".format(name))
+        # Store current rng state.
+        orig_cuda_rng_state = torch.cuda.get_rng_state()
+        # Set rng state to the desired one
+        _set_cuda_rng_state(self.states_[name])
+        # Do the stuff we wanted to do.
+        try:
+            yield
+        finally:
+            # Update the current rng state for later use.
+            self.states_[name] = torch.cuda.get_rng_state()
+            # And set the state to the original state we started with.
+            _set_cuda_rng_state(orig_cuda_rng_state)
+
+# RNG tracker object.
+_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+
+def get_cuda_rng_tracker():
+    """Get cuda rng tracker."""
+    return _CUDA_RNG_STATE_TRACKER
+
+_CUDA_RNG_STATE_TRACKER.add(_TEST_RNG_TRACKER_NAME, 0)
+
 class ModelConfig:
     def __init__(
         self, num_layers, hidden_size, num_attention_heads, head_dim, seq_len,
@@ -37,20 +126,14 @@ class ModelConfig:
         self.attn_mask_type  = attn_mask_type
 
 model_configs = {
-    "test1":  ModelConfig(1, 1024, 16,  64,   32, 0.0,  "causal"),
-    "test2":  ModelConfig(1, 1024, 16,  64,   64, 0.0,  "causal"),
-    "test3":  ModelConfig(1, 1024, 16,  64,  128, 0.0,  "causal"),
-    "test4":  ModelConfig(1, 1024, 16,  64,  512, 0.0,  "causal"),
-    "test5":  ModelConfig(1, 1024, 16,  64, 2048, 0.0,  "causal"),
-    "test6":  ModelConfig(1, 2048, 16, 128,   32, 0.0,  "causal"),
-    "test7":  ModelConfig(1, 2048, 16, 128,   64, 0.0,  "causal"),
-    "test8":  ModelConfig(1, 2048, 16, 128,  128, 0.0,  "causal"),
-    "test9":  ModelConfig(1, 2048, 16, 128,  512, 0.0,  "causal"),
-    "test10": ModelConfig(1, 2048, 16, 128, 2048, 0.0,  "causal"),
-    "test11": ModelConfig(1, 1024, 16,  64,   32, 0.0, "no_mask"),
-    "test12": ModelConfig(1, 1024, 16,  64,   64, 0.0, "no_mask"),
-    "test13": ModelConfig(1, 1024, 16,  64,  128, 0.0, "no_mask"),
-    "test14": ModelConfig(1, 1024, 16,  64,  512, 0.0, "no_mask"),
+    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
@@ -64,18 +147,19 @@ batch_sizes = [1]#, 2, 32]
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_dot_product_attention(dtype, bs, model):
+@pytest.mark.parametrize("ckpt_attn", [True, False])
+def test_dot_product_attention(dtype, bs, model, ckpt_attn):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
     config = model_configs[model]
 
     flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "FlashAttention")
+            dtype, bs, config, "FlashAttention", ckpt_attn)
     fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "FusedAttention")
+            dtype, bs, config, "FusedAttention", ckpt_attn)
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "UnfusedDotProductAttention")
+            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn)
 
     atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
     assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
@@ -83,7 +167,7 @@ def test_dot_product_attention(dtype, bs, model):
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
-def _run_dot_product_attention(dtype, bs, config, backend):
+def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn):
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -114,7 +198,7 @@ def _run_dot_product_attention(dtype, bs, config, backend):
                 attn_mask_type = config.attn_mask_type,
                 sequence_parallel = False,
                 tp_size = 1,
-                get_rng_state_tracker = None,
+                get_rng_state_tracker = get_cuda_rng_tracker,
                 tp_group = None,
                 layer_number = 1,
                 attention_type = "self"
@@ -124,7 +208,7 @@ def _run_dot_product_attention(dtype, bs, config, backend):
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v, checkpoint_core_attention=True)
+    op = block(q, k, v, checkpoint_core_attention = ckpt_attn)
     op.backward(op_grad)
 
     return op, inp.grad
@@ -134,18 +218,19 @@ def _run_dot_product_attention(dtype, bs, config, backend):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_transformer_layer(dtype, bs, model):
+@pytest.mark.parametrize("ckpt_attn", [True, False])
+def test_transformer_layer(dtype, bs, model, ckpt_attn):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
     config = model_configs[model]
 
     flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FlashAttention")
+            dtype, bs, config, "FlashAttention", ckpt_attn)
     fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FusedAttention")
+            dtype, bs, config, "FusedAttention", ckpt_attn)
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "UnfusedDotProductAttention")
+            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn)
 
     atol, rtol = (5e-1, 5e-1) if dtype == torch.bfloat16 else (5e-1, 5e-1)
     assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
@@ -153,7 +238,7 @@ def test_transformer_layer(dtype, bs, model):
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
-def _run_transformer_layer(dtype, bs, config, backend):
+def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn):
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -201,7 +286,7 @@ def _run_transformer_layer(dtype, bs, config, backend):
             tp_group = None,
             tp_size =  1,
             params_dtype = dtype,
-            get_rng_state_tracker = None,
+            get_rng_state_tracker = get_cuda_rng_tracker,
             fuse_wgrad_accumulation = False,
             seq_length = config.seq_len,
             micro_batch_size = bs,
@@ -221,7 +306,7 @@ def _run_transformer_layer(dtype, bs, config, backend):
         .cuda()
     )
 
-    op = block(inp)
+    op = block(inp, checkpoint_core_attention = ckpt_attn)
     op.backward(op_grad)
 
     return op, inp.grad

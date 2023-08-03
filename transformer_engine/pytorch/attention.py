@@ -7,7 +7,7 @@ import os
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
@@ -854,11 +854,12 @@ class DotProductAttention(torch.nn.Module):
         self,
         attention_func: Callable,
         *forward_args: Tuple[torch.Tensor, ...],
+        **forward_kwargs: Dict[str, Any],
     ) -> torch.Tensor:
         """Forward method with activation checkpointing."""
 
-        def custom_forward(*inputs):
-            return attention_func(*inputs)
+        def custom_forward(*input_args, **input_kwargs):
+            return attention_func(*input_args, **input_kwargs)
 
         hidden_states = checkpoint(
             custom_forward,
@@ -866,6 +867,7 @@ class DotProductAttention(torch.nn.Module):
             self.get_rng_state_tracker,
             self.tp_group,
             *forward_args,
+            **forward_kwargs,
         )
 
         return hidden_states
@@ -992,18 +994,18 @@ class DotProductAttention(torch.nn.Module):
         if use_fused_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            fused_attention_backend,
-                                                            core_attention_bias_type,
-                                                            core_attention_bias,
-                                                            fast_zero_fill)
+                              query_layer,
+                              key_layer,
+                              value_layer,
+                              fused_attention_backend = fused_attention_backend,
+                              core_attention_bias_type = core_attention_bias_type,
+                              core_attention_bias = core_attention_bias,
+                              fast_zero_fill = fast_zero_fill)
             return self.fused_attention(query_layer, key_layer, value_layer,
-                                                            fused_attention_backend,
-                                                            core_attention_bias_type,
-                                                            core_attention_bias,
-                                                            fast_zero_fill)
+                              fused_attention_backend = fused_attention_backend,
+                              core_attention_bias_type = core_attention_bias_type,
+                              core_attention_bias = core_attention_bias,
+                              fast_zero_fill = fast_zero_fill)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
@@ -1011,16 +1013,16 @@ class DotProductAttention(torch.nn.Module):
                 query_layer,
                 key_layer,
                 value_layer,
-                attention_mask,
-                core_attention_bias_type,
-                core_attention_bias,
+                attention_mask = attention_mask,
+                core_attention_bias_type = core_attention_bias_type,
+                core_attention_bias = core_attention_bias,
             )
         return self.unfused_attention(query_layer,
                 key_layer,
                 value_layer,
-                attention_mask,
-                core_attention_bias_type,
-                core_attention_bias,
+                attention_mask = attention_mask,
+                core_attention_bias_type = core_attention_bias_type,
+                core_attention_bias = core_attention_bias,
         )
 
 
