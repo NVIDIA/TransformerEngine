@@ -148,26 +148,29 @@ batch_sizes = [1]#, 2, 32]
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [True, False])
-def test_dot_product_attention(dtype, bs, model, ckpt_attn):
+@pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
+def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
     config = model_configs[model]
 
-    flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "FlashAttention", ckpt_attn)
+    if bias_type == "no_bias":
+        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
     fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "FusedAttention", ckpt_attn)
+            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type)
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn)
+            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
 
     atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
-    assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
+    if bias_type == "no_bias":
+        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
-def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn):
+def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type):
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -189,6 +192,11 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn):
     op_grad = 0.001 * torch.randint(0, 200, (
         config.seq_len, bs, config.num_attention_heads * config.head_dim
         ), dtype = dtype).cuda()
+    if bias_type != "no_bias":
+        bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
+                dtype = dtype).cuda()
+    else:
+        bias = None
 
     block = (
          DotProductAttention(
@@ -208,7 +216,10 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn):
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v, checkpoint_core_attention = ckpt_attn)
+    op = block(q, k, v,
+        checkpoint_core_attention = ckpt_attn,
+        core_attention_bias_type = bias_type,
+        core_attention_bias = bias)
     op.backward(op_grad)
 
     return op, inp.grad
@@ -219,26 +230,29 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [True, False])
-def test_transformer_layer(dtype, bs, model, ckpt_attn):
+@pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
+def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
     config = model_configs[model]
 
-    flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FlashAttention", ckpt_attn)
+    if bias_type == "no_bias":
+        flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
+                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
     fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FusedAttention", ckpt_attn)
+            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type)
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn)
+            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
 
     atol, rtol = (5e-1, 5e-1) if dtype == torch.bfloat16 else (5e-1, 5e-1)
-    assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
+    if bias_type == "no_bias":
+        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
-def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn):
+def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -269,6 +283,11 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn):
     drop_path_rate = 0.0
     drop_path_rates = [
             rate.item() for rate in torch.linspace(0, drop_path_rate, config.num_layers)]
+    if bias_type != "no_bias":
+        bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
+                dtype = dtype).cuda()
+    else:
+        bias = None
 
     block = (
         TransformerLayer(
@@ -306,7 +325,10 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn):
         .cuda()
     )
 
-    op = block(inp, checkpoint_core_attention = ckpt_attn)
+    op = block(inp,
+        checkpoint_core_attention = ckpt_attn,
+        core_attention_bias_type = bias_type,
+        core_attention_bias = bias)
     op.backward(op_grad)
 
     return op, inp.grad

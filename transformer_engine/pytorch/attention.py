@@ -237,7 +237,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = (matmul_result + core_attention_bias) / scale
         elif core_attention_bias_type == "post_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
-            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
+            assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                     ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             matmul_result = torch.baddbmm(
                 matmul_result,
