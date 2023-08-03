@@ -40,6 +40,10 @@ def generate_layer(layer_cls, init_rng, diff_inputs, no_diff_inputs):
 
 
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
+    # To be compatible with both Flax>=0.7.1 or <0.7.1
+    # since Flax 0.7.1 removed FrozenDict.
+    ref_fd = flax.core.unfreeze(ref_fd)
+    test_fd = flax.core.unfreeze(test_fd)
     for key in ref_fd:
         assert key in test_fd, \
             f"{key} not found in test dict {test_fd}"
