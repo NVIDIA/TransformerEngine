@@ -486,6 +486,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
   
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     counter = torch::ones({tp_size}, counter_options);
+    counter.index_put_({_tp_id}, 0);
 
     // CUDA event creation
     cudaEventCreateWithFlags(&_start_compute, 0);
@@ -534,10 +535,16 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
     assert(pre_gelu_out.numel() == 0);
     // Catch up the default torch stream
+    //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
+    //CHECK_CUDA(cudaEventRecord(_start_compute, (cudaStream_t)_stream_compute[0]));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
 
+    torch::Tensor output_chunk = torch::from_blob(
+        output_ptr, {_ubuf.size(0), m}, D.options());
+    torch::Tensor workspace_chunk =
+        torch::from_blob(workspace_ptr,
+                         {workspace_size_chunk}, workspace.options());
     for (int i = 0; i < _tp_size; i++) {
       // Set the userbuffer id. Buffer under send is the input for the current GEMM chunk
       // The initial input chunk is stored _ubuf[rank]. This is to have the AG output in all ranks
@@ -547,23 +554,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
       int send_offset = comm_bytes * send_chunk_id;
       int recv_offset = comm_bytes * recv_chunk_id;
 
-      // GEMM
-      if (i==0) {
-          // producer_sentinel kernel here
-          producer(counter_ptr, send_chunk_id, (cudaStream_t)_stream_recv);
-          torch::Tensor output_chunk = torch::from_blob(
-              output_ptr, {_ubuf.size(0), m}, D.options());
-          torch::Tensor workspace_chunk =
-              torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-                               {workspace_size_chunk}, workspace.options());
-          at::cuda::setCurrentCUDAStream(_stream_compute[0]);
-          te_gemm(A, A_scale_inverse, A_type, transa, _ubuf, B_scale_inverse, B_type,
-                  transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
-                  workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                  _math_sms, 0 /*m_split*/, _tp_size /*n_split*/, false /*gemm_producer*/, counter);
-          consumer(counter_ptr, send_chunk_id, (cudaStream_t)_stream_compute[0]);
-      }
-
       if (i < _tp_size - 1) {
         // P2P communication
         userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
@@ -571,7 +561,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
                          _prev_rank, (cudaStream_t)_stream_recv);
         producer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_recv);
-        consumer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_compute[0]);
+        //consumer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_compute[0]);
         CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
       } else if (B_copy.numel() > 0) {
@@ -581,14 +571,25 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                                    _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
                                    cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
         CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
       }
     }
-    at::cuda::setCurrentCUDAStream(stream_main);
-    CHECK_CUDA(
-        cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
+    // GEMM
+    at::cuda::setCurrentCUDAStream(stream_main); //_stream_compute[0]);
+    //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _stop_send, 0));
+    te_gemm(A, A_scale_inverse, A_type, transa, _ubuf, B_scale_inverse, B_type,
+            transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+            workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
+            _math_sms-1, 0 /*m_split*/, _tp_size /*n_split*/, false /*gemm_producer*/, counter);
+    for (int i = 0; i < _tp_size-1; i++) {
+      int recv_chunk_id = (_tp_size + _tp_id - i - 1) % _tp_size;
+      consumer(counter_ptr, recv_chunk_id, (cudaStream_t)stream_main);//_stream_compute[0]);
+    }
+    //CHECK_CUDA(
+    //    cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
 
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    //at::cuda::setCurrentCUDAStream(stream_main);
+    //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
 
     return D;
   }  // split_overlap_ag
@@ -630,6 +631,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
     assert(pre_gelu_out.numel() == 0);
     if (_aggregate2) {
+      printf ("!!split_overlap_ag aggregate2\n");
       // Catch up the default torch stream
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
@@ -702,6 +704,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
       CHECK_CUDA(
           cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     } else {
+      printf ("!!split_overlap_ag NO aggregate2\n");
       // Catch up the default torch stream
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
