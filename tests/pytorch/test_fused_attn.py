@@ -18,97 +18,10 @@ import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
+from test_numerics import get_dummy_cuda_rng_tracker
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
-
-_TEST_RNG_TRACKER_NAME = "test-rng"
-
-def _set_cuda_rng_state(new_state, device=-1):
-    if device == -1:
-        device = torch.device("cuda")
-    elif isinstance(device, str):
-        device = torch.device(device)
-    elif isinstance(device, int):
-        device = torch.device("cuda", device)
-
-    def cb():
-        idx = device.index
-        if idx is None:
-            idx = torch.cuda.current_device()
-        default_generator = torch.cuda.default_generators[idx]
-        default_generator.set_state(new_state)
-
-class CudaRNGStatesTracker:
-    def __init__(self):
-        # Map from a string name to the cuda rng state.
-        self.states_ = {}
-        # Seeds are just for book keeping and ensure no seed is set twice.
-        self.seeds_ = set()
-
-    def reset(self):
-        """Set to the initial state (no tracker)."""
-        self.states_ = {}
-        self.seeds_ = set()
-
-    def get_states(self):
-        """Get rng states. Copy the dictionary so we have direct
-        pointers to the states, not just a pointer to the dictionary."""
-        states = {}
-        for name in self.states_:
-            states[name] = self.states_[name]
-        return states
-
-    def set_states(self, states):
-        """Set the rng states. For efficiency purposes, we do not check
-        the size of seed for compatibility."""
-        self.states_ = states
-
-    def add(self, name, seed):
-        """Track the rng state."""
-        # Check seed is not already used.
-        if seed in self.seeds_:
-            raise Exception("seed {} already exists".format(seed))
-        self.seeds_.add(seed)
-        # Check that state is not already defined.
-        if name in self.states_:
-            raise Exception("cuda rng state {} already exists".format(name))
-        # Get the current rng state.
-        orig_rng_state = torch.cuda.get_rng_state()
-        # Set the new state and store it.
-        torch.cuda.manual_seed(seed)
-        self.states_[name] = torch.cuda.get_rng_state()
-        # Reset rng state to what it was.
-        _set_cuda_rng_state(orig_rng_state)
-
-    @contextlib.contextmanager
-    def fork(self, name=_TEST_RNG_TRACKER_NAME):
-        """Fork the cuda rng state, perform operations, and exit with
-        the original state."""
-        # Check if we have added the state
-        if name not in self.states_:
-            raise Exception("cuda rng state {} is not added".format(name))
-        # Store current rng state.
-        orig_cuda_rng_state = torch.cuda.get_rng_state()
-        # Set rng state to the desired one
-        _set_cuda_rng_state(self.states_[name])
-        # Do the stuff we wanted to do.
-        try:
-            yield
-        finally:
-            # Update the current rng state for later use.
-            self.states_[name] = torch.cuda.get_rng_state()
-            # And set the state to the original state we started with.
-            _set_cuda_rng_state(orig_cuda_rng_state)
-
-# RNG tracker object.
-_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-
-def get_cuda_rng_tracker():
-    """Get cuda rng tracker."""
-    return _CUDA_RNG_STATE_TRACKER
-
-_CUDA_RNG_STATE_TRACKER.add(_TEST_RNG_TRACKER_NAME, 0)
 
 class ModelConfig:
     def __init__(
@@ -206,7 +119,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
                 attn_mask_type = config.attn_mask_type,
                 sequence_parallel = False,
                 tp_size = 1,
-                get_rng_state_tracker = get_cuda_rng_tracker,
+                get_rng_state_tracker = get_dummy_cuda_rng_tracker,
                 tp_group = None,
                 layer_number = 1,
                 attention_type = "self"
@@ -305,7 +218,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
             tp_group = None,
             tp_size =  1,
             params_dtype = dtype,
-            get_rng_state_tracker = get_cuda_rng_tracker,
+            get_rng_state_tracker = get_dummy_cuda_rng_tracker,
             fuse_wgrad_accumulation = False,
             seq_length = config.seq_len,
             micro_batch_size = bs,

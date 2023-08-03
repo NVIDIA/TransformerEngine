@@ -25,6 +25,10 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
+from pkg_resources import packaging
+from importlib.metadata import version
+_flash_attn_version = packaging.version.Version(version("flash-attn"))
+_flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
 seed = 1234
 rng_str = "rng_state"
@@ -463,6 +467,7 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
     return outputs
 
 
+@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -534,6 +539,7 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
     return outputs
 
 
+@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -655,6 +661,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     return outputs
 
 
+@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
