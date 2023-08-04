@@ -398,8 +398,10 @@ class FlashAttention(torch.nn.Module):
             # Input tensor format is `sbh` whereas FA only support `bsh`. This trick
             # converts the formats without change in memory layouts or need for
             # explicit transposes.
-            query_layer, key_layer, value_layer = [x.view(1, sq, b * np, hn).contiguous()
-                           for x in (query_layer, key_layer, value_layer)]
+            query_layer, key_layer, value_layer = [x.view(1, x.shape[0],
+                                                          x.shape[1] * x.shape[2],
+                                                          x.shape[3]).contiguous()
+                                                   for x in (query_layer, key_layer, value_layer)]
 
         effective_batch_size, effective_seqlen = query_layer.shape[0], query_layer.shape[1]
 
@@ -430,7 +432,7 @@ class FlashAttention(torch.nn.Module):
             )
 
         # [1, sq, (b np), hn] -> [sq, b, (np hn)]
-        return output.view(sq, b, np * hn).contiguous()
+        return output.view(sq, b, np * hn)
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
