@@ -28,6 +28,7 @@ class ComputePipelineFunction(torch.autograd.Function):
         ctx.save_for_backward(activation, *exposed_ctx)
         setattr(ctx, "op", op)
         setattr(ctx, "raw_ctx", raw_ctx)
+        setattr(ctx, "forward_args", forward_args)
         return activation
 
     @staticmethod
@@ -37,21 +38,25 @@ class ComputePipelineFunction(torch.autograd.Function):
         _ = ctx.saved_tensors  # type: ignore
         op: Op = getattr(ctx, "op")  # type: ignore
         raw_ctx: dict[str, GenericTensor] = getattr(ctx, "raw_ctx")  # type: ignore
+        forward_args: dict[str, GenericTensor] = getattr(ctx, "forward_args")  # type: ignore
         raw_grad, raw_param_grads = op.backward(
             PytorchNativeTensor(DType.from_torch_dtype(grad.dtype), grad), **raw_ctx
         )
         assert isinstance(raw_grad, PytorchTensor)
         grad = raw_grad.tensor
-        ordering = {name: i for i, name in enumerate(raw_ctx.keys())}
-        ordered_raw_param_grads = sorted(
-            (ordering[name], name, grad) for name, grad in raw_param_grads.items()
-        )
-        param_grads = [
-            grad.tensor
-            for _, _, grad in ordered_raw_param_grads
-            if isinstance(grad, PytorchTensor)
+        ordering = {name: i for i, name in enumerate(forward_args.keys())}
+        ordered_raw_param_grads = {
+            ordering[name]: grad for name, grad in raw_param_grads.items()
+        }
+        raw_all_grads = [
+            ordered_raw_param_grads[i] if i in ordered_raw_param_grads else None
+            for i in range(len(forward_args))
         ]
-        return (grad, *param_grads, None, None)
+        all_grads = [
+            grad.tensor if isinstance(grad, PytorchTensor) else None
+            for grad in raw_all_grads
+        ]
+        return (grad, *all_grads, None, None)
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
