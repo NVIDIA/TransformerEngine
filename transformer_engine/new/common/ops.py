@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
 from typing import Generator, final
+
+from transformer_engine.new.common.generic_tensor import GenericTensor
 from .enums import DType, PType, DTypeInfer
 from .generic_tensor import (
     GenericTensor,
@@ -13,6 +15,8 @@ from . import generic_tensor as f
 
 ExecutionFlow = list["Op"]
 Parallelism = tuple[PType, PType]
+Context = dict[str, GenericTensor]
+ParamGrads = dict[str, GenericTensor]
 
 
 # Op Protocol
@@ -121,16 +125,20 @@ class Op(ABC):
             setattr(self, name, tensor)
 
     @abstractmethod
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
+    def forward(
+        self, x: GenericTensor, **tensors: GenericTensor
+    ) -> tuple[GenericTensor, Context]:
         raise NotImplementedError()
 
     @abstractmethod
-    def inference(
-        self,
-        x: GenericTensor,
+    def backward(
+        self, grad: GenericTensor, **context: GenericTensor
+    ) -> tuple[GenericTensor, ParamGrads]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def inference_optimized(
+        self, x: GenericTensor, **tensors: GenericTensor
     ) -> GenericTensor:
         raise NotImplementedError()
 
@@ -201,43 +209,32 @@ class Identity(
     NoTensorOp,
     EnvObliviousOp,
 ):
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield x
-        yield grad
+    def forward(self, x: GenericTensor, **_):
+        return x, Context()
 
-    def inference(
-        self,
-        x: GenericTensor,
-    ) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return grad, ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return x
 
 
 # Transpose
 @final
 class Transpose(NonParallelOp, NoTensorOp):
-    act: GenericTensor
+    def forward(self, x: GenericTensor, **_):
+        return f.transpose(x), Context()
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.transpose(x)
-        yield f.transpose(grad)
+    def backward(self, grad: GenericTensor, **_):
+        return f.transpose(grad), ParamGrads()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.transpose(x)
 
 
 # Normalization
 @final
 class LayerNorm(RowwiseOp, EnvObliviousOp):
-    weight: GenericTensor
-    weight_grad: GenericTensor
-    bias: GenericTensor
-    bias_grad: GenericTensor
-
     def __init__(
         self,
         name: str,
@@ -267,36 +264,45 @@ class LayerNorm(RowwiseOp, EnvObliviousOp):
             "bias": TensorDescriptor((self.features,), f.zeros, self.param_type, True),
         }
 
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
+    def forward(
+        self, x: GenericTensor, *, weight: GenericTensor, bias: GenericTensor, **_
+    ):
         act, mu, rsigma = f.layer_norm(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             self.eps,
             self.zero_centered_gamma,
         )
-        grad = yield act
-        grad, self.weight_grad, self.bias_grad = f.dlayer_norm(
+        return act, {"x": x, "weight": weight, "mu": mu, "rsigma": rsigma}
+
+    def backward(
+        self,
+        grad: GenericTensor,
+        *,
+        x: GenericTensor,
+        weight: GenericTensor,
+        mu: GenericTensor,
+        rsigma: GenericTensor,
+        **_,
+    ):
+        dgrad, wgrad, bgrad = f.dlayer_norm(
             grad,
             x,
-            self.weight,
+            weight,
             self.zero_centered_gamma,
             mu,
             rsigma,
         )
-        yield grad
+        return dgrad, {"weight": wgrad, "bias": bgrad}
 
-    def inference(
-        self,
-        x: GenericTensor,
-    ) -> GenericTensor:
+    def inference_optimized(
+        self, x: GenericTensor, *, weight: GenericTensor, bias: GenericTensor, **_
+    ):
         return f.layer_norm_inf(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             self.eps,
             self.zero_centered_gamma,
         )
@@ -335,9 +341,6 @@ def _ag_cgemm(op: Gemm) -> list[Op]:
 
 @final
 class Gemm(Op):
-    weight: GenericTensor
-    weight_grad: GenericTensor
-
     def __init__(
         self,
         name: str,
@@ -351,7 +354,7 @@ class Gemm(Op):
         super().__init__(name, input_type, output_type)
         self.in_features = in_features
         self.out_features = out_features
-        self.param_dtype = param_type
+        self.param_type = param_type
         self.init_method = init_method
 
     def _pre_describe_tensors(self):
@@ -393,22 +396,33 @@ class Gemm(Op):
             "weight": TensorDescriptor(
                 (self.in_features, self.out_features),
                 self.init_method,
-                self.param_dtype,
+                self.param_type,
                 True,
             ),
         }
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.gemm(x, self.weight)
-        weight_t = f.transpose(self.weight)
-        x_t = f.transpose(x)
-        self.weight_grad = f.gemm(grad, x_t)
-        yield f.gemm(grad, weight_t)
+    def forward(
+        self, x: GenericTensor, *, weight: GenericTensor, **_
+    ) -> tuple[GenericTensor, Context]:
+        if self.input_type.is_fp8() and not self.param_type.is_fp8():
+            weight_fp8, weight_t = f.cast_transpose_fp8(weight)
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
-        return f.gemm(x, self.weight)
+        return f.gemm(x, weight), {"x": x, "weight": weight}
+
+    def backward(
+        self,
+        grad: GenericTensor,
+        *,
+        x: GenericTensor,
+        weight: GenericTensor,
+        **_,
+    ) -> tuple[GenericTensor, ParamGrads]:
+        dgrad = f.gemm(grad, f.transpose(weight))
+        wgrad = f.gemm(f.transpose(x), grad)
+        return dgrad, {"weight": wgrad}
+
+    def inference_optimized(self, x: GenericTensor, *, weight: GenericTensor, **_):
+        return f.gemm(x, weight)
 
 
 @final

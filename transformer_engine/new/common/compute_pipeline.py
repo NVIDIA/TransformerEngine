@@ -5,7 +5,6 @@ from .ops import (
     NonParallelOp,
     Op,
     Cast,
-    ParallelismClass,
     NoTensorOp,
 )
 from .enums import DType, DTypeInfer

@@ -94,7 +94,7 @@ class ComputePipelineModuleBase(nn.Module):
         self._compile_checked(
             x.dtype, self.output_type, _convert_env(get_current_environment())
         )
-        return apply(x, self.pipeline)
+        return apply(x, self.pipeline, self.training)
 
     def _compile_checked(
         self,
