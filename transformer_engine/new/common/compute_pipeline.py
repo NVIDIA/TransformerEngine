@@ -1,11 +1,12 @@
-from typing import Generator, final
+from typing import final
 
 from .ops import (
+    Context,
     _normal,
     NonParallelOp,
+    ParamGrads,
     Op,
     Cast,
-    NoTensorOp,
 )
 from .enums import DType, DTypeInfer
 from .generic_tensor import GenericTensor
@@ -14,12 +15,12 @@ from .model_parallel_transform import model_parallel_transform
 
 
 @final
-class ComputePipeline(NonParallelOp, NoTensorOp):
+class ComputePipeline(NonParallelOp):
     _ops: list[Op]
     _original_types: list[tuple[DType | DTypeInfer, DType | DTypeInfer]]
     _tensor_manager: TensorManager
-    _parameters: list[tuple[GenericTensor, str, Op]]
-    _buffers: list[tuple[GenericTensor, str, Op]]
+    _parameters: dict[Op, dict[str, GenericTensor]]
+    _buffers: dict[Op, dict[str, GenericTensor]]
     _compiled: list[Op] | None
 
     def __init__(self, ops: list[Op], world_size: int = 1):
@@ -44,10 +45,18 @@ class ComputePipeline(NonParallelOp, NoTensorOp):
         )
 
     def parameters(self):
-        return self._parameters
+        return [
+            (param, param_name, op)
+            for (op, params) in self._parameters.items()
+            for param_name, param in params.items()
+        ]
 
     def buffers(self):
-        return self._buffers
+        return [
+            (buf, buf_name, op)
+            for (op, buffs) in self._buffers.items()
+            for buf_name, buf in buffs.items()
+        ]
 
     def compile(self, input_type: DType, output_type: DType):
         for op, orig_types in zip(self._ops, self._original_types):
@@ -57,30 +66,38 @@ class ComputePipeline(NonParallelOp, NoTensorOp):
     def _pre_describe_tensors(self) -> None:
         self.compile(self.input_type, self.output_type)
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
+    def describe_tensors(self):
+        return {
+            f"{op.name}.{name}": desc
+            for op in self._ops
+            for name, desc in op.describe_tensors().items()
+        }
+
+    def forward(self, x: GenericTensor, **_):
         assert self._compiled is not None
-
-        backwards = list[Generator[GenericTensor, GenericTensor, None]]()
+        ctx = Context()
         for op in self._compiled:
-            gen = op.training(x)
-            x = next(gen)
-            backwards.append(gen)
-        backwards.reverse()
+            x, op_ctx = op.forward(x, **(self._parameters[op] | self._buffers[op]))
+            ctx |= {f"{op.name}.{name}": tensor for name, tensor in op_ctx.items()}
+        return x, ctx
 
-        grad = yield x
-
-        for bwd in backwards:
-            grad = bwd.send(grad)
-
-        yield grad
-
-    def inference(self, x: GenericTensor):
+    def backward(self, grad: GenericTensor, **tensors: GenericTensor):
         assert self._compiled is not None
+        grads = ParamGrads()
+        for op in self._compiled[::-1]:
+            op_ctx = {
+                name.lstrip(f"{op.name}."): tensor
+                for name, tensor in tensors.items()
+                if name.startswith(f"{op.name}.")
+            }
+            grad, op_grads = op.backward(grad, **op_ctx)
+            grads |= {f"{op.name}.{name}": tensor for name, tensor in op_grads.items()}
+        return grad, grads
 
+    def inference_optimized(self, x: GenericTensor, **_):
+        assert self._compiled is not None
         for op in self._compiled:
-            x = op.inference(x)
+            x = op.inference_optimized(x)
         return x
 
     @staticmethod
@@ -100,25 +117,23 @@ class ComputePipeline(NonParallelOp, NoTensorOp):
 
         for op in ops:
             for tensor_name, tensor_desc in op.describe_tensors().items():
-                qual_name = op.name + tensor_name
+                qual_name = f"{op.name}.{tensor_name}"
                 tensor_manager.register_tensor(qual_name, tensor_desc)
 
         tensor_manager.allocate_storage()
 
-        parameters = list[tuple[GenericTensor, str, Op]]()
-        buffers = list[tuple[GenericTensor, str, Op]]()
+        parameters = dict[Op, dict[str, GenericTensor]]()
+        buffers = dict[Op, dict[str, GenericTensor]]()
         for op in ops:
             tensors = dict[str, GenericTensor]()
             for tensor_name, tensor_desc in op.describe_tensors().items():
-                qual_name = op.name + tensor_name
+                qual_name = f"{op.name}.{tensor_name}"
                 tensor = tensor_manager.retrieve_tensor(qual_name)
                 tensors[qual_name] = tensor
                 if tensor_desc.is_parameter:
-                    parameters.append((tensor, tensor_name, op))
+                    parameters[op][tensor_name] = tensor
                 else:
-                    buffers.append((tensor, tensor_name, op))
-            op.set_tensors_allocated(**tensors)
-
+                    buffers[op][tensor_name] = tensor
         return (ops, tensor_manager, parameters, buffers)
 
     @staticmethod

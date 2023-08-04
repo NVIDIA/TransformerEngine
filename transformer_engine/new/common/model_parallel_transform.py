@@ -118,10 +118,13 @@ class Input(NoTensorOp, EnvObliviousOp):
     def __init__(self, name: str):
         super().__init__(name, DType.Infer, DType.Infer)
 
-    def training(self, x: GenericTensor):
+    def forward(self, x: GenericTensor, **_):
         raise RuntimeError("Input op should not be called directly")
 
-    def inference(self, x: GenericTensor):
+    def backward(self, grad: GenericTensor, **_):
+        raise RuntimeError("Input op should not be called directly")
+
+    def inference_optimized(self, x: GenericTensor, **_):
         raise RuntimeError("Input op should not be called directly")
 
     def describe_parallellism(self) -> list[list[Op]]:
@@ -158,10 +161,13 @@ class Output(NoTensorOp, EnvObliviousOp):
     def __init__(self, name: str):
         super().__init__(name, DType.Infer, DType.Infer)
 
-    def training(self, x: GenericTensor):
+    def forward(self, x: GenericTensor, **_):
         raise RuntimeError("Output op should not be called directly")
 
-    def inference(self, x: GenericTensor):
+    def backward(self, grad: GenericTensor, **_):
+        raise RuntimeError("Output op should not be called directly")
+
+    def inference_optimized(self, x: GenericTensor, **_):
         raise RuntimeError("Output op should not be called directly")
 
     def describe_parallellism(self) -> list[list[Op]]:

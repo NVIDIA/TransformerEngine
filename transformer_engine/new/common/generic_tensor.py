@@ -235,25 +235,25 @@ def dswiglu(grad: GenericTensor, x: GenericTensor) -> GenericTensor:
 
 # Communication
 @multiple_dispatch(False)
-def gather(x: GenericTensor, group: DistributedGroup) -> GenericTensor:
+def gather(x: GenericTensor) -> GenericTensor:
     raise NotImplementedError()
 
 
 @multiple_dispatch(False)
-def scatter(x: GenericTensor, group: DistributedGroup) -> GenericTensor:
+def scatter(x: GenericTensor) -> GenericTensor:
     raise NotImplementedError()
 
 
 @multiple_dispatch(False)
-def all_gather(x: GenericTensor, group: DistributedGroup) -> GenericTensor:
+def all_gather(x: GenericTensor) -> GenericTensor:
     raise NotImplementedError()
 
 
 @multiple_dispatch(False)
-def reduce_scatter(x: GenericTensor, group: DistributedGroup) -> GenericTensor:
+def reduce_scatter(x: GenericTensor) -> GenericTensor:
     raise NotImplementedError()
 
 
 @multiple_dispatch(False)
-def all_reduce(x: GenericTensor, group: DistributedGroup) -> GenericTensor:
+def all_reduce(x: GenericTensor) -> GenericTensor:
     raise NotImplementedError()

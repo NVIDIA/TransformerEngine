@@ -2,7 +2,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
-from typing import Generator, final
+from typing import final
 
 from transformer_engine.new.common.generic_tensor import GenericTensor
 from .enums import DType, PType, DTypeInfer
@@ -120,10 +120,6 @@ class Op(ABC):
     def describe_tensors(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
-    def set_tensors_allocated(self, **tensors: GenericTensor):
-        for name, tensor in tensors.items():
-            setattr(self, name, tensor)
-
     @abstractmethod
     def forward(
         self, x: GenericTensor, **tensors: GenericTensor
@@ -193,7 +189,7 @@ class ColumnwiseOp(Op):
 
 
 class EnvObliviousOp(Op):
-    def _pre_describe_tensors(self) -> None:
+    def _pre_describe_tensors(self):
         return
 
 
@@ -253,7 +249,7 @@ class LayerNorm(RowwiseOp, EnvObliviousOp):
 
     def describe_tensors(
         self,
-    ) -> dict[str, TensorDescriptor]:
+    ):
         return {
             "weight": TensorDescriptor(
                 (self.features,),
@@ -391,7 +387,7 @@ class Gemm(Op):
             _ag_cgemm(self),
         ]
 
-    def describe_tensors(self) -> dict[str, TensorDescriptor]:
+    def describe_tensors(self):
         return {
             "weight": TensorDescriptor(
                 (self.in_features, self.out_features),
@@ -401,12 +397,7 @@ class Gemm(Op):
             ),
         }
 
-    def forward(
-        self, x: GenericTensor, *, weight: GenericTensor, **_
-    ) -> tuple[GenericTensor, Context]:
-        if self.input_type.is_fp8() and not self.param_type.is_fp8():
-            weight_fp8, weight_t = f.cast_transpose_fp8(weight)
-
+    def forward(self, x: GenericTensor, *, weight: GenericTensor, **_):
         return f.gemm(x, weight), {"x": x, "weight": weight}
 
     def backward(
@@ -416,7 +407,7 @@ class Gemm(Op):
         x: GenericTensor,
         weight: GenericTensor,
         **_,
-    ) -> tuple[GenericTensor, ParamGrads]:
+    ):
         dgrad = f.gemm(grad, f.transpose(weight))
         wgrad = f.gemm(f.transpose(x), grad)
         return dgrad, {"weight": wgrad}
@@ -457,22 +448,21 @@ class Bias(PointwiseOp):
             )
         self.features //= workers
 
-    def describe_tensors(self) -> dict[str, TensorDescriptor]:
+    def describe_tensors(self):
         return {
             "bias": TensorDescriptor(
                 (self.features,), self.init_method, self.param_dtype, True
             ),
         }
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.add(x, self.bias)
-        self.bias_grad = grad
-        yield grad
+    def forward(self, x: GenericTensor, *, bias: GenericTensor, **_):
+        return f.add(x, bias), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
-        return f.add(x, self.bias)
+    def backward(self, grad: GenericTensor, **_):
+        return grad, {"bias": grad}
+
+    def inference_optimized(self, x: GenericTensor, *, bias: GenericTensor, **_):
+        return f.add(x, bias)
 
 
 # Attention
@@ -517,16 +507,17 @@ class ResidualBegin(PointwiseOp, NoTensorOp, EnvObliviousOp):
         super().__init__(name, DType.default, DType.default)
         self.end = end
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        assert self.end is not None
+    def forward(self, x: GenericTensor, **_):
         self.fwd_residue = x
-        grad = yield x
-        self.end.bwd_residue = f.add(self.end.bwd_residue, grad)
-        yield self.end.bwd_residue
+        return x, Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        assert self.end is not None
+        grad = f.add(self.end.bwd_residue, grad)
+        del self.end.bwd_residue
+        return grad, ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         self.fwd_residue = x
         return x
 
@@ -540,17 +531,19 @@ class ResidualEnd(PointwiseOp, NoTensorOp, EnvObliviousOp):
         super().__init__(name, DType.default, DType.default)
         self.begin = begin
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        self.begin.fwd_residue = f.add(self.begin.fwd_residue, x)
-        grad = yield self.begin.fwd_residue
-        self.bwd_residue = grad
-        yield grad
+    def forward(self, x: GenericTensor, **_):
+        x = f.add(self.begin.fwd_residue, x)
+        del self.begin.fwd_residue
+        return x, Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
-        self.begin.fwd_residue = f.add(self.begin.fwd_residue, x)
-        return self.begin.fwd_residue
+    def backward(self, grad: GenericTensor, **_):
+        self.bwd_residue = grad
+        return grad, ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
+        x = f.add(self.begin.fwd_residue, x)
+        del self.begin.fwd_residue
+        return x
 
 
 # Dropout
@@ -566,65 +559,51 @@ class Dropout(
         super().__init__(name, DTypeInfer(), DTypeInfer())
         self.p = p
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.dropout(x, self.p)
-        yield f.dropout(grad, self.p)
+    def forward(self, x: GenericTensor, **_):
+        return f.dropout(x, self.p), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return f.dropout(grad, self.p), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.dropout(x, self.p)
 
 
 # Activation
 @final
 class Gelu(PointwiseOp, NoTensorOp, EnvObliviousOp):
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.gelu(x)
-        yield f.dgelu(grad, x)
+    def forward(self, x: GenericTensor, **_):
+        return f.gelu(x), {"x": x}
 
-    def inference(
-        self,
-        x: GenericTensor,
-    ) -> GenericTensor:
+    def backward(self, grad: GenericTensor, *, x: GenericTensor, **_):
+        return f.dgelu(grad, x), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.gelu(x)
 
 
 @final
 class Relu(PointwiseOp, NoTensorOp, EnvObliviousOp):
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.relu(x)
-        yield f.drelu(grad, x)
+    def forward(self, x: GenericTensor, **_):
+        return f.relu(x), {"x": x}
 
-    def inference(
-        self,
-        x: GenericTensor,
-    ) -> GenericTensor:
+    def backward(self, grad: GenericTensor, *, x: GenericTensor, **_):
+        return f.drelu(grad, x), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.relu(x)
 
 
 # Cast
 @final
 class Cast(PointwiseOp, NoTensorOp, EnvObliviousOp):
-    act: GenericTensor
+    def forward(self, x: GenericTensor, **_):
+        return f.cast(x, self.output_type), Context()
 
-    def training(
-        self,
-        x: GenericTensor,
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.cast(x, self.output_type)
-        yield f.cast(grad, self.input_type)
+    def backward(self, grad: GenericTensor, **_):
+        return f.cast(grad, self.input_type), ParamGrads()
 
-    def inference(
-        self,
-        x: GenericTensor,
-    ) -> GenericTensor:
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.cast(x, self.output_type)
 
 
@@ -643,13 +622,13 @@ class Scatter(NoTensorOp, EnvObliviousOp):
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_scatter(self)]
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.scatter(x)
-        yield f.gather(grad)
+    def forward(self, x: GenericTensor, **_):
+        return f.scatter(x), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return f.gather(grad), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.scatter(x)
 
 
@@ -660,13 +639,13 @@ class ReduceScatter(NoTensorOp, EnvObliviousOp):
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_reduce_scatter(self)]
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.reduce_scatter(x)
-        yield f.all_gather(grad)
+    def forward(self, x: GenericTensor, **_):
+        return f.reduce_scatter(x), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return f.all_gather(grad), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.reduce_scatter(x)
 
 
@@ -677,13 +656,13 @@ class AllGather(NoTensorOp, EnvObliviousOp):
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_all_gather(self)]
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.all_gather(x)
-        yield f.reduce_scatter(grad)
+    def forward(self, x: GenericTensor, **_):
+        return f.all_gather(x), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return f.reduce_scatter(grad), ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.all_gather(x)
 
 
@@ -694,11 +673,11 @@ class AllReduce(NoTensorOp, EnvObliviousOp):
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_all_reduce(self)]
 
-    def training(
-        self, x: GenericTensor
-    ) -> Generator[GenericTensor, GenericTensor, None]:
-        grad = yield f.all_reduce(x)
-        yield grad
+    def forward(self, x: GenericTensor, **_):
+        return f.all_reduce(x), Context()
 
-    def inference(self, x: GenericTensor) -> GenericTensor:
+    def backward(self, grad: GenericTensor, **_):
+        return grad, ParamGrads()
+
+    def inference_optimized(self, x: GenericTensor, **_):
         return f.all_reduce(x)
