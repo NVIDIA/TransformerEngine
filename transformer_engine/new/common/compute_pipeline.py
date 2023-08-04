@@ -94,7 +94,7 @@ class ComputePipeline(NonParallelOp):
             grads |= {f"{op.name}.{name}": tensor for name, tensor in op_grads.items()}
         return grad, grads
 
-    def inference_optimized(self, x: GenericTensor, **_):
+    def inference_optimized(self, x: GenericTensor, **_: GenericTensor):
         assert self._compiled is not None
         for op in self._compiled:
             x = op.inference_optimized(x)
