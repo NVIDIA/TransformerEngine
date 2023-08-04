@@ -22,8 +22,9 @@ ParamInitializer = Callable[[GenericTensor], None]
 @dataclass
 class TensorDescriptor:
     shape: tuple[int, ...]
-    constructor: ParamInitializer | None
+    initializer: ParamInitializer | None
     dtype: DType
+    is_parameter: bool
 
 
 @runtime_checkable

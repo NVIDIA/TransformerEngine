@@ -5,19 +5,18 @@ from typing import final
 from .generic_tensor import (
     GenericTensor,
 )
-from .enums import DTypeInfer, PType
+from .enums import DType, PType
 from .ops import (
-    ParallelismClass,
-    NoSupplementaryTensorsOp,
-    Op,
-    ParameterFreeOp,
-    ShapePreserveOp,
-    Identity,
-    Transpose,
-    Scatter,
+    _normal,
     AllGather,
     AllReduce,
-    _normal,
+    EnvObliviousOp,
+    Identity,
+    Op,
+    ParallelismClass,
+    NoTensorOp,
+    Scatter,
+    Transpose,
 )
 
 
@@ -115,9 +114,9 @@ def _bfs01(graph: list[Node]) -> list[Op]:
 
 
 @final
-class Input(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+class Input(NoTensorOp, EnvObliviousOp):
     def __init__(self, name: str):
-        super().__init__(name, DTypeInfer(), DTypeInfer())
+        super().__init__(name, DType.Infer, DType.Infer)
 
     def training(self, x: GenericTensor):
         raise RuntimeError("Input op should not be called directly")
@@ -129,21 +128,21 @@ class Input(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         i = (
             Identity("identity", self.input_type, self.input_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.input_type, self.input_type)
             .set_parallelism(ParallelismClass.NORMAL)
         )
         s = (
-            Scatter("scatter")
+            Scatter("scatter", self.input_type, self.input_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.input_type, self.input_type)
             .set_parallelism(ParallelismClass.S)
         )
         t = (
-            Transpose("transpose")
+            Transpose("transpose", self.input_type, self.input_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.input_type, self.input_type)
             .set_parallelism(ParallelismClass.NORMAL)
         )
@@ -155,9 +154,9 @@ class Input(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
 
 
 @final
-class Output(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
+class Output(NoTensorOp, EnvObliviousOp):
     def __init__(self, name: str):
-        super().__init__(name, DTypeInfer(), DTypeInfer())
+        super().__init__(name, DType.Infer, DType.Infer)
 
     def training(self, x: GenericTensor):
         raise RuntimeError("Output op should not be called directly")
@@ -169,28 +168,28 @@ class Output(ParameterFreeOp, ShapePreserveOp, NoSupplementaryTensorsOp):
         i = (
             Identity("identity", self.output_type, self.output_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.output_type, self.output_type)
             .set_parallelism(ParallelismClass.NORMAL)
         )
         ar = (
-            AllReduce("allreduce")
+            AllReduce("allreduce", self.output_type, self.output_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.output_type, self.output_type)
             .set_parallelism(ParallelismClass.AR)
         )
         ag = (
-            AllGather("allgather")
+            AllGather("allgather", self.output_type, self.output_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.output_type, self.output_type)
             .set_parallelism(ParallelismClass.AG)
         )
         t = (
-            Transpose("transpose", self.input_type, self.output_type)
+            Transpose("transpose", self.output_type, self.output_type)
             .set_parent_name(self.name)
-            .set_environment(self.environment)
+            .set_world_size(self.world_size)
             .set_types_inferred(self.output_type, self.output_type)
             .set_parallelism(ParallelismClass.NORMAL)
         )

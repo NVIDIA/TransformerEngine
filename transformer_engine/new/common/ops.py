@@ -4,7 +4,6 @@ from copy import deepcopy
 from functools import partial
 from typing import Generator, final
 from .enums import DType, PType, DTypeInfer
-from .generic_environment import ExecutionEnv
 from .generic_tensor import (
     GenericTensor,
     TensorDescriptor,
@@ -32,34 +31,22 @@ class Op(ABC):
 
     name: str
     original_source: object
-    __environment: ExecutionEnv | Unset
-    __dist_group_size: int | Unset | None
+    __world_size: int | Unset
     __input_type: DType | DTypeInfer
     __output_type: DType | DTypeInfer
     __parallellism: Parallelism | Unset
-    __input_shape: tuple[int, ...] | Unset
 
     @property
-    def environment(self):
-        assert not isinstance(self.__environment, Unset)
-        return self.__environment
-
-    @property
-    def dist_group_size(self):
-        assert not isinstance(self.__dist_group_size, Unset)
-        if self.__dist_group_size is None:
-            raise ValueError(
-                "Operation is not distributed, but distributed group size is requested"
-            )
-        else:
-            return self.__dist_group_size
+    def world_size(self):
+        assert not isinstance(self.__world_size, Unset)
+        return self.__world_size
 
     @property
     def raw_input_type(self):
         return self.__input_type
 
     @raw_input_type.setter
-    def raw_input_type(self, value: DType):
+    def raw_input_type(self, value: DType | DTypeInfer):
         self.__input_type = value
 
     @property
@@ -67,7 +54,7 @@ class Op(ABC):
         return self.__output_type
 
     @raw_output_type.setter
-    def raw_output_type(self, value: DType):
+    def raw_output_type(self, value: DType | DTypeInfer):
         self.__output_type = value
 
     @property
@@ -85,11 +72,6 @@ class Op(ABC):
         assert not isinstance(self.__parallellism, Unset)
         return self.__parallellism
 
-    @property
-    def input_shape(self):
-        assert not isinstance(self.__input_shape, Unset)
-        return self.__input_shape
-
     def __init__(
         self,
         relative_name: str,
@@ -99,22 +81,15 @@ class Op(ABC):
         self.name = relative_name
         self.__input_type = input_type
         self.__output_type = output_type
-        self.__environment = Unset()
-        self.__dist_group_size = Unset()
+        self.__world_size = Unset()
         self.__parallellism = Unset()
-        self.__input_shape = Unset()
 
     def set_parent_name(self, parent_module_name: str):
         self.name = parent_module_name + "." + self.name
         return self
 
-    def set_environment(self, env: ExecutionEnv):
-        self.__environment = env
-        self.__dist_group_size = (
-            self.__environment.distributed_group.size()
-            if self.__environment.distributed_group is not None
-            else None
-        )
+    def set_world_size(self, world_size: int):
+        self.__world_size = world_size
         return self
 
     def set_types_inferred(
@@ -130,10 +105,6 @@ class Op(ABC):
 
     def set_parallelism(self, chosen_parallelism: Parallelism):
         self.__parallellism = chosen_parallelism
-        return self
-
-    def set_input_shape(self, input_shape: tuple[int, ...]):
-        self.__input_shape = input_shape
         self._pre_describe_tensors()
         return self
 
@@ -142,11 +113,7 @@ class Op(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def describe_params(self) -> dict[str, TensorDescriptor]:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def describe_activation_shape(self) -> tuple[int, ...]:
+    def describe_tensors(self) -> dict[str, TensorDescriptor]:
         raise NotImplementedError()
 
     def set_tensors_allocated(self, **tensors: GenericTensor):
@@ -169,27 +136,16 @@ class Op(ABC):
 
 
 # Base classes
-class ParameterFreeOp(Op):
+class NoTensorOp(Op):
     """
     Base class for ops that do not have any trainable parameters.
     """
 
-    def describe_params(self) -> dict[str, TensorDescriptor]:
+    def describe_tensors(self) -> dict[str, TensorDescriptor]:
         return {}
 
 
-class ShapePreserveOp(Op):
-    """
-    Base class for ops, whose activation's shape is the same as the input's.
-    """
-
-    def describe_activation_shape(self):
-        return self.input_shape
-
-
 # Parallelism base classes
-
-
 class ParallelismClass:
     NORMAL = (PType.NA, PType.NA)
     ROWP = (PType.NRS, PType.NRS)
@@ -242,8 +198,7 @@ class NonParallelOp(EnvObliviousOp):
 @final
 class Identity(
     PointwiseOp,
-    ParameterFreeOp,
-    ShapePreserveOp,
+    NoTensorOp,
     EnvObliviousOp,
 ):
     def training(
@@ -262,11 +217,8 @@ class Identity(
 
 # Transpose
 @final
-class Transpose(NonParallelOp, ParameterFreeOp):
+class Transpose(NonParallelOp, NoTensorOp):
     act: GenericTensor
-
-    def describe_activation_shape(self) -> tuple[int, ...]:
-        return self.input_shape[:-2] + (self.input_shape[-1], self.input_shape[-2])
 
     def training(
         self, x: GenericTensor
@@ -280,7 +232,7 @@ class Transpose(NonParallelOp, ParameterFreeOp):
 
 # Normalization
 @final
-class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
+class LayerNorm(RowwiseOp, EnvObliviousOp):
     weight: GenericTensor
     weight_grad: GenericTensor
     bias: GenericTensor
@@ -302,7 +254,7 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
 
-    def describe_params(
+    def describe_tensors(
         self,
     ) -> dict[str, TensorDescriptor]:
         return {
@@ -310,8 +262,9 @@ class LayerNorm(RowwiseOp, ShapePreserveOp, EnvObliviousOp):
                 (self.features,),
                 f.zeros if self.zero_centered_gamma else f.ones,
                 self.param_type,
+                True,
             ),
-            "bias": TensorDescriptor((self.features,), f.zeros, self.param_type),
+            "bias": TensorDescriptor((self.features,), f.zeros, self.param_type, True),
         }
 
     def training(
@@ -360,7 +313,7 @@ def _rgemm_rs(op: Gemm) -> list[Op]:
     rs = (
         ReduceScatter("post-rs", op.output_type, op.output_type)
         .set_parent_name(op.name)
-        .set_environment(op.environment)
+        .set_world_size(op.world_size)
         .set_types_inferred(op.output_type, op.output_type)
         .set_parallelism(ParallelismClass.RS)
     )
@@ -372,7 +325,7 @@ def _ag_cgemm(op: Gemm) -> list[Op]:
     ag = (
         AllGather("pre-ag", op.input_type, op.input_type)
         .set_parent_name(op.name)
-        .set_environment(op.environment)
+        .set_world_size(op.world_size)
         .set_types_inferred(op.output_type, op.output_type)
         .set_parallelism(ParallelismClass.AG)
     )
@@ -409,7 +362,7 @@ class Gemm(Op):
         ]
 
         workers = (
-            self.dist_group_size
+            self.world_size
             if self.parallellism in [ParallelismClass.RGEMM, ParallelismClass.CGEMM]
             else 1
         )
@@ -435,17 +388,15 @@ class Gemm(Op):
             _ag_cgemm(self),
         ]
 
-    def describe_params(self) -> dict[str, TensorDescriptor]:
+    def describe_tensors(self) -> dict[str, TensorDescriptor]:
         return {
             "weight": TensorDescriptor(
                 (self.in_features, self.out_features),
                 self.init_method,
                 self.param_dtype,
+                True,
             ),
         }
-
-    def describe_activation_shape(self) -> tuple[int, ...]:
-        return self.input_shape[:-1] + (self.out_features,)
 
     def training(
         self, x: GenericTensor
@@ -461,7 +412,7 @@ class Gemm(Op):
 
 
 @final
-class Bias(PointwiseOp, ShapePreserveOp):
+class Bias(PointwiseOp):
     bias: GenericTensor
     bias_grad: GenericTensor
 
@@ -485,19 +436,17 @@ class Bias(PointwiseOp, ShapePreserveOp):
             ParallelismClass.ROWP,
             ParallelismClass.COLP,
         ]
-        workers = (
-            self.dist_group_size if self.parallellism == ParallelismClass.COLP else 1
-        )
+        workers = self.world_size if self.parallellism == ParallelismClass.COLP else 1
         if self.features % workers != 0:
             raise ValueError(
                 "Number of features must be divisible by the distributed group size"
             )
         self.features //= workers
 
-    def describe_params(self) -> dict[str, TensorDescriptor]:
+    def describe_tensors(self) -> dict[str, TensorDescriptor]:
         return {
             "bias": TensorDescriptor(
-                (self.features,), self.init_method, self.param_dtype
+                (self.features,), self.init_method, self.param_dtype, True
             ),
         }
 
@@ -518,7 +467,7 @@ HEAD_PARALLEL_GATHERING = (PType.NCS, PType.NA)
 
 
 @final
-class DotProductAttention(ParameterFreeOp, ShapePreserveOp):  # TODO
+class DotProductAttention(NoTensorOp):  # TODO
     features_per_head: int
 
     def __init__(
@@ -546,7 +495,7 @@ class DotProductAttention(ParameterFreeOp, ShapePreserveOp):  # TODO
 
 # Residual
 @final
-class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
+class ResidualBegin(PointwiseOp, NoTensorOp, EnvObliviousOp):
     end: ResidualEnd | None = None
     fwd_residue: GenericTensor
 
@@ -569,7 +518,7 @@ class ResidualBegin(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousO
 
 
 @final
-class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
+class ResidualEnd(PointwiseOp, NoTensorOp, EnvObliviousOp):
     begin: ResidualBegin
     bwd_residue: GenericTensor
 
@@ -594,8 +543,7 @@ class ResidualEnd(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp)
 @final
 class Dropout(
     PointwiseOp,
-    ParameterFreeOp,
-    ShapePreserveOp,
+    NoTensorOp,
     EnvObliviousOp,
 ):
     p: float
@@ -616,7 +564,7 @@ class Dropout(
 
 # Activation
 @final
-class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
+class Gelu(PointwiseOp, NoTensorOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
@@ -632,7 +580,7 @@ class Gelu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
 
 
 @final
-class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
+class Relu(PointwiseOp, NoTensorOp, EnvObliviousOp):
     def training(
         self,
         x: GenericTensor,
@@ -649,7 +597,7 @@ class Relu(PointwiseOp, ParameterFreeOp, ShapePreserveOp, EnvObliviousOp):
 
 # Cast
 @final
-class Cast(PointwiseOp, ShapePreserveOp, ParameterFreeOp, EnvObliviousOp):
+class Cast(PointwiseOp, NoTensorOp, EnvObliviousOp):
     act: GenericTensor
 
     def training(
@@ -674,85 +622,59 @@ _all_gather = partial(__single_parallel, ParallelismClass.AG)
 _all_reduce = partial(__single_parallel, ParallelismClass.AR)
 
 
-def row_split_shape(shape: tuple[int, ...], workers: int) -> tuple[int, ...]:
-    assert len(shape) >= 2
-    assert shape[-2] % workers == 0
-    return shape[:-2] + (shape[-2] // workers, shape[-1])
-
-
-def row_merge_shape(shape: tuple[int, ...], workers: int) -> tuple[int, ...]:
-    assert len(shape) >= 2
-    return shape[:-2] + (shape[-2] * workers, shape[-1])
-
-
 @final
-class Scatter(ParameterFreeOp, EnvObliviousOp):
+class Scatter(NoTensorOp, EnvObliviousOp):
     act: GenericTensor
 
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_scatter(self)]
 
-    def describe_activation_shape(self) -> tuple[int, ...]:
-        return row_split_shape(self.input_shape, self.dist_group_size)
-
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        assert self.environment.distributed_group is not None
-        grad = yield f.scatter(x, self.environment.distributed_group)
-        yield f.gather(grad, self.environment.distributed_group)
+        grad = yield f.scatter(x)
+        yield f.gather(grad)
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        assert self.environment.distributed_group is not None
-        return f.scatter(x, self.environment.distributed_group)
+        return f.scatter(x)
 
 
 @final
-class ReduceScatter(ParameterFreeOp, EnvObliviousOp):
+class ReduceScatter(NoTensorOp, EnvObliviousOp):
     act: GenericTensor
 
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_reduce_scatter(self)]
 
-    def describe_activation_shape(self) -> tuple[int, ...]:
-        return row_split_shape(self.input_shape, self.dist_group_size)
-
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        assert self.environment.distributed_group is not None
-        grad = yield f.reduce_scatter(x, self.environment.distributed_group)
-        yield f.all_gather(grad, self.environment.distributed_group)
+        grad = yield f.reduce_scatter(x)
+        yield f.all_gather(grad)
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        assert self.environment.distributed_group is not None
-        return f.reduce_scatter(x, self.environment.distributed_group)
+        return f.reduce_scatter(x)
 
 
 @final
-class AllGather(ParameterFreeOp, EnvObliviousOp):
+class AllGather(NoTensorOp, EnvObliviousOp):
     act: GenericTensor
 
     def describe_parallellism(self) -> list[ExecutionFlow]:
         return [_all_gather(self)]
 
-    def describe_activation_shape(self) -> tuple[int, ...]:
-        return row_merge_shape(self.input_shape, self.dist_group_size)
-
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        assert self.environment.distributed_group is not None
-        grad = yield f.all_gather(x, self.environment.distributed_group)
-        yield f.reduce_scatter(grad, self.environment.distributed_group)
+        grad = yield f.all_gather(x)
+        yield f.reduce_scatter(grad)
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        assert self.environment.distributed_group is not None
-        return f.all_gather(x, self.environment.distributed_group)
+        return f.all_gather(x)
 
 
 @final
-class AllReduce(ParameterFreeOp, EnvObliviousOp, ShapePreserveOp):
+class AllReduce(NoTensorOp, EnvObliviousOp):
     act: GenericTensor
 
     def describe_parallellism(self) -> list[ExecutionFlow]:
@@ -761,10 +683,8 @@ class AllReduce(ParameterFreeOp, EnvObliviousOp, ShapePreserveOp):
     def training(
         self, x: GenericTensor
     ) -> Generator[GenericTensor, GenericTensor, None]:
-        assert self.environment.distributed_group is not None
-        grad = yield f.all_reduce(x, self.environment.distributed_group)
+        grad = yield f.all_reduce(x)
         yield grad
 
     def inference(self, x: GenericTensor) -> GenericTensor:
-        assert self.environment.distributed_group is not None
-        return f.all_reduce(x, self.environment.distributed_group)
+        return f.all_reduce(x)

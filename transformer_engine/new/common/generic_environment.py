@@ -26,3 +26,9 @@ class ExecutionEnv(ABC):
     fp8: bool
     training: bool
     distributed_group: DistributedGroup | None
+
+    def world_size(self):
+        if self.distributed_group is None:
+            return 1
+        else:
+            return self.distributed_group.size()

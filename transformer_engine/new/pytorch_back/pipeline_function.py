@@ -13,7 +13,7 @@ class PipelineFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx: FunctionCtx | None, input: torch.Tensor, pipeline: ComputePipeline):  # type: ignore
         tensor = PytorchNativeTensor(DType.from_torch_dtype(input.dtype), input)
-        if pipeline.environment.training:
+        if pipeline.world_size.training:
             assert ctx is not None
             gen = pipeline.training(tensor)
             output = next(gen)

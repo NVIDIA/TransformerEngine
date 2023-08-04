@@ -5,7 +5,6 @@ import transformer_engine_extensions as tex  # TODO: make this framework agnosti
 from .generic_tensor import (
     GenericTensor,
     FrameworkTensor,
-    FP8Tensor,
     NativeTensor,
     TransformerEngineExtensionsFP8TensorMeta,
     TensorDescriptor,
@@ -70,8 +69,8 @@ class TensorManager:
                 )
                 assert tensor.is_contiguous()
 
-                if desc.constructor is not None:
-                    desc.constructor(f.as_native_tensor(desc.dtype, tensor))
+                if desc.initializer is not None:
+                    desc.initializer(f.as_native_tensor(desc.dtype, tensor))
 
                 self.tensors[name] = tensor
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ..common.generic_environment import DistributedGroup, ExecutionEnv
 import torch.distributed
-from torch.distributed import ProcessGroup
+from torch.distributed import ProcessGroup  # type: ignore
 
 
 class PytorchDistributedGroup(DistributedGroup):
