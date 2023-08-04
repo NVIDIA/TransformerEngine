@@ -204,7 +204,9 @@ class TestSelfFusedAttn():
 
     def test_forward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend, dropout_probability,
                      dtype, is_training, pad_ratio):
-        """Test only forward"""
+        """
+        Test forward without using JIT
+        """
         self._set_inputs(b,
                          s,
                          h,
@@ -255,7 +257,9 @@ class TestSelfFusedAttn():
 
     def test_forward_backward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend,
                               dropout_probability, dtype, is_training, pad_ratio):
-        """Test both forward and backward"""
+        """
+        Test forward, backward, and autodiff by jax.value_and_grad
+        """
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
@@ -398,7 +402,9 @@ class TestCrossFusedAttn():
 
     def test_forward(self, b, s_q, s_kv, h, d, attn_mask_type, dropout_probability, dtype,
                      is_training, pad_ratio):
-        """Test only forward"""
+        """
+        Test forward without using JIT
+        """
         self._set_inputs(b,
                          s_q,
                          s_kv,
@@ -448,7 +454,9 @@ class TestCrossFusedAttn():
 
     def test_forward_backward(self, b, s_q, s_kv, h, d, attn_mask_type, dropout_probability, dtype,
                               is_training, pad_ratio):
-        """Test both forward and backward"""
+        """
+        Test forward, backward, and autodiff by jax.value_and_grad
+        """
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
