@@ -51,8 +51,7 @@ struct Tensor {
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
          at::Tensor scale_inv) {
-    NVTEShape shape{static_cast<size_t *>(data.sizes().data()),
-                    data.sizes().size()};
+    NVTEShape shape{(size_t *)(data.sizes().data()), data.sizes().size()};
     impl = nvte_create_tensor(getDataPtr(data), shape, dtype, getDataPtr(amax),
                               getDataPtr(scale), getDataPtr(scale_inv));
   }
@@ -95,22 +94,26 @@ template <typename T> decltype(auto) unwrap_arg(T &&arg) {
   }
 }
 
-template <typename LastGetterT, typename Ret, typename... Args,
-          typename... ArgsStripped>
-constexpr auto _wrap_no_last(Ret(func)(Args...), type_list<ArgsStripped...>,
-                             LastGetterT last_func) noexcept {
-  return [func, last_func](wrapped_arg_t<ArgsStripped>... args) -> Ret {
-    return func(unwrap_arg(args)..., last_func());
+template <typename Ret, typename... PrefixArgs, typename... SuffixArgs,
+          typename... Args>
+constexpr auto
+remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
+                              type_list<SuffixArgs...>) noexcept {
+  return [func](wrapped_arg_t<PrefixArgs>... prefixArgs,
+                wrapped_arg_t<SuffixArgs>... suffixArgs) -> Ret {
+    return func(unwrap_arg(prefixArgs)..., at::cuda::getCurrentCUDAStream(),
+                unwrap_arg(suffixArgs)...);
   };
 }
 
 template <typename Ret, typename... Args>
 constexpr auto wrap(Ret(func)(Args...)) noexcept {
-  using LastArg = typename type_list<Args...>::back_t;
-  if constexpr (std::is_same_v<LastArg, cudaStream_t>) {
-    using stripped = typename type_list<Args...>::template pop_back<>;
-    return _wrap_no_last<>(func, stripped(),
-                           []() { return at::cuda::getCurrentCUDAStream(); });
+  using tl = type_list<Args...>;
+  if constexpr (tl::template contains<cudaStream_t>) {
+    constexpr size_t stream_arg_idx = tl::template find<cudaStream_t>;
+    using prefix = tl::template pop_back<tl::size - stream_arg_idx>;
+    using suffix = tl::template pop_front<stream_arg_idx + 1>;
+    return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
       return func(unwrap_arg(args)...);
@@ -138,7 +141,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nvte_fused_attn_bwd_kvpacked", wrap(nvte_fused_attn_bwd_kvpacked));
   m.def("nvte_cublas_gemm", wrap(nvte_cublas_gemm));
   m.def("nvte_layernorm_fwd", wrap(nvte_layernorm_fwd));
-  m.def("nvte_layernorm1p_fwd", wrap(nvte_layernorm1p_fwd));
+  m.def("nvte_layernorm1p_fwd", wrap());
   m.def("nvte_layernorm_bwd", wrap(nvte_layernorm_bwd));
   m.def("nvte_layernorm1p_bwd", wrap(nvte_layernorm1p_bwd));
   m.def("nvte_rmsnorm_fwd", wrap(nvte_rmsnorm_fwd));
