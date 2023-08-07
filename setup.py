@@ -499,8 +499,6 @@ def setup_common_pybind_extension() -> setuptools.Extension:
         src_dir / "util" / "system.cpp",
         src_dir / "fused_softmax" / "scaled_masked_softmax.cu",
         src_dir / "fused_softmax" / "scaled_upper_triang_masked_softmax.cu",
-        src_dir / "fused_softmax" / "scaled_masked_softmax.cu",
-        src_dir / "fused_softmax" / "scaled_upper_triang_masked_softmax.cu",
     ]
 
     # Header files
