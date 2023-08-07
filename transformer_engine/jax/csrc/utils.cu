@@ -41,9 +41,15 @@ __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t 
 }
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, cudaStream_t stream) {
-    constexpr int threads_per_cta = 128;
-    const size_t increment = (q_max_seqlen * kv_max_seqlen + threads_per_cta - 1) / threads_per_cta;
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream) {
+    size_t increment = 0;
+    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+        increment = 16;
+    } else {
+        constexpr int threads_per_cta = 128;
+        increment = (q_max_seqlen * kv_max_seqlen + threads_per_cta - 1) / threads_per_cta;
+    }
     auto offset = FusedAttnOffsetManager::Instance().GetAndUpdateOffset(increment);
     populate_rng_state_kernel<<<1, 1, 0, stream>>>(reinterpret_cast<int64_t *>(rng_state_dst),
                                                    reinterpret_cast<const int64_t *>(seed), offset);

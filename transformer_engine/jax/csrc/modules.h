@@ -116,6 +116,12 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 
 bool IsFusedAttnKernelAvailable();
 
+NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
+                                            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                                            NVTE_Mask_Type mask_type, float dropout_probability,
+                                            size_t q_max_seqlen, size_t kv_max_seqlen,
+                                            size_t head_dim);
+
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
@@ -166,17 +172,17 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
-void SelfFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                size_t opaque_len);
+void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                          size_t opaque_len);
 
-void SelfFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len);
+void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len);
 
-void CrossFusedAttnMax512Forward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 size_t opaque_len);
+void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque,
+                           size_t opaque_len);
 
-void CrossFusedAttnMax512Backward(cudaStream_t stream, void **buffers, const char *opaque,
-                                  size_t opaque_len);
+void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque,
+                            size_t opaque_len);
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -1,4 +1,4 @@
 datasets
-flax
+flax>=0.7.1
 nltk
 optax
