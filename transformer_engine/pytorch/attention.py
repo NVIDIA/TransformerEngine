@@ -123,7 +123,7 @@ def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
 
 class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
     """
-    Merge softmax stats of each step in Flash Attention with context parallelism.
+    Flash Attention implementation with context parallelism.
     Split flash attention compute into multiple steps, and overlap current-step
     compute with next-step communication.
     """
