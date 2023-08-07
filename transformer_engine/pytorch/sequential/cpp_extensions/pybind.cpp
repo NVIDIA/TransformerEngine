@@ -5,6 +5,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "type_list.h"
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -33,14 +34,15 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 #include <type_traits>
+
 namespace py = pybind11;
 
 struct Tensor {
   NVTETensor impl;
 
-  static void *getDataPtr(at::Tensor t) {
+  static float *getDataPtr(at::Tensor t) {
     if (t.numel() > 0) {
-      return t.data_ptr();
+      return reinterpret_cast<float *>(t.data_ptr());
     } else {
       return nullptr;
     }
@@ -48,7 +50,7 @@ struct Tensor {
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
          at::Tensor scale_inv) {
-    NVTEShape shape{data.sizes().data(), data.sizes().size()};
+    NVTEShape shape{(static_cast<size_t*>(data.sizes().data()), data.sizes().size()};
     impl = nvte_create_tensor(getDataPtr(data), shape, dtype, getDataPtr(amax),
                               getDataPtr(scale), getDataPtr(scale_inv));
   }
@@ -56,7 +58,7 @@ struct Tensor {
 };
 
 struct TensorPack : NVTETensorPack {
-  TensorPack(const std::vector<Tensor> &tensors_) : tensors{}, size{} {
+  TensorPack(const std::vector<Tensor> &tensors_) : NVTETensorPack{} {
     size = tensors_.size();
     if (size > MAX_SIZE) {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
@@ -75,13 +77,13 @@ template <typename T> struct trait {
 };
 
 template <typename T> struct wrapped_arg : trait<T> {};
-struct wrapped_arg<NVTETensor> : trait<Tensor> {};
-struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {};
+template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {};
+template <> struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {};
 
 template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
 
 template <typename T> decltype(auto) unwrap_arg(T &&arg) {
-  if constexpr (std::is_same_v < std::decay_t<T>, wrapped_arg_t<NVTETensor>) {
+  if constexpr (std::is_same_v<std::decay_t<T>, wrapped_arg_t<NVTETensor>>) {
     return arg.impl;
   } else if constexpr (std::is_same_v<std::decay_t<T>,
                                       wrapped_arg_t<NVTETensorPack>>) {
@@ -91,16 +93,25 @@ template <typename T> decltype(auto) unwrap_arg(T &&arg) {
   }
 }
 
-template <typename Ret, typename LastArg, typename... Args>
-constexpr auto wrap(Ret(func)(Args &&..., LastArg &&)) noexcept {
-  if constexpr (std::is_same_v<std::decay_t<LastArg>, cudaStream_t>) {
-    return [func](wrapped_arg_t<Args>... args) -> Ret {
-      return func(unwrap_arg(args)..., at::cuda::getCurrentCUDAStream());
-    };
+template <typename LastGetterT, typename Ret, typename... Args,
+          typename... ArgsStripped>
+constexpr auto _wrap_no_last(Ret(func)(Args...), type_list<ArgsStripped...>,
+                             LastGetterT last_func) noexcept {
+  return [func, last_func](wrapped_arg_t<ArgsStripped>... args) -> Ret {
+    return func(unwrap_arg(args)..., last_func());
+  };
+}
+
+template <typename Ret, typename... Args>
+constexpr auto wrap(Ret(func)(Args...)) noexcept {
+  using LastArg = typename type_list<Args...>::back_t;
+  if constexpr (std::is_same_v<LastArg, cudaStream_t>) {
+    using stripped = typename type_list<Args...>::template pop_back<>;
+    return _wrap_no_last<>(func, stripped(),
+                           []() { return at::cuda::getCurrentCUDAStream(); });
   } else {
-    return [func](wrapped_arg_t<Args>... args,
-                  wrapped_arg_t<LastArg> last_arg) -> Ret {
-      return func(unwrap_arg(args)..., unwrap_arg(last_arg));
+    return [func](wrapped_arg_t<Args>... args) -> Ret {
+      return func(unwrap_arg(args)...);
     };
   }
 }
@@ -196,6 +207,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("ndim", &NVTEShape::ndim);
 
   py::class_<Tensor>(m, "NVTETensor")
-      .def(
-          py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor, at::Tensor>())
+      .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
+                    at::Tensor>());
 }
