@@ -5,7 +5,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "type_list.h"
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -35,6 +34,8 @@
 #include <transformer_engine/transpose.h>
 #include <type_traits>
 
+#include "type_list.h"
+
 namespace py = pybind11;
 
 struct Tensor {
@@ -50,7 +51,8 @@ struct Tensor {
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
          at::Tensor scale_inv) {
-    NVTEShape shape{(static_cast<size_t*>(data.sizes().data()), data.sizes().size()};
+    NVTEShape shape{static_cast<size_t *>(data.sizes().data()),
+                    data.sizes().size()};
     impl = nvte_create_tensor(getDataPtr(data), shape, dtype, getDataPtr(amax),
                               getDataPtr(scale), getDataPtr(scale_inv));
   }
