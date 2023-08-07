@@ -18,61 +18,61 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("nvte_gelu", &nvte_gelu)
-    m.def("nvte_dgelu", &nvte_dgelu)
-    m.def("nvte_geglu", &nvte_geglu)
-    m.def("nvte_dgeglu", &nvte_dgeglu)
-    m.def("nvte_relu", &nvte_relu)
-    m.def("nvte_drelu", &nvte_drelu)
-    m.def("nvte_swiglu", &nvte_swiglu)
-    m.def("nvte_dswiglu", &nvte_dswiglu)
-    m.def("nvte_reglu", &nvte_reglu)
-    m.def("nvte_dreglu", &nvte_dreglu)
+    m.def("nvte_gelu", &nvte_gelu);
+    m.def("nvte_dgelu", &nvte_dgelu);
+    m.def("nvte_geglu", &nvte_geglu);
+    m.def("nvte_dgeglu", &nvte_dgeglu);
+    m.def("nvte_relu", &nvte_relu);
+    m.def("nvte_drelu", &nvte_drelu);
+    m.def("nvte_swiglu", &nvte_swiglu);
+    m.def("nvte_dswiglu", &nvte_dswiglu);
+    m.def("nvte_reglu", &nvte_reglu);
+    m.def("nvte_dreglu", &nvte_dreglu);
 
-    m.def("nvte_fp8_quantize", &nvte_fp8_quantize)
-    m.def("nvte_fp8_dequantize", &nvte_fp8_dequantize)
+    m.def("nvte_fp8_quantize", &nvte_fp8_quantize);
+    m.def("nvte_fp8_dequantize", &nvte_fp8_dequantize);
 
-    m.def("nvte_get_fused_attn_backend", &nvte_get_fused_attn_backend)
-    m.def("nvte_fused_attn_fwd_qkvpacked", &nvte_fused_attn_fwd_qkvpacked)
-    m.def("nvte_fused_attn_bwd_qkvpacked", &nvte_fused_attn_bwd_qkvpacked)
-    m.def("nvte_fused_attn_fwd_kvpacked", &nvte_fused_attn_fwd_kvpacked)
-    m.def("nvte_fused_attn_bwd_kvpacked", &nvte_fused_attn_bwd_kvpacked)
+    m.def("nvte_get_fused_attn_backend", &nvte_get_fused_attn_backend);
+    m.def("nvte_fused_attn_fwd_qkvpacked", &nvte_fused_attn_fwd_qkvpacked);
+    m.def("nvte_fused_attn_bwd_qkvpacked", &nvte_fused_attn_bwd_qkvpacked);
+    m.def("nvte_fused_attn_fwd_kvpacked", &nvte_fused_attn_fwd_kvpacked);
+    m.def("nvte_fused_attn_bwd_kvpacked", &nvte_fused_attn_bwd_kvpacked);
 
-    m.def("nvte_cublas_gemm", &nvte_cublas_gemm)
+    m.def("nvte_cublas_gemm", &nvte_cublas_gemm);
 
-    m.def("nvte_layernorm_fwd", &nvte_layernorm_fwd)
-    m.def("nvte_layernorm1p_fwd", &nvte_layernorm1p_fwd)
-    m.def("nvte_layernorm_bwd", &nvte_layernorm_bwd)
-    m.def("nvte_layernorm1p_bwd", &nvte_layernorm1p_bwd)
+    m.def("nvte_layernorm_fwd", &nvte_layernorm_fwd);
+    m.def("nvte_layernorm1p_fwd", &nvte_layernorm1p_fwd);
+    m.def("nvte_layernorm_bwd", &nvte_layernorm_bwd);
+    m.def("nvte_layernorm1p_bwd", &nvte_layernorm1p_bwd);
 
-    m.def("nvte_rmsnorm_fwd", &nvte_rmsnorm_fwd)
-    m.def("nvte_rmsnorm_bwd", &nvte_rmsnorm_bwd)
+    m.def("nvte_rmsnorm_fwd", &nvte_rmsnorm_fwd);
+    m.def("nvte_rmsnorm_bwd", &nvte_rmsnorm_bwd);
 
-    m.def("nvte_scaled_softmax_forward", &nvte_scaled_softmax_forward)
-    m.def("nvte_scaled_softmax_backward", &nvte_scaled_softmax_backward)
-    m.def("nvte_scaled_masked_softmax_forward", &nvte_scaled_masked_softmax_forward)
-    m.def("nvte_scaled_masked_softmax_backward", &nvte_scaled_masked_softmax_backward)
-    m.def("nvte_scaled_upper_triang_masked_softmax_forward", &nvte_scaled_upper_triang_masked_softmax_forward)
-    m.def("nvte_scaled_upper_triang_masked_softmax_backward", &nvte_scaled_upper_triang_masked_softmax_backward)
+    m.def("nvte_scaled_softmax_forward", &nvte_scaled_softmax_forward);
+    m.def("nvte_scaled_softmax_backward", &nvte_scaled_softmax_backward);
+    m.def("nvte_scaled_masked_softmax_forward", &nvte_scaled_masked_softmax_forward);
+    m.def("nvte_scaled_masked_softmax_backward", &nvte_scaled_masked_softmax_backward);
+    m.def("nvte_scaled_upper_triang_masked_softmax_forward", &nvte_scaled_upper_triang_masked_softmax_forward);
+    m.def("nvte_scaled_upper_triang_masked_softmax_backward", &nvte_scaled_upper_triang_masked_softmax_backward);
 
-    m.def("nvte_create_tensor", &nvte_create_tensor)
-    m.def("nvte_destroy_tensor", &nvte_destroy_tensor)
-    m.def("nvte_tensor_type", &nvte_tensor_type)
-    m.def("nvte_tensor_shape", &nvte_tensor_shape)
-    m.def("nvte_tensor_data", &nvte_tensor_data)
-    m.def("nvte_tensor_amax", &nvte_tensor_amax)
-    m.def("nvte_tensor_scale", &nvte_tensor_scale)
-    m.def("nvte_tensor_scale_inv", &nvte_tensor_scale_inv)
-    m.def("nvte_tensor_pack_create", &nvte_tensor_pack_create)
-    m.def("nvte_tensor_pack_destroy", &nvte_tensor_pack_destroy)
+    m.def("nvte_create_tensor", &nvte_create_tensor);
+    m.def("nvte_destroy_tensor", &nvte_destroy_tensor);
+    m.def("nvte_tensor_type", &nvte_tensor_type);
+    m.def("nvte_tensor_shape", &nvte_tensor_shape);
+    m.def("nvte_tensor_data", &nvte_tensor_data);
+    m.def("nvte_tensor_amax", &nvte_tensor_amax);
+    m.def("nvte_tensor_scale", &nvte_tensor_scale);
+    m.def("nvte_tensor_scale_inv", &nvte_tensor_scale_inv);
+    m.def("nvte_tensor_pack_create", &nvte_tensor_pack_create);
+    m.def("nvte_tensor_pack_destroy", &nvte_tensor_pack_destroy);
 
-    m.def("nvte_cast_transpose", &nvte_cast_transpose)
-    m.def("nvte_transpose", &nvte_transpose)
-    m.def("nvte_cast_transpose_dbias", &nvte_cast_transpose_dbias)
-    m.def("nvte_fp8_transpose_dbias", &nvte_fp8_transpose_dbias)
-    m.def("nvte_cast_transpose_dbias_dgelu", &nvte_cast_transpose_dbias_dgelu)
-    m.def("nvte_multi_cast_transpose", &nvte_multi_cast_transpose)
-    m.def("nvte_dgeglu_cast_transpose", &nvte_dgeglu_cast_transpose)
+    m.def("nvte_cast_transpose", &nvte_cast_transpose);
+    m.def("nvte_transpose", &nvte_transpose);
+    m.def("nvte_cast_transpose_dbias", &nvte_cast_transpose_dbias);
+    m.def("nvte_fp8_transpose_dbias", &nvte_fp8_transpose_dbias);
+    m.def("nvte_cast_transpose_dbias_dgelu", &nvte_cast_transpose_dbias_dgelu);
+    m.def("nvte_multi_cast_transpose", &nvte_multi_cast_transpose);
+    m.def("nvte_dgeglu_cast_transpose", &nvte_dgeglu_cast_transpose);
 
     py::enum_<NVTEDType>(m, "NVTEDType")
         .value("kNVTEByte", kNVTEByte)
@@ -105,7 +105,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .value("NVTE_PADDING_MASK", NVTE_PADDING_MASK)
         .value("NVTE_CAUSAL_MASK", NVTE_CAUSAL_MASK);
 
-    py::class_<transformer_engine::FP8TensorMeta>(m, "NVTEShape")
+    py::class_<NVTEShape>(m, "NVTEShape")
         .def(py::init<>())
         .def_readwrite("data", &NVTEShape::data)
         .def_readwrite("ndim", &NVTEShape::ndim)
