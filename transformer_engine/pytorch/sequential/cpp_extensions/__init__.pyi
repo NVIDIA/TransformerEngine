@@ -1,22 +1,22 @@
 import torch
 from enum import Enum
 
-class QKV_Layout(Enum):
+class QKVLayout(Enum):
     NVTE_NOT_INTERLEAVED = 0
     NVTE_QKV_INTERLEAVED = 1
     NVTE_KV_INTERLEAVED = 2
 
-class Bias_Type(Enum):
+class BiasType(Enum):
     NVTE_NO_BIAS = 0
     NVTE_PRE_SCALE_BIAS = 1
     NVTE_POST_SCALE_BIAS = 2
 
-class Mask_Type(Enum):
+class MaskType(Enum):
     NVTE_NO_MASK = 0
     NVTE_PADDING_MASK = 1
     NVTE_CAUSAL_MASK = 2
 
-class Fused_Attn_Backend(Enum):
+class FusedAttnBackend(Enum):
     NVTE_No_Backend = -1
     NVTE_F16_max512_seqlen = 0
     NVTE_F16_arbitrary_seqlen = 1
