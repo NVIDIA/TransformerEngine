@@ -600,7 +600,7 @@ def setup_sequential_extension() -> setuptools.Extension:
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
-        package_data={"nvte": ["py.typed", src_dir / "__init__.pyi"]}
+        package_data={"nvte": ["py.typed", "transformer_engine/pytorch/sequential/cpp_extensions/__init__.pyi"]}
     )
 
 
