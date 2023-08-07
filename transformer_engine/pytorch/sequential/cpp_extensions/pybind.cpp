@@ -173,37 +173,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_transpose_dbias_dgelu", wrap(nvte_cast_transpose_dbias_dgelu));
   m.def("dgeglu_cast_transpose", wrap(nvte_dgeglu_cast_transpose));
 
-  py::enum_<NVTEDType>(m, "DType")
-      .value("Byte", kNVTEByte)
-      .value("Int32", kNVTEInt32)
-      .value("Int64", kNVTEInt64)
-      .value("Float32", kNVTEFloat32)
-      .value("Float16", kNVTEFloat16)
-      .value("BFloat16", kNVTEBFloat16)
-      .value("Float8E4M3", kNVTEFloat8E4M3)
-      .value("Float8E5M2", kNVTEFloat8E5M2);
-
-  py::enum_<NVTE_Fused_Attn_Backend>(m, "FusedAttnBackend")
-      .value("No_Backend", NVTE_No_Backend)
-      .value("F16_max512_seqlen", NVTE_F16_max512_seqlen)
-      .value("F16_arbitrary_seqlen", NVTE_F16_arbitrary_seqlen)
-      .value("FP8", NVTE_FP8);
-
-  py::enum_<NVTE_QKV_Layout>(m, "QKVLayout")
-      .value("NOT_INTERLEAVED", NVTE_NOT_INTERLEAVED)
-      .value("QKV_INTERLEAVED", NVTE_QKV_INTERLEAVED)
-      .value("KV_INTERLEAVED", NVTE_KV_INTERLEAVED);
-
-  py::enum_<NVTE_Bias_Type>(m, "BiasType")
-      .value("NO_BIAS", NVTE_NO_BIAS)
-      .value("PRE_SCALE_BIAS", NVTE_PRE_SCALE_BIAS)
-      .value("POST_SCALE_BIAS", NVTE_POST_SCALE_BIAS);
-
-  py::enum_<NVTE_Mask_Type>(m, "MaskType")
-      .value("NO_MASK", NVTE_NO_MASK)
-      .value("PADDING_MASK", NVTE_PADDING_MASK)
-      .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
-
   py::class_<NVTEShape>(m, "Shape")
       .def(py::init<>())
       .def_readwrite("data", &NVTEShape::data)
