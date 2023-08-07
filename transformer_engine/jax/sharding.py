@@ -1033,13 +1033,36 @@ def get_fused_attn_sharding_meta(stype: ShardingType,
                                                               tp_axis_name)
 
 
-def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
-                              input_dp_dim: int = 0,
-                              weight_fsdp_dim_map: Dict[int, int] = None) -> ShardingMeta:
+def extend_fsdp_sharding_meta(
+        sharding_meta: ShardingMeta,
+        input_dp_dim: int = 0,
+        weight_fsdp_dim_map: Dict[int, int] = None) -> Tuple[ShardingMeta, str]:
     """
-    extend_fsdp_sharding_meta
+    Extending the given ShardingMeta to be compatible with FSDP (ZeRO3) sharding pattern.
+
+    .. note::
+        The extending helper assumes the first shape in sharding_meta.input_shapes
+        corresponding to the input tensor.
+
+    Parameters
+    ----------
+    sharding_meta : ShardingMeta
+        the sharding meta object to extend with FSDP.
+    input_dp_dim : int
+        The batch dimension of input tensors.
+    weight_fsdp_dim_map: Dict[int, int]
+        The dict, which key is idx of sharding_meta.input_shapes and value is the dimension
+        to extend FSDP. default is None, means no other sharding_meta.input_shapes to extend.
+
+    Returns
+    -------
+    updated_sharding_meta : ShardingMeta
+        a sharding_meta with the FSDP extenstion.
+    fsdp_axis_name: str
+        The name of FSDP named axis for further xmap projection.
     """
     weight_fsdp_dim_map = {} if weight_fsdp_dim_map is None else weight_fsdp_dim_map
+    assert 0 not in weight_fsdp_dim_map, "0-idx is remained for the input."
 
     mst = infer_major_sharding_type()
     if mst is MajorShardingType.SINGLE:
@@ -1075,7 +1098,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
     new_in_axes = []
     for i, shape in enumerate(sharding_meta.input_shapes):
         idx_to_extend = -1
-        if i == 0:    # Assume 0-idx in the tensor with inputs
+        if i == 0:    # Assume first shape corresponds to input
             # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
             idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
             new_shape = extend_exist_sharding(idx_to_extend, shape)
@@ -1143,7 +1166,7 @@ def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
     # when all mesh axes are partitioned manually (no partial automatic
     # sharding). Make sure that you mention all mesh axes in axis_resources!"
     fake_idx_counter = 0
-    for _, mesh_axis_names in enumerate(mesh.axis_names):
+    for mesh_axis_names in mesh.axis_names:
         if mesh_axis_names not in axis_resources.values():
             fake_idx_counter += 1
             fake_axis_name = f"{mesh_axis_names}_fake_{fake_idx_counter}"
