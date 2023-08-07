@@ -536,9 +536,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         },
     )
 
-def setup_pytorch_extension() -> setuptools.Extension:
-    """Setup CUDA extension for PyTorch support"""
-
+def setup_sequential_extension() -> setuptools.Extension:
     # Source files
     src_dir = root_path / "transformer_engine" / "pytorch" / "sequential" / "cpp_extensions"
     sources = [
