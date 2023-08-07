@@ -14,6 +14,9 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvte_gelu", &nvte_gelu)
     m.def("nvte_dgelu", &nvte_dgelu)
