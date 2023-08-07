@@ -111,8 +111,8 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
   using tl = type_list<Args...>;
   if constexpr (tl::template contains<cudaStream_t>) {
     constexpr size_t stream_arg_idx = tl::template find<cudaStream_t>;
-    using prefix = tl::template pop_back<tl::size - stream_arg_idx>;
-    using suffix = tl::template pop_front<stream_arg_idx + 1>;
+    using prefix = typename tl::template pop_back<tl::size - stream_arg_idx>;
+    using suffix = typename tl::template pop_front<stream_arg_idx + 1>;
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
@@ -141,7 +141,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nvte_fused_attn_bwd_kvpacked", wrap(nvte_fused_attn_bwd_kvpacked));
   m.def("nvte_cublas_gemm", wrap(nvte_cublas_gemm));
   m.def("nvte_layernorm_fwd", wrap(nvte_layernorm_fwd));
-  m.def("nvte_layernorm1p_fwd", wrap());
+  m.def("nvte_layernorm1p_fwd", wrap(nvte_layernorm1p_fwd));
   m.def("nvte_layernorm_bwd", wrap(nvte_layernorm_bwd));
   m.def("nvte_layernorm1p_bwd", wrap(nvte_layernorm1p_bwd));
   m.def("nvte_rmsnorm_fwd", wrap(nvte_rmsnorm_fwd));
