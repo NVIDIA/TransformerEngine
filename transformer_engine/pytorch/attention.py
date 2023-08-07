@@ -115,18 +115,18 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
 
 @torch.jit.script
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
-    """
-    Merge softmax stats of each step in Flash Attention with context parallelism.
-    Split flash attention compute into multiple steps, and overlap current-step
-    compute with next-step communication.
-    """
+    """Merge softmax stats of each step in Flash Attention with context parallelism"""
     softmax_lse.exp_()
     softmax_lse.add_(softmax_lse_per_step.to(torch.double).exp())
     softmax_lse.log_()
 
 
 class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
-    """Flash Attention implementation with context parallelism."""
+    """
+    Merge softmax stats of each step in Flash Attention with context parallelism.
+    Split flash attention compute into multiple steps, and overlap current-step
+    compute with next-step communication.
+    """
 
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
