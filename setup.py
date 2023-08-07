@@ -470,41 +470,14 @@ def setup_common_pybind_extension() -> setuptools.Extension:
     # Source files
     src_dir = root_path / "transformer_engine" / "common"
     sources = [
-        src_dir / "transformer_engine.cpp",
         src_dir / "pybind.cpp",
-        src_dir / "transpose" / "cast_transpose.cu",
-        src_dir / "transpose" / "transpose.cu",
-        src_dir / "transpose" / "cast_transpose_fusion.cu",
-        src_dir / "transpose" / "transpose_fusion.cu",
-        src_dir / "transpose" / "multi_cast_transpose.cu",
-        src_dir / "activation" / "gelu.cu",
-        src_dir / "fused_attn" / "fused_attn_f16_max512_seqlen.cu",
-        src_dir / "fused_attn" / "fused_attn_f16_arbitrary_seqlen.cu",
-        src_dir / "activation" / "relu.cu",
-        src_dir / "activation" / "swiglu.cu",
-        src_dir / "fused_attn" / "fused_attn_fp8.cu",
-        src_dir / "fused_attn" / "fused_attn.cpp",
-        src_dir / "fused_attn" / "utils.cu",
-        src_dir / "gemm" / "cublaslt_gemm.cu",
-        src_dir / "layer_norm" / "ln_api.cpp",
-        src_dir / "layer_norm" / "ln_bwd_semi_cuda_kernel.cu",
-        src_dir / "layer_norm" / "ln_fwd_cuda_kernel.cu",
-        src_dir / "rmsnorm" / "rmsnorm_api.cpp",
-        src_dir / "rmsnorm" / "rmsnorm_bwd_semi_cuda_kernel.cu",
-        src_dir / "rmsnorm" / "rmsnorm_fwd_cuda_kernel.cu",
-        src_dir / "util" / "cast.cu",
-        src_dir / "util" / "cuda_driver.cpp",
-        src_dir / "util" / "cuda_runtime.cpp",
-        src_dir / "util" / "rtc.cpp",
-        src_dir / "util" / "system.cpp",
-        src_dir / "fused_softmax" / "scaled_masked_softmax.cu",
-        src_dir / "fused_softmax" / "scaled_upper_triang_masked_softmax.cu",
     ]
 
     # Header files
     include_dirs = [
         src_dir / "include",
         root_path / "3rdparty" / "cudnn-frontend" / "include",
+        root_path / "transformer_engine"
     ]
 
     # Compiler flags
