@@ -172,7 +172,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nvte_fp8_transpose_dbias", wrap(nvte_fp8_transpose_dbias));
   m.def("nvte_cast_transpose_dbias_dgelu",
         wrap(nvte_cast_transpose_dbias_dgelu));
-  m.def("nvte_multi_cast_transpose", wrap(nvte_multi_cast_transpose));
   m.def("nvte_dgeglu_cast_transpose", wrap(nvte_dgeglu_cast_transpose));
 
   py::enum_<NVTEDType>(m, "NVTEDType")
