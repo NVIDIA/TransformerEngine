@@ -1,9 +1,28 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
+ *reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <ATen/ATen.h>
+#include <ATen/Dispatch.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <ATen/cudnn/Handle.h>
+#include <ATen/native/DispatchStub.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/macros/Macros.h>
+#include <cublasLt.h>
+#include <cuda.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <exception>
+#include <pybind11/pybind11.h>
+#include <stdexcept>
+#include <torch/extension.h>
+#include <torch/torch.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
@@ -13,11 +32,78 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
-
-#include <pybind11/pybind11.h>
+#include <type_traits>
 namespace py = pybind11;
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+struct Tensor {
+  NVTETensor impl;
+
+  static void *getDataPtr(at::Tensor t) {
+    if (t.numel() > 0) {
+      return t.data_ptr();
+    } else {
+      return nullptr;
+    }
+  }
+
+  Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
+         at::Tensor scale_inv) {
+    NVTEShape shape{data.sizes().data(), data.sizes().size()};
+    impl = nvte_create_tensor(getDataPtr(data), shape, dtype, getDataPtr(amax),
+                              getDataPtr(scale), getDataPtr(scale_inv));
+  }
+  ~Tensor() { nvte_destroy_tensor(impl); }
+};
+
+struct TensorPack : NVTETensorPack {
+  TensorPack(const std::vector<Tensor> &tensors_) : tensors{}, size{} {
+    size = tensors_.size();
+    if (size > MAX_SIZE) {
+      throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
+    }
+    for (size_t i = 0; i < size; ++i) {
+      tensors[i] = tensors_[i].impl;
+    }
+    nvte_tensor_pack_create(this);
+  }
+  ~TensorPack() { nvte_tensor_pack_destroy(this); }
+};
+
+template <typename T> struct trait {
+  using type = T;
+};
+
+template <typename T> struct wrapped_arg : trait<T> {};
+struct wrapped_arg<NVTETensor> : trait<Tensor> {};
+struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {};
+
+template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
+
+template <typename T> decltype(auto) unwrap_arg(T &&arg) {
+  if constexpr (std::is_same_v < std::decay_t<T>, wrapped_arg_t<NVTETensor>) {
+    return arg.impl;
+  } else if constexpr (std::is_same_v<std::decay_t<T>,
+                                      wrapped_arg_t<NVTETensorPack>>) {
+    return TensorPack(arg);
+  } else {
+    { return arg; }
+  }
+
+  template <typename Ret, typename LastArg, typename... Args>
+  constexpr auto wrap(Ret(func)(Args && ..., LastArg &&)) noexcept {
+    if constexpr (std::is_same_v<std::decay_t<LastArg>, cudaStream_t>) {
+      return [func](wrapped_arg_t<Args>... args) -> Ret {
+        return func(unwrap_arg(args)..., at::cuda::getCurrentCUDAStream());
+      };
+    } else {
+      return [func](wrapped_arg_t<Args>... args,
+                    wrapped_arg_t<LastArg> last_arg) -> Ret {
+        return func(unwrap_arg(args)..., unwrap_arg(last_arg));
+      };
+    }
+  }
+
+  PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvte_gelu", &nvte_gelu);
     m.def("nvte_dgelu", &nvte_dgelu);
     m.def("nvte_geglu", &nvte_geglu);
@@ -28,33 +114,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvte_dswiglu", &nvte_dswiglu);
     m.def("nvte_reglu", &nvte_reglu);
     m.def("nvte_dreglu", &nvte_dreglu);
-
     m.def("nvte_fp8_quantize", &nvte_fp8_quantize);
     m.def("nvte_fp8_dequantize", &nvte_fp8_dequantize);
-
     m.def("nvte_get_fused_attn_backend", &nvte_get_fused_attn_backend);
     m.def("nvte_fused_attn_fwd_qkvpacked", &nvte_fused_attn_fwd_qkvpacked);
     m.def("nvte_fused_attn_bwd_qkvpacked", &nvte_fused_attn_bwd_qkvpacked);
     m.def("nvte_fused_attn_fwd_kvpacked", &nvte_fused_attn_fwd_kvpacked);
     m.def("nvte_fused_attn_bwd_kvpacked", &nvte_fused_attn_bwd_kvpacked);
-
     m.def("nvte_cublas_gemm", &nvte_cublas_gemm);
-
     m.def("nvte_layernorm_fwd", &nvte_layernorm_fwd);
     m.def("nvte_layernorm1p_fwd", &nvte_layernorm1p_fwd);
     m.def("nvte_layernorm_bwd", &nvte_layernorm_bwd);
     m.def("nvte_layernorm1p_bwd", &nvte_layernorm1p_bwd);
-
     m.def("nvte_rmsnorm_fwd", &nvte_rmsnorm_fwd);
     m.def("nvte_rmsnorm_bwd", &nvte_rmsnorm_bwd);
-
     m.def("nvte_scaled_softmax_forward", &nvte_scaled_softmax_forward);
     m.def("nvte_scaled_softmax_backward", &nvte_scaled_softmax_backward);
-    m.def("nvte_scaled_masked_softmax_forward", &nvte_scaled_masked_softmax_forward);
-    m.def("nvte_scaled_masked_softmax_backward", &nvte_scaled_masked_softmax_backward);
-    m.def("nvte_scaled_upper_triang_masked_softmax_forward", &nvte_scaled_upper_triang_masked_softmax_forward);
-    m.def("nvte_scaled_upper_triang_masked_softmax_backward", &nvte_scaled_upper_triang_masked_softmax_backward);
-
+    m.def("nvte_scaled_masked_softmax_forward",
+          &nvte_scaled_masked_softmax_forward);
+    m.def("nvte_scaled_masked_softmax_backward",
+          &nvte_scaled_masked_softmax_backward);
+    m.def("nvte_scaled_upper_triang_masked_softmax_forward",
+          &nvte_scaled_upper_triang_masked_softmax_forward);
+    m.def("nvte_scaled_upper_triang_masked_softmax_backward",
+          &nvte_scaled_upper_triang_masked_softmax_backward);
     m.def("nvte_create_tensor", &nvte_create_tensor);
     m.def("nvte_destroy_tensor", &nvte_destroy_tensor);
     m.def("nvte_tensor_type", &nvte_tensor_type);
@@ -108,10 +191,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<NVTEShape>(m, "NVTEShape")
         .def(py::init<>())
         .def_readwrite("data", &NVTEShape::data)
-        .def_readwrite("ndim", &NVTEShape::ndim)
+        .def_readwrite("ndim", &NVTEShape::ndim);
 
-    py::class_<NVTETensorPack>(m, "NVTETensorPack")
-        .def(py::init<>())
-        .def_readwrite("tensors", &NVTETensorPack::tensors)
-        .def_readwrite("size", &NVTETensorPack::size)
-}
+    py::class_<Tensor>(m, "NVTETensor")
+        .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
+                      at::Tensor>())
+  }
