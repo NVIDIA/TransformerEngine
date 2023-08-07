@@ -66,6 +66,7 @@ struct TensorPack : NVTETensorPack {
     }
     nvte_tensor_pack_create(this);
   }
+  operator NVTETensorPack *() { return this; }
   ~TensorPack() { nvte_tensor_pack_destroy(this); }
 };
 
