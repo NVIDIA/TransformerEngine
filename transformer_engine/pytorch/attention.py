@@ -61,6 +61,7 @@ __all__ = ["DotProductAttention"]
 def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
                                recv_tensor, recv_src,
                                cp_group, batch_p2p_comm):
+    """All-to-all communications of KV and dKV in Flash Attention with context parallelism"""
     send_recv_ops = []
 
     if batch_p2p_comm:
@@ -105,6 +106,7 @@ def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
 
 @torch.jit.script
 def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step):
+    """Merge partial outputs of each step in Flash Attention with context parallelism"""
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).transpose(1, 2)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step*softmax_lse_corrected_exp
@@ -113,12 +115,18 @@ def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_pe
 
 @torch.jit.script
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
+    """
+    Merge softmax stats of each step in Flash Attention with context parallelism.
+    Split flash attention compute into multiple steps, and overlap current-step
+    compute with next-step communication.
+    """
     softmax_lse.exp_()
     softmax_lse.add_(softmax_lse_per_step.to(torch.double).exp())
     softmax_lse.log_()
 
 
 class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
+    """Flash Attention implementation with context parallelism."""
 
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
@@ -268,7 +276,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, dout, *args):
+    def backward(ctx, dout):
         q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
 
         cp_size = get_distributed_world_size(ctx.cp_group)
@@ -432,6 +440,7 @@ def flash_attn_forward_func_with_cp(q, k, v, cu_seqlens_q, cu_seqlens_k,
                                     cp_group, cp_global_ranks,cp_stream,
                                     softmax_scale=None, causal=False,
                                     deterministic=False):
+    """Flash Attention implementation with context parallelism"""
     out = FlashAttnUnpaddedFuncWithCP.apply(
         q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
         cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic
