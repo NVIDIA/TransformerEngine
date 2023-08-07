@@ -4,7 +4,7 @@
 
 import pytest
 import jax.numpy as jnp
-from jax.abstract_arrays import ShapedArray
+from jax.core import ShapedArray
 
 from transformer_engine_jax import DType
 from transformer_engine.jax.cpp_extensions import te_dtype_to_jax_dtype

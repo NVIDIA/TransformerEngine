@@ -547,7 +547,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
         if (!is_training) {
-          dropout_probability == 0.0f;
+          dropout_probability = 0.0f;
         }
 
         FADescriptor descriptor{b,           h,
@@ -1144,7 +1144,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         void *devPtrSoftmaxSum = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devPtrdQAccumulator = static_cast<int8_t *>(devPtrSoftmaxSum)
                                     + softmaxSum_workspace_size;
-        NVTE_CHECK_CUDA(cudaMemset(devPtrdQAccumulator, 0, dqAccum_workspace_size));
+        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQAccumulator, 0, dqAccum_workspace_size, stream));
 
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
@@ -1224,6 +1224,8 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         devPtrS = output_S->data.dptr;
         Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
         output_rng_state->data.dptr = rng_state->data.dptr;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
 
     void* devPtrDropoutSeed = rng_state->data.dptr;
@@ -1250,6 +1252,8 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 
@@ -1312,6 +1316,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 }  // namespace transformer_engine
