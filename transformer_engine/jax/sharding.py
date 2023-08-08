@@ -1096,7 +1096,7 @@ def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
     for i, shape in enumerate(sharding_meta.input_shapes):
         idx_to_extend = -1
         if i == 0:    # Assume first shape corresponds to input
-            input_dp_dim = weight_fsdp_dim_map[idx_to_extend]
+            input_dp_dim = weight_fsdp_dim_map[i]
             # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
             idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
             new_shape = extend_exist_sharding(idx_to_extend, shape)
