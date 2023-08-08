@@ -82,7 +82,7 @@ def self_fused_attn(qkv: jnp.ndarray,
             tp_dims=([3, 1, None, 0], [2]),
             dp_axis_name=dp_axis_name,
             tp_axis_name=tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, 0, {2: 0})
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
 
         inputs_ = tuple(
             jnp.reshape(x, new_shape) if x is not None else None
@@ -203,7 +203,7 @@ def cross_fused_attn(q: jnp.ndarray,
             tp_dims=([2, 3, None, None], [2]),
             dp_axis_name=dp_axis_name,
             tp_axis_name=tp_axis_name)
-        sharding_meta = extend_fsdp_sharding_meta(sharding_meta, 0, {2: 0})
+        sharding_meta = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
 
         inputs_ = tuple(
             jnp.reshape(x, new_shape) if x is not None else None

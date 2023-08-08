@@ -65,7 +65,7 @@ def fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
         sharding_meta = get_dot_sharding_meta(sharding_type, inputs.shape, kernel.shape,
                                               dp_dim_index, input_tp_index, kernel_tp_index,
                                               contracting_dims, dp_axis_name, tp_axis_name)
-        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
+        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         kernel_ = jnp.reshape(kernel, sharding_meta.input_shapes[1])    # 1 for kernel
 

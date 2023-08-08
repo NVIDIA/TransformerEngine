@@ -69,7 +69,7 @@ def layernorm(inputs: jnp.ndarray,
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, gamma.shape,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
 
-        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
+        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         gamma_ = jnp.reshape(gamma, sharding_meta.input_shapes[1])    # 1 for gamma
         beta_ = beta
@@ -214,7 +214,7 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
 
         ln_sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, gamma.shape,
                                                          dp_dim_index, dp_axis_name, tp_axis_name)
-        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, dp_dim_index)
+        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, {0: dp_dim_index})
         inputs_ = jnp.reshape(inputs, ln_sharding_meta.input_shapes[0])    # 0 for input
         gamma_ = jnp.reshape(gamma, ln_sharding_meta.input_shapes[1])    # 1 for gamma
         beta_ = beta
@@ -235,7 +235,7 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                                   dp_dim_index, input_tp_index, kernel_tp_index,
                                                   contracting_dims, dp_axis_name, tp_axis_name)
         dot_sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(dot_sharding_meta,
-                                                                      dp_dim_index)
+                                                                      {0: dp_dim_index})
         kernel_ = jnp.reshape(kernel, dot_sharding_meta.input_shapes[1])    # 1 for kernel
 
         num_of_fp8_meta_kind = 4    # fp8_max, amax, scale, scale_inv

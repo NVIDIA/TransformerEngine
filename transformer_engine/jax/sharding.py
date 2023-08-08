@@ -1033,23 +1033,20 @@ def get_fused_attn_sharding_meta(stype: ShardingType,
                                                               tp_axis_name)
 
 
-def extend_fsdp_sharding_meta(
-        sharding_meta: ShardingMeta,
-        input_dp_dim: int = 0,
-        weight_fsdp_dim_map: Dict[int, int] = None) -> Tuple[ShardingMeta, str]:
+def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
+                              weight_fsdp_dim_map: Dict[int, int]) -> Tuple[ShardingMeta, str]:
     """
     Extending the given ShardingMeta to be compatible with FSDP (ZeRO3) sharding pattern.
 
     .. note::
         The extending helper assumes the first shape in sharding_meta.input_shapes
-        corresponding to the input tensor.
+        corresponding to the input tensor. Please be sure that 0-idx is in
+        `weight_fsdp_dim_map`.
 
     Parameters
     ----------
     sharding_meta : ShardingMeta
         the sharding meta object to extend with FSDP.
-    input_dp_dim : int
-        The batch dimension of input tensors.
     weight_fsdp_dim_map: Dict[int, int]
         The dict, which key is idx of sharding_meta.input_shapes and value is the dimension
         to extend FSDP. default is None, means no other sharding_meta.input_shapes to extend.
@@ -1061,8 +1058,8 @@ def extend_fsdp_sharding_meta(
     fsdp_axis_name: str
         The name of FSDP named axis for further xmap projection.
     """
-    weight_fsdp_dim_map = {} if weight_fsdp_dim_map is None else weight_fsdp_dim_map
-    assert 0 not in weight_fsdp_dim_map, "0-idx is remained for the input."
+    assert 0 in weight_fsdp_dim_map, \
+        "0-idx is required to be in 'weight_fsdp_dim_map' for the input."
 
     mst = infer_major_sharding_type()
     if mst is MajorShardingType.SINGLE:
@@ -1099,6 +1096,7 @@ def extend_fsdp_sharding_meta(
     for i, shape in enumerate(sharding_meta.input_shapes):
         idx_to_extend = -1
         if i == 0:    # Assume first shape corresponds to input
+            input_dp_dim = weight_fsdp_dim_map[idx_to_extend]
             # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
             idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
             new_shape = extend_exist_sharding(idx_to_extend, shape)

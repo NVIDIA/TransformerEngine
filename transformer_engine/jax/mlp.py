@@ -54,7 +54,7 @@ def geglu(
 
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, None,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, dp_dim_index)
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
 
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
 
@@ -144,7 +144,7 @@ def fp8_ln_mlp(
         ln_sharding_meta = get_elementwise_sharding_meta(first_part_st, inputs.shape,
                                                          ln_scale.shape, dp_dim_index, dp_axis_name,
                                                          tp_axis_name)
-        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, dp_dim_index)
+        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, {0: dp_dim_index})
 
         input_tp_index = len(inputs.shape) - 1
         first_dot_sharding_meta = get_dot_sharding_meta(first_part_st, inputs.shape, kernel_1.shape,
@@ -152,7 +152,7 @@ def fp8_ln_mlp(
                                                         contracting_dims, dp_axis_name,
                                                         tp_axis_name)
         first_dot_sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(
-            first_dot_sharding_meta, dp_dim_index, {})
+            first_dot_sharding_meta, {0: dp_dim_index})
         second_input_shape = (*first_dot_sharding_meta.output_shapes[0][:-2],
                               first_dot_sharding_meta.output_shapes[0][-1])
         second_dot_sharding_meta = get_dot_sharding_meta(second_part_st, second_input_shape,
@@ -161,7 +161,7 @@ def fp8_ln_mlp(
                                                          contracting_dims, dp_axis_name,
                                                          tp_axis_name)
         second_dot_sharding_meta, _ = extend_fsdp_sharding_meta(second_dot_sharding_meta,
-                                                                dp_dim_index)
+                                                                {0: dp_dim_index})
 
         num_of_fp8_meta_kind = 4    # fp8_max, amax, scale, scale_inv
         fp8_sharding_meta = get_fp8_meta_sharding_meta(first_part_st, num_of_fp8_meta_kind,
