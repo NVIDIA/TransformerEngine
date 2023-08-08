@@ -382,14 +382,13 @@ def onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma):
 
     inputs_float = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
 
-    norm = g.op("ReduceL2", inputs_float, axes_i=[axis])
+    sum_square = g.op("ReduceSumSquare", inputs_float, axes_i=[axis])
     shape = g.op("Shape", inputs_float, start_i=-1)
     shape_f = g.op("Cast", shape, to_i=_C_onnx.TensorProtoDataType.FLOAT)
-    n_reciprocal = g.op("Reciprocal", shape_f)
-    sqrt_n_reciprocal = g.op("Sqrt", n_reciprocal)
-    rms = g.op("Mul", norm, sqrt_n_reciprocal)
+    mean_squared = g.op("Div", sum_square, shape_f)
     eps_tensor = g.op("ConstantOfShape", shape, value_t=torch.tensor([eps], dtype=torch.float32))
-    rms_eps = g.op("Add", rms, eps_tensor)
+    rms_squared = g.op("Add", mean_squared, eps_tensor)
+    rms_eps = g.op("Sqrt", rms_squared)
     normalized_input = g.op("Div", inputs_float, rms_eps)
     result = g.op("Mul", weight, normalized_input)
     result = g.op("Cast", result, to_i=get_TensorProtoDataType(inputs))
