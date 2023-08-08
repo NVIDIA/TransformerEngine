@@ -173,11 +173,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_transpose_dbias_dgelu", wrap(nvte_cast_transpose_dbias_dgelu));
   m.def("dgeglu_cast_transpose", wrap(nvte_dgeglu_cast_transpose));
 
-  py::class_<NVTEShape>(m, "Shape")
-      .def(py::init<>())
-      .def_readwrite("data", &NVTEShape::data)
-      .def_readwrite("ndim", &NVTEShape::ndim);
-
   py::class_<Tensor>(m, "Tensor")
       .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
                     at::Tensor>());
