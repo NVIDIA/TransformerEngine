@@ -413,14 +413,22 @@ class FlashAttention(torch.nn.Module):
             dtype=torch.int32,
             device=query_layer.device)
 
+        max_seqlen_k = key_layer.shape[0] // batch_size
+        cu_seqlens_k = torch.arange(
+            0,
+            (batch_size + 1) * max_seqlen_k,
+            step=max_seqlen_k,
+            dtype=torch.int32,
+            device=key_layer.device)
+        is_causal = self.attn_causal_mask and query_layer.shape[0] == key_layer.shape[0]
         with self.attention_dropout_ctx():
             fa_optional_forward_kwargs = {}
             if not _flash_attn_2_available:
                 fa_optional_forward_kwargs["deterministic"] = self.deterministic
             output = flash_attn_forward_func(
-                query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
+                query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens_k, max_seqlen, max_seqlen_k,
                 self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
+                softmax_scale=1.0/self.norm_factor, causal=is_causal,
                 **fa_optional_forward_kwargs
             )
 
