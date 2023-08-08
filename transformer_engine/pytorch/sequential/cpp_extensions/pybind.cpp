@@ -42,6 +42,8 @@ namespace py = pybind11;
 struct Tensor {
   static_assert(std::is_same_v<NVTETensor, void *>);
 
+  NVTEDType dtype;
+  std::vector<int> shape;
   std::shared_ptr<void> pimpl;
   at::Tensor data;
   at::Tensor amax;
@@ -57,7 +59,10 @@ struct Tensor {
   }
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
-         at::Tensor scale_inv) : pimpl{
+         at::Tensor scale_inv) :
+         dtype{dtype},
+         shape{data.sizes().begin(), data.sizes().end()},
+         pimpl{
           nvte_create_tensor(
             getDataPtr(data),
             NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()}, dtype, getDataPtr(amax),
@@ -172,6 +177,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<Tensor>(m, "Tensor", py::module_local())
       .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
                     at::Tensor>())
+      .def_readonly("dtype", &Tensor::dtype)
+      .def_readonly("shape", &Tensor::shape)
       .def_readonly("data", &Tensor::data)
       .def_readonly("amax", &Tensor::amax)
       .def_readonly("scale", &Tensor::scale)
