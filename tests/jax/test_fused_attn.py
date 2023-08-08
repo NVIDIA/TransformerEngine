@@ -1,9 +1,11 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+"""Tests for fused attention"""
 
-from typing import Optional
-import math
+import os
+from enum import Enum
+from math import sqrt
 
 import jax
 import jax.numpy as jnp
@@ -14,8 +16,6 @@ from flax.linen import combine_masks
 from flax.linen import dot_product_attention
 from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
-from jax import lax
-from jax import nn as jax_nn
 from jax import value_and_grad, jit
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
@@ -25,19 +25,45 @@ from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 # Type annotations
 Array = jnp.ndarray
 
-SELF_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
+
+class Backend(Enum):
+    """
+    Fused attn backend.
+    Unit tests only, transformer will auto dispatch to the best backend
+    """
+    Max512 = "0"
+    Arbitrary = "1"
+
+
+@pytest.fixture(name="backend", params=[Backend.Max512, Backend.Arbitrary])
+def fixture_backend(request):
+    """
+    Fixture of setting up/tearing down backend
+    """
+    backend = request.param
+    os.environ["NVTE_FUSED_ATTN_BACKEND"] = backend.value
+    yield backend
+    os.environ["NVTE_FUSED_ATTN_BACKEND"] = ""
+
+
+SELF_CASES = [(32, 512, 16, 64), (32, 128, 16, 64), (4, 2048, 12, 64)]
 CROSS_CASES = [(32, 128, 512, 16, 64)]
 DTYPES = [jnp.bfloat16, jnp.float16]
-PAD_RATIO = [0.3]
 
 
 def make_decoder_mask(tokens: Array) -> Array:
+    """
+    Create padded causal mask
+    """
     causal_mask = make_causal_mask(tokens)
     padding_mask = make_attention_mask(tokens > 0, tokens > 0)
     return combine_masks(causal_mask, padding_mask)
 
 
-def jax_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
+def jax_self_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
+    """
+    Self attention with JAX native implementation
+    """
     attn_mask_type = kwargs['attn_mask_type']
     if attn_mask_type == AttnMaskType.CAUSAL_MASK:
         mask = make_decoder_mask(q_token)
@@ -61,7 +87,10 @@ def jax_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
     return output
 
 
-def jax_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
+def jax_cross_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
+    """
+    Cross attention with JAX native implementation
+    """
     assert q.dtype == kv.dtype
 
     attn_mask_type = kwargs['attn_mask_type']
@@ -87,6 +116,9 @@ def jax_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
 
 
 def customcall_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
+    """
+    Self fused attention
+    """
     if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
         mask = make_decoder_mask(q_token)
     else:
@@ -99,6 +131,9 @@ def customcall_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwar
 
 
 def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
+    """
+    Cross fused attention
+    """
     assert q.dtype == kv.dtype
 
     if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
@@ -113,10 +148,33 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
 
 @pytest.mark.skipif(not is_fused_attn_kernel_available(),
                     reason="Fused attention kernel is not supported.")
-class TestSelfFusedAttnMax512():
+@pytest.mark.parametrize('b, s, h, d', SELF_CASES)
+@pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
+@pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+@pytest.mark.parametrize('dropout_probability', [0., 0.1])
+@pytest.mark.parametrize('dtype', DTYPES)
+@pytest.mark.parametrize('is_training', [True, False])
+@pytest.mark.parametrize('pad_ratio', [0, 0.3])
+class TestSelfFusedAttn():
+    """Tests for transformer_engine.jax.fused_attn.self_fused_attn"""
 
-    def set_input(self, b, s, h, d, *, attn_bias_type, attn_mask_type, dropout_probability, dtype,
-                  is_training, pad_ratio):
+    @staticmethod
+    def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, pad_ratio):
+        # Arbitrary seqlen backend has a limited spec for now
+        # No bias, only causal mask, and no variable seqlen
+        if (s > 512 or backend == Backend.Arbitrary) and (attn_bias_type != AttnBiasType.NO_BIAS or
+                                                          attn_mask_type != AttnMaskType.CAUSAL_MASK
+                                                          or pad_ratio != 0):
+            pytest.skip("Unsupported inputs combination.")
+
+    def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
+                    dropout_probability, dtype, is_training, pad_ratio):
+        """Setup the test inputs"""
+        self.__class__._check_inputs(s,
+                                     attn_bias_type=attn_bias_type,
+                                     attn_mask_type=attn_mask_type,
+                                     backend=backend,
+                                     pad_ratio=pad_ratio)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -137,82 +195,29 @@ class TestSelfFusedAttnMax512():
                                        axis=-1)
         self.kv_token = self.q_token
 
-        self.scaling_factor = 1. / math.sqrt(d)
+        self.scaling_factor = 1. / sqrt(d)
         self.dropout_probability = dropout_probability
         self.dropout_rng = jax.random.PRNGKey(0) if self.dropout_probability > 0 else None
         self.attn_bias_type = attn_bias_type
+        self.attn_mask_type = attn_mask_type
         self.is_training = is_training
 
-    @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
-    @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
-    @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
-    @pytest.mark.parametrize('dropout_probability', [0., 0.1])
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('is_training', [True, False])
-    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
-    def test_sanity(self, b, s, h, d, attn_bias_type, attn_mask_type, dropout_probability, dtype,
-                    is_training, pad_ratio):
-
-        def grad_func(func, *args, **kwargs):
-            # Keep only valid result for the gradient
-            # fused_attn_max_512 output has shape (b, s, h, d)
-            valid_ret, _ = jnp.split(func(*args, **kwargs), (self.valid_len,), axis=1)
-            return jnp.mean(valid_ret, dtype=jnp.float32).astype(dtype)
-
-        self.set_input(b,
-                       s,
-                       h,
-                       d,
-                       attn_bias_type=attn_bias_type,
-                       attn_mask_type=attn_mask_type,
-                       dropout_probability=dropout_probability,
-                       dtype=dtype,
-                       is_training=is_training,
-                       pad_ratio=pad_ratio)
-
-        kwargs = {
-            'attn_bias_type': self.attn_bias_type,
-            'attn_mask_type': attn_mask_type,
-            'scaling_factor': self.scaling_factor,
-            'dropout_probability': self.dropout_probability,
-            'is_training': self.is_training
-        }
-
-        jitted_primitive = jit(
-            value_and_grad(
-                lambda qkv, bias, q_token, kv_token, dropout_rng: grad_func(
-                    customcall_self_fused_attn, qkv, bias, q_token, kv_token, dropout_rng, **kwargs
-                ), (0, 1)))
-
-        primitive_out, (primitive_dqkv,
-                        primitive_dbias) = jitted_primitive(self.qkv, self.bias, self.q_token,
-                                                            self.kv_token, self.dropout_rng)
-
-    @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
-    @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
-    @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
-    @pytest.mark.parametrize('dropout_probability', [0., 0.1])
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('is_training', [True, False])
-    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
-    def test_forward(self, b, s, h, d, attn_bias_type, attn_mask_type, dropout_probability, dtype,
-                     is_training, pad_ratio):
-        # dropout can't get the bitmatch result
-        if is_training and dropout_probability > 0.:
-            return
-
-        self.set_input(b,
-                       s,
-                       h,
-                       d,
-                       attn_bias_type=attn_bias_type,
-                       attn_mask_type=attn_mask_type,
-                       dropout_probability=dropout_probability,
-                       dtype=dtype,
-                       is_training=is_training,
-                       pad_ratio=pad_ratio)
+    def test_forward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend, dropout_probability,
+                     dtype, is_training, pad_ratio):
+        """
+        Test forward without using JIT
+        """
+        self._set_inputs(b,
+                         s,
+                         h,
+                         d,
+                         attn_bias_type=attn_bias_type,
+                         attn_mask_type=attn_mask_type,
+                         backend=backend,
+                         dropout_probability=dropout_probability,
+                         dtype=dtype,
+                         is_training=is_training,
+                         pad_ratio=pad_ratio)
 
         primitive_out = customcall_self_fused_attn(self.qkv,
                                                    self.bias,
@@ -225,18 +230,22 @@ class TestSelfFusedAttnMax512():
                                                    dropout_probability=self.dropout_probability,
                                                    is_training=self.is_training)
 
-        reference_out = jax_self_fused_attn(self.qkv,
-                                            self.bias,
-                                            self.q_token,
-                                            self.kv_token,
-                                            self.dropout_rng,
-                                            attn_mask_type=attn_mask_type,
-                                            scaling_factor=self.scaling_factor,
-                                            dropout_probability=self.dropout_probability,
-                                            is_training=self.is_training)
+        reference_out = jax_self_attn(self.qkv,
+                                      self.bias,
+                                      self.q_token,
+                                      self.kv_token,
+                                      self.dropout_rng,
+                                      attn_mask_type=attn_mask_type,
+                                      scaling_factor=self.scaling_factor,
+                                      dropout_probability=self.dropout_probability,
+                                      is_training=self.is_training)
 
         ref_valid, _ = jnp.split(reference_out, (self.valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.valid_len,), axis=1)
+
+        # Dropout can't get the bitmatch result, skip the elementwise comparison
+        if is_training and dropout_probability > 0.:
+            return
 
         np.testing.assert_allclose(jnp.asarray(pri_valid, np.float32),
                                    jnp.asarray(ref_valid, np.float32),
@@ -246,38 +255,36 @@ class TestSelfFusedAttnMax512():
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
 
-    @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
-    @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
-    @pytest.mark.parametrize('attn_mask_type',
-                             [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
-    @pytest.mark.parametrize('dropout_probability', [0.])    # dropout can't get the bitmatch result
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('is_training', [True])    # backward is only used when is_training
-    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
-    def test_forward_backward(self, b, s, h, d, attn_bias_type, attn_mask_type, dropout_probability,
-                              dtype, is_training, pad_ratio):
-        self.set_input(b,
-                       s,
-                       h,
-                       d,
-                       attn_bias_type=attn_bias_type,
-                       attn_mask_type=attn_mask_type,
-                       dropout_probability=dropout_probability,
-                       dtype=dtype,
-                       is_training=is_training,
-                       pad_ratio=pad_ratio)
+    def test_forward_backward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend,
+                              dropout_probability, dtype, is_training, pad_ratio):
+        """
+        Test forward, backward, and autodiff by jax.value_and_grad
+        """
+        if not is_training:
+            pytest.skip(f"Backward doesn't support {is_training=}")
 
-        def grad_func(fused_attn_max_512_func, *args, **kwargs):
+        self._set_inputs(b,
+                         s,
+                         h,
+                         d,
+                         attn_bias_type=attn_bias_type,
+                         attn_mask_type=attn_mask_type,
+                         backend=backend,
+                         dropout_probability=dropout_probability,
+                         dtype=dtype,
+                         is_training=is_training,
+                         pad_ratio=pad_ratio)
+
+        def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 1000 if dtype == jnp.bfloat16 else 10000
             if attn_mask_type == AttnMaskType.CAUSAL_MASK:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
-            # fused_attn_max_512 output has shape (b, s, h, d)
-            valid_fused_attn_max_512_ret, _ = jnp.split(fused_attn_max_512_func(*args, **kwargs),
-                                                        (self.valid_len,),
-                                                        axis=1)
-            return (jnp.mean(valid_fused_attn_max_512_ret, dtype=jnp.float32) *
+            # fused_attn output has shape (b, s, h, d)
+            valid_fused_attn_ret, _ = jnp.split(fused_attn_func(*args, **kwargs), (self.valid_len,),
+                                                axis=1)
+            return (jnp.mean(valid_fused_attn_ret, dtype=jnp.float32) *
                     gradient_multiplier).astype(dtype)
 
         kwargs = {
@@ -298,8 +305,7 @@ class TestSelfFusedAttnMax512():
         jitted_reference = jit(
             value_and_grad(
                 lambda qkv, bias, q_token, kv_token, dropout_rng: grad_func(
-                    jax_self_fused_attn, qkv, bias, q_token, kv_token, dropout_rng, **kwargs),
-                (0, 1)))
+                    jax_self_attn, qkv, bias, q_token, kv_token, dropout_rng, **kwargs), (0, 1)))
 
         primitive_out, (primitive_dqkv,
                         primitive_dbias) = jitted_primitive(self.qkv, self.bias, self.q_token,
@@ -308,6 +314,10 @@ class TestSelfFusedAttnMax512():
         reference_out, (reference_dqkv,
                         reference_dbias) = jitted_reference(self.qkv, self.bias, self.q_token,
                                                             self.kv_token, self.dropout_rng)
+
+        # Dropout can't get the bitmatch result, skip the elementwise comparison
+        if dropout_probability > 0.:
+            return
 
         np.testing.assert_allclose(jnp.asarray(primitive_out, np.float32),
                                    jnp.asarray(reference_out, np.float32),
@@ -319,23 +329,14 @@ class TestSelfFusedAttnMax512():
         valid_reference_dqkv, invalid_reference_dqkv = jnp.split(reference_dqkv, (self.valid_len,),
                                                                  axis=1)
 
-        # dQ
-        np.testing.assert_allclose(jnp.asarray(valid_primitive_dqkv[:, :, 0], np.float32),
-                                   jnp.asarray(valid_reference_dqkv[:, :, 0], np.float32),
-                                   rtol=1e-4,
-                                   atol=1e-5)
+        valid_primitive_dq, valid_primitive_dk, valid_primitive_dv = jnp.split(
+            valid_primitive_dqkv.astype(jnp.float32), 3, axis=2)
+        valid_reference_dq, valid_reference_dk, valid_reference_dv = jnp.split(
+            valid_reference_dqkv.astype(jnp.float32), 3, axis=2)
 
-        # dK
-        np.testing.assert_allclose(jnp.asarray(valid_primitive_dqkv[:, :, 1], np.float32),
-                                   jnp.asarray(valid_reference_dqkv[:, :, 1], np.float32),
-                                   rtol=1e-4,
-                                   atol=1e-5)
-
-        # dV
-        np.testing.assert_allclose(jnp.asarray(valid_primitive_dqkv[:, :, 2], np.float32),
-                                   jnp.asarray(valid_reference_dqkv[:, :, 2], np.float32),
-                                   rtol=1e-4,
-                                   atol=1e-5)
+        np.testing.assert_allclose(valid_primitive_dq, valid_reference_dq, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(valid_primitive_dk, valid_reference_dk, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(valid_primitive_dv, valid_reference_dv, rtol=1e-4, atol=1e-5)
 
         assert jnp.allclose(invalid_primitive_dqkv, invalid_reference_dqkv)
 
@@ -362,10 +363,17 @@ class TestSelfFusedAttnMax512():
 
 @pytest.mark.skipif(not is_fused_attn_kernel_available(),
                     reason="Fused attention kernel is not supported.")
-class TestCrossFusedAttnMax512():
+@pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
+@pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK])
+@pytest.mark.parametrize('dropout_probability', [0., 0.1])
+@pytest.mark.parametrize('dtype', DTYPES)
+@pytest.mark.parametrize('is_training', [True, False])
+@pytest.mark.parametrize('pad_ratio', [0.3])
+class TestCrossFusedAttn():
+    """Tests for transformer_engine.jax.fused_attn.cross_fused_attn"""
 
-    def set_input(self, b, s_q, s_kv, h, d, *, attn_mask_type, dropout_probability, dtype,
-                  is_training, pad_ratio):
+    def _set_inputs(self, b, s_q, s_kv, h, d, *, attn_mask_type, dropout_probability, dtype,
+                    is_training, pad_ratio):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -385,34 +393,28 @@ class TestCrossFusedAttnMax512():
         self.kv_token = jnp.concatenate((jnp.ones((b, self.kv_valid_len)), jnp.zeros(
             (b, kv_pad_len))),
                                         axis=-1)
-        self.scaling_factor = 1. / math.sqrt(d)
+        self.scaling_factor = 1. / sqrt(d)
         self.dropout_probability = dropout_probability
         self.dropout_rng = jax.random.PRNGKey(0) if self.dropout_probability > 0 else None
         self.attn_bias_type = AttnBiasType.NO_BIAS
+        self.attn_mask_type = attn_mask_type
         self.is_training = is_training
 
-    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
-    @pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK])
-    @pytest.mark.parametrize('dropout_probability', [0., 0.1])
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('is_training', [True, False])
-    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
     def test_forward(self, b, s_q, s_kv, h, d, attn_mask_type, dropout_probability, dtype,
                      is_training, pad_ratio):
-        # dropout can't get the bitmatch result
-        if is_training and dropout_probability > 0.:
-            return
-
-        self.set_input(b,
-                       s_q,
-                       s_kv,
-                       h,
-                       d,
-                       attn_mask_type=attn_mask_type,
-                       dropout_probability=dropout_probability,
-                       dtype=dtype,
-                       is_training=is_training,
-                       pad_ratio=pad_ratio)
+        """
+        Test forward without using JIT
+        """
+        self._set_inputs(b,
+                         s_q,
+                         s_kv,
+                         h,
+                         d,
+                         attn_mask_type=attn_mask_type,
+                         dropout_probability=dropout_probability,
+                         dtype=dtype,
+                         is_training=is_training,
+                         pad_ratio=pad_ratio)
 
         primitive_out = customcall_cross_fused_attn(self.q,
                                                     self.kv,
@@ -425,15 +427,19 @@ class TestCrossFusedAttnMax512():
                                                     dropout_probability=self.dropout_probability,
                                                     is_training=self.is_training)
 
-        reference_out = jax_cross_fused_attn(self.q,
-                                             self.kv,
-                                             self.q_token,
-                                             self.kv_token,
-                                             self.dropout_rng,
-                                             attn_mask_type=attn_mask_type,
-                                             scaling_factor=self.scaling_factor,
-                                             dropout_probability=self.dropout_probability,
-                                             is_training=self.is_training)
+        reference_out = jax_cross_attn(self.q,
+                                       self.kv,
+                                       self.q_token,
+                                       self.kv_token,
+                                       self.dropout_rng,
+                                       attn_mask_type=attn_mask_type,
+                                       scaling_factor=self.scaling_factor,
+                                       dropout_probability=self.dropout_probability,
+                                       is_training=self.is_training)
+
+        # Dropout can't get the bitmatch result, skip the elementwise comparison
+        if is_training and dropout_probability > 0.:
+            return
 
         ref_valid, _ = jnp.split(reference_out, (self.q_valid_len,), axis=1)
         pri_valid, pri_invalid = jnp.split(primitive_out, (self.q_valid_len,), axis=1)
@@ -446,36 +452,36 @@ class TestCrossFusedAttnMax512():
         np.testing.assert_allclose(jnp.asarray(pri_invalid, jnp.float32),
                                    jnp.zeros_like(pri_invalid, jnp.float32))
 
-    @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_CASES)
-    @pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK])
-    @pytest.mark.parametrize('dropout_probability', [0.])    # dropout can't get the bitmatch result
-    @pytest.mark.parametrize('dtype', DTYPES)
-    @pytest.mark.parametrize('is_training', [True])    # backward is only used when is_training
-    @pytest.mark.parametrize('pad_ratio', PAD_RATIO)
     def test_forward_backward(self, b, s_q, s_kv, h, d, attn_mask_type, dropout_probability, dtype,
                               is_training, pad_ratio):
-        self.set_input(b,
-                       s_q,
-                       s_kv,
-                       h,
-                       d,
-                       attn_mask_type=attn_mask_type,
-                       dropout_probability=dropout_probability,
-                       dtype=dtype,
-                       is_training=is_training,
-                       pad_ratio=pad_ratio)
+        """
+        Test forward, backward, and autodiff by jax.value_and_grad
+        """
+        if not is_training:
+            pytest.skip(f"Backward doesn't support {is_training=}")
 
-        def grad_func(fused_attn_max_512_func, *args, **kwargs):
+        self._set_inputs(b,
+                         s_q,
+                         s_kv,
+                         h,
+                         d,
+                         attn_mask_type=attn_mask_type,
+                         dropout_probability=dropout_probability,
+                         dtype=dtype,
+                         is_training=is_training,
+                         pad_ratio=pad_ratio)
+
+        def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 10000
             if attn_mask_type == AttnMaskType.CAUSAL_MASK:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
-            # fused_attn_max_512 output has shape (b, s_q, h, d)
-            valid_fused_attn_max_512_ret, _ = jnp.split(fused_attn_max_512_func(*args, **kwargs),
-                                                        (self.q_valid_len,),
-                                                        axis=1)
-            return (jnp.mean(valid_fused_attn_max_512_ret, dtype=jnp.float32) *
+            # fused_attn output has shape (b, s_q, h, d)
+            valid_fused_attn_ret, _ = jnp.split(fused_attn_func(*args, **kwargs),
+                                                (self.q_valid_len,),
+                                                axis=1)
+            return (jnp.mean(valid_fused_attn_ret, dtype=jnp.float32) *
                     gradient_multiplier).astype(dtype)
 
         kwargs = {
@@ -496,7 +502,7 @@ class TestCrossFusedAttnMax512():
         jitted_reference = jit(
             value_and_grad(
                 lambda q, kv, q_token, kv_token, dropout_rng: grad_func(
-                    jax_cross_fused_attn, q, kv, q_token, kv_token, dropout_rng, **kwargs), (0, 1)))
+                    jax_cross_attn, q, kv, q_token, kv_token, dropout_rng, **kwargs), (0, 1)))
 
         primitive_out, (primitive_dq,
                         primitive_dkv) = jitted_primitive(self.q, self.kv, self.q_token,
@@ -505,6 +511,10 @@ class TestCrossFusedAttnMax512():
         reference_out, (reference_dq,
                         reference_dkv) = jitted_reference(self.q, self.kv, self.q_token,
                                                           self.kv_token, self.dropout_rng)
+
+        # Dropout can't get the bitmatch result, skip the elementwise comparison
+        if dropout_probability > 0.:
+            return
 
         np.testing.assert_allclose(jnp.asarray(primitive_out, np.float32),
                                    jnp.asarray(reference_out, np.float32),
