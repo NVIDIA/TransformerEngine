@@ -593,14 +593,14 @@ def setup_sequential_extension() -> setuptools.Extension:
     include_dirs = [str(path) for path in include_dirs]
     from torch.utils.cpp_extension import CUDAExtension
     return CUDAExtension(
-        name="nvte",
+        name="transformer_engine_cuda",
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
-        package_data={"nvte": ["py.typed", "*.pyi"]}
+        package_data={"transformer_engine_cuda": ["py.typed", "*.pyi"]}
     )
 
 
