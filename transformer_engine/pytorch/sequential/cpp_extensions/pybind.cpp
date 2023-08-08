@@ -43,6 +43,10 @@ struct Tensor {
   static_assert(std::is_same_v<NVTETensor, void *>);
 
   std::shared_ptr<void> pimpl;
+  at::Tensor data;
+  at::Tensor amax;
+  at::Tensor scale;
+  at::Tensor scale_inv;
 
   static float *getDataPtr(at::Tensor t) {
     if (t.numel() > 0) {
@@ -61,7 +65,11 @@ struct Tensor {
             getDataPtr(scale_inv)
           ),
           [](NVTETensor impl) { nvte_destroy_tensor(impl); }
-        }
+        },
+        data{data},
+        amax{amax},
+        scale{scale},
+        scale_inv{scale_inv}
   {
   }
 };
@@ -163,7 +171,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<Tensor>(m, "Tensor", py::module_local())
       .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
-                    at::Tensor>());
+                    at::Tensor>())
+      .def_readonly("data", &Tensor::data)
+      .def_readonly("amax", &Tensor::amax)
+      .def_readonly("scale", &Tensor::scale)
+      .def_readonly("scale_inv", &Tensor::scale_inv);
 
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
