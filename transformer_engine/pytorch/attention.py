@@ -616,7 +616,7 @@ class FusedAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """fused attention fprop"""
 
-        assert (tex.NVTE_Fused_Attn_Backend
+        assert (fused_attention_backend
                 != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
                 ), 'No fused attention backend supports this input combination!'
         assert (
