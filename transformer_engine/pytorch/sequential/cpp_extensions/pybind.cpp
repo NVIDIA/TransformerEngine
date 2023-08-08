@@ -33,13 +33,17 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 #include <type_traits>
+#include <memory>
 
 #include "type_list.h"
 
 namespace py = pybind11;
 
 struct Tensor {
-  NVTETensor impl;
+  static_assert(std::is_same_v<NVTETensor, void *>);
+  using deleter = void (*)(NVTETensor *);
+
+  std::shared_ptr<void, deleter> pimpl;
 
   static float *getDataPtr(at::Tensor t) {
     if (t.numel() > 0) {
@@ -50,12 +54,17 @@ struct Tensor {
   }
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
-         at::Tensor scale_inv) {
-    NVTEShape shape{(size_t *)(data.sizes().data()), data.sizes().size()};
-    impl = nvte_create_tensor(getDataPtr(data), shape, dtype, getDataPtr(amax),
-                              getDataPtr(scale), getDataPtr(scale_inv));
+         at::Tensor scale_inv) : pimpl{
+          nvte_create_tensor(
+            getDataPtr(data),
+            NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()}, dtype, getDataPtr(amax),
+            getDataPtr(scale),
+            getDataPtr(scale_inv)
+          ),
+          [](NVTETensor *impl) { nvte_destroy_tensor(impl); }
+        }
+  {
   }
-  ~Tensor() { nvte_destroy_tensor(impl); }
 };
 
 struct TensorPack : NVTETensorPack {
@@ -85,7 +94,7 @@ template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
 
 template <typename T> decltype(auto) unwrap_arg(T &&arg) {
   if constexpr (std::is_same_v<std::decay_t<T>, wrapped_arg_t<NVTETensor>>) {
-    return arg.impl;
+    return (NVTETensor)arg.pimpl;
   } else if constexpr (std::is_same_v<std::decay_t<T>,
                                       wrapped_arg_t<NVTETensorPack>>) {
     return TensorPack(arg);
