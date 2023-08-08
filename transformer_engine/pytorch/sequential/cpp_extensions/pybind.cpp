@@ -73,7 +73,7 @@ struct TensorPack : NVTETensorPack {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
     }
     for (size_t i = 0; i < size; ++i) {
-      tensors[i] = *tensors_[i].pimpl;
+      tensors[i] = (NVTETensor)tensors_[i].pimpl.get();
     }
     nvte_tensor_pack_create(this);
   }
