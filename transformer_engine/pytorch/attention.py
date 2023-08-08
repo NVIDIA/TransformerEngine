@@ -815,6 +815,12 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
             and self.device_compute_capability >= 8.0
         )
+        if self.deterministic:
+            self.use_fused_attention = False
+            warnings.warn(
+                "Disabling usage of FusedAttention since the FusedAttention"
+                "backend does not support deterministic exection."
+            )
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
