@@ -93,7 +93,7 @@ template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
 
 template <typename T> decltype(auto) unwrap_arg(T &&arg) {
   if constexpr (std::is_same_v<std::decay_t<T>, wrapped_arg_t<NVTETensor>>) {
-    return (NVTETensor)arg.pimpl;
+    return (NVTETensor)arg.pimpl.get();
   } else if constexpr (std::is_same_v<std::decay_t<T>,
                                       wrapped_arg_t<NVTETensorPack>>) {
     return TensorPack(arg);
