@@ -226,6 +226,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=(1.0 / scale),
             )
+
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
             assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
@@ -234,7 +235,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             )
-            matmul_result = (matmul_result + core_attention_bias) / scale
+            matmul_result = (matmul_result.view(
+                output_size[0], output_size[1], output_size[2], output_size[3])
+                + core_attention_bias).view(-1, output_size[2], output_size[3])
+            matmul_result /= scale
+
         elif core_attention_bias_type == "post_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
             assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
@@ -246,7 +251,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=(1.0 / scale),
             )
-            matmul_result = matmul_result + core_attention_bias
+            matmul_result = (matmul_result.view(
+                output_size[0], output_size[1], output_size[2], output_size[3])
+                + core_attention_bias).view(-1, output_size[2], output_size[3])
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
@@ -609,6 +616,9 @@ class FusedAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """fused attention fprop"""
 
+        assert (tex.NVTE_Fused_Attn_Backend
+                != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+                ), 'No fused attention backend supports this input combination!'
         assert (
             (query_layer.dtype in [torch.float16, torch.bfloat16])
             and (key_layer.dtype in [torch.float16, torch.bfloat16])

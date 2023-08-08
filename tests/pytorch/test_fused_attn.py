@@ -17,7 +17,7 @@ import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
-from test_numerics import get_dummy_cuda_rng_tracker
+from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
@@ -84,8 +84,7 @@ def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
 
 def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type):
 
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed(1234)
+    reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if backend == "FlashAttention":
@@ -166,8 +165,7 @@ def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
 
 def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed(1234)
+    reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if backend == "FlashAttention":
