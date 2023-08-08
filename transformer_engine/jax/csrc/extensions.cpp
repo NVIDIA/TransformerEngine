@@ -46,11 +46,10 @@ pybind11::dict Registrations() {
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
     dict["te_scaled_upper_triang_masked_softmax_backward"] =
         EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-    dict["te_self_fused_attn_max_512_forward"] = EncapsulateFunction(SelfFusedAttnMax512Forward);
-    dict["te_self_fused_attn_max_512_backward"] = EncapsulateFunction(SelfFusedAttnMax512Backward);
-    dict["te_cross_fused_attn_max_512_forward"] = EncapsulateFunction(CrossFusedAttnMax512Forward);
-    dict["te_cross_fused_attn_max_512_backward"] =
-        EncapsulateFunction(CrossFusedAttnMax512Backward);
+    dict["te_self_fused_attn_forward"] = EncapsulateFunction(SelfFusedAttnForward);
+    dict["te_self_fused_attn_backward"] = EncapsulateFunction(SelfFusedAttnBackward);
+    dict["te_cross_fused_attn_forward"] = EncapsulateFunction(CrossFusedAttnForward);
+    dict["te_cross_fused_attn_backward"] = EncapsulateFunction(CrossFusedAttnBackward);
     return dict;
 }
 
@@ -65,6 +64,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
     m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
+    m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
         .value("kByte", DType::kByte)
@@ -85,6 +85,17 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
         .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
         .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+
+    pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
+        .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
+        .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
+        .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED);
+
+    pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
+        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
+        .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
+        .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
+        .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
 }
 
 }  // namespace jax

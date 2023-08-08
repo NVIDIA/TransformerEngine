@@ -12,7 +12,6 @@ import numpy as np
 import optax
 from datasets import load_dataset
 from flax import linen as nn
-from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
 
 import transformer_engine.jax as te
@@ -62,7 +61,7 @@ def apply_model(state, images, labels, var_collect, rngs=None):
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
-    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    var_collect = {**var_collect, PARAMS_KEY: state.params}
 
     if rngs is not None:
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)

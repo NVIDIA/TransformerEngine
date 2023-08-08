@@ -6,6 +6,7 @@ import argparse
 import unittest
 from functools import partial
 
+import flax
 import jax
 import jax.numpy as jnp
 import nltk
@@ -13,7 +14,6 @@ import numpy as np
 import optax
 from datasets import load_dataset
 from flax import linen as nn
-from flax.core.frozen_dict import FrozenDict
 from flax.training import train_state
 
 import transformer_engine.jax as te
@@ -65,12 +65,12 @@ def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
-    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    var_collect = {**var_collect, PARAMS_KEY: state.params}
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, logits), grads = grad_fn(var_collect)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
 
-    var_collect, grads = grads.pop(PARAMS_KEY)
+    var_collect, grads = flax.core.pop(grads, PARAMS_KEY)
     state = state.apply_gradients(grads=grads)
     if use_fp8:
         var_collect = te.update_fp8_metas(var_collect)
@@ -112,7 +112,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
-    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    var_collect = {**var_collect, PARAMS_KEY: state.params}
     loss, logits = loss_fn(var_collect, disable_dropout=True)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
     return loss, accuracy
