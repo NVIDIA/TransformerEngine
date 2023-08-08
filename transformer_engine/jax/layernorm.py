@@ -44,16 +44,6 @@ def layernorm(inputs: jnp.ndarray,
     """
     Layernorm wrapper
     """
-
-    # inputs_ = jnp.asarray(inputs, jnp.float32)
-    # mean = jnp.mean(inputs_, axis=-1, keepdims=True)
-    # var = jnp.mean(jnp.square(inputs_ - mean), axis=-1, keepdims=True)
-    # normed_input = (inputs_ - mean) * jax.lax.rsqrt(var + epsilon)
-    # # Align TE implementation
-    # if zero_centered_gamma:
-    #     return jnp.asarray(normed_input * (gamma + 1) + beta).astype(inputs.dtype)
-    # return jnp.asarray(normed_input * gamma + beta).astype(inputs.dtype)
-
     assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
         "layernorm does not support row-split tensor parallelism currently."
 
