@@ -181,7 +181,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                     at::Tensor>())
       .def_property_readonly("dtype", &Tensor::dtype)
       .def_property_readonly("shape", &Tensor::shape)
-      .def_readonly("shape", &Tensor::shape)
       .def_readonly("data", &Tensor::data)
       .def_readonly("amax", &Tensor::amax)
       .def_readonly("scale", &Tensor::scale)
