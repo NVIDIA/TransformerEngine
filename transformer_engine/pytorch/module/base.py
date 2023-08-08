@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
+from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     is_fp8_enabled,
     is_fp8_calibration,
@@ -364,8 +365,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
-        state_serialized = io.BytesIO()
-        torch.save(state, state_serialized)
+        if is_in_onnx_export_mode():
+            state_serialized = torch.frombuffer(pickle.dumps(state), dtype=torch.uint8)
+        else:
+            state_serialized = io.BytesIO()
+            torch.save(state, state_serialized)
 
         return state_serialized
 
@@ -411,7 +415,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):
             state.seek(0)
-            state = torch.load(io.BytesIO(state.read()), map_location='cuda')
+            state = torch.load(state, map_location='cuda')
 
         if state is None:
             return
