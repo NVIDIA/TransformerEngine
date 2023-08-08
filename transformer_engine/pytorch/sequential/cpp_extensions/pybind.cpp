@@ -41,9 +41,8 @@ namespace py = pybind11;
 
 struct Tensor {
   static_assert(std::is_same_v<NVTETensor, void *>);
-  using deleter = void (*)(NVTETensor *);
 
-  std::shared_ptr<void, deleter> pimpl;
+  std::shared_ptr<void> pimpl;
 
   static float *getDataPtr(at::Tensor t) {
     if (t.numel() > 0) {
@@ -74,7 +73,7 @@ struct TensorPack : NVTETensorPack {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
     }
     for (size_t i = 0; i < size; ++i) {
-      tensors[i] = tensors_[i].impl;
+      tensors[i] = *tensors_[i].pimpl;
     }
     nvte_tensor_pack_create(this);
   }
