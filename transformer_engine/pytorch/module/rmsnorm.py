@@ -79,12 +79,12 @@ class RMSNorm(torch.nn.Module):
     the paper `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x}{RMS(x) + \varepsilon} * \gamma
+        y = \frac{x}{RMS_\varepsilon(x)} * \gamma
 
     where
 
     .. math::
-        RMS(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2}
+        RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
 
     :math:`\gamma` is a learnable affine transform parameter of size :attr:`hidden_size`
 
