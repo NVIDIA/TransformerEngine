@@ -49,6 +49,7 @@ class TestAmaxReduction(TestDistributed):
     """Test amax reduction in dp mode"""
 
     @unittest.skipIf(not is_devices_enough(2), "TestAmaxReduction needs 2 GPUs")
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_amax_reduction(self):
         """Tests amax reduction"""
         self.run_2gpu(str(test_root / 'parallel_tests' / 'amax_reduction.py'))
@@ -58,6 +59,7 @@ class TestPipelineParallel(TestDistributed):
     """Test pipeline parallel"""
 
     @unittest.skipIf(not is_devices_enough(2), "TestPipelineParallel needs 2 GPUs")
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_pipeline_parallel(self):
         """Tests pipeline parallel"""
         self.run_2gpu(str(test_root / 'parallel_tests' / 'linear_pp.py'))
@@ -67,6 +69,7 @@ class TestGroupSharding(TestDistributed):
     """Test group sharding"""
 
     @unittest.skipIf(not is_devices_enough(2), "TestGroupSharding needs 2 GPUs")
+    @unittest.skipIf(not gpu_has_fp8, reason)
     def test_group_sharding(self):
         """Tests group sharding"""
         self.run_2gpu(str(test_root / 'parallel_tests' / 'group_sharding.py'))
