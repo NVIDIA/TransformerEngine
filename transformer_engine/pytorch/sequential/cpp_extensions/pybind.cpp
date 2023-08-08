@@ -60,7 +60,7 @@ struct Tensor {
             getDataPtr(scale),
             getDataPtr(scale_inv)
           ),
-          [](NVTETensor *impl) { nvte_destroy_tensor(impl); }
+          [](NVTETensor impl) { nvte_destroy_tensor(impl); }
         }
   {
   }
