@@ -122,6 +122,41 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  py::enum_<NVTEDType>(m, "DType", py::module_local())
+      .value("Byte", kNVTEByte)
+      .value("Int32", kNVTEInt32)
+      .value("Int64", kNVTEInt64)
+      .value("Float32", kNVTEFloat32)
+      .value("Float16", kNVTEFloat16)
+      .value("BFloat16", kNVTEBFloat16)
+      .value("Float8E4M3", kNVTEFloat8E4M3)
+      .value("Float8E5M2", kNVTEFloat8E5M2);
+
+  py::enum_<NVTE_Fused_Attn_Backend>(m, "FusedAttnBackend", py::module_local())
+      .value("No_Backend", NVTE_No_Backend)
+      .value("F16_max512_seqlen", NVTE_F16_max512_seqlen)
+      .value("F16_arbitrary_seqlen", NVTE_F16_arbitrary_seqlen)
+      .value("FP8", NVTE_FP8);
+
+  py::enum_<NVTE_QKV_Layout>(m, "QKVLayout", py::module_local())
+      .value("NOT_INTERLEAVED", NVTE_NOT_INTERLEAVED)
+      .value("QKV_INTERLEAVED", NVTE_QKV_INTERLEAVED)
+      .value("KV_INTERLEAVED", NVTE_KV_INTERLEAVED);
+
+  py::enum_<NVTE_Bias_Type>(m, "BiasType", py::module_local())
+      .value("NO_BIAS", NVTE_NO_BIAS)
+      .value("PRE_SCALE_BIAS", NVTE_PRE_SCALE_BIAS)
+      .value("POST_SCALE_BIAS", NVTE_POST_SCALE_BIAS);
+
+  py::enum_<NVTE_Mask_Type>(m, "MaskType", py::module_local())
+      .value("NO_MASK", NVTE_NO_MASK)
+      .value("PADDING_MASK", NVTE_PADDING_MASK)
+      .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
+
+  py::class_<Tensor>(m, "Tensor", py::module_local())
+      .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
+                    at::Tensor>());
+
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
   m.def("geglu", wrap(nvte_geglu));
@@ -156,24 +191,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         wrap(nvte_scaled_upper_triang_masked_softmax_forward));
   m.def("scaled_upper_triang_masked_softmax_backward",
         wrap(nvte_scaled_upper_triang_masked_softmax_backward));
-  m.def("create_tensor", wrap(nvte_create_tensor));
-  m.def("destroy_tensor", wrap(nvte_destroy_tensor));
-  m.def("tensor_type", wrap(nvte_tensor_type));
-  m.def("tensor_shape", wrap(nvte_tensor_shape));
-  m.def("tensor_data", wrap(nvte_tensor_data));
-  m.def("tensor_amax", wrap(nvte_tensor_amax));
-  m.def("tensor_scale", wrap(nvte_tensor_scale));
-  m.def("tensor_scale_inv", wrap(nvte_tensor_scale_inv));
-  m.def("tensor_pack_create", wrap(nvte_tensor_pack_create));
-  m.def("tensor_pack_destroy", wrap(nvte_tensor_pack_destroy));
   m.def("cast_transpose", wrap(nvte_cast_transpose));
   m.def("transpose", wrap(nvte_transpose));
   m.def("cast_transpose_dbias", wrap(nvte_cast_transpose_dbias));
   m.def("fp8_transpose_dbias", wrap(nvte_fp8_transpose_dbias));
   m.def("cast_transpose_dbias_dgelu", wrap(nvte_cast_transpose_dbias_dgelu));
   m.def("dgeglu_cast_transpose", wrap(nvte_dgeglu_cast_transpose));
-
-  py::class_<Tensor>(m, "Tensor")
-      .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
-                    at::Tensor>());
 }
