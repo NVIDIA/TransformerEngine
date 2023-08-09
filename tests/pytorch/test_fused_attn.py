@@ -92,7 +92,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = 0.1 * torch.randn(
+    inp = torch.randn(
             config.seq_len, bs, 3, config.num_attention_heads, config.head_dim,
             dtype = dtype).cuda()
     inp.requires_grad=True
@@ -100,9 +100,9 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = 0.001 * torch.randint(0, 200, (
-        config.seq_len, bs, config.num_attention_heads * config.head_dim
-        ), dtype = dtype).cuda()
+    op_grad = torch.randn(
+        config.seq_len, bs, config.num_attention_heads * config.head_dim,
+        dtype = dtype).cuda()
     if bias_type != "no_bias":
         bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
                 dtype = dtype).cuda()
@@ -156,7 +156,7 @@ def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
             dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
 
-    atol, rtol = (5e-1, 5e-1) if dtype == torch.bfloat16 else (5e-1, 5e-1)
+    atol, rtol = (5e-1, 5e-2)
     if bias_type == "no_bias":
         assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
         assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
@@ -173,7 +173,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = 0.1 * torch.randn(
+    inp = torch.randn(
             config.seq_len, bs, config.num_attention_heads * config.head_dim,
             dtype = dtype).cuda()
     inp.requires_grad=True
@@ -181,9 +181,9 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = 0.001 * torch.randint(0, 200, (
-        config.seq_len, bs, config.num_attention_heads * config.head_dim
-        ), dtype = dtype).cuda()
+    op_grad = torch.randn(
+        config.seq_len, bs, config.num_attention_heads * config.head_dim,
+        dtype = dtype).cuda()
 
     sigma = 0.02
     init_method = init_method_normal(sigma)
@@ -271,19 +271,18 @@ def test_transformer_layer_gqa(dtype, bs, model):
         unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer_gqa(
                 dtype, bs, config, "UnfusedDotProductAttention", num_q_per_gqa_group)
 
-        atol, rtol = 5e-1, 5e-1
+        atol, rtol = 5e-1, 5e-2
         assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
         assert torch.allclose(flash_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
 def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_group):
 
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed(1234)
+    reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
 
-    inp = 0.1 * torch.randn(
+    inp = torch.randn(
             config.seq_len, bs, config.num_attention_heads * config.head_dim,
             dtype = dtype).cuda()
     inp.requires_grad=True
@@ -291,9 +290,9 @@ def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_gr
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = 0.001 * torch.randint(0, 200, (
-        config.seq_len, bs, config.num_attention_heads * config.head_dim
-        ), dtype = dtype).cuda()
+    op_grad = torch.randn(
+        config.seq_len, bs, config.num_attention_heads * config.head_dim,
+        dtype = dtype).cuda()
 
     sigma = 0.02
     init_method = init_method_normal(sigma)
@@ -373,12 +372,11 @@ def test_dpa_fp8(dtype, bs, model):
 
 def _run_dpa_fp8(dtype, bs, config, backend):
 
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed(1234)
+    reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
 
-    inp = 0.01 * torch.randn(
+    inp = torch.randn(
             bs * config.seq_len, config.num_attention_heads * config.head_dim,
             dtype = dtype).cuda()
     inp.requires_grad=True
@@ -386,9 +384,9 @@ def _run_dpa_fp8(dtype, bs, config, backend):
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = 0.001 * torch.randint(0, 200, (
-        bs * config.seq_len, config.num_attention_heads * config.head_dim
-        ), dtype = dtype).cuda()
+    op_grad = torch.randn(
+        bs * config.seq_len, config.num_attention_heads * config.head_dim,
+        dtype = dtype).cuda()
     torch.save(op_grad, 'op_grad.pt')
 
     fp8_recipe = recipe.DelayedScaling(
