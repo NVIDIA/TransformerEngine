@@ -1023,7 +1023,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_split_ag: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
-        cpu_initialization: bool = True,
+        cpu_initialization: bool = False,
     ) -> None:
         super().__init__()
         self.layer_number = layer_number

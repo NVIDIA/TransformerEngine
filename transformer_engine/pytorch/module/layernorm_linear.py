@@ -606,7 +606,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_split_ag: bool = False,
-        cpu_initialization: bool = True,
+        cpu_initialization: bool = False,
     ) -> None:
         super().__init__()
 

@@ -521,7 +521,7 @@ class Linear(TransformerEngineBaseModule):
         parameters_split: Optional[Tuple[str, ...]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
-        cpu_initialization: bool = True,
+        cpu_initialization: bool = False,
     ) -> None:
         super().__init__()
 

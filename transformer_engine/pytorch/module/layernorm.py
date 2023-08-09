@@ -107,7 +107,7 @@ class LayerNorm(torch.nn.Module):
         sequence_parallel: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
-        cpu_initialization: bool = True,
+        cpu_initialization: bool = False,
     ) -> None:
         super().__init__()
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype

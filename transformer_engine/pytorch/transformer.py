@@ -235,7 +235,7 @@ class TransformerLayer(torch.nn.Module):
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
-        cpu_initialization: bool = True,
+        cpu_initialization: bool = False,
     ) -> None:
         super().__init__()
 
