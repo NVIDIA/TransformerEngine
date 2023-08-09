@@ -3,5 +3,6 @@
 # See LICENSE for license information.
 """Transformer Engine bindings for Paddle"""
 
-from .layer import Linear, LayerNorm, LayerNormLinear, LayerNormMLP
+from .layer import (Linear, LayerNorm, LayerNormLinear, LayerNormMLP, FusedScaleMaskSoftmax,
+                    DotProductAttention, MultiHeadAttention, TransformerLayer)
 from .fp8 import fp8_autocast

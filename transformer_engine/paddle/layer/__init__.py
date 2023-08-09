@@ -7,3 +7,6 @@ from .layernorm import LayerNorm
 from .layernorm_linear import LayerNormLinear
 from .layernorm_mlp import LayerNormMLP
 from .linear import Linear
+from .softmax import FusedScaleMaskSoftmax
+from .attention import DotProductAttention, MultiHeadAttention
+from .transformer import TransformerLayer

@@ -52,3 +52,42 @@ def get_paddle_act_func(activation):
     if activation not in funcs:
         raise "Activation type " + activation + " is not supported."
     return funcs[activation]
+
+
+def attention_mask_func(attention_scores: paddle.Tensor,
+                        attention_mask: paddle.Tensor) -> paddle.Tensor:
+    """Get attention mask"""
+
+    def _masked_fill(x, mask, value):
+        y = paddle.full(x.shape, value, x.dtype)
+        return paddle.where(mask, y, x)
+
+    attention_scores = _masked_fill(attention_scores, attention_mask, -10000.0)
+    return attention_scores
+
+
+def mask_to_cu_seqlens(mask: paddle.Tensor, need_kv: bool = False) -> paddle.Tensor:
+    """Convert mask to cu_seqlens"""
+    assert 'bool' in str(mask.dtype), "mask must be bool dtype"
+    assert len(mask.shape) == 4 and mask.shape[1] == 1, "mask must be [b, 1, s_q, s_k]"
+    q_actual_seqlens = paddle.sum(mask[:, :, :, 0] == False, axis=(-1, -2), dtype='int32')    # pylint: disable=singleton-comparison
+    q_cu_seqlens = paddle.cumsum(q_actual_seqlens)
+    q_cu_seqlens = paddle.concat([paddle.zeros([1], dtype=paddle.int32), q_cu_seqlens], axis=0)
+    if not need_kv:
+        return q_cu_seqlens, None
+    kv_actual_seqlens = paddle.sum(mask[:, :, 0, :] == False, axis=(-1, -2), dtype='int32')    # pylint: disable=singleton-comparison
+    kv_cu_seqlens = paddle.cumsum(kv_actual_seqlens)
+    kv_cu_seqlens = paddle.concat([paddle.zeros([1], dtype=paddle.int32), kv_cu_seqlens], axis=0)
+    return q_cu_seqlens, kv_cu_seqlens
+
+
+def ensure_divisibility(numerator: int, denominator: int) -> None:
+    """Ensure that numerator is divisible by the denominator."""
+    assert (numerator % denominator == 0), f"{numerator} is not divisible by {denominator}"
+
+
+def divide(numerator: int, denominator: int) -> int:
+    """Ensure that numerator is divisible by the denominator and return
+    the division value."""
+    ensure_divisibility(numerator, denominator)
+    return numerator // denominator
