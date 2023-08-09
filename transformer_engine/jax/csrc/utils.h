@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 
 namespace transformer_engine {
@@ -22,7 +23,8 @@ int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, cudaStream_t stream);
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream);
 
 class cublasLtMetaManager {
  public:
