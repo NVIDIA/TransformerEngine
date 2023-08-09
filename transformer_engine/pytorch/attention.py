@@ -4,6 +4,7 @@
 
 """Attention."""
 import os
+import warnings
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
@@ -387,6 +388,7 @@ class FlashAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         attn_mask_type: str = "causal",
+        deterministic: bool = False,
     ) -> None:
         super().__init__()
 
@@ -398,7 +400,7 @@ class FlashAttention(torch.nn.Module):
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
-        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        self.deterministic = deterministic
 
     def forward(
         self,
@@ -831,10 +833,20 @@ class DotProductAttention(torch.nn.Module):
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
         self.device_compute_capability = get_device_compute_capability()
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and self.device_compute_capability >= 8.0
         )
+        if _flash_attn_2_available and self.deterministic:
+            self.use_flash_attention = False
+            warnings.warn(
+                "Disabling usage of FlashAttention since version 2 does not support deterministic"
+                "exection. In order to use FA with deterministic behavior, install FlashAttention"
+                "version 1."
+            )
+
         self.use_fused_attention = (
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
             and self.device_compute_capability >= 8.0
@@ -850,7 +862,9 @@ class DotProductAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
 
         if self.use_flash_attention:
-            self.flash_attention = FlashAttention(norm_factor, **attn_kwargs)
+            self.flash_attention = FlashAttention(
+                norm_factor, **attn_kwargs,
+                deterministic=self.deterministic)
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
         if self.use_fused_attention:
@@ -992,6 +1006,13 @@ class DotProductAttention(torch.nn.Module):
         use_fused_attention = (use_fused_attention
                               and is_backend_avail
                               and self.num_gqa_groups == self.num_attention_heads)
+        if (self.deterministic
+            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
+            use_fused_attention = False
+            warnings.warn(
+                "Disabling usage of FusedAttention since the FusedAttention"
+                "backend does not support deterministic exection."
+            )
 
         if use_flash_attention:
             if checkpoint_core_attention:
