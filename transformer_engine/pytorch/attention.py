@@ -815,12 +815,6 @@ class DotProductAttention(torch.nn.Module):
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
             and self.device_compute_capability >= 8.0
         )
-        if self.deterministic:
-            self.use_fused_attention = False
-            warnings.warn(
-                "Disabling usage of FusedAttention since the FusedAttention"
-                "backend does not support deterministic exection."
-            )
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
@@ -971,6 +965,13 @@ class DotProductAttention(torch.nn.Module):
         use_fused_attention = (use_fused_attention
                               and is_backend_avail
                               and self.num_gqa_groups == self.num_attention_heads)
+        if (self.deterministic
+            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
+            use_fused_attention = False
+            warnings.warn(
+                "Disabling usage of FusedAttention since the FusedAttention"
+                "backend does not support deterministic exection."
+            )
 
         if use_flash_attention:
             if checkpoint_core_attention:
