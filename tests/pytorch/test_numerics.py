@@ -468,7 +468,6 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
     return outputs
 
 
-@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -540,7 +539,6 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
     return outputs
 
 
-@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -662,7 +660,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     return outputs
 
 
-@pytest.mark.skipif(_flash_attn_2_available, reason="FlashAttention v2 is not deterministic.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
