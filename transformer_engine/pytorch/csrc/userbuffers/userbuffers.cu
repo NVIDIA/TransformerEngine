@@ -1806,6 +1806,44 @@ void reducescatter2_userbuff(void *output, const int handler, const int offset, 
   reducescatter2_userbuff_stridedoutput(output, handler, offset, elements, 1, 0, comm, stream);
 }
 
+__global__ void __launch_bounds__(MAX_THREADS)
+kuserbuffers_pullsendrecv(int myrank, int peer, int* recv_id, int *send_flagptr, int* recv_flagptr,int4 *srcptr,int4* dstptr, const int lines) {
+
+  if(blockIdx.x==0 && threadIdx.x==0) {
+      atomicAdd_system(send_flagptr,1);
+  }
+
+  #define UNROLLCOPY 8
+  const int start_elem = threadIdx.x + blockDim.x*blockIdx.x;
+  const int end_elem = lines;
+  const int aligned_elem = (end_elem - start_elem) & (~(blockDim.x*gridDim.x*UNROLLCOPY-1));
+  const int end_aligned = start_elem + aligned_elem;
+
+  if(threadIdx.x==0) {
+    const int signal_id=(*recv_id) + 1;
+    volatile int* flag =(volatile int*) recv_flagptr;
+    clock_t s=clock64();
+    while(*flag<signal_id) {if(clock64()-s>TIMEOUT) {printf("[%d from %d] pullrecv: expected %d, stuck with %d\n",myrank,peer,signal_id,*flag);break;}}
+    if(lines==0) { *recv_id=signal_id;
+                   return; }//otherwise need an extra kernel
+  }
+  __syncthreads();
+
+  if(end_elem<=start_elem) return;
+
+    for (int line=start_elem;line<end_aligned;line+=blockDim.x*gridDim.x*UNROLLCOPY) {
+      int4 val[UNROLLCOPY];
+      #pragma unroll
+      for(int i=0;i<UNROLLCOPY;i++)
+        val[i] = srcptr[line+i*blockDim.x*gridDim.x];
+        #pragma unroll
+      for(int i=0;i<UNROLLCOPY;i++)
+        dstptr[line+i*blockDim.x*gridDim.x]=val[i];
+    }
+    for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x)
+      dstptr[line] = srcptr[line];
+}
+
 __global__ void kuserbuffers_pullsend(int myrank, int peer, int *send_id, int *flagptr) {
   atomicAdd(flagptr, 1);
 }
@@ -1905,6 +1943,150 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int *recv_id, int *f
   }
 }
 
+__global__ void __launch_bounds__(MAX_THREADS)
+kuserbuffers_pushsendrecv(int* send_id, int* send_flagptr,int4 *srcptr, int4* dstptr, const int lines, int myrank, int peer, int *recv_id, int* recv_flagptr, int adder) {
+
+    if(lines) {
+        const int start_elem = threadIdx.x + blockDim.x*blockIdx.x;
+        const int end_elem = lines;
+        const int aligned_elem = ((end_elem - start_elem) & (~(blockDim.x*gridDim.x*UNROLLCOPY-1)));
+        const int end_aligned = start_elem + aligned_elem;
+        if(end_elem>start_elem) {
+            for (int line=start_elem;line<end_aligned;line+=blockDim.x*gridDim.x*UNROLLCOPY) {
+                int4 val[UNROLLCOPY];
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    val[i] = srcptr[line+i*blockDim.x*gridDim.x];
+                }
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    dstptr[line+i*blockDim.x*gridDim.x]=val[i];
+                }
+            }
+            for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x) {
+                dstptr[line] = srcptr[line];
+            }
+        }
+        __syncthreads();
+        if(threadIdx.x) return;
+        __threadfence_system();
+        atomicAdd_system(send_flagptr,1); //otherwise need local SM sync before sending flag
+    } else { //0 bytes and 1 SM only
+        atomicAdd_system(send_flagptr,1);
+    }
+
+    if(blockIdx.x==0 && threadIdx.x==0) {
+        const int signal_id = (*recv_id) + adder;
+        *recv_id = signal_id;
+        volatile int* flag = (volatile int*)recv_flagptr;
+        if(*flag>=signal_id) return;
+        clock_t s=clock64();
+        while(*flag<signal_id) {if(clock64()-s>TIMEOUT) {printf("%d from %d] pushrecv: expected %d, stuck with %d\n",myrank,peer,signal_id,*flag);return;}}
+    }
+}
+
+__global__ void __launch_bounds__(MAX_THREADS)
+kuserbuffers_pushsendrecv_atomic(int* send_id, int* send_flagptr,int4 *srcptr, int4* dstptr, const int lines, int myrank, int peer, int *recv_id, int* recv_flagptr, int adder, void *counters) {
+
+    if(lines) {
+        const int start_elem = threadIdx.x + blockDim.x*blockIdx.x;
+        const int end_elem = lines;
+        const int aligned_elem = ((end_elem - start_elem) & (~(blockDim.x*gridDim.x*UNROLLCOPY-1)));
+        const int end_aligned = start_elem + aligned_elem;
+        if(end_elem>start_elem) {
+            for (int line=start_elem;line<end_aligned;line+=blockDim.x*gridDim.x*UNROLLCOPY) {
+                int4 val[UNROLLCOPY];
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    val[i] = srcptr[line+i*blockDim.x*gridDim.x];
+		}
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    dstptr[line+i*blockDim.x*gridDim.x]=val[i];
+		}
+            }
+            for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x) {
+                dstptr[line] = srcptr[line];
+	    }
+        }
+        __syncthreads();
+        if(threadIdx.x) return;
+        __threadfence_system();
+        atomicAdd_system(send_flagptr,1); //otherwise need local SM sync before sending flag
+    } else { //0 bytes and 1 SM only
+        atomicAdd_system(send_flagptr,1);
+    }
+
+    if(blockIdx.x==0 && threadIdx.x==0) {
+        const int signal_id = (*recv_id) + adder;
+        *recv_id = signal_id;
+        volatile int* flag = (volatile int*)recv_flagptr;
+        //if(*flag>=signal_id) return;
+        clock_t s=clock64();
+        while(*flag<signal_id) {if(clock64()-s>TIMEOUT) {printf("%d from %d] pushrecv: expected %d, stuck with %d\n",myrank,peer,signal_id,*flag);/*return;*/}}
+
+        // Decrement atomic val to signal current output tile finish
+	if(counters) {
+            ((unsigned int*)counters)[0] = 0;
+            asm volatile ("fence.sc.gpu;\n");
+	}
+    }
+}
+
+__global__ void __launch_bounds__(MAX_THREADS)
+kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcptr, int4* dstptr, const int lines, int myrank, int peer, int *recv_id, int* recv_flagptr, int adder, void *counters, int nchunks, int send_stride) {
+
+    for(int j = 0; j < nchunks-1; j++) {
+    int send_chunk = (nchunks + myrank - j) % nchunks;
+    int offset = (send_chunk*send_stride)/16;
+
+    if(lines) {
+        const int start_elem = threadIdx.x + blockDim.x*blockIdx.x;
+        const int end_elem = lines;
+        const int aligned_elem = ((end_elem - start_elem) & (~(blockDim.x*gridDim.x*UNROLLCOPY-1)));
+        const int end_aligned = start_elem + aligned_elem;
+        if(end_elem>start_elem) {
+            for (int line=start_elem;line<end_aligned;line+=blockDim.x*gridDim.x*UNROLLCOPY) {
+                int4 val[UNROLLCOPY];
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    val[i] = srcptr[offset+line+i*blockDim.x*gridDim.x];
+                }
+                #pragma unroll
+                for(int i=0;i<UNROLLCOPY;i++) {
+                    dstptr[offset+line+i*blockDim.x*gridDim.x]=val[i];
+                }
+            }
+            for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x) {
+                dstptr[offset+line] = srcptr[offset+line];
+            }
+        }
+        __syncthreads();
+	if(!threadIdx.x) {
+            __threadfence_system();
+            atomicAdd_system(send_flagptr,1); //otherwise need local SM sync before sending flag
+	}
+    } else { //0 bytes and 1 SM only
+        atomicAdd_system(send_flagptr,1);
+    }
+
+    if(blockIdx.x==0 && threadIdx.x==0) {
+        const int signal_id = (*recv_id) + adder;
+        *recv_id = signal_id;
+        volatile int* flag = (volatile int*)recv_flagptr;
+        //if(*flag>=signal_id) return;
+        clock_t s=clock64();
+        while(*flag<signal_id) {if(clock64()-s>TIMEOUT) {printf("%d from %d] pushrecv: expected %d, stuck with %d\n",myrank,peer,signal_id,*flag);/*return;*/}}
+
+        // Decrement atomic val to signal current output tile finish
+        if(counters) {
+            ((unsigned int*)counters)[j+1] = 0;
+            asm volatile ("fence.sc.gpu;\n");
+        }
+    }
+    }
+}
+
 #define CUDACHECK(cmd)                                                                      \
   do {                                                                                      \
     cudaError_t e = cmd;                                                                    \
@@ -1967,6 +2149,115 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     CUDACHECK(
         cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
   }
+}
+
+void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
+		          const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, cudaStream_t stream) {
+
+    bool signalonly = (bytes/16==0) || (comm->use_ce!=0);
+    int send_peerlocal = send_peer % comm->nvsize;
+    int recv_peerlocal = recv_peer % comm->nvsize;
+    void* flagptr_send = (comm->peer_ptr[0][send_peerlocal])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+comm->myrank*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+    void *flagptr_recv = (comm->mem_ptr[0])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+recv_peer*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+
+    if(comm->push==0) {
+        void *recv_dstptr = (comm->mem_ptr[dsthandler])+recv_offset;
+        void *recv_srcptr = (comm->peer_ptr[srchandler][recv_peerlocal])+recv_offset;
+
+        SETUP_LAUNCH_CONFIG(signalonly?1:comm->sms,signalonly?1:1024,stream);
+        int arg1=comm->myrank;
+	int arg2=recv_peer;
+	int *arg3=&(comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler]);
+	int *arg4=(int*)flagptr_send;
+	int *arg5=(int*)flagptr_recv;
+	int4 *arg6=(int4*)recv_srcptr;
+	int4 *arg7=(int4*)recv_dstptr;
+	int arg8=signalonly ? 0 : bytes/16;
+        void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8};
+        CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pullsendrecv, kernelArgs));
+        if(comm->use_ce) {
+	    CUDACHECK(cudaMemcpyAsync(recv_dstptr,recv_srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
+            kuserbuffers_inc<<<1,1,0,stream>>> (&(comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler]));
+        }
+    } else {
+        void *send_srcptr = (comm->mem_ptr[srchandler])+send_offset;
+        void *send_dstptr = (comm->peer_ptr[dsthandler][send_peerlocal])+send_offset;
+        if(comm->use_ce) CUDACHECK(cudaMemcpyAsync(send_dstptr,send_srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
+        SETUP_LAUNCH_CONFIG(signalonly?1:comm->sms,signalonly?1:1024,stream);
+
+        int *arg1=&comm->send_id[send_peer];
+	int *arg2=(int*)flagptr_send;
+        int4 *arg3=(int4*)send_srcptr;
+	int4 *arg4=(int4*)send_dstptr;
+        int arg5=signalonly?0:bytes/16;
+	int arg6=comm->myrank;
+	int arg7=recv_peer;
+	int *arg8=&comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler];
+	int *arg9=(int*)flagptr_recv;
+	int arg10=signalonly ? 1:comm->sms;
+        void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10};
+        CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv, kernelArgs));
+    }
+}
+
+void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
+		                 const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, void *counters, cudaStream_t stream) {
+
+    assert(comm->push && comm->use_ce==0);
+
+    int send_peerlocal = send_peer % comm->nvsize;
+    int recv_peerlocal = recv_peer % comm->nvsize;
+    void* flagptr_send = (comm->peer_ptr[0][send_peerlocal])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+comm->myrank*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+    void *flagptr_recv = (comm->mem_ptr[0])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+recv_peer*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+
+    SETUP_LAUNCH_CONFIG(comm->sms,1024,stream);
+
+    int *arg1=&comm->send_id[send_peer];
+    int *arg2=(int*)flagptr_send;
+    int4 *arg3=(int4*)((comm->mem_ptr[srchandler])+send_offset);
+    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+send_offset);
+    int arg5=bytes/16;
+    int arg6=comm->myrank;
+    int arg7=recv_peer;
+    int *arg8=&comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler];
+    int *arg9=(int*)flagptr_recv;
+    int arg10=comm->sms;
+    void *arg11=counters;
+    void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11};
+    CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv_atomic, kernelArgs));
+}
+
+void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_stride, const size_t recv_stride,
+                                      const size_t bytes, communicator* comm, const int nchunks, void *counters, cudaStream_t stream) {
+
+    assert(comm->push && comm->use_ce==0);
+
+    const int rank_round = (comm->myrank / comm->nranks) * comm->nranks;
+    const int send_peer = (comm->nranks + comm->myrank + 1) % comm->nranks + rank_round;
+    const int recv_peer = (comm->nranks + comm->myrank - 1) % comm->nranks + rank_round;
+
+    int send_peerlocal = send_peer % comm->nvsize;
+    int recv_peerlocal = recv_peer % comm->nvsize;
+    void* flagptr_send = (comm->peer_ptr[0][send_peerlocal])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+comm->myrank*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+    void *flagptr_recv = (comm->mem_ptr[0])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+recv_peer*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
+
+    SETUP_LAUNCH_CONFIG(comm->sms,1024,stream);
+
+    int *arg1=&comm->send_id[send_peer];
+    int *arg2=(int*)flagptr_send;
+    int4 *arg3=(int4*)((comm->mem_ptr[srchandler]));
+    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal]));
+    int arg5=bytes/16;
+    int arg6=comm->myrank;
+    int arg7=recv_peer;
+    int *arg8=&comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler];
+    int *arg9=(int*)flagptr_recv;
+    int arg10=comm->sms;
+    void *arg11=counters;
+    int arg12=nchunks;
+    int arg13=send_stride;
+    void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11,(void*)&arg12,(void*)&arg13};
+    CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv_multiatomic, kernelArgs));
 }
 
 __global__ void __launch_bounds__(MAX_THREADS)

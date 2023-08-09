@@ -556,14 +556,16 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
       if (i < _tp_size - 1) {
         // P2P communication
-        userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
-                         _next_rank, (cudaStream_t)_stream_send);
-        userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                         _prev_rank, (cudaStream_t)_stream_recv);
+        //userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
+        //                 _next_rank, (cudaStream_t)_stream_send);
+        //userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
+        //                 _prev_rank, (cudaStream_t)_stream_recv);
+        userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
+                            _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
         producer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_recv);
         //consumer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_compute[0]);
         CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
+        //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
       } else if (B_copy.numel() > 0) {
         assert(B_copy.numel() == _ubufs[_tp_id].numel());
         assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
