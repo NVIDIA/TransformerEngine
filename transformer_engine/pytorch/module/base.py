@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import io
 import os
 import pickle
 import warnings
@@ -11,12 +12,12 @@ from typing import Generator, Union, Optional, Tuple, Dict, Any, List
 from functools import partial
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
+from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     is_fp8_enabled,
     is_fp8_calibration,
@@ -349,12 +350,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if fp8_checkpoint:
             state = {}
-            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale.cpu()
-            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv.cpu()
-            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history.cpu()
-            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale.cpu()
-            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv.cpu()
-            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history.cpu()
+            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
+            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
+            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
+            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
+            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
+            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
             state["global_fp8_buffer"] = get_global_fp8_buffer()
 
             # Store other pickelable values.
@@ -364,10 +365,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
-        state_serialized = pickle.dumps(state)
-        state_tensor = torch.tensor(np.frombuffer(state_serialized, dtype=np.uint8))
+        if is_in_onnx_export_mode():
+            state_serialized = torch.frombuffer(pickle.dumps(state), dtype=torch.uint8)
+        else:
+            state_serialized = io.BytesIO()
+            torch.save(state, state_serialized)
 
-        return state_tensor
+        return state_serialized
 
     def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
@@ -409,8 +413,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if isinstance(state, torch.Tensor):
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
-            if state is None:
-                return
+        elif isinstance(state, io.BytesIO):
+            state.seek(0)
+            state = torch.load(state, map_location='cuda')
+
+        if state is None:
+            return
 
         # Restore global FP8 buffer states.
         set_global_fp8_buffer(state["global_fp8_buffer"])
