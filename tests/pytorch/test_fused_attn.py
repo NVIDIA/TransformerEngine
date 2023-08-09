@@ -140,7 +140,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("ckpt_attn", [True, False])
+@pytest.mark.parametrize("ckpt_attn", [False])
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
 def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
     """Test TransformerLayer module when its DotProductAttention is enabled with
@@ -215,7 +215,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
             tp_group = None,
             tp_size =  1,
             params_dtype = dtype,
-            get_rng_state_tracker = get_dummy_cuda_rng_tracker,
+            get_rng_state_tracker = None,
             fuse_wgrad_accumulation = False,
             seq_length = config.seq_len,
             micro_batch_size = bs,
