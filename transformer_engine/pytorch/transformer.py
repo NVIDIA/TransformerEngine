@@ -263,6 +263,7 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
         ub_split_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_AG", "1")))
         ub_split_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_RS", "1")))
+        ub_atomic_gemm_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_RS", "1")))
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
@@ -323,6 +324,7 @@ class TransformerLayer(torch.nn.Module):
             "ub_bulk_dgrad" : ub_bulk_dgrad,
             "ub_split_ag" : ub_split_ag,
             "ub_split_rs" : ub_split_rs,
+            "ub_atomic_gemm_rs" : ub_atomic_gemm_rs,
         }
 
         self.self_attention = MultiheadAttention(
@@ -377,6 +379,7 @@ class TransformerLayer(torch.nn.Module):
             ub_bulk_dgrad=ub_bulk_dgrad,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
+            ub_atomic_gemm_rs=ub_atomic_gemm_rs,
             activation=activation,
             normalization=normalization,
             device=device,

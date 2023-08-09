@@ -77,6 +77,7 @@ class _Linear(torch.autograd.Function):
         is_grad_enabled: bool,
         ub_split_rs: bool,
         ub_split_ag: bool,
+        ub_atomic_gemm_rs: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -88,10 +89,11 @@ class _Linear(torch.autograd.Function):
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
+                ub_atomic_gemm_rs = False
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
@@ -155,7 +157,7 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                     )
 
-            if ub_split_rs:
+            if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
@@ -167,6 +169,8 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
+            ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
+            ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
             _ = fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -182,9 +186,9 @@ class _Linear(torch.autograd.Function):
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=out,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_projout if ub_split_rs else None,
-                extra_output_tensor=rs_out if ub_split_rs else None,
+                ub_algo=ub_algo,
+                ub=ub_obj_projout if (ub_split_rs or ub_atomic_gemm_rs) else None,
+                extra_output_tensor=rs_out if (ub_split_rs or ub_atomic_gemm_rs) else None,
             )
         else:
             # Cast for native AMP
@@ -249,7 +253,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             out = rs_out
         elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -436,6 +440,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -529,6 +534,7 @@ class Linear(TransformerEngineBaseModule):
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         device: Union[torch.device, str] = "cuda",
+        ub_atomic_gemm_rs: bool = False,
     ) -> None:
         super().__init__()
 
@@ -550,8 +556,9 @@ class Linear(TransformerEngineBaseModule):
         self.parameters_split = parameters_split
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+        self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
 
-        if ub_split_rs or ub_split_ag:
+        if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
@@ -776,6 +783,7 @@ class Linear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.ub_split_rs,
                 self.ub_split_ag,
+                self.ub_atomic_gemm_rs
             )
             out = linear_fn(*args)
 
