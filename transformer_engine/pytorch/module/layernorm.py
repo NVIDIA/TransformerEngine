@@ -96,6 +96,8 @@ class LayerNorm(torch.nn.Module):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    cpu_initialization : bool, default = `False`
+          if set to `True`, the parameters of the model will be initialized on the CPU.
     """
 
     def __init__(
@@ -105,22 +107,24 @@ class LayerNorm(torch.nn.Module):
         sequence_parallel: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
+        cpu_initialization: bool = True,
     ) -> None:
         super().__init__()
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        device = "cpu" if cpu_initialization else torch.cuda.current_device()
         self.eps = eps
         self.zero_centered_gamma = zero_centered_gamma
         self.weight = Parameter(
             torch.empty(
                 hidden_size,
-                device=torch.cuda.current_device(),
+                device=device,
                 dtype=params_dtype,
             )
         )
         self.bias = Parameter(
             torch.empty(
                 hidden_size,
-                device=torch.cuda.current_device(),
+                device=device,
                 dtype=params_dtype,
             )
         )

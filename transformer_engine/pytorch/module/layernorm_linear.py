@@ -544,6 +544,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    cpu_initialization : bool, default = `False`
+          if set to `True`, the parameters of the model will be initialized on the CPU.
 
     Parallelism parameters
     ----------------------
@@ -604,6 +606,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_split_ag: bool = False,
+        cpu_initialization: bool = True,
     ) -> None:
         super().__init__()
 
@@ -616,6 +619,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        device = "cpu" if cpu_initialization else torch.cuda.current_device()
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -662,20 +666,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.eps = eps
         self.layer_norm_weight = Parameter(
-            torch.empty(
-                in_features,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
+            torch.empty(in_features, device=device, dtype=params_dtype)
         )
         setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
         if self.normalization != "RMSNorm":
             self.layer_norm_bias = Parameter(
-                torch.empty(
-                    in_features,
-                    device=torch.cuda.current_device(),
-                    dtype=params_dtype,
-                )
+                torch.empty(in_features, device=device, dtype=params_dtype)
             )
             setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
         else:
@@ -684,8 +680,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
-            device=torch.cuda.current_device(),
-            dtype=params_dtype)
+            device=device, dtype=params_dtype)
 
         initialize_affine_weight_gpu(
             self.weight_tensor,
@@ -698,11 +693,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if self.use_bias:
             self.bias_tensor = torch.empty(
                 self.out_features,
-                device=torch.cuda.current_device(),
+                device=device,
                 dtype=params_dtype)
         else:
-            self.bias_tensor = torch.Tensor().to(dtype=params_dtype,
-                                                    device=torch.cuda.current_device())
+            self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
 
         with torch.no_grad():
             self.bias_tensor.zero_()
@@ -739,8 +733,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                 )
             else:
-                setattr(self, bname, torch.Tensor().to(dtype=params_dtype,
-                                                        device=torch.cuda.current_device()))
+                setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
             if parallel_mode == "column":
                 set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)

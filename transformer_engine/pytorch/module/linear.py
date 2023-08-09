@@ -464,6 +464,8 @@ class Linear(TransformerEngineBaseModule):
                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
                       split along the first dimension, where `N` is the length of the argument
                       and the strings contained are the names of the split parameters.
+    cpu_initialization : bool, default = `False`
+          if set to `True`, the parameters of the model will be initialized on the CPU.
 
     Parallelism parameters
     ----------------------
@@ -519,6 +521,7 @@ class Linear(TransformerEngineBaseModule):
         parameters_split: Optional[Tuple[str, ...]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
+        cpu_initialization: bool = True,
     ) -> None:
         super().__init__()
 
@@ -531,6 +534,7 @@ class Linear(TransformerEngineBaseModule):
             )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        device = "cpu" if cpu_initialization else torch.cuda.current_device()
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -572,8 +576,7 @@ class Linear(TransformerEngineBaseModule):
 
         self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
-            device=torch.cuda.current_device(),
-            dtype=params_dtype)
+            device=device, dtype=params_dtype)
 
         initialize_affine_weight_gpu(
             self.weight_tensor,
@@ -584,13 +587,9 @@ class Linear(TransformerEngineBaseModule):
         )
 
         if self.use_bias:
-            self.bias_tensor = torch.empty(
-                self.out_features,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype)
+            self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
         else:
-            self.bias_tensor = torch.Tensor().to(dtype=params_dtype,
-                                                    device=torch.cuda.current_device())
+            self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
 
         with torch.no_grad():
             self.bias_tensor.zero_()
@@ -627,8 +626,7 @@ class Linear(TransformerEngineBaseModule):
                     bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                 )
             else:
-                setattr(self, bname, torch.Tensor().to(dtype=params_dtype,
-                                                        device=torch.cuda.current_device()))
+                setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
             if parallel_mode == "column":
                 set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)
