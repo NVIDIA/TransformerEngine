@@ -25,10 +25,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
-from pkg_resources import packaging
-from importlib.metadata import version
-_flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
 seed = 1234
 rng_str = "rng_state"
