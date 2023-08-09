@@ -929,8 +929,8 @@ class DotProductAttention(torch.nn.Module):
             self.use_flash_attention = False
             warnings.warn(
                 "Disabling usage of FlashAttention since version 2 does not support deterministic"
-                "exection. In order to use FA with deterministic behavior, install FlashAttention"
-                "version 1."
+                "execution. In order to use FA with deterministic behavior, please install"
+                "FlashAttention version 1."
             )
 
         self.use_fused_attention = (
@@ -1091,8 +1091,8 @@ class DotProductAttention(torch.nn.Module):
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
             use_fused_attention = False
             warnings.warn(
-                "Disabling usage of FusedAttention since the FusedAttention"
-                "backend does not support deterministic exection."
+                "Disabling usage of FusedAttention since this FusedAttention"
+                "backend does not support deterministic execution."
             )
 
         if use_flash_attention:
