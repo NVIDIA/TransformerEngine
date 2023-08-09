@@ -575,10 +575,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.set_fp8_weights()
 
             update_weight_scale_inv = is_first_microbatch is None or is_first_microbatch
-            #if self.fp8 and self.sequence_parallel:
-            #    assert self.fp8_meta["recipe"].reduce_amax, \
-            #    "Amax reduction across tensor parallel group is " \
-            #    "necessary when using sequence parallelism with FP8."
+            if self.fp8 and self.sequence_parallel:
+                assert self.fp8_meta["recipe"].reduce_amax, \
+                "Amax reduction across tensor parallel group is " \
+                "necessary when using sequence parallelism with FP8."
 
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):

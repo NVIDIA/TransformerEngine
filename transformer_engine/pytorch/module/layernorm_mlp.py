@@ -19,7 +19,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import get_fp8_te_dtype, amax_and_scale_update
+from ..fp8 import get_fp8_te_dtype#, amax_and_scale_update
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -246,27 +246,26 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
+            gelu_out = activation_func(
+                fc1_out,
+                fp8_meta["scaling_fwd"],
+                tex.FP8FwdTensors.GEMM2_INPUT,
+                fp8_dtype_forward,
+            )
 
-            fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
-                torch.amax(fc1_out).float()
-            amax_and_scale_update(fp8_meta, True)
+            #fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
+            #    torch.amax(fc1_out).float()
+            #amax_and_scale_update(fp8_meta, True)
             #print (f'fc2 inp shape {fc1_out.shape}')
 
-            fake_fc2_inp = torch.arange(tp_size, dtype=activation_dtype, device=fc1_out.device).view(tp_size,1,1).repeat(1,fc1_out.size(0)//tp_size,fc1_out.size(1)).view_as(fc1_out)/8
-            #fc1_out = fake_fc2_inp
-            #print (f'fake fc2 inp {fake_fc2_inp.shape} {fake_fc2_inp}')
-            gelu_out = tex.cast_to_fp8(
-                    fc1_out,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM2_INPUT,
-                    fp8_dtype_forward,
-                )
-            #gelu_out = activation_func(
-            #    fc1_out,
-            #    fp8_meta["scaling_fwd"],
-            #    tex.FP8FwdTensors.GEMM2_INPUT,
-            #    fp8_dtype_forward,
-            #)
+            #fake_fc2_inp = torch.arange(tp_size, dtype=activation_dtype, device=fc1_out.device).view(tp_size,1,1).repeat(1,fc1_out.size(0)//tp_size,fc1_out.size(1)).view_as(fc1_out)/8
+            ##fc1_out = fake_fc2_inp
+            #gelu_out = tex.cast_to_fp8(
+            #        fc1_out,
+            #        fp8_meta["scaling_fwd"],
+            #        tex.FP8FwdTensors.GEMM2_INPUT,
+            #        fp8_dtype_forward,
+            #    )
 
             if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
@@ -333,7 +332,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_split_ag else None,
                 extra_output_tensor=ln_out if ub_split_ag else None,
             )
-            bias_gelu_nvfusion
             if bias_gelu_nvfusion:
                 fc1_out, _, _ = fc1_outputs
                 gelu_out = bias_gelu_fused(fc1_out, fc1_bias)
