@@ -10,8 +10,10 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
+from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
+from ..utils import cast_if_needed
 
 
 __all__ = ["RMSNorm"]
@@ -30,12 +32,17 @@ class _RMSNorm(torch.autograd.Function):
         bwd_rmsnorm_sm_margin: int,
         zero_centered_gamma: bool,
         is_grad_enabled: bool,
+        activation_dtype: torch.dtype,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert inp.shape[-1] == in_features, "RMSNorm not possible"
         inputmat = inp.view((-1, in_features))
+
+        # Cast for native AMP
+        inputmat = cast_if_needed(inputmat, activation_dtype)
+        rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
 
         if is_grad_enabled:
             rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
@@ -70,6 +77,7 @@ class _RMSNorm(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -79,12 +87,12 @@ class RMSNorm(torch.nn.Module):
     the paper `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x}{RMS(x) + \varepsilon} * \gamma
+        y = \frac{x}{RMS_\varepsilon(x)} * \gamma
 
     where
 
     .. math::
-        RMS(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2}
+        RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
 
     :math:`\gamma` is a learnable affine transform parameter of size :attr:`hidden_size`
 
@@ -148,6 +156,10 @@ class RMSNorm(torch.nn.Module):
     @no_torch_dynamo
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """RMSNorm FWD"""
+
+        # Set the activation type for AMP.
+        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+
         if torch.is_grad_enabled():
             fwd_fn = _RMSNorm.apply
             args = []
@@ -162,7 +174,8 @@ class RMSNorm(torch.nn.Module):
             self.fwd_rmsnorm_sm_margin,
             self.bwd_rmsnorm_sm_margin,
             self.zero_centered_gamma,
-            torch.is_grad_enabled()
+            torch.is_grad_enabled(),
+            self.activation_dtype,
         )
 
         return fwd_fn(*args)
