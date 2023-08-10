@@ -991,21 +991,23 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
-        fused_attention_backend = tex.get_fused_attn_backend(
-            TE_DType[query_layer.dtype],
-            TE_DType[key_layer.dtype],
-            QKVLayout[qkv_layout],
-            AttnBiasType[core_attention_bias_type],
-            AttnMaskType[self.attn_mask_type],
-            self.attention_dropout,
-            query_layer.shape[0], key_layer.shape[0],
-            query_layer.shape[-1])
-        # DPA does not support FP8; for FP8, use cpp_extensions modules directly
-        is_backend_avail = (fused_attention_backend in
-            [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
-        use_fused_attention = (use_fused_attention
-                              and is_backend_avail
-                              and self.num_gqa_groups == self.num_attention_heads)
+
+        if use_fused_attention:
+            fused_attention_backend = tex.get_fused_attn_backend(
+                TE_DType[query_layer.dtype],
+                TE_DType[key_layer.dtype],
+                QKVLayout[qkv_layout],
+                AttnBiasType[core_attention_bias_type],
+                AttnMaskType[self.attn_mask_type],
+                self.attention_dropout,
+                query_layer.shape[0], key_layer.shape[0],
+                query_layer.shape[-1])
+            # DPA does not support FP8; for FP8, use cpp_extensions modules directly
+            is_backend_avail = (fused_attention_backend in
+                [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
+            use_fused_attention = (use_fused_attention
+                                  and is_backend_avail
+                                  and self.num_gqa_groups == self.num_attention_heads)
         if (self.deterministic
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
             use_fused_attention = False
