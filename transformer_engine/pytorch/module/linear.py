@@ -294,7 +294,7 @@ class _Linear(torch.autograd.Function):
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            if weight.requires_grad and ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     inputmat_t_total, handle = gather_along_last_dim(
                         inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
@@ -306,6 +306,7 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat_t_total = inputmat_t
                 inputmat_total = inputmat
+                handle = None
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -353,7 +354,8 @@ class _Linear(torch.autograd.Function):
 
                 # Overlap dgrad-RS/AR with wgrad
                 if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                    handle.wait()
+                    if handle is not None:
+                        handle.wait()
                     dgrad, handle = reduce_scatter_along_first_dim(
                         dgrad, ctx.tp_group, async_op=True
                     )

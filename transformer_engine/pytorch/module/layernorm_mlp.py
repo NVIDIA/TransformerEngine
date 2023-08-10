@@ -471,12 +471,16 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if (not ctx.ub_bulk_dgrad) and ctx.set_parallel_mode and ctx.sequence_parallel:
+            if (fc1_weight.requires_grad
+                and (not ctx.ub_bulk_dgrad)
+                and ctx.set_parallel_mode
+                and ctx.sequence_parallel):
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
             else:
                 ln_out_total = ln_out
+                handle = None
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -687,7 +691,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             # Overlap dgrad-RS/AR with wgrad
             if ctx.set_parallel_mode and ctx.sequence_parallel:
-                if not ctx.ub_bulk_dgrad:
+                if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
                 if not ctx.ub_bulk_wgrad:
                     fc1_dgrad, handle = reduce_scatter_along_first_dim(
