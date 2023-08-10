@@ -12,7 +12,6 @@ from transformer_engine.paddle.constants import (
     LayerTypes,
 )
 from transformer_engine.paddle.layer import (LayerNormMLP, LayerNorm, MultiHeadAttention)
-
 from .base import TransformerEngineBaseLayer
 
 
@@ -91,6 +90,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
         self.layer_type = layer_type
         self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
         self.self_attn_mask_type = self_attn_mask_type
+
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
         assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
@@ -190,6 +190,9 @@ class TransformerLayer(TransformerEngineBaseLayer):
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
             assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
+
+        assert core_attention_bias_type in ['no_bias'], f"Only no_bias is supported currently, " \
+            f"but receive core_attention_bias_type = {core_attention_bias_type}"
 
         # Self attention.
         self_attention_outputs = self.self_attention(
