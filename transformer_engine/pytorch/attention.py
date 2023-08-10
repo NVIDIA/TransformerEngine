@@ -1008,13 +1008,13 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = (use_fused_attention
                                   and is_backend_avail
                                   and self.num_gqa_groups == self.num_attention_heads)
-        if (self.deterministic
-            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
-            use_fused_attention = False
-            warnings.warn(
-                "Disabling usage of FusedAttention since the FusedAttention"
-                "backend does not support deterministic exection."
-            )
+            if (self.deterministic
+                and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
+                use_fused_attention = False
+                warnings.warn(
+                    "Disabling usage of FusedAttention since the FusedAttention"
+                    "backend does not support deterministic exection."
+                )
 
         if use_flash_attention:
             if checkpoint_core_attention:
