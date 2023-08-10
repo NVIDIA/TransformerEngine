@@ -9,10 +9,11 @@ from typing import Callable, Iterable, Sequence, Tuple, Union
 
 from praxis import pax_fiddle
 from praxis.base_layer import init_var
-from praxis.base_layer import BaseLayer, WeightInit, WeightHParams
+from praxis.base_layer import BaseLayer, WeightInit, WeightHParams, WeightHParamsCollection
 from praxis.layers import flax_adapter
 from praxis.pytypes import JTensor
 
+from ..fp8 import FP8Helper
 from ..flax.module import DenseGeneral, LayerNormDenseGeneral
 from ..flax.module import LayerNorm as flax_LayerNorm
 from ..flax.module import LayerNormMLP as flax_LayerNormMLP
@@ -45,9 +46,18 @@ class TransformerEngineBaseLayer(BaseLayer):
     def create_layer(self, name, flax_module_cls):
         """create_layer"""
 
+        fp8_collection_map = {
+            FP8Helper.FP8_COLLECTION_NAME: [
+                WeightHParamsCollection.SKIP_LP_REGULARIZATION,
+                WeightHParamsCollection.NON_TRAINABLE,
+                WeightHParamsCollection.DISALLOW_BFLOAT16_CONVERSION
+            ]
+        }
+
         flax_module_p = pax_fiddle.Config(flax_adapter.FlaxModuleAdapter,
                                           module_factory_method=flax_module_cls,
                                           logical_axes_rules=self.logical_axes_rules,
+                                          var_collection_map=fp8_collection_map,
                                           ici_mesh_shape=self.ici_mesh_shape,
                                           dcn_mesh_shape=self.dcn_mesh_shape,
                                           mesh_axis_names=self.mesh_axis_names)
