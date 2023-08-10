@@ -153,6 +153,9 @@ def initialize_ub(
                     sample_buffer,          # Sample userbuffer
                     rank_id,                # Rank id
                     tp_size,                # TP size
+                    num_sm,                 # Number of communication SMs
+                    cga_size,               # CGA cluster size
+                    set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
                 )
