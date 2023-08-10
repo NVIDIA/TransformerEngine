@@ -144,6 +144,11 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
   }
 }
 
+// Manual wrapper around nvte_multi_cast_transpose
+void multi_cast_transpose(const std::vector<Tensor>& inputs, const std::vector<Tensor>& cast_outs, const std::vector<Tensor>& transposed_outs) {
+  nvte_multi_cast_transpose(inputs.size(), inputs.data(), cast_outs.data(), transposed_outs.data(), at::cuda::getCurrentCUDAStream());
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<NVTEDType>(m, "DType", py::module_local())
       .value("Byte", kNVTEByte)
@@ -226,4 +231,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_transpose_dbias", wrap(nvte_fp8_transpose_dbias));
   m.def("cast_transpose_dbias_dgelu", wrap(nvte_cast_transpose_dbias_dgelu));
   m.def("dgeglu_cast_transpose", wrap(nvte_dgeglu_cast_transpose));
+  m.def("multi_cast_transpose", &multi_cast_transpose);
 }
