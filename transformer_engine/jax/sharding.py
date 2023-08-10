@@ -14,6 +14,7 @@ from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
 from jax.experimental.maps import xmap
+from jax.sharding import PartitionSpec
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -26,6 +27,17 @@ def _get_mesh_info(resource: str):
     assert resource in mesh.axis_names, \
         f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
+
+
+def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
+    """
+    A wrapper function to jax.lax.with_sharding_constraint to
+    support the case that Mesh is empty.
+    """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh.empty:
+        return x
+    return jax.lax.with_sharding_constraint(x, pspec)
 
 
 @dataclass
@@ -45,6 +57,7 @@ class ShardingResource:
     """
     dp_resource: str = None
     tp_resource: str = None
+    fsdp_resource: str = None
 
 
 _GLOBAL_SHARD_RESOURCE = ShardingResource()
@@ -420,6 +433,11 @@ class FusedAttnShardingMetaGenerator(ShardingMetaGenerator):
             if tp_dim is not None:
                 out_axis[tp_dim] = tp_axis_name
             out_axes.append(out_axis)
+
+        assert len(out_axes) == 1, "Only allow single output at this moment."
+        assert len(output_new_shapes) == 1, "Only allow single output at this moment."
+        out_axes = out_axes[0]
+        output_new_shapes = output_new_shapes[0]
 
         axis_resources = {}
         if dp_axis_name is not None:
@@ -1015,6 +1033,119 @@ def get_fused_attn_sharding_meta(stype: ShardingType,
                                                               tp_axis_name)
 
 
+def extend_fsdp_sharding_meta(sharding_meta: ShardingMeta,
+                              weight_fsdp_dim_map: Dict[int, int]) -> Tuple[ShardingMeta, str]:
+    """
+    Extending the given ShardingMeta to be compatible with FSDP (ZeRO3) sharding pattern.
+
+    .. note::
+        The extending helper assumes the first shape in sharding_meta.input_shapes
+        corresponding to the input tensor. Please be sure that 0-idx is in
+        `weight_fsdp_dim_map`.
+
+    Parameters
+    ----------
+    sharding_meta : ShardingMeta
+        the sharding meta object to extend with FSDP.
+    weight_fsdp_dim_map: Dict[int, int]
+        The dict, which key is idx of sharding_meta.input_shapes and value is the dimension
+        to extend FSDP. default is None, means no other sharding_meta.input_shapes to extend.
+
+    Returns
+    -------
+    updated_sharding_meta : ShardingMeta
+        a sharding_meta with the FSDP extenstion.
+    fsdp_axis_name: str
+        The name of FSDP named axis for further xmap projection.
+    """
+    assert 0 in weight_fsdp_dim_map, \
+        "0-idx is required to be in 'weight_fsdp_dim_map' for the input."
+
+    mst = infer_major_sharding_type()
+    if mst is MajorShardingType.SINGLE:
+        return sharding_meta, ""
+
+    gsr = global_shard_resource()
+    dp_mesh_axis = gsr.dp_resource
+    fsdp_mesh_axis = gsr.fsdp_resource
+
+    if fsdp_mesh_axis == dp_mesh_axis:
+        return sharding_meta, ""
+    if fsdp_mesh_axis is None:
+        return sharding_meta, ""
+
+    fsdp_dim_size, _ = _get_mesh_info(fsdp_mesh_axis)
+    fsdp_axis_name = "fsdp"
+
+    def get_idx_to_extend(sharded_indices, target_idx):
+        idx_to_extend = target_idx
+        for i in sharded_indices:
+            if i <= target_idx:
+                idx_to_extend += 1
+        return idx_to_extend
+
+    def extend_exist_sharding(idx, shape):
+        remain_size = shape[idx]
+        assert remain_size == -1 or remain_size % fsdp_dim_size == 0
+        remain_size = remain_size // fsdp_dim_size
+        new_shape = tuple([*shape[:idx], fsdp_dim_size, remain_size, *shape[idx + 1:]])
+        return new_shape
+
+    new_input_shapes = []
+    new_in_axes = []
+    for i, shape in enumerate(sharding_meta.input_shapes):
+        idx_to_extend = -1
+        if i == 0:    # Assume first shape corresponds to input
+            input_dp_dim = weight_fsdp_dim_map[i]
+            # idx_to_extend = input_dp_dim + 1 if is_dp_enabled(mst) else input_dp_dim
+            idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()), input_dp_dim)
+            new_shape = extend_exist_sharding(idx_to_extend, shape)
+
+            # assume one output only and have the same batch sharding like input
+            assert isinstance(sharding_meta.out_axes, dict)
+            new_out_axes = {}
+            for key in sharding_meta.out_axes:
+                if key < idx_to_extend:
+                    new_out_axes[key] = sharding_meta.out_axes[key]
+                else:
+                    new_out_axes[key + 1] = sharding_meta.out_axes[key]
+            new_out_axes[idx_to_extend] = fsdp_axis_name
+            sharding_meta.out_axes = new_out_axes
+        else:
+            new_shape = shape
+            if i in weight_fsdp_dim_map:
+                idx_to_extend = get_idx_to_extend(list(sharding_meta.in_axes[i].keys()),
+                                                  weight_fsdp_dim_map[i])
+                if weight_fsdp_dim_map[i] in sharding_meta.in_axes[i]:
+                    new_shape = extend_exist_sharding(idx_to_extend, shape)
+                else:
+                    assert shape[idx_to_extend] % fsdp_dim_size == 0
+                    remain_dim_size = shape[idx_to_extend] // fsdp_dim_size
+                    new_shape = tuple([
+                        *shape[:idx_to_extend], fsdp_dim_size, remain_dim_size,
+                        *shape[idx_to_extend + 1:]
+                    ])
+        if idx_to_extend >= 0:
+            new_ia = {}
+            for key in sharding_meta.in_axes[i]:
+                if key < idx_to_extend:
+                    new_ia[key] = sharding_meta.in_axes[i][key]
+                else:
+                    new_ia[key + 1] = sharding_meta.in_axes[i][key]
+            new_ia[idx_to_extend] = fsdp_axis_name
+        else:
+            new_ia = sharding_meta.in_axes[i]
+
+        new_input_shapes.append(new_shape)
+        new_in_axes.append(new_ia)
+
+    sharding_meta.input_shapes = tuple(new_input_shapes)
+    sharding_meta.in_axes = tuple(new_in_axes)
+
+    sharding_meta.axis_resources[fsdp_axis_name] = fsdp_mesh_axis
+    return sharding_meta, fsdp_axis_name
+
+
 def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
                 out_axes: Union[Dict, Tuple[str, ...], Tuple[Union[Dict, Tuple], ...]],
                 axis_resources: Dict, inputs: Tuple):
@@ -1032,10 +1163,12 @@ def xmap_runner(func: Callable, in_axes: Tuple[Dict, ...],
     # Collectives in manually partitioned computations are only supported
     # when all mesh axes are partitioned manually (no partial automatic
     # sharding). Make sure that you mention all mesh axes in axis_resources!"
-    for i, mesh_axis_names in enumerate(mesh.axis_names):
+    fake_idx_counter = 0
+    for mesh_axis_names in mesh.axis_names:
         if mesh_axis_names not in axis_resources.values():
-            fake_axis_name = f"{mesh_axis_names}_fake_{i}"
-            fake_in_axes[i] = fake_axis_name
+            fake_idx_counter += 1
+            fake_axis_name = f"{mesh_axis_names}_fake_{fake_idx_counter}"
+            fake_in_axes[fake_idx_counter] = fake_axis_name
             fake_axis_resource[fake_axis_name] = mesh_axis_names
 
     fake_input = jnp.zeros(tuple(64 for _ in range(len(fake_in_axes) + 1)))
