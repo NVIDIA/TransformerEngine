@@ -11,10 +11,12 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 
 import transformer_engine_extensions as tex
+from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
  )
 from ..jit import no_torch_dynamo
+from ..utils import cast_if_needed
 
 __all__ = ["LayerNorm"]
 
@@ -33,12 +35,18 @@ class _LayerNorm(torch.autograd.Function):
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
         is_grad_enabled: bool,
+        activation_dtype: torch.dtype,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.view((-1, in_features))
+
+        # Cast for native AMP
+        inputmat = cast_if_needed(inputmat, activation_dtype)
+        ln_weight = cast_if_needed(ln_weight, activation_dtype)
+        ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if is_grad_enabled:
             ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
@@ -63,7 +71,7 @@ class _LayerNorm(torch.autograd.Function):
             d_ln_out, inputmat, mu, rsigma, ln_weight,
             ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None
+        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
@@ -170,6 +178,9 @@ class LayerNorm(torch.nn.Module):
         if hasattr(self, "layer_norm_bias"):
             setattr(self, "bias", self.layer_norm_bias)
 
+        # Set the activation type for AMP.
+        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+
         if torch.is_grad_enabled():
             fwd_fn = _LayerNorm.apply
             args = []
@@ -185,7 +196,8 @@ class LayerNorm(torch.nn.Module):
             self.fwd_ln_sm_margin,
             self.bwd_ln_sm_margin,
             self.zero_centered_gamma,
-            torch.is_grad_enabled()
+            torch.is_grad_enabled(),
+            self.activation_dtype,
         )
 
         return fwd_fn(*args)
