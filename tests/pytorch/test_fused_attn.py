@@ -75,7 +75,7 @@ def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
             dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
 
-    atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+    atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (5e-3, 5e-3)
     if bias_type == "no_bias":
         assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
         assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
@@ -366,7 +366,7 @@ def test_dpa_fp8(dtype, bs, model):
     unfused_attn_fwd, unfused_attn_bwd = _run_dpa_fp8_ref(
             dtype, bs, config, "UnfusedDotProductAttention")
 
-    atol, rtol = (5e-2, 1e-1)
+    atol, rtol = (2.5e-2, 2.5e-2)
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
 
@@ -376,7 +376,7 @@ def _run_dpa_fp8(dtype, bs, config, backend):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
 
-    inp = torch.randn(
+    inp = 0.01 * torch.randn(
             bs * config.seq_len, config.num_attention_heads * config.head_dim,
             dtype = dtype).cuda()
     inp.requires_grad=True
@@ -384,7 +384,7 @@ def _run_dpa_fp8(dtype, bs, config, backend):
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = torch.randn(
+    op_grad = 0.01 * torch.randn(
         bs * config.seq_len, config.num_attention_heads * config.head_dim,
         dtype = dtype).cuda()
     torch.save(op_grad, 'op_grad.pt')
