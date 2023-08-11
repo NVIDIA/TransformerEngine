@@ -205,7 +205,8 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], nvte.DType])
 # CAST + TRANPOSE
 def cast(t: nvte.Tensor, dtype: nvte.DType):
     assert t.dtype != dtype
-    assert is_fp8(t) != is_fp8(dtype)
+    if is_fp8(t):
+        assert not is_fp8(dtype)
 
     output = empty(t.shape, dtype)
     if is_fp8(dtype):

@@ -189,7 +189,7 @@ class Add(Op):
 
 
 @register_fusion_inference
-def _(mmt: MMT, add: Add, x: nvte.Tensor):
+def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     (weight, bias) = get_parameters(mmt.weight, add.bias)
     x = nvte_utils.cast_checked(x, mmt.x_dtype)
     weight = nvte_utils.cast_checked(weight, mmt.weight_dtype)
@@ -201,7 +201,7 @@ def _(mmt: MMT, add: Add, x: nvte.Tensor):
 
 
 @register_fusion_forward
-def _(mmt: MMT, add: Add, x: nvte.Tensor):
+def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     (weight, bias) = get_parameters(mmt.weight, add.bias)
     (x, x_t), (weight, weight_t) = nvte_utils.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (weight, mmt.weight_dtype)
@@ -214,7 +214,7 @@ def _(mmt: MMT, add: Add, x: nvte.Tensor):
 
 
 @register_fusion_backward
-def _(
+def mmt_add_bwd_fused(
     mmt: MMT,
     add: Add,
     mmt_ctx: dict[str, nvte.Tensor],
