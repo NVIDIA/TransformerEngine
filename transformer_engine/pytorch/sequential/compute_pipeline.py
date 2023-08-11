@@ -7,27 +7,26 @@ from typing_extensions import Unpack
 from .utils import set_attribute
 import transformer_engine_cuda as nvte
 from .nvte_utils import is_fp8
-from .ops import Grads, Op, FUSIONS_INF, FUSIONS_FWD, FUSIONS_BWD, Context
+from .ops import (
+    BackwardFused,
+    ForwardFused,
+    Grads,
+    Op,
+    FUSIONS_INF,
+    FUSIONS_FWD,
+    FUSIONS_BWD,
+    Context,
+    Inference,
+)
 from .environment import Environment
-
-Forward = Callable[[nvte.Tensor], tuple[nvte.Tensor, Context]]
-Backward = Callable[[Context, nvte.Tensor], tuple[nvte.Tensor, Grads]]
-Inference = Callable[[nvte.Tensor], nvte.Tensor]
 
 
 class FusedOp(Op):
     def __init__(
         self,
         ops: list[Op],
-        forward: Callable[
-            [nvte.Tensor], tuple[nvte.Tensor, Unpack[tuple[Context, ...]]]
-        ]
-        | None = None,
-        backward: Callable[
-            [Unpack[tuple[Context, ...]], nvte.Tensor],
-            tuple[nvte.Tensor, Unpack[tuple[Grads, ...]]],
-        ]
-        | None = None,
+        forward: ForwardFused | None = None,
+        backward: BackwardFused | None = None,
         inference: Inference | None = None,
     ):
         self.forward_ = forward
@@ -52,14 +51,20 @@ class FusedOp(Op):
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
         assert self.backward_ is not None
-        ctxs = [
-            {name[len(getattr(op, "name")) :]: tensor for name, tensor in ctx.items()}
-            for op in self.ops
-        ]
-        result = self.backward_(*ctxs, dy)
-        dx: nvte.Tensor = result[0]  # type: ignore
-        grads: tuple[Grads] = result[1:]  # type: ignore
-        return (dx, *grads)
+        ctxs = list[Context]()
+        for op in self.ops:
+            op_name = getattr(op, "name")
+            ctxs.append(
+                {
+                    name[len(op_name) :]: tensor
+                    for name, tensor in ctx.items()
+                    if name.startswith(op_name)
+                }
+            )
+
+        dx, grads = self.backward_(*ctxs, dy)
+        grads_total: Grads = [grad for op_grads in grads for grad in op_grads]
+        return dx, grads_total
 
     def args(self):
         return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
@@ -84,12 +89,20 @@ class SelfContainedOp(Op):
         return x, full_ctx
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
-        ctxs = [
-            {name[len(getattr(op, "name")) :]: tensor for name, tensor in ctx.items()}
-            if not isinstance(op, FusedOp)
-            else ctx
-            for op in self.bwds
-        ]
+        ctxs = list[Context]()
+        for op in self.bwds:
+            if isinstance(op, FusedOp):
+                ctxs.append(ctx)
+            else:
+                op_name = getattr(op, "name")
+                ctxs.append(
+                    {
+                        name[len(op_name) :]: tensor
+                        for name, tensor in ctx.items()
+                        if name.startswith(op_name)
+                    }
+                )
+
         full_grads = Grads()
         for op, ctx in list(zip(self.bwds, ctxs))[::-1]:
             dy, grads = op.backward(ctx, dy)

@@ -7,23 +7,20 @@ from typing_extensions import Unpack, TypeVarTuple
 import transformer_engine_cuda as nvte
 from . import nvte_utils
 
-TensorProvider = Callable[[], nvte.Tensor]
-TensorRecipient = Callable[[nvte.Tensor], None]
 Context = dict[str, nvte.Tensor]
-Grads = tuple[nvte.Tensor | None, ...]
+Grads = list[nvte.Tensor]
+
+Forward = Callable[[nvte.Tensor], tuple[nvte.Tensor, Context]]
+ForwardFused = Callable[[nvte.Tensor], tuple[nvte.Tensor, tuple[Context, ...]]]
+Backward = Callable[[Context, nvte.Tensor], tuple[nvte.Tensor, Grads]]
+BackwardFused = Callable[
+    [Unpack[tuple[Context, ...]], nvte.Tensor], tuple[nvte.Tensor, tuple[Grads, ...]]
+]
+Inference = Callable[[nvte.Tensor], nvte.Tensor]
 
 FUSIONS_INF: dict[tuple[type, ...], Callable[..., Any]] = {}
 FUSIONS_FWD: dict[tuple[type, ...], Callable[..., Any]] = {}
 FUSIONS_BWD: dict[tuple[type, ...], Callable[..., Any]] = {}
-
-
-def get_parameters(*param: nvte.Tensor | TensorProvider):
-    return tuple(p if isinstance(p, nvte.Tensor) else p() for p in param)
-
-
-def return_grads(*grad: tuple[nvte.Tensor, TensorRecipient | None]):
-    return tuple(t if rec is None else rec(t) for t, rec in grad)
-
 
 Ops = TypeVarTuple("Ops")
 OpsAndCtxs = TypeVarTuple("OpsAndCtxs")
@@ -50,7 +47,7 @@ def register_fusion_inference(f: Callable[[Unpack[Ops], nvte.Tensor], nvte.Tenso
 def register_fusion_forward(
     f: Callable[
         [Unpack[Ops], nvte.Tensor],
-        tuple[nvte.Tensor, Unpack[tuple[Context, ...]]],
+        tuple[nvte.Tensor, tuple[Context, ...]],
     ]
 ):
     fused_modules = _get_arg_types(f)[:-1]
@@ -61,7 +58,7 @@ def register_fusion_forward(
 def register_fusion_backward(
     f: Callable[
         [Unpack[OpsAndCtxs], nvte.Tensor],
-        tuple[nvte.Tensor, Unpack[tuple[Grads, ...]]],
+        tuple[nvte.Tensor, tuple[Grads, ...]],
     ]
 ):
     arg_types = _get_arg_types(f)
@@ -92,8 +89,7 @@ class Op(ABC):
 class MMT(Op):
     def __init__(
         self,
-        weight: nvte.Tensor | TensorProvider,
-        dweight_r: TensorRecipient | None = None,
+        weight: nvte.Tensor,
         x_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
@@ -102,7 +98,6 @@ class MMT(Op):
         dweight_dtype: nvte.DType = nvte.DType.BFloat16,
     ):
         self.weight = weight
-        self.dweight_r = dweight_r
         self.x_dtype = x_dtype
         self.weight_dtype = weight_dtype
         self.dy_dtype = dy_dtype
@@ -111,18 +106,16 @@ class MMT(Op):
         self.dweight_dtype = dweight_dtype
 
     def inference(self, x: nvte.Tensor):
-        (weight,) = get_parameters(self.weight)
         x = nvte_utils.cast_checked(x, self.x_dtype)
-        weight = nvte_utils.cast_checked(weight, self.weight_dtype)
+        weight = nvte_utils.cast_checked(self.weight, self.weight_dtype)
 
         y = nvte_utils.matmul_transpose(x, weight, self.y_dtype)
 
         return y
 
     def forward(self, x: nvte.Tensor):
-        (weight,) = get_parameters(self.weight)
         (x, x_t), (weight, weight_t) = nvte_utils.multi_cast_transpose_checked(
-            (x, self.x_dtype), (weight, self.weight_dtype)
+            (x, self.x_dtype), (self.weight, self.weight_dtype)
         )
 
         y = nvte_utils.matmul_transpose(x, weight, self.y_dtype)
@@ -136,17 +129,16 @@ class MMT(Op):
         dx = nvte_utils.matmul_transpose(dy, weight_t, self.dx_dtype)
         dweight = nvte_utils.matmul_transpose(x_t, dy_t, self.dweight_dtype)
 
-        return dx, return_grads((dweight, self.dweight_r))
+        return dx, [dweight]
 
     def args(self):
-        return [*get_parameters(self.weight)]
+        return [self.weight]
 
 
 class Add(Op):
     def __init__(
         self,
-        bias: nvte.Tensor | TensorProvider,
-        dbias_r: TensorRecipient | None = None,
+        bias: nvte.Tensor,
         x_dtype: nvte.DType | None = None,
         bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
@@ -155,7 +147,6 @@ class Add(Op):
         dbias_dtype: nvte.DType = nvte.DType.BFloat16,
     ):
         self.bias = bias
-        self.dbias_r = dbias_r
         self.x_dtype = x_dtype
         self.bias_dtype = bias_dtype
         self.dy_dtype = dy_dtype
@@ -167,9 +158,8 @@ class Add(Op):
         return self.forward(x)[0]
 
     def forward(self, x: nvte.Tensor):
-        (bias,) = get_parameters(self.bias)
         x = nvte_utils.cast_checked(x, self.x_dtype)
-        bias = nvte_utils.cast_checked(bias, self.bias_dtype)
+        bias = nvte_utils.cast_checked(self.bias, self.bias_dtype)
 
         y = nvte_utils.add(x, bias, self.y_dtype)
 
@@ -182,18 +172,17 @@ class Add(Op):
         dx = nvte_utils.cast_checked(dy, self.dx_dtype)
         dbias = nvte_utils.dbias(dy, self.dbias_dtype)
 
-        return dx, return_grads((dbias, self.dbias_r))
+        return dx, [dbias]
 
     def args(self):
-        return [*get_parameters(self.bias)]
+        return [self.bias]
 
 
 @register_fusion_inference
 def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
-    (weight, bias) = get_parameters(mmt.weight, add.bias)
     x = nvte_utils.cast_checked(x, mmt.x_dtype)
-    weight = nvte_utils.cast_checked(weight, mmt.weight_dtype)
-    bias = nvte_utils.cast_checked(bias, add.bias_dtype)
+    weight = nvte_utils.cast_checked(mmt.weight, mmt.weight_dtype)
+    bias = nvte_utils.cast_checked(add.bias, add.bias_dtype)
 
     y = nvte_utils.matmul_transpose_add(x, weight, bias, add.y_dtype)
 
@@ -202,15 +191,14 @@ def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
 
 @register_fusion_forward
 def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
-    (weight, bias) = get_parameters(mmt.weight, add.bias)
     (x, x_t), (weight, weight_t) = nvte_utils.multi_cast_transpose_checked(
-        (x, mmt.x_dtype), (weight, mmt.weight_dtype)
+        (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
-    bias = nvte_utils.cast_checked(bias, add.bias_dtype)
+    bias = nvte_utils.cast_checked(add.bias, add.bias_dtype)
 
     y = nvte_utils.matmul_transpose_add(x, weight, bias, add.y_dtype)
 
-    return y, {"x_t": x_t, "weight_t": weight_t}, Context()
+    return y, ({"x_t": x_t, "weight_t": weight_t}, Context())
 
 
 @register_fusion_backward
@@ -230,8 +218,4 @@ def mmt_add_bwd_fused(
     dx = nvte_utils.matmul_transpose(dy, weight_t, mmt.dx_dtype)
     dweight = nvte_utils.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
 
-    return (
-        dx,
-        return_grads((dweight, mmt.dweight_r)),
-        return_grads((dbias, add.dbias_r)),
-    )
+    return dx, ([dweight], [dbias])
