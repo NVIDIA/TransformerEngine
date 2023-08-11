@@ -22,7 +22,7 @@ def _cublas_workspace():
     workspace_size = 33_554_432 if _is_hopper() else 4_194_304
     data = torch.empty(workspace_size, dtype=torch.int8, device="cuda")
     return nvte.Tensor(
-        nvte.DType.Byte, data, torch.empty(), torch.empty(), torch.empty()
+        nvte.DType.Byte, data, torch.empty(()), torch.empty(()), torch.empty(())
     )
 
 
@@ -38,9 +38,9 @@ def make_nvte_tensor(t: torch.Tensor):
     return nvte.Tensor(
         torch_to_te_dtype(t.dtype),
         t.data,
-        torch.empty(),
-        torch.empty(),
-        torch.empty(),
+        torch.empty(()),
+        torch.empty(()),
+        torch.empty(()),
     )
 
 
@@ -167,9 +167,9 @@ def empty(shape: Sequence[int] = (), dtype: nvte.DType = nvte.DType.Float32):
         return nvte.Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
-            torch.empty(),
-            torch.empty(),
-            torch.empty(),
+            torch.empty(()),
+            torch.empty(()),
+            torch.empty(()),
         )
 
 
@@ -194,9 +194,9 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], nvte.DType])
         else nvte.Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
-            torch.empty(),
-            torch.empty(),
-            torch.empty(),
+            torch.empty(()),
+            torch.empty(()),
+            torch.empty(()),
         )
         for shape, dtype in shapes_dtypes
     )
