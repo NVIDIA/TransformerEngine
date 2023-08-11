@@ -77,7 +77,7 @@ class SelfContainedOp(Op):
         full_ctx = Context()
         for op in self.fwds:
             x, ctx = op.forward(x)
-            if not isinstance(x, FusedOp):
+            if not isinstance(op, FusedOp):
                 op_name = getattr(op, "name")
                 ctx = {op_name + name: tensor for name, tensor in ctx.items()}
             full_ctx |= ctx
