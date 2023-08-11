@@ -14,11 +14,18 @@ class BaseModule(nn.Module):
     compile_env: Environment | None
 
     def __init__(self, *ops: Op | None):
-        super().__init__()  # type: ignore
+        if not self.is_nn_module_initialized():
+            raise AttributeError(
+                f"nn.Module not initialized - call super({BaseModule.__name__}).__init__() before super().__init__()"
+            )
+
         ops_clean = [op for op in ops if op is not None]
         self.ops = ops_clean
         self.pipeline = None
         self.compile_env = None
+
+    def is_nn_module_initialized(self):
+        return hasattr(self, "_parameters")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         env = self._current_env()
