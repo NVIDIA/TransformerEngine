@@ -34,11 +34,13 @@ class Linear(BaseModule):
         nn.Module.__init__(self)  # type: ignore
 
         self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, dtype=param_dtype)
+            torch.empty(out_features, in_features, dtype=param_dtype, device="cuda")
         )
         weight_init_method(self.weight)
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, dtype=param_dtype))
+            self.bias = nn.Parameter(
+                torch.empty(out_features, dtype=param_dtype, device="cuda")
+            )
             bias_init_method(self.bias)
 
         super().__init__(

@@ -77,6 +77,10 @@ struct Tensor {
 
   static float *getDataPtr(at::Tensor t) {
     if (t.numel() > 0) {
+      if (!t.is_cuda()) {
+        throw std::runtime_error(
+            "Cannot create NVTE Tensor: !tensor.is_cuda()");
+      }
       return reinterpret_cast<float *>(t.data_ptr());
     } else {
       return nullptr;
