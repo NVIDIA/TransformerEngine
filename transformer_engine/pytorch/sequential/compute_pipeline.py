@@ -1,7 +1,7 @@
 from copy import deepcopy
 from functools import partial, reduce
 import operator
-from typing import Callable, Literal, overload
+from typing import Callable, Literal
 from typing_extensions import Unpack
 import transformer_engine_cuda as nvte
 from .nvte_utils import is_fp8

@@ -19,6 +19,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <exception>
+#include <memory>
 #include <pybind11/pybind11.h>
 #include <stdexcept>
 #include <torch/extension.h>
@@ -33,7 +34,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 #include <type_traits>
-#include <memory>
+
 
 #include "type_list.h"
 
@@ -63,22 +64,14 @@ struct Tensor {
   }
 
   Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
-         at::Tensor scale_inv) :
-         pimpl{
-          nvte_create_tensor(
-            getDataPtr(data),
-            NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()}, dtype, getDataPtr(amax),
-            getDataPtr(scale),
-            getDataPtr(scale_inv)
-          ),
-          [](NVTETensor impl) { nvte_destroy_tensor(impl); }
-        },
-        data{data},
-        amax{amax},
-        scale{scale},
-        scale_inv{scale_inv}
-  {
-  }
+         at::Tensor scale_inv)
+      : pimpl{nvte_create_tensor(getDataPtr(data),
+                                 NVTEShape{(size_t *)(data.sizes().data()),
+                                           data.sizes().size()},
+                                 dtype, getDataPtr(amax), getDataPtr(scale),
+                                 getDataPtr(scale_inv)),
+              [](NVTETensor impl) { nvte_destroy_tensor(impl); }},
+        data{data}, amax{amax}, scale{scale}, scale_inv{scale_inv} {}
 };
 
 struct TensorPack : NVTETensorPack {
@@ -145,8 +138,23 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 }
 
 // Manual wrapper around nvte_multi_cast_transpose
-void multi_cast_transpose(const std::vector<Tensor>& inputs, const std::vector<Tensor>& cast_outs, const std::vector<Tensor>& transposed_outs) {
-  nvte_multi_cast_transpose(inputs.size(), inputs.data(), cast_outs.data(), transposed_outs.data(), at::cuda::getCurrentCUDAStream());
+void multi_cast_transpose(const std::vector<Tensor> &inputs,
+                          const std::vector<Tensor> &cast_outs,
+                          const std::vector<Tensor> &transposed_outs) {
+  count = inputs.size();
+  std::vector<NVTETensor> inputs_(count);
+  std::vector<NVTETensor> cast_outs_(count);
+  std::vector<NVTETensor> transposed_outs_(count);
+
+  for (int i = 0; i < inputs.size(); ++i) {
+    inputs_[i] = (NVTETensor)inputs[i].pimpl.get();
+    cast_outs_[i] = (NVTETensor)cast_outs[i].pimpl.get();
+    transposed_outs_[i] = (NVTETensor)transposed_outs[i].pimpl.get();
+  }
+
+  nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
+                            transposed_outs_.data(),
+                            at::cuda::getCurrentCUDAStream());
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -182,8 +190,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
 
   py::class_<Tensor>(m, "Tensor", py::module_local())
-      .def(py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor,
-                    at::Tensor>())
+      .def(
+          py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor, at::Tensor>())
       .def_property_readonly("dtype", &Tensor::dtype)
       .def_property_readonly("shape", &Tensor::shape)
       .def_readonly("data", &Tensor::data)
