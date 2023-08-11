@@ -16,16 +16,18 @@ class ComputePipelineFunction(autograd.Function):
     def forward(
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *exposed_tensors: torch.Tensor,
-        op: Op,
-        nvte_x: nvte.Tensor
+        *args: torch.Tensor | Op | nvte.Tensor
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
         real input and output is nvte_x
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
+        exposed_tensors, op, nvte_x = args[:-2], args[-2], args[-1]
         del exposed_tensors
+
+        assert isinstance(op, Op)
+        assert isinstance(nvte_x, nvte.Tensor)
 
         y, to_save = op.forward(nvte_x)
 
