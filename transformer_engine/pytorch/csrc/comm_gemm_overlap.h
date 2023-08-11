@@ -53,23 +53,36 @@ struct UbufCommOverlap : torch::CustomClassHolder {
   torch::Tensor _ubuf;
   torch::Tensor output_tensor;
   torch::Tensor counter;
+  torch::Tensor _empty_tensor;
   at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
   std::vector<at::cuda::CUDAStream> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
 
   UbufCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm, int comm_cga_size,
-                  int num_splits, bool set_sm_margin, int num_max_streams) {
+                  int num_splits, bool set_sm_margin, int num_max_streams, torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
     _ub_comm->use_ce = 0;
     _ub_comm->sms = num_comm_sm;
     _ub_comm->cga_size = comm_cga_size;
 
+    _empty_tensor = empty_tensor;
+
     // Allocate and register extra userbuffers
     int ubuf_bytes = sample.numel() * sample.element_size();
     _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
                                               _ub_comm, true);
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
+
+    const char* env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
+    if (env_p != nullptr) {
+      if (env_p[0]=='1')
+        printf ("!! Using reducescatter2_userbuff_strided_atomic\n");
+      else if (env_p[0]=='2')
+        printf ("!! Using reducescatter2_userbuff_strided_multiatomic\n");
+      else
+        printf ("!! Using reducescatter2_userbuff_strided\n");
+    }
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
@@ -142,7 +155,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     te_gemm(A, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb, D, D_scale,
             D_type, D_amax, bias, bias_type, pre_gelu_out, grad, workspace, workspaceSize,
             accumulate, use_split_accumulator, _math_sms, 0 /*m_split*/, 0 /*n_split*/,
-            false /*gemm_producer*/, torch::Tensor());
+            false /*gemm_producer*/, _empty_tensor);
 
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_comm, 0));
@@ -171,7 +184,6 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     int m = A.size(0);
     int k = A.size(1);
     int n = B.size(0);
-    printf ("!! atomic_gemm_overlap_rs %dx%dx%d\n", m, n, k);
     int m_chunk = m / _num_splits;
     int output_chunk_size = n * m_chunk;
     int input_a_chunk_size = m_chunk * k;
@@ -182,10 +194,9 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     char *output_buf_chunk_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
     int *counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
-//    printf ("rs_output size=%d,%d\m", rs_output.size(0), rs_output.size(1));
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
     int ubuf_offset = 0;
-    int ori_sms = _ub_comm->sms;
+//    int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -217,19 +228,22 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     for (int i = 0; i < _num_splits; i++) {
       const char* env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
       if (env_p != nullptr && env_p[0]=='1') {
-        printf ("!! Using reducescatter2_userbuff_strided_atomic\n");
+//        if (i == _num_splits-1) {
+//          _ub_comm->sms = UB_MAX_SM;
+//        }
         reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i*m_chunk,
                                             m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
       }
       else if (env_p != nullptr && env_p[0]=='2') {
-        printf ("!! TODO reducescatter2_userbuff_strided_multiatomic\n");
         reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
                                             m_chunk, n, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
         break;
       }
       else {
-        printf ("!! Using reducescatter2_userbuff_strided\n");
         consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
+//        if (i == _num_splits-1) {
+//           _ub_comm->sms = UB_MAX_SM;
+//        }
         reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i*m_chunk,
                                             m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
       }
@@ -237,7 +251,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
       rs_output_ptr += m_chunk * _ubuf.element_size();
     }
  
-    _ub_comm->sms = ori_sms;
+//    _ub_comm->sms = ori_sms;
     CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
@@ -257,7 +271,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
                         at::Tensor bias, transformer_engine::DType bias_type,
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                        bool gemm_overlap, at::Tensor rs_output, at::Tensor empty_tensor) {
+                        bool gemm_overlap, at::Tensor rs_output) {
     // Get GEMM dimensions
     int m = A.size(0);
     int k = A.size(1);
@@ -299,7 +313,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
       te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
               output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
               workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator, _math_sms,
-              0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, empty_tensor);
+              0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, _empty_tensor);
 
       for (int i = 1; i < _num_splits; i++) {
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
@@ -316,7 +330,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
                 output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, empty_tensor);
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, _empty_tensor);
 
         CHECK_CUDA(cudaEventRecord(
             _start_comm, (cudaStream_t)_stream_compute[(i - 1) % _stream_compute.size()]));
@@ -352,7 +366,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
                 output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, empty_tensor);
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, _empty_tensor);
 
         CHECK_CUDA(cudaEventRecord(_start_comm,
                                    (cudaStream_t)_stream_compute[i % _stream_compute.size()]));
@@ -432,6 +446,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
   void *_ubuf_ptr;
   torch::Tensor _ubuf;
   torch::Tensor counter;
+  torch::Tensor _empty_tensor;
   std::vector<torch::Tensor> _ubufs;
   at::cuda::CUDAStream _stream_send = at::cuda::getStreamFromPool(true);
   at::cuda::CUDAStream _stream_recv = at::cuda::getStreamFromPool(true);
@@ -439,13 +454,14 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
   cudaEvent_t _start_compute, _stop_compute, _stop_send, _stop_recv;
 
   UbufP2PCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm, int comm_cga_size,
-                     bool set_sm_margin, bool aggregate2, int num_max_streams) {
+                     bool set_sm_margin, bool aggregate2, int num_max_streams, torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     create_communicator_grouped2(&_ub_comm, 1, 1, tp_size, 1);
     _ub_comm->use_ce = 1;
     _ub_comm->sms = num_comm_sm;
     _ub_comm->cga_size = comm_cga_size;
 
+    _empty_tensor = empty_tensor;
     // Create workspace tensor with userbuffer
     int ubuf_bytes = sample.numel() * sample.element_size();
     int ubuf_chunk_bytes = ubuf_bytes / tp_size;
@@ -453,6 +469,15 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                                               _ub_comm, true);
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
+    const char* env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
+    if (env_p != nullptr) {
+      if (env_p[0]=='1')
+        printf ("!!userbuffers_sendrecv_atomic\n");
+      else if (env_p[0]=='2')
+        printf ("!!userbuffers_sendrecv_multiatomic\n");
+      else
+        printf ("!!userbuffers_sendrecv\n");
+    }
     // Create tensor chunks for easy management
     char *ubuf_byte_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     for (int i = 0; i < tp_size; i++) {
@@ -485,7 +510,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     _prev_rank = (tp_size + rank + -1) % tp_size + _rank_round_tp;
   
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    counter = torch::ones({tp_size}, counter_options);
+    counter = torch::zeros({tp_size*2}, counter_options);
+    counter.index_put_({Slice(None, tp_size)}, 1);
     counter.index_put_({0}/*_tp_id}*/, 0);
 
     // CUDA event creation
@@ -510,7 +536,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
                                  bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-    printf ("!! atomic_gemm_overlap_ag\n");
     // Get GEMM dimensions between TN and NN input layouts
     const int m = (transa) ? A.size(0) : A.size(1);
     const int k = (transa) ? A.size(1) : A.size(0);
@@ -559,19 +584,16 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         //                 _prev_rank, (cudaStream_t)_stream_recv);
         const char* env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
         if (env_p != nullptr && env_p[0]=='1') {
-          printf ("!!userbuffers_sendrecv_atomic\n");
           userbuffers_sendrecv_atomic(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
                             _next_rank, _prev_rank, &counter_ptr[i+1]/*recv_chunk_id]*/, (cudaStream_t)_stream_recv);
         }
         else if (env_p != nullptr && env_p[0]=='2') {
           if (i==0) {
-            printf ("!!userbuffers_sendrecv_multiatomic\n");
             userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes, _ub_comm,
                             _tp_size, counter_ptr, (cudaStream_t)_stream_recv);
           }
         }
         else {
-          printf ("!!userbuffers_sendrecv\n");
           userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
                             _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
           producer(counter_ptr, i+1/*recv_chunk_id*/, (cudaStream_t)_stream_recv);
@@ -612,7 +634,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                                  at::Tensor D_amax, at::Tensor bias,
                                  transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                                  bool grad, at::Tensor workspace, size_t workspaceSize,
-                                 bool accumulate, bool use_split_accumulator, at::Tensor B_copy, at::Tensor counter) {
+                                 bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
     // Get GEMM dimensions between TN and NN input layouts
     const int m = (transa) ? A.size(0) : A.size(1);
     const int k = (transa) ? A.size(1) : A.size(0);
@@ -636,7 +658,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
     assert(pre_gelu_out.numel() == 0);
     if (_aggregate2) {
-      printf ("!!split_overlap_ag aggregate2\n");
       // Catch up the default torch stream
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
@@ -681,7 +702,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         te_gemm(A, A_scale_inverse, A_type, transa, input_b_chunk, B_scale_inverse, B_type, transb,
                 output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, counter);
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, _empty_tensor);
 
         if (i < num_steps - 1) {
           // P2P communication
@@ -709,7 +730,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
       CHECK_CUDA(
           cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     } else {
-      printf ("!!split_overlap_ag NO aggregate2\n");
       // Catch up the default torch stream
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
       CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
@@ -734,7 +754,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         te_gemm(A, A_scale_inverse, A_type, transa, _ubufs[send_chunk_id], B_scale_inverse, B_type,
                 transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, counter);
+                _math_sms, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, _empty_tensor);
 
         if (i < _tp_size - 1) {
           // P2P communication

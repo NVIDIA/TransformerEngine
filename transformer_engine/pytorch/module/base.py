@@ -115,6 +115,7 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
     rank_id = torch.distributed.get_rank()
+    print (f'!!!! initialize_ub ub_cfgs {ub_cfgs}')
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -158,6 +159,7 @@ def initialize_ub(
                     set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -169,6 +171,7 @@ def initialize_ub(
                     num_splits,             # Number of communication splits
                     set_sm_margin,          # Set SM margin
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
 

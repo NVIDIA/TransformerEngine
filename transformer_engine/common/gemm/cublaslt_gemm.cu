@@ -229,7 +229,6 @@ void cublas_gemm(const Tensor *inputA,
                                                    CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
   if (counter != nullptr) {
-    printf ("!!! cublasLtMatmul m_split %d n_split %d\n", m_split, n_split);
     if (m_split == 0) m_split=1;
     if (n_split == 0) n_split=1;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,

@@ -141,13 +141,10 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
-        if ub_atomic_gemm_rs:
-            tp_world_size = get_distributed_world_size(tp_group)
-            if tp_world_size == 1:
                 ub_atomic_gemm_rs = False
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -979,6 +976,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
 
+        print (f'!!!LNMLP ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_rs {ub_split_rs} ub_atomic_gemm_rs {ub_atomic_gemm_rs} ub_split_ag {ub_split_ag}')
         if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
                 tex.userbuf_comm_available()

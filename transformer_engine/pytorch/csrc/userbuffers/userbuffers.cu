@@ -2084,6 +2084,14 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
             asm volatile ("fence.sc.gpu;\n");
         }
     }
+    // sync all CTAs before moving to next chunk.
+    if(threadIdx.x==0) {
+        int old_val2;
+        atomicInc(((unsigned int *)counters)+nchunks+j, gridDim.x-1);
+        clock_t s=clock64();
+        while ( 0 != ( old_val2 = atomicCAS( ((unsigned int*)counters)+nchunks+j, 0, 0) ) ) {if(clock64()-s>TIMEOUT) {printf("pusg_sendrecv %d chunk %d stuck at %d expect %d\n", myrank, j, old_val2, gridDim.x);}}
+    }
+    __syncthreads();
     }
 }
 

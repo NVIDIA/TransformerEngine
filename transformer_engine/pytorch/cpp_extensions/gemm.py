@@ -101,7 +101,7 @@ def fp8_gemm(
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (extra_output_tensor, empty_tensor,))
+            args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG:
             fn = ub.atomic_gemm_overlap_ag
             extra_output_tensor = (
@@ -113,7 +113,7 @@ def fp8_gemm(
             assert (
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS requires extra output tensor'
-            args = tuple(args + (True, extra_output_tensor, empty_tensor,))
+            args = tuple(args + (True, extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS:
             fn = ub.atomic_gemm_overlap_rs
             assert (
@@ -227,13 +227,13 @@ def gemm(
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
-            args = tuple(args + (extra_output_tensor, empty_tensor,))
+            args = tuple(args + (extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
             assert (
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS requires extra output tensor'
-            args = tuple(args + (True, extra_output_tensor, empty_tensor,))
+            args = tuple(args + (True, extra_output_tensor,))
     else:
         args = tuple(args + (empty_tensor,))
     _ = fn(*args)
