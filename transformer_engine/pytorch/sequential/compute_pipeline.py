@@ -1,8 +1,10 @@
+import copy
 from copy import deepcopy
 from functools import partial, reduce
 import operator
 from typing import Callable, Literal
 from typing_extensions import Unpack
+from .utils import set_attribute
 import transformer_engine_cuda as nvte
 from .nvte_utils import is_fp8
 from .ops import Grads, Op, FUSIONS_INF, FUSIONS_FWD, FUSIONS_BWD, Context
@@ -171,9 +173,15 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
     return functions
 
 
+def copy_op_list(ops: list[Op]):
+    "Deep copy ops, except for tensors"
+    with set_attribute(nvte.Tensor, "__deepcopy__", lambda self, memo: self):
+        return copy.deepcopy(ops)
+
+
 class ComputePipeline:
     def __init__(self, ops: list[Op], env: Environment):
-        ops = deepcopy(ops)
+        ops = copy_op_list(ops)
 
         name_ops(ops)
         if not env.fp8_enabled:
