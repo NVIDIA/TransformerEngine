@@ -39,8 +39,15 @@
 #define NVTE_CHECK_CUBLAS(status)                                              \
   do {                                                                         \
     if (status != CUBLAS_STATUS_SUCCESS) {                                     \
-      NVTE_ERROR("CUBLAS Error: " +                                            \
-                 std::string(cublasGetStatusString(status)));                  \
+      std::string message;                                                     \
+      message.reserve(1024);                                                   \
+      message += "CUBLAS Error: ";                                             \
+      message += cublasGetStatusString(status);                                \
+      message += (". "                                                         \
+                  "For more information, increase CUBLASLT_LOG_LEVEL, "        \
+                  "by setting CUBLASLT_LOG_LEVEL=N [0-5] "                     \
+                  "in the environment.");                                      \
+      NVTE_ERROR(message);                                                     \
     }                                                                          \
   } while (false)
 
