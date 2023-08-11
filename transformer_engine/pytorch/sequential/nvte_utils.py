@@ -30,8 +30,13 @@ def _to_cublas_args(A: nvte.Tensor, B: nvte.Tensor, transA: bool, transB: bool):
     return B, A, not transA, not transB
 
 
+def set_is_backward(is_backward: bool):
+    global _is_backward
+    _is_backward = is_backward
+
+
 def _is_during_backward() -> bool:
-    raise NotImplementedError()  # TODO
+    return _is_backward
 
 
 def make_nvte_tensor(t: torch.Tensor):

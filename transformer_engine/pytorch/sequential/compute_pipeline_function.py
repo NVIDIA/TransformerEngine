@@ -1,12 +1,11 @@
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-from torch import nn
 import transformer_engine_cuda as nvte
 
 from .ops import Context, Op
 
-from .nvte_utils import is_fp8, make_nvte_tensor
+from .nvte_utils import is_fp8, make_nvte_tensor, set_is_backward
 
 from .compute_pipeline import ComputePipeline
 
@@ -29,6 +28,7 @@ class ComputePipelineFunction(autograd.Function):
         assert isinstance(op, Op)
         assert isinstance(nvte_x, nvte.Tensor)
 
+        set_is_backward(False)
         y, to_save = op.forward(nvte_x)
 
         # Expose backward context for tracing
@@ -69,6 +69,7 @@ class ComputePipelineFunction(autograd.Function):
         saved: Context = getattr(ctx, "nvte_ctx")
         op: Op = getattr(ctx, "nvte_op")
 
+        set_is_backward(True)
         data_grad, param_grads = op.backward(saved, make_nvte_tensor(grad_output))
 
         # Check that gradients are not fp8 and can be processed by the optimizer
