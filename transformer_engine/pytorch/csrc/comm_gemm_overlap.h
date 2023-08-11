@@ -75,7 +75,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     const char* env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
-    if (env_p != nullptr) {
+    const char* env_q = std::getenv("NVTE_UB_ATOMIC_GEMM_RS");
+    if (env_p != nullptr && env_q != nullptr && env_q[0]=='1') {
       if (env_p[0]=='1')
         printf ("!! Using reducescatter2_userbuff_strided_atomic\n");
       else if (env_p[0]=='2')
