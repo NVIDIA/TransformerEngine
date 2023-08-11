@@ -106,6 +106,56 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 c10::optional<at::Tensor> amax_dP,
                 c10::optional<at::Tensor> amax_dQKV);
 
+std::vector<at::Tensor> fused_attn_fwd_q_k_v(
+                size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
+                size_t total_seqs_q, size_t total_seqs_kv,
+                size_t h, size_t d, bool is_training,
+                float attn_scale, float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
+                const at::Tensor cu_seqlens_q,
+                const at::Tensor cu_seqlens_kv,
+                const at::Tensor Q,
+                const at::Tensor K,
+                const at::Tensor V,
+                const transformer_engine::DType qkv_type,
+                const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> scale_S,
+                const c10::optional<at::Tensor> scale_O,
+                c10::optional<at::Tensor> amax_S,
+                c10::optional<at::Tensor> amax_O,
+                const c10::optional<at::Tensor> Bias,
+                const c10::optional<at::Generator> rng_gen,
+                size_t rng_elts_per_thread);
+
+std::vector<at::Tensor> fused_attn_bwd_q_k_v(
+                size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
+                size_t total_seqs_q, size_t total_seqs_kv,
+                size_t h, size_t d, float attn_scale,
+                float p_dropout, bool set_zero,
+                NVTE_QKV_Layout qkv_layout,
+                NVTE_Bias_Type bias_type,
+                NVTE_Mask_Type attn_mask_type,
+                const at::Tensor cu_seqlens_q,
+                const at::Tensor cu_seqlens_kv,
+                const at::Tensor Q,
+                const at::Tensor K,
+                const at::Tensor V,
+                const at::Tensor O,
+                const at::Tensor dO,
+                const transformer_engine::DType qkv_type,
+                const std::vector<at::Tensor> Aux_CTX_Tensors,
+                const c10::optional<at::Tensor> descale_QKV,
+                const c10::optional<at::Tensor> descale_S,
+                const c10::optional<at::Tensor> descale_O,
+                const c10::optional<at::Tensor> descale_dO,
+                const c10::optional<at::Tensor> scale_S,
+                const c10::optional<at::Tensor> scale_dP,
+                const c10::optional<at::Tensor> scale_dQKV,
+                c10::optional<at::Tensor> amax_dP,
+                c10::optional<at::Tensor> amax_dQKV);
+
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);

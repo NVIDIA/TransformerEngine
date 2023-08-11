@@ -82,7 +82,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   return backend;
 }
 
-// NVTE fused attention FWD FP8 with packed QKV
+// NVTE fused attention FWD with packed QKV
 void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor Bias,
@@ -167,7 +167,7 @@ void nvte_fused_attn_fwd_qkvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention BWD FP8 with packed QKV
+// NVTE fused attention BWD with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor O,
@@ -266,7 +266,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention FWD FP8 with packed KV
+// NVTE fused attention FWD with packed KV
 void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
@@ -336,7 +336,7 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention BWD FP8 with packed KV
+// NVTE fused attention BWD with packed KV
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
@@ -397,6 +397,159 @@ void nvte_fused_attn_bwd_kvpacked(
           input_Q, input_KV, input_dO,
           output_S,
           output_dQ, output_dKV, output_dBias,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
+          wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+    const char* err_msg =
+    "The FP16/BF16 fused attention (arbitrary seqlen) currently "
+    "only supports packed QKV input.\n";
+    NVTE_ERROR(err_msg);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
+    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+  } else {
+    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+  }
+}
+// NVTE fused attention FWD with separate Q, K and V
+void nvte_fused_attn_fwd_kvpacked(
+            const NVTETensor Q,
+            const NVTETensor K,
+            const NVTETensor V,
+            const NVTETensor Bias,
+            NVTETensor S,
+            NVTETensor O,
+            NVTETensorPack* Aux_CTX_Tensors,
+            const NVTETensor cu_seqlens_q,
+            const NVTETensor cu_seqlens_kv,
+            const NVTETensor rng_state,
+            size_t max_seqlen_q, size_t max_seqlen_kv,
+            bool is_training, float attn_scale, float dropout,
+            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTETensor workspace,
+            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
+  using namespace transformer_engine;
+  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
+  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
+  const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
+  const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
+  const Tensor *input_Bias = reinterpret_cast<const Tensor*>(Bias);
+  Tensor *input_output_S = reinterpret_cast<Tensor*>(S);
+  Tensor *output_O = reinterpret_cast<Tensor*>(O);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+
+  // Q shape is [total_seqs, h, d]
+  // KV shape is [total_seqs, h, d]
+  auto ndim = input_Q->data.shape.size();
+  size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  size_t h = input_Q->data.shape[ndim - 2];
+  size_t d = input_Q->data.shape[ndim - 1];
+
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+  NVTE_Fused_Attn_Backend fused_attention_backend =
+              nvte_get_fused_attn_backend(
+                          Q_type, KV_type,
+                          qkv_layout, bias_type, attn_mask_type,
+                          dropout, max_seqlen_q, max_seqlen_kv, d);
+
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
+#if (CUDNN_VERSION >= 8901)
+      fused_attn_max_512_fwd_q_k_v(
+          b, max_seqlen_q, max_seqlen_kv, h, d,
+          is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_Q, input_K, input_V, input_Bias, output_O,
+          Aux_CTX_Tensors,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
+          input_rng_state,
+          wkspace, stream, handle);
+#else
+    NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
+#endif
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+    const char* err_msg =
+    "The FP16/BF16 fused attention (arbitrary seqlen) currently "
+    "only supports packed QKV input.\n";
+    NVTE_ERROR(err_msg);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
+    NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
+  } else {
+    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+  }
+}
+// NVTE fused attention BWD with separate Q, K and V
+void nvte_fused_attn_bwd_kvpacked(
+            const NVTETensor Q,
+            const NVTETensor K,
+            const NVTETensor V,
+            const NVTETensor O,
+            const NVTETensor dO,
+            const NVTETensor S,
+            NVTETensor dP,
+            const NVTETensorPack* Aux_CTX_Tensors,
+            NVTETensor dQ,
+            NVTETensor dK,
+            NVTETensor dV,
+            NVTETensor dBias,
+            const NVTETensor cu_seqlens_q,
+            const NVTETensor cu_seqlens_kv,
+            size_t max_seqlen_q, size_t max_seqlen_kv,
+            float attn_scale, float dropout,
+            NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTETensor workspace,
+            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
+  using namespace transformer_engine;
+  const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
+  const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
+  const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
+  const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
+  const Tensor *input_O = reinterpret_cast<const Tensor*>(O);
+  const Tensor *input_dO = reinterpret_cast<const Tensor*>(dO);
+  const Tensor *input_S = reinterpret_cast<const Tensor*>(S);
+  Tensor *input_output_dP = reinterpret_cast<Tensor*>(dP);
+  Tensor *output_dQ = reinterpret_cast<Tensor*>(dQ);
+  Tensor *output_dK = reinterpret_cast<Tensor*>(dK);
+  Tensor *output_dV = reinterpret_cast<Tensor*>(dV);
+  Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
+  Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
+
+  // Q shape is [total_seqs, h, d]
+  // KV shape is [total_seqs, h, d]
+  auto ndim = input_Q->data.shape.size();
+  size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  size_t h = input_Q->data.shape[ndim - 2];
+  size_t d = input_Q->data.shape[ndim - 1];
+
+  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+  NVTE_Fused_Attn_Backend fused_attention_backend =
+              nvte_get_fused_attn_backend(
+                          Q_type, KV_type,
+                          qkv_layout, bias_type, attn_mask_type,
+                          dropout, max_seqlen_q, max_seqlen_kv, d);
+
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
+#if (CUDNN_VERSION >= 8901)
+      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      fused_attn_max_512_bwd_q_k_v(
+          b, max_seqlen_q, max_seqlen_kv, h, d,
+          attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_Q, input_K, input_V, input_dO,
+          output_S,
+          output_dQ, output_dK, output_dV, output_dBias,
           input_cu_seqlens_q, input_cu_seqlens_kv,
           wkspace, stream, handle);
 #else
