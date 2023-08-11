@@ -65,7 +65,7 @@ def register_fusion_backward(
     ]
 ):
     arg_types = _get_arg_types(f)
-    module_count = (len(arg_types) - 1) / 2
+    module_count = (len(arg_types) - 1) // 2
     fused_modules = arg_types[:module_count]
     FUSIONS_BWD[fused_modules] = f
     return f
