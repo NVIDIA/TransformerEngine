@@ -10,13 +10,13 @@ from ..nvte_utils import make_nvte_tensor
 def _default_weight_init_method(weight: torch.Tensor):
     in_features = weight.shape[0]
     k = 1 / sqrt(in_features)
-    torch.nn.init.uniform_(weight, -k, k)
+    return nn.init.uniform_(weight, -k, k)
 
 
 def _default_bias_init_method(bias: torch.Tensor):
     out_features = bias.shape[0]
     k = 1 / sqrt(out_features)
-    torch.nn.init.uniform_(bias, -k, k)
+    return nn.init.uniform_(bias, -k, k)
 
 
 class Linear(BaseModule):
@@ -27,21 +27,25 @@ class Linear(BaseModule):
         bias: bool = True,
         param_dtype: torch.dtype = torch.get_default_dtype(),
         weight_init_method: Callable[
-            [torch.Tensor], None
+            [torch.Tensor], torch.Tensor
         ] = _default_weight_init_method,
-        bias_init_method: Callable[[torch.Tensor], None] = _default_bias_init_method,
+        bias_init_method: Callable[
+            [torch.Tensor], torch.Tensor
+        ] = _default_bias_init_method,
     ):
         nn.Module.__init__(self)  # type: ignore
 
         self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, dtype=param_dtype, device="cuda")
+            weight_init_method(
+                torch.empty(out_features, in_features, dtype=param_dtype, device="cuda")
+            )
         )
-        weight_init_method(self.weight)
         if bias:
             self.bias = nn.Parameter(
-                torch.empty(out_features, dtype=param_dtype, device="cuda")
+                bias_init_method(
+                    torch.empty(out_features, dtype=param_dtype, device="cuda")
+                )
             )
-            bias_init_method(self.bias)
 
         super().__init__(
             MMT(make_nvte_tensor(self.weight)),
