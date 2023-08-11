@@ -29,6 +29,7 @@ class Sequential(BaseModule):
         self,
         *args: BaseModule | OrderedDict[str, BaseModule],
     ):
+        nn.Module.__init__(self)  # type: ignore
         modules: list[tuple[str, BaseModule]]
         if len(args) == 1 and isinstance(args[0], OrderedDict):
             modules = list(args[0].items())
