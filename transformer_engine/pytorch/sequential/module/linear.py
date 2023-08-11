@@ -3,7 +3,7 @@ from math import sqrt
 import torch
 from torch import nn
 from .base import BaseModule
-from ..ops import MMT, Add
+from .. import ops
 from ..nvte_utils import make_nvte_tensor
 
 
@@ -48,6 +48,6 @@ class Linear(BaseModule):
             )
 
         super().__init__(
-            MMT(make_nvte_tensor(self.weight)),
-            Add(make_nvte_tensor(self.bias)) if bias else None,
+            ops.MMT(make_nvte_tensor(self.weight)),
+            ops.Add(make_nvte_tensor(self.bias)) if bias else None,
         )

@@ -178,6 +178,56 @@ class Add(Op):
         return [self.bias]
 
 
+class LayerNorm(Op):
+    def __init__(
+        self,
+        eps: float,
+        zero_centered_gamma: bool,
+        weight: nvte.Tensor,
+        bias: nvte.Tensor,
+        x_dtype: nvte.DType | None = None,
+        weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        dy_dtype: nvte.DType | None = None,
+        y_dtype: nvte.DType = nvte.DType.Float8E4M3,
+        dx_dtype: nvte.DType = nvte.DType.BFloat16,
+        dweight_dtype: nvte.DType = nvte.DType.BFloat16,
+        dbias_dtype: nvte.DType = nvte.DType.BFloat16,
+    ):
+        self.eps = eps
+        self.zero_centered_gamma = zero_centered_gamma
+        self.weight = weight
+        self.bias = bias
+        self.x_dtype = x_dtype
+        self.weight_dtype = weight_dtype
+        self.bias_dtype = bias_dtype
+        self.dy_dtype = dy_dtype
+        self.y_dtype = y_dtype
+        self.dx_dtype = dx_dtype
+        self.dweight_dtype = dweight_dtype
+        self.dbias_dtype = dbias_dtype
+
+    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
+        return self.forward(x)[0]
+
+    def forward(self, x: nvte.Tensor):
+        x = nvte_utils.cast_checked(x, self.x_dtype)
+        weight = nvte_utils.cast_checked(self.weight, self.weight_dtype)
+        bias = nvte_utils.cast_checked(self.bias, self.bias_dtype)
+
+        y, mu, rsigma = nvte_utils.layernorm(
+            x, self.eps, self.zero_centered_gamma, weight, bias, self.y_dtype
+        )
+
+        return y, {"mu": mu, "rsigma": rsigma}
+
+    def backward(self, ctx: dict[str, nvte.Tensor], dy: nvte.Tensor):
+        raise NotImplementedError()
+
+    def args(self):
+        return [self.weight, self.bias]
+
+
 @register_fusion_inference
 def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     x = nvte_utils.cast_checked(x, mmt.x_dtype)

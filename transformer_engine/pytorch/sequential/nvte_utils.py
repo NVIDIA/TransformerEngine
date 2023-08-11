@@ -1,6 +1,7 @@
 from functools import cache
+import os
 import subprocess
-from typing import Sequence
+from typing import Literal, Sequence
 import torch
 import transformer_engine_cuda as nvte
 
@@ -26,17 +27,32 @@ def _cublas_workspace():
     )
 
 
+@cache
+def _fwd_ln_sm_margin():
+    return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def _bwd_ln_sm_margin():
+    return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+def _sm_margin():
+    if _pass == "backward":
+        return _bwd_ln_sm_margin()
+    elif _pass == "forward":
+        return _fwd_ln_sm_margin()
+    else:
+        return 0
+
+
 def _to_cublas_args(A: nvte.Tensor, B: nvte.Tensor, transA: bool, transB: bool):
     return B, A, not transA, not transB
 
 
-def set_is_backward(is_backward: bool):
-    global _is_backward
-    _is_backward = is_backward
-
-
-def _is_during_backward() -> bool:
-    return _is_backward
+def set_current_pass(pass_: Literal["forward", "backward", "inference"]):
+    global _pass
+    _pass = pass_
 
 
 def make_nvte_tensor(t: torch.Tensor):
@@ -56,12 +72,12 @@ def _cast_transpose_dbias(
     transposed_output: nvte.Tensor,
     dbias: nvte.Tensor,
 ):
-    workspace_query = empty()
-    nvte.cast_transpose_dbias(
-        input, cast_output, transposed_output, dbias, workspace_query
-    )
-    workspace = empty_like(workspace_query)
-    nvte.cast_transpose_dbias(input, cast_output, transposed_output, dbias, workspace)
+    workspace = empty()
+    for _ in range(2):
+        nvte.cast_transpose_dbias(
+            input, cast_output, transposed_output, dbias, workspace
+        )
+        workspace = empty_like(workspace)
 
 
 # DTYPES
@@ -341,10 +357,10 @@ def matmul_transpose_add(
         empty(),
         trans_a,
         trans_b,
-        _is_during_backward(),
+        _pass == "backward",
         _cublas_workspace(),
         False,
-        _is_during_backward(),
+        _pass == "backward",
         0,
     )
     return out
@@ -366,10 +382,10 @@ def matmul_transpose_add_gelu(
         pre_gelu,
         trans_a,
         trans_b,
-        _is_during_backward(),
+        _pass == "backward",
         _cublas_workspace(),
         False,
-        _is_during_backward(),
+        _pass == "backward",
         0,
     )
     return pre_gelu, out
@@ -389,10 +405,10 @@ def matmul_transpose_add_add(
         empty(),
         trans_a,
         trans_b,
-        _is_during_backward(),
+        _pass == "backward",
         _cublas_workspace(),
         True,
-        _is_during_backward(),
+        _pass == "backward",
         0,
     )
     return add2
@@ -413,10 +429,59 @@ def matmul_transpose_add_gelu_add(
         pre_gelu,
         trans_a,
         trans_b,
-        _is_during_backward(),
+        _pass == "backward",
         _cublas_workspace(),
         True,
-        _is_during_backward(),
+        _pass == "backward",
         0,
     )
     return pre_gelu, add2
+
+
+# LAYERNORM
+def layernorm(
+    inp: nvte.Tensor,
+    eps: float,
+    zero_centered_gamma: bool,
+    gamma: nvte.Tensor,
+    beta: nvte.Tensor,
+    out_dtype: nvte.DType,
+):
+    "returns (inp - mean(inp)) / sqrt(var(inp) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
+
+    assert len(inp.shape) == 2
+    n = inp.shape[0]
+    mu = empty((n,), nvte.DType.Float32)
+    rsigma = empty((n,), nvte.DType.Float32)
+    out = empty(inp.shape, out_dtype)
+    multiProcessorCount = torch.cuda.get_device_properties(  # type: ignore
+        torch.cuda.current_device()
+    ).multiProcessorCount
+    assert isinstance(multiProcessorCount, int)
+    sm_margin = _sm_margin()
+
+    workspace = empty()
+    barrier = empty()
+
+    if zero_centered_gamma:
+        func = nvte.layernorm1p_fwd
+    else:
+        func = nvte.layernorm_fwd
+
+    for _ in range(2):
+        func(
+            inp,
+            gamma,
+            beta,
+            eps,
+            out,
+            mu,
+            rsigma,
+            multiProcessorCount - sm_margin,
+            workspace,
+            barrier,
+        )
+        workspace = empty_like(workspace)
+        barrier = empty_like(barrier)
+
+    return out, mu, rsigma
