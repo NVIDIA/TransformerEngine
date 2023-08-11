@@ -15,17 +15,20 @@ class ComputePipelineFunction(autograd.Function):
     def forward(
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *args: torch.Tensor | Op | nvte.Tensor
+        *args: torch.Tensor | Op | list[nvte.Tensor]
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
-        real input and output is nvte_x
+        real input and output is in list, as nvte.Tensor is immutable
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
-        exposed_tensors, op, nvte_x = args[:-2], args[-2], args[-1]
+        exposed_tensors, op, nvte_x_container = args[:-2], args[-2], args[-1]
         del exposed_tensors
 
         assert isinstance(op, Op)
+        assert isinstance(nvte_x_container, list)
+        assert len(nvte_x_container) == 1
+        nvte_x = nvte_x_container[0]
         assert isinstance(nvte_x, nvte.Tensor)
 
         set_is_backward(False)
@@ -48,12 +51,7 @@ class ComputePipelineFunction(autograd.Function):
         setattr(ctx, "nvte_op", op)
 
         # Actually store the result
-        nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv = (
-            y.data,
-            y.amax,
-            y.scale,
-            y.scale_inv,
-        )
+        nvte_x_container[0] = y
 
         # Preserve computation graph
         exposed_x.data = y.data
@@ -100,6 +98,6 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
             x = ComputePipelineFunction.apply(  # type: ignore
-                x, *exposed_tensors, contained_op, nvte_x
+                x, *exposed_tensors, contained_op, [nvte_x]
             )
         return x
