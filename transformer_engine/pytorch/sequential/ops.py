@@ -94,7 +94,7 @@ class MMT(Op):
         self,
         weight: nvte.Tensor | TensorProvider,
         dweight_r: TensorRecipient | None = None,
-        x_dtype: nvte.DType | None = None,
+        x_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
         y_dtype: nvte.DType = nvte.DType.Float8E4M3,

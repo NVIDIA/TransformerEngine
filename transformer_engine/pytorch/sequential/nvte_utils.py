@@ -307,11 +307,14 @@ def cast_transpose_dbias_checked(
 # MATMUL TRANSPOSE
 def matmul_transpose(mat: nvte.Tensor, mul: nvte.Tensor, out_dtype: nvte.DType):
     "returns mat @ mul^T"
+    # TODO: this should be allowed, though cublaslt_gemm cannot be used in this case
+    assert mat.dtype == mul.dtype
     return matmul_transpose_add(mat, mul, empty(), out_dtype)
 
 
 def matmul_transpose_gelu(mat: nvte.Tensor, mul: nvte.Tensor, out_dtype: nvte.DType):
     "returns mat @ mul^T, GELU(mat @ mul^T)"
+    assert mat.dtype == mul.dtype
     return matmul_transpose_add_gelu(mat, mul, empty(), out_dtype)
 
 
@@ -319,6 +322,7 @@ def matmul_transpose_add(
     mat: nvte.Tensor, mul: nvte.Tensor, add: nvte.Tensor, out_dtype: nvte.DType
 ):
     "returns mat @ mul^T + add"
+    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
     nvte.cublas_gemm(
@@ -342,6 +346,7 @@ def matmul_transpose_add_gelu(
     mat: nvte.Tensor, mul: nvte.Tensor, add: nvte.Tensor, out_dtype: nvte.DType
 ):
     "returns mat @ mul^T + add, GELU(mat @ mul^T + add)"
+    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
     pre_gelu = empty(out.shape, add.dtype)
@@ -366,6 +371,7 @@ def matmul_transpose_add_add(
     mat: nvte.Tensor, mul: nvte.Tensor, add1: nvte.Tensor, add2: nvte.Tensor
 ):
     "returns mat @ mul^T + add1 + add2"
+    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     nvte.cublas_gemm(
         a,
@@ -388,6 +394,7 @@ def matmul_transpose_add_gelu_add(
     mat: nvte.Tensor, mul: nvte.Tensor, add1: nvte.Tensor, add2: nvte.Tensor
 ):
     "returns mat @ mul^T + add1, GELU(mat @ mul^T + add1) + add2"
+    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     pre_gelu = empty(add2.shape, add1.dtype)
     nvte.cublas_gemm(
