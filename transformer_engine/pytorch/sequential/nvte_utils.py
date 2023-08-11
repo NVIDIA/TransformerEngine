@@ -68,7 +68,7 @@ def _cast_transpose_dbias(
 def te_to_torch_dtype(dtype: nvte.DType):
     match dtype:
         case nvte.DType.Byte:
-            return torch.int8
+            return torch.uint8
         case nvte.DType.Int32:
             return torch.int32
         case nvte.DType.Int64:
