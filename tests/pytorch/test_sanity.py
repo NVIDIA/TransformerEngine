@@ -15,6 +15,8 @@ from transformer_engine.pytorch import (
     Linear,
     LayerNormMLP,
     TransformerLayer,
+    RMSNorm,
+    LayerNorm,
 )
 from transformer_engine.common import recipe
 
@@ -306,6 +308,50 @@ def _test_sanity_common(block, bs, dtype, config, fp8_recipe, skip_wgrad, skip_d
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
+
+
+def _test_sanity_normalization_amp(block, bs, dtype, config, skip_wgrad, skip_dgrad):
+    if skip_dgrad and skip_wgrad:
+        pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")
+
+    te_inp = torch.randn(
+        config.seq_len, bs, config.hidden_size, requires_grad=True
+    ).cuda()
+    te_inp.retain_grad()
+
+    with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
+        te_out = block(te_inp)
+        loss = te_out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+
+    assert te_out.dtype == dtype, "AMP wrong output type."
+    assert te_inp.grad.dtype == torch.float32, "AMP wrong dgrad type."
+    for name, p in block.named_parameters():
+        if p.requires_grad:
+            assert p.grad.dtype == torch.float32, f"AMP wrong wgrad type for {name}."
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("skip_wgrad", all_boolean)
+@pytest.mark.parametrize("skip_dgrad", all_boolean)
+@pytest.mark.parametrize("normalization", all_normalizations)
+def test_sanity_normalization_amp(dtype, bs, model, skip_wgrad, skip_dgrad, normalization):
+    config = model_configs[model]
+    module = RMSNorm if normalization == "RMSNorm" else LayerNorm
+
+    block = (
+        module(
+            config.hidden_size,
+            eps=config.eps,
+        )
+        .to(dtype=torch.float32)
+        .cuda()
+    )
+    _test_sanity_normalization_amp(block, bs, dtype, config, skip_wgrad, skip_dgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)

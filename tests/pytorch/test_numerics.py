@@ -25,7 +25,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
-
 seed = 1234
 rng_str = "rng_state"
 torch.manual_seed(seed)
@@ -333,13 +332,14 @@ class TorchRMSNorm(nn.Module):
         self.register_parameter("weight", self.weight)
 
     def forward(self, x):
-        norm_x = x.norm(2, dim=-1, keepdim=True)
+        norm_x2 = torch.sum(x.float()**2, dim=-1, keepdim=True)
         d_x = self.in_features
 
-        rms_x = norm_x * d_x ** (-1. / 2)
-        x_normed = x / (rms_x + self.eps)
+        rms_x2 = norm_x2 / d_x + self.eps
+        r_rms_x = rms_x2 ** (-1. / 2)
+        x_normed = x * r_rms_x
 
-        return self.weight * x_normed
+        return (self.weight.float() * x_normed).to(x.dtype)
 
 class TorchLayerNormLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int,
@@ -877,12 +877,14 @@ def test_linear_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_rmsnorm_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
+def test_rmsnorm_accuracy(dtype, bs, model, eps):
     config = model_configs[model]
 
     te_rmsnorm = (
         RMSNorm(
             config.hidden_size,
+            eps=eps,
         )
         .to(dtype=dtype)
         .cuda()
@@ -892,6 +894,7 @@ def test_rmsnorm_accuracy(dtype, bs, model):
     torch_rmsnorm = (
         TorchRMSNorm(
             config.hidden_size,
+            eps=eps,
         )
         .to(dtype=dtype)
         .cuda()

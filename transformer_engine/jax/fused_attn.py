@@ -16,7 +16,7 @@ from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
 from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
 from .sharding import get_fused_attn_sharding_meta
 from .sharding import ShardingType
-from .sharding import xmap_runner
+from .sharding import xmap_runner, extend_fsdp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -82,6 +82,7 @@ def self_fused_attn(qkv: jnp.ndarray,
             tp_dims=([3, 1, None, 0], [2]),
             dp_axis_name=dp_axis_name,
             tp_axis_name=tp_axis_name)
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
 
         inputs_ = tuple(
             jnp.reshape(x, new_shape) if x is not None else None
@@ -95,9 +96,9 @@ def self_fused_attn(qkv: jnp.ndarray,
                                           is_training=is_training)
 
         output_ = xmap_runner(partial_self_fused_attn, sharding_meta.in_axes,
-                              sharding_meta.out_axes[0], sharding_meta.axis_resources, inputs_)
+                              sharding_meta.out_axes, sharding_meta.axis_resources, inputs_)
 
-        output = jnp.reshape(output_, sharding_meta.output_shapes[0])
+        output = jnp.reshape(output_, sharding_meta.output_shapes)
 
     return output
 
@@ -202,6 +203,7 @@ def cross_fused_attn(q: jnp.ndarray,
             tp_dims=([2, 3, None, None], [2]),
             dp_axis_name=dp_axis_name,
             tp_axis_name=tp_axis_name)
+        sharding_meta = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
 
         inputs_ = tuple(
             jnp.reshape(x, new_shape) if x is not None else None
@@ -215,9 +217,9 @@ def cross_fused_attn(q: jnp.ndarray,
                                            is_training=is_training)
 
         output_ = xmap_runner(partial_cross_fused_attn, sharding_meta.in_axes,
-                              sharding_meta.out_axes[0], sharding_meta.axis_resources, inputs_)
+                              sharding_meta.out_axes, sharding_meta.axis_resources, inputs_)
 
-        output = jnp.reshape(output_, sharding_meta.output_shapes[0])
+        output = jnp.reshape(output_, sharding_meta.output_shapes)
 
     return output
 

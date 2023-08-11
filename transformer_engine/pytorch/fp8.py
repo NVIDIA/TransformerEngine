@@ -87,13 +87,7 @@ def get_amax_reduce_handle_fwd() -> Union[bool, None]:
 
 def get_global_fp8_buffer() -> Dict[str, List[torch.Tensor]]:
     """Returns global fp8 buffer."""
-    buffer = {}
-
-    # Map all tensors to CPU.
-    for k, v in _global_fp8_buffer.items():
-        buffer[k] = [tensor.cpu() for tensor in v]
-
-    return buffer
+    return _global_fp8_buffer
 
 
 def set_global_fp8_buffer(buffer: Dict[str, List[torch.Tensor]]) -> None:
