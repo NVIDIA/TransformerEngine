@@ -14,6 +14,7 @@
 #include <ATen/native/DispatchStub.h>
 #include <c10/cuda/CUDAStream.h>
 #include <c10/macros/Macros.h>
+#include <cstdlib>
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -36,6 +37,26 @@
 #include <type_traits>
 
 #include "type_list.h"
+
+void cuda_check() {
+  static const bool perform_check = []() {
+    const char *var = std::getenv("CUDA_LAUNCH_BLOCKING");
+    if (var && var[0] == '1') {
+      return true;
+    }
+    return false;
+  }();
+
+  if (perform_check) {
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      throw std::runtime_error(
+          "TE kernel error: " + std::string(cudaGetErrorName(err)) + ": " +
+          cudaGetErrorString(err))
+    }
+  }
+}
 
 namespace py = pybind11;
 
@@ -131,7 +152,9 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
-      return func(unwrap_arg(args)...);
+      auto result = func(unwrap_arg(args)...);
+      cuda_check();
+      return result;
     };
   }
 }
@@ -154,6 +177,8 @@ void multi_cast_transpose(const std::vector<Tensor> &inputs,
   nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
                             transposed_outs_.data(),
                             at::cuda::getCurrentCUDAStream());
+
+  cuda_check();
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
