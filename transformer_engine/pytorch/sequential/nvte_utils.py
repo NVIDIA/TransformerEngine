@@ -158,6 +158,14 @@ _AMAX_HISTORY_LEN = 512
 
 
 def empty(shape: Sequence[int] = (), dtype: nvte.DType = nvte.DType.Float32):
+    if shape == ():
+        return nvte.Tensor(
+            dtype,
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
+        )
     if is_fp8(dtype):
         return nvte.Tensor(
             dtype,
