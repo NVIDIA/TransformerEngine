@@ -32,11 +32,12 @@ OpsAndCtxs = TypeVarTuple("OpsAndCtxs")
 def _get_arg_types(f: Callable[..., Any]):
     annotations = typing.get_type_hints(f)
     annotations.pop("return", None)
-    arg_type_names: tuple[str] = tuple(annotations.values())
-    assert all(
-        isinstance(val, str) for val in arg_type_names
-    )  # True due to __future__.annotations
-    arg_types: tuple[type] = tuple(ast.literal_eval(val) for val in arg_type_names)
+    arg_type_annotations: tuple[str | type] = tuple(annotations.values())
+    assert all(isinstance(val, (str, type)) for val in arg_type_annotations)
+    arg_types: tuple[type] = tuple(
+        ast.literal_eval(val) if isinstance(val, str) else val
+        for val in arg_type_annotations
+    )
     return arg_types
 
 
