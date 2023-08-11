@@ -61,7 +61,7 @@ class ComputePipelineFunction(autograd.Function):
     @staticmethod
     def backward(ctx: FunctionCtx, grad_output: torch.Tensor):
         # The context needs to think that the tensors were read
-        _ = ctx.saved_tensors()  # type: ignore
+        _ = ctx.saved_tensors  # type: ignore
 
         # Get real context
         saved: Context = getattr(ctx, "nvte_ctx")
