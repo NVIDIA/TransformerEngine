@@ -86,6 +86,8 @@ class SelfContainedOp(Op):
     def backward(self, ctx: Context, dy: nvte.Tensor):
         ctxs = [
             {name[len(getattr(op, "name")) :]: tensor for name, tensor in ctx.items()}
+            if not isinstance(op, FusedOp)
+            else ctx
             for op in self.bwds
         ]
         full_grads = Grads()
