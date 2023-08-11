@@ -26,6 +26,8 @@ AttnMaskTypes = ("causal", "padding", "no_mask")
 
 AttnTypes = ("self", "cross")
 
+AttnBiasTypes = ("pre_scale_bias", "post_scale_bias", "no_bias")
+
 LayerTypes = ("encoder", "decoder")
 
 GemmParallelModes = ("row", "column", None)
