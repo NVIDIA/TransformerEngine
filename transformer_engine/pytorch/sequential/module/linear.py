@@ -31,7 +31,7 @@ class Linear(BaseModule):
         ] = _default_weight_init_method,
         bias_init_method: Callable[[torch.Tensor], None] = _default_bias_init_method,
     ):
-        super(BaseModule).__init__()  # type: ignore
+        nn.Module.__init__(self)  # type: ignore
 
         self.weight = nn.Parameter(
             torch.empty(out_features, in_features, dtype=param_dtype)
