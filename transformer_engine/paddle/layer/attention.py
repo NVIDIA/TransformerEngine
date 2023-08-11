@@ -129,11 +129,9 @@ class DotProductAttention(paddle.nn.Layer):
                  attention_dropout: float = 0.0,
                  attn_mask_type: str = "causal",
                  attention_type: str = "self",
-                 is_training: bool = True,
                  backend: str = 'transformer_engine') -> None:
         super().__init__()
 
-        self.is_training = is_training
         self.norm_factor = norm_factor
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
@@ -270,12 +268,11 @@ class DotProductAttention(paddle.nn.Layer):
         product = paddle.matmul(x=q * (1.0 / self.norm_factor), y=k, transpose_y=True)
         attention_probs = self.scale_mask_softmax(product, attention_mask, scale=None)
 
-        if self.is_training and self.attention_dropout > 0:
+        if self.attention_dropout > 0:
             attention_probs = F.dropout(
                 attention_probs,
                 self.attention_dropout,
                 training=self.training,
-                mode="upscale_in_train",
             )
 
         out = paddle.matmul(attention_probs, v)
@@ -302,7 +299,6 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         input_layernorm: bool = False,
         attention_type: str = "self",
         zero_centered_gamma: bool = False,
-        is_training: bool = True,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -313,7 +309,6 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         self.weight_attr = weight_attr
         self.bias_attr = bias_attr
         self.attn_mask_type = attn_mask_type
-        self.is_training = is_training
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -378,7 +373,6 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             attn_mask_type=attn_mask_type,
             attention_type=self.attention_type,
             backend=self.backend,
-            is_training=self.is_training,
         )
 
         # Linear
