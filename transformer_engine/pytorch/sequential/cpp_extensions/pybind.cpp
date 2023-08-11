@@ -53,7 +53,7 @@ void cuda_check() {
     if (err != cudaSuccess) {
       throw std::runtime_error(
           "TE kernel error: " + std::string(cudaGetErrorName(err)) + ": " +
-          cudaGetErrorString(err))
+          cudaGetErrorString(err));
     }
   }
 }
