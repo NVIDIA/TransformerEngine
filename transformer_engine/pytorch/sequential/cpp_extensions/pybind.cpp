@@ -35,7 +35,6 @@
 #include <transformer_engine/transpose.h>
 #include <type_traits>
 
-
 #include "type_list.h"
 
 namespace py = pybind11;
@@ -141,7 +140,7 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 void multi_cast_transpose(const std::vector<Tensor> &inputs,
                           const std::vector<Tensor> &cast_outs,
                           const std::vector<Tensor> &transposed_outs) {
-  count = inputs.size();
+  auto count = inputs.size();
   std::vector<NVTETensor> inputs_(count);
   std::vector<NVTETensor> cast_outs_(count);
   std::vector<NVTETensor> transposed_outs_(count);
