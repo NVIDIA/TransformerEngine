@@ -58,7 +58,13 @@ inline CUresult call(const char *symbol, ArgTs... args) {
   do {                                                                         \
     CUresult status =                                                          \
         transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__);           \
-    NVTE_CHECK_CUDA_DRIVER(status);                                            \
+    if (status != CUDA_SUCCESS) {                                              \
+      const char *description;                                                 \
+      transformer_engine::cuda_driver::call("cuGetErrorString", status,        \
+                                            &description);                     \
+      NVTE_ERROR(                                                              \
+          transformer_engine::concat_strings(#symbol": ", description));       \
+    }                                                                          \
   } while (false)
 
 #endif // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
