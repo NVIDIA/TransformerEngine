@@ -52,7 +52,7 @@ inline CUresult call(const char *symbol, ArgTs... args) {
       NVTE_ERROR(                                                              \
           transformer_engine::concat_strings("CUDA Error: ", description));    \
     }                                                                          \
-    while (false)
+  } while (false)
 
 #define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                               \
   do {                                                                         \
