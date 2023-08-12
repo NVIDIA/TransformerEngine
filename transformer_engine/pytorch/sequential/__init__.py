@@ -1,3 +1,7 @@
-from .module import Linear, Sequential
+from .module import LayerNorm, Linear, Sequential
 
-__all__ = ["Linear", "Sequential"]
+__all__ = [
+    "LayerNorm",
+    "Linear",
+    "Sequential",
+]
