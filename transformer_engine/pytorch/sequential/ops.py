@@ -85,7 +85,7 @@ class Op(ABC):
     def args(self) -> list[nvte.Tensor]:
         ...
 
-    def __str__(self):
+    def __repr__(self):
         return self.__class__.__name__
 
 

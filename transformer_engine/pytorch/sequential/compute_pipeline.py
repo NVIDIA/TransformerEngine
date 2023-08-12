@@ -68,7 +68,7 @@ class FusedOp(Op):
     def args(self):
         return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
 
-    def __str__(self):
+    def __repr__(self):
         return f"""FusedOp{self.ops}"""
 
 
@@ -217,7 +217,7 @@ class ComputePipeline:
             x = op.inference(x)
         return x
 
-    def __str__(self):
+    def __repr__(self):
         return f"""ComputePipeline(
             forward: {(
                 op
