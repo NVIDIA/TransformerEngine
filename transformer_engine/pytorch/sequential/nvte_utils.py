@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from functools import cache
 import os
 import subprocess
@@ -133,6 +134,26 @@ def bit_width(dtype: nvte.DType):
             return 8
         case nvte.DType.Float8E5M2:
             return 8
+
+
+def _type_name(dtype: nvte.DType):
+    match dtype:
+        case nvte.DType.Byte:
+            return "byte"
+        case nvte.DType.Int32:
+            return "int32"
+        case nvte.DType.Int64:
+            return "int64"
+        case nvte.DType.Float32:
+            return "fp32"
+        case nvte.DType.Float16:
+            return "fp16"
+        case nvte.DType.BFloat16:
+            return "bf16"
+        case nvte.DType.Float8E4M3:
+            return "fp8e4m3"
+        case nvte.DType.Float8E5M2:
+            return "fp8e5m2"
 
 
 def is_fp8(t: nvte.Tensor | nvte.DType):
@@ -440,6 +461,50 @@ def matmul_transpose_add_gelu_add(
 
 
 # LAYERNORM
+class _LayerNormConfig:
+    def __init__(
+        self, hidden_size: int, gamma: nvte.Tensor, x: nvte.Tensor, out: nvte.Tensor
+    ):
+        self.hidden_size = hidden_size
+        self.gamma_dtype_name = _type_name(gamma.dtype)
+        self.x_dtype_name = _type_name(x.dtype)
+        self.out_dtype_name = _type_name(out.dtype)
+
+    def __str__(self):
+        return str(
+            (
+                self.hidden_size,
+                self.gamma_dtype_name,
+                self.x_dtype_name,
+                self.out_dtype_name,
+            )
+        )
+
+
+@contextmanager
+def _handle_unsupported_layernorm_config(
+    hidden_size: int, gamma: nvte.Tensor, x: nvte.Tensor, out: nvte.Tensor
+):
+    try:
+        yield
+    except RuntimeError as error:
+        config = _LayerNormConfig(hidden_size, gamma, x, out)
+        if "in function get_fwd_launcher: FWD: Unsupported types." in str(error):
+            raise ValueError(
+                "This configuration for layernorm is not supported. "
+                "(Regex) Search for REGISTER_FWD_(TUNED|GENERAL)_LAUNCHER to see possible options. "
+                f"Used configuration: {config}"
+            ) from error
+        elif "in function get_bwd_launcher: BWD: Unsupported types." in str(error):
+            raise ValueError(
+                "This configuration for layernorm is not supported. "
+                "(Regex) Search for REGISTER_BWD_(TUNED|GENERAL)_LAUNCHER to see possible options. "
+                f"Used configuration: {config}"
+            ) from error
+        else:
+            raise
+
+
 def layernorm(
     x: nvte.Tensor,
     eps: float,
@@ -451,7 +516,7 @@ def layernorm(
     "returns (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
 
     assert len(x.shape) == 2
-    n = x.shape[0]
+    n, hidden_size = x.shape
     mu = empty((n,), nvte.DType.Float32)
     rsigma = empty((n,), nvte.DType.Float32)
     out = empty(x.shape, out_dtype)
@@ -461,7 +526,7 @@ def layernorm(
     else:
         func = nvte.layernorm_fwd
 
-    try:
+    with _handle_unsupported_layernorm_config(hidden_size, gamma, x, out):
         workspace = empty()
         barrier = empty()
         for _ in range(2):
@@ -479,14 +544,6 @@ def layernorm(
             )
             workspace = empty_like(workspace)
             barrier = empty_like(barrier)
-    except RuntimeError as error:
-        if "in function get_fwd_launcher: FWD: Unsupported types." in str(error):
-            raise ValueError(
-                "This configuration for layernorm is not supported. "
-                "(Regex) Search for REGISTER_FWD_(TUNED|GENERAL)_LAUNCHER to see possible options."
-            ) from error
-        else:
-            raise
 
     return out, mu, rsigma
 
@@ -513,7 +570,7 @@ def dlayernorm(
     else:
         func = nvte.layernorm_bwd
 
-    try:
+    with _handle_unsupported_layernorm_config(x.shape[1], gamma, x, dx):
         workspace = empty()
         barrier = empty()
         dgamma_part = empty()
@@ -538,13 +595,5 @@ def dlayernorm(
             barrier = empty_like(barrier)
             dgamma_part = empty_like(dgamma_part)
             dbeta_part = empty_like(dbeta_part)
-    except RuntimeError as error:
-        if "in function get_bwd_launcher: BWD: Unsupported types." in str(error):
-            raise ValueError(
-                "This configuration for layernorm is not supported. "
-                "(Regex) Search for REGISTER_BWD_(TUNED|GENERAL)_LAUNCHER to see possible options."
-            ) from error
-        else:
-            raise
 
     return dx, dgamma, dbeta
