@@ -37,7 +37,7 @@ class Sequential(BaseModule):
         for name, module in modules:
             submodules: list[tuple[str, BaseModule]]
             if isinstance(module, Sequential):
-                submodules = [(k, v) for k, v in Sequential._modules.items()]
+                submodules = [(k, v) for k, v in module._modules.items()]
                 for i, (submodule_name, submodule) in enumerate(submodules):
                     submodules[i] = (f"{name}[{submodule_name}]", submodule)
             else:
