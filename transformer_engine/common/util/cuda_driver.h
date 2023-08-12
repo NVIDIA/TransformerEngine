@@ -43,30 +43,19 @@ inline CUresult call(const char *symbol, ArgTs... args) {
 
 }  // namespace transformer_engine
 
-namespace {
+#define NVTE_CHECK_CUDA_DRIVER(ans)                                            \
+  do {                                                                         \
+    if (status != CUDA_SUCCESS) {                                              \
+      const char *description;                                                 \
+      transformer_engine::cuda_driver::call("cuGetErrorString", status,        \
+                                            &description);                     \
+      NVTE_ERROR(                                                              \
+          transformer_engine::concat_strings("CUDA Error: ", description));    \
+    }                                                                          \
+    while (false)
 
-/*! \brief Throw exception if CUDA driver call has failed */
-inline void check_cuda_driver_(CUresult status) {
-  if (status != CUDA_SUCCESS) {
-    const char *description;
-    transformer_engine::cuda_driver::call("cuGetErrorString", status, &description);
-    NVTE_ERROR(transformer_engine::concat_strings("CUDA Error: ", description));
-  }
-}
+#define NVTE_CALL_CHECK_CUDA_DRIVER(func, ...)                                 \
+  NVTE_CHECK_CUDA_DRIVER(                                                      \
+      transformer_engine::cuda_driver::call(symbol, __VA_ARGS__))
 
-/*! \brief Call CUDA driver function and throw exception if it fails */
-template <typename... ArgTs>
-inline void call_and_check_cuda_driver_(const char *symbol,
-                                        ArgTs &&... args) {
-  check_cuda_driver_(transformer_engine::cuda_driver::call(symbol,
-                                                           std::forward<ArgTs>(args)...));
-}
-
-}  // namespace
-
-#define NVTE_CHECK_CUDA_DRIVER(ans) { check_cuda_driver_(ans); }
-
-#define NVTE_CALL_CHECK_CUDA_DRIVER(func, ...) \
-  { call_and_check_cuda_driver_(#func, __VA_ARGS__); }
-
-#endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
+#endif // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
