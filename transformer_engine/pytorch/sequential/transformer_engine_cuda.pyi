@@ -1,3 +1,5 @@
+# pylint: skip-file
+
 import torch
 from enum import Enum
 from typing import Sequence

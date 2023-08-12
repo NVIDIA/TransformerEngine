@@ -37,6 +37,13 @@ def _bwd_ln_sm_margin():
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
 
+@cache
+def _sm_total_count() -> int:
+    return torch.cuda.get_device_properties(  # type: ignore
+        torch.cuda.current_device()
+    ).multiProcessorCount
+
+
 def _sm_margin():
     if _pass == "backward":
         return _bwd_ln_sm_margin()
@@ -63,21 +70,6 @@ def make_nvte_tensor(t: torch.Tensor):
         torch.Tensor(),
         torch.Tensor(),
     )
-
-
-# Wrappers around functions needing workspace
-def _cast_transpose_dbias(
-    input: nvte.Tensor,
-    cast_output: nvte.Tensor,
-    transposed_output: nvte.Tensor,
-    dbias: nvte.Tensor,
-):
-    workspace = empty()
-    for _ in range(2):
-        nvte.cast_transpose_dbias(
-            input, cast_output, transposed_output, dbias, workspace
-        )
-        workspace = empty_like(workspace)
 
 
 # DTYPES
@@ -161,11 +153,11 @@ def add(A: nvte.Tensor, B: nvte.Tensor, out_dtype: nvte.DType):
         return make_nvte_tensor(output)
 
 
-def dbias(t: nvte.Tensor, out_dtype: nvte.DType):
-    if is_fp8(t):
+def dbias(grad: nvte.Tensor, out_dtype: nvte.DType):
+    if is_fp8(grad):
         raise NotImplementedError()
     else:
-        output = torch.sum(t.data, dtype=te_to_torch_dtype(out_dtype), dim=0)
+        output = torch.sum(grad.data, dtype=te_to_torch_dtype(out_dtype), dim=0)
         return make_nvte_tensor(output)
 
 
@@ -313,18 +305,27 @@ def multi_cast_transpose_checked(*desc: tuple[nvte.Tensor, nvte.DType | None]):
 
 
 def cast_transpose_dbias_checked(
-    t: nvte.Tensor, cast_dtype: nvte.DType | None, dbias_dtype: nvte.DType
+    grad: nvte.Tensor, cast_dtype: nvte.DType | None, dbias_dtype: nvte.DType
 ):
-    if dbias_dtype == t.dtype and cast_dtype is not None and cast_dtype != t.dtype:
+    if (
+        dbias_dtype == grad.dtype
+        and cast_dtype is not None
+        and cast_dtype != grad.dtype
+    ):
         out_cast, out_transpose = multi_empty_share_metadata(
-            (t.shape, cast_dtype), (t.shape[::-1], cast_dtype)
+            (grad.shape, cast_dtype), (grad.shape[::-1], cast_dtype)
         )
-        out_dbias = empty((t.shape[1],), dbias_dtype)
-        _cast_transpose_dbias(t, out_cast, out_transpose, out_dbias)
+        out_dbias = empty((grad.shape[1],), dbias_dtype)
+        workspace = empty()
+        for _ in range(2):
+            nvte.cast_transpose_dbias(
+                grad, out_cast, out_transpose, out_dbias, workspace
+            )
+            workspace = empty_like(workspace)
         return out_cast, out_transpose, out_dbias
     else:
-        out_cast, out_transpose = cast_transpose_checked(t, cast_dtype)
-        out_dbias = dbias(t, dbias_dtype)
+        out_cast, out_transpose = cast_transpose_checked(grad, cast_dtype)
+        out_dbias = dbias(grad, dbias_dtype)
         return out_cast, out_transpose, out_dbias
 
 
@@ -440,44 +441,38 @@ def matmul_transpose_add_gelu_add(
 
 # LAYERNORM
 def layernorm(
-    inp: nvte.Tensor,
+    x: nvte.Tensor,
     eps: float,
     zero_centered_gamma: bool,
     gamma: nvte.Tensor,
     beta: nvte.Tensor,
     out_dtype: nvte.DType,
 ):
-    "returns (inp - mean(inp)) / sqrt(var(inp) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
+    "returns (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
 
-    assert len(inp.shape) == 2
-    n = inp.shape[0]
+    assert len(x.shape) == 2
+    n = x.shape[0]
     mu = empty((n,), nvte.DType.Float32)
     rsigma = empty((n,), nvte.DType.Float32)
-    out = empty(inp.shape, out_dtype)
-    multiProcessorCount = torch.cuda.get_device_properties(  # type: ignore
-        torch.cuda.current_device()
-    ).multiProcessorCount
-    assert isinstance(multiProcessorCount, int)
-    sm_margin = _sm_margin()
-
-    workspace = empty()
-    barrier = empty()
+    out = empty(x.shape, out_dtype)
 
     if zero_centered_gamma:
         func = nvte.layernorm1p_fwd
     else:
         func = nvte.layernorm_fwd
 
+    workspace = empty()
+    barrier = empty()
     for _ in range(2):
         func(
-            inp,
+            x,
             gamma,
             beta,
             eps,
             out,
             mu,
             rsigma,
-            multiProcessorCount - sm_margin,
+            _sm_total_count() - _sm_margin(),
             workspace,
             barrier,
         )
@@ -485,3 +480,53 @@ def layernorm(
         barrier = empty_like(barrier)
 
     return out, mu, rsigma
+
+
+def dlayernorm(
+    grad: nvte.Tensor,
+    zero_centered_gamma: bool,
+    x: nvte.Tensor,
+    gamma: nvte.Tensor,
+    mu: nvte.Tensor,
+    rsigma: nvte.Tensor,
+    dx_dtype: nvte.DType,
+    dgamma_dtype: nvte.DType,
+    dbeta_dtype: nvte.DType,
+):
+    "returns dx, dgamma, dbeta"
+
+    dx = empty(x.shape, dx_dtype)
+    dgamma = empty(gamma.shape, dgamma_dtype)
+    dbeta = empty(gamma.shape, dbeta_dtype)
+
+    if zero_centered_gamma:
+        func = nvte.layernorm1p_bwd
+    else:
+        func = nvte.layernorm_bwd
+
+    workspace = empty()
+    barrier = empty()
+    dgamma_part = empty()
+    dbeta_part = empty()
+    for _ in range(2):
+        func(
+            grad,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            dx,
+            dgamma,
+            dbeta,
+            dgamma_part,
+            dbeta_part,
+            _sm_total_count() - _sm_margin(),
+            workspace,
+            barrier,
+        )
+        workspace = empty_like(workspace)
+        barrier = empty_like(barrier)
+        dgamma_part = empty_like(dgamma_part)
+        dbeta_part = empty_like(dbeta_part)
+
+    return dx, dgamma, dbeta

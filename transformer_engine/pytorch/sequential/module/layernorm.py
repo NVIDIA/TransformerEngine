@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from .base import BaseModule
 from .. import ops
-from nvte_utils import make_nvte_tensor
+from ..nvte_utils import make_nvte_tensor
 
 
 class LayerNorm(BaseModule):

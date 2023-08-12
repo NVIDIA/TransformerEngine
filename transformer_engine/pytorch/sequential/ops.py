@@ -2,7 +2,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import ast
 import typing
-from typing import Any, Callable
+from typing import Any, Callable, final
 from typing_extensions import Unpack, TypeVarTuple
 import transformer_engine_cuda as nvte
 from . import nvte_utils
@@ -165,7 +165,7 @@ class Add(Op):
 
         return y, Context()
 
-    def backward(self, ctx: dict[str, nvte.Tensor], dy: nvte.Tensor):
+    def backward(self, ctx: Context, dy: nvte.Tensor):
         del ctx
         dy = nvte_utils.cast_checked(dy, self.dy_dtype)
 
@@ -219,10 +219,25 @@ class LayerNorm(Op):
             x, self.eps, self.zero_centered_gamma, weight, bias, self.y_dtype
         )
 
-        return y, {"mu": mu, "rsigma": rsigma}
+        return y, {"x": x, "weight": weight, "mu": mu, "rsigma": rsigma}
 
-    def backward(self, ctx: dict[str, nvte.Tensor], dy: nvte.Tensor):
-        raise NotImplementedError()
+    def backward(self, ctx: Context, dy: nvte.Tensor):
+        x, weight, mu, rsigma = ctx["x"], ctx["weight"], ctx["mu"], ctx["rsigma"]
+        dy = nvte_utils.cast_checked(dy, self.dy_dtype)
+
+        dx, dweight, dbias = nvte_utils.dlayernorm(
+            dy,
+            self.zero_centered_gamma,
+            x,
+            weight,
+            mu,
+            rsigma,
+            self.dx_dtype,
+            self.dweight_dtype,
+            self.dbias_dtype,
+        )
+
+        return dx, [dweight, dbias]
 
     def args(self):
         return [self.weight, self.bias]
@@ -255,8 +270,8 @@ def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
 def mmt_add_bwd_fused(
     mmt: MMT,
     add: Add,
-    mmt_ctx: dict[str, nvte.Tensor],
-    add_ctx: dict[str, nvte.Tensor],
+    mmt_ctx: Context,
+    add_ctx: Context,
     dy: nvte.Tensor,
 ):
     del add_ctx
