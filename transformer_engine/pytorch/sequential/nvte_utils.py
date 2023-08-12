@@ -461,23 +461,32 @@ def layernorm(
     else:
         func = nvte.layernorm_fwd
 
-    workspace = empty()
-    barrier = empty()
-    for _ in range(2):
-        func(
-            x,
-            gamma,
-            beta,
-            eps,
-            out,
-            mu,
-            rsigma,
-            _sm_total_count() - _sm_margin(),
-            workspace,
-            barrier,
-        )
-        workspace = empty_like(workspace)
-        barrier = empty_like(barrier)
+    try:
+        workspace = empty()
+        barrier = empty()
+        for _ in range(2):
+            func(
+                x,
+                gamma,
+                beta,
+                eps,
+                out,
+                mu,
+                rsigma,
+                _sm_total_count() - _sm_margin(),
+                workspace,
+                barrier,
+            )
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+    except RuntimeError as error:
+        if "in function get_fwd_launcher: FWD: Unsupported types." in str(error):
+            raise ValueError(
+                "This configuration for layernorm is not supported. "
+                "(Regex) Search for REGISTER_FWD_(TUNED|GENERAL)_LAUNCHER to see possible options."
+            ) from error
+        else:
+            raise
 
     return out, mu, rsigma
 
@@ -504,29 +513,38 @@ def dlayernorm(
     else:
         func = nvte.layernorm_bwd
 
-    workspace = empty()
-    barrier = empty()
-    dgamma_part = empty()
-    dbeta_part = empty()
-    for _ in range(2):
-        func(
-            grad,
-            x,
-            mu,
-            rsigma,
-            gamma,
-            dx,
-            dgamma,
-            dbeta,
-            dgamma_part,
-            dbeta_part,
-            _sm_total_count() - _sm_margin(),
-            workspace,
-            barrier,
-        )
-        workspace = empty_like(workspace)
-        barrier = empty_like(barrier)
-        dgamma_part = empty_like(dgamma_part)
-        dbeta_part = empty_like(dbeta_part)
+    try:
+        workspace = empty()
+        barrier = empty()
+        dgamma_part = empty()
+        dbeta_part = empty()
+        for _ in range(2):
+            func(
+                grad,
+                x,
+                mu,
+                rsigma,
+                gamma,
+                dx,
+                dgamma,
+                dbeta,
+                dgamma_part,
+                dbeta_part,
+                _sm_total_count() - _sm_margin(),
+                workspace,
+                barrier,
+            )
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+            dgamma_part = empty_like(dgamma_part)
+            dbeta_part = empty_like(dbeta_part)
+    except RuntimeError as error:
+        if "in function get_bwd_launcher: BWD: Unsupported types." in str(error):
+            raise ValueError(
+                "This configuration for layernorm is not supported. "
+                "(Regex) Search for REGISTER_BWD_(TUNED|GENERAL)_LAUNCHER to see possible options."
+            ) from error
+        else:
+            raise
 
     return dx, dgamma, dbeta
