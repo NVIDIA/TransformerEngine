@@ -43,7 +43,7 @@ inline CUresult call(const char *symbol, ArgTs... args) {
 
 }  // namespace transformer_engine
 
-#define NVTE_CHECK_CUDA_DRIVER(ans)                                            \
+#define NVTE_CHECK_CUDA_DRIVER(status)                                         \
   do {                                                                         \
     if (status != CUDA_SUCCESS) {                                              \
       const char *description;                                                 \
@@ -54,8 +54,11 @@ inline CUresult call(const char *symbol, ArgTs... args) {
     }                                                                          \
     while (false)
 
-#define NVTE_CALL_CHECK_CUDA_DRIVER(func, ...)                                 \
-  NVTE_CHECK_CUDA_DRIVER(                                                      \
-      transformer_engine::cuda_driver::call(symbol, __VA_ARGS__))
+#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                               \
+  do {                                                                         \
+    CUresult status =                                                          \
+        transformer_engine::cuda_driver::call(symbol, __VA_ARGS__);            \
+    NVTE_CHECK_CUDA_DRIVER(status);                                            \
+  } while (false)
 
 #endif // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
