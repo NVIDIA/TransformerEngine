@@ -109,6 +109,7 @@ CUfunction Kernel::get_function(int device_id) {
     CUcontext context;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxPushCurrent, context);
 
     // Load function into driver context
     NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx,
@@ -123,6 +124,7 @@ CUfunction Kernel::get_function(int device_id) {
                                 mangled_name_.c_str());
 
     // Reset driver context
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxPopCurrent, context);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
   };
   std::call_once(init_flags_->at(device_id), load_on_device);
