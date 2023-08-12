@@ -24,7 +24,7 @@ class Linear(BaseModule):
         self,
         in_features: int,
         out_features: int,
-        bias: bool = True,
+        use_bias: bool = True,
         param_dtype: torch.dtype = torch.get_default_dtype(),
         weight_init_method: Callable[
             [torch.Tensor], torch.Tensor
@@ -35,19 +35,28 @@ class Linear(BaseModule):
     ):
         nn.Module.__init__(self)  # type: ignore
 
+        self.in_features = in_features
+        self.out_features = out_features
+
         self.weight = nn.Parameter(
             weight_init_method(
                 torch.empty(out_features, in_features, dtype=param_dtype, device="cuda")
             )
         )
-        if bias:
-            self.bias = nn.Parameter(
+        self.bias = (
+            nn.Parameter(
                 bias_init_method(
                     torch.empty(out_features, dtype=param_dtype, device="cuda")
                 )
             )
+            if use_bias
+            else None
+        )
 
         super().__init__(
             ops.MMT(make_nvte_tensor(self.weight)),
-            ops.Add(make_nvte_tensor(self.bias)) if bias else None,
+            ops.Add(make_nvte_tensor(self.bias)) if self.bias else None,
         )
+
+    def extra_repr(self):
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"

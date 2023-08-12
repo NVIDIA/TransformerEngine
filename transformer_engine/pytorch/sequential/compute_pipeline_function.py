@@ -73,11 +73,9 @@ class ComputePipelineFunction(autograd.Function):
         # Check that gradients are not fp8 and can be processed by the optimizer
         # TODO: change this when fp8 optimizer comes along
         assert not is_fp8(data_grad)
-        assert all(g is None or not is_fp8(g) for g in param_grads)
+        assert all(not is_fp8(g) for g in param_grads)
 
-        torch_grads = [data_grad.data] + [
-            g.data if g is not None else None for g in param_grads
-        ]
+        torch_grads = [data_grad.data] + [g.data for g in param_grads]
 
         return (*torch_grads, None, None)
 

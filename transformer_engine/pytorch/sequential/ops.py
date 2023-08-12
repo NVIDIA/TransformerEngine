@@ -85,6 +85,9 @@ class Op(ABC):
     def args(self) -> list[nvte.Tensor]:
         ...
 
+    def __str__(self):
+        return self.__class__.__name__
+
 
 class MMT(Op):
     def __init__(

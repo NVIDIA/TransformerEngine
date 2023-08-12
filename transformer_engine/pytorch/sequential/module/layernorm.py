@@ -15,6 +15,10 @@ class LayerNorm(BaseModule):
     ):
         nn.Module.__init__(self)  # type: ignore
 
+        self.features = features
+        self.eps = eps
+        self.zero_centered_gamma = zero_centered_gamma
+
         self.weight = nn.Parameter(
             torch.zeros(features, dtype=param_dtype, device="cuda")
             if zero_centered_gamma
@@ -32,3 +36,6 @@ class LayerNorm(BaseModule):
                 make_nvte_tensor(self.bias),
             )
         )
+
+    def extra_repr(self):
+        return f"features={self.features}, eps={self.eps}, zero_centered_gamma={self.zero_centered_gamma}"

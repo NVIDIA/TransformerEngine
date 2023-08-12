@@ -68,6 +68,9 @@ class FusedOp(Op):
     def args(self):
         return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
 
+    def __str__(self):
+        return f"""FusedOp{self.ops}"""
+
 
 class SelfContainedOp(Op):
     def __init__(self, fwds: list[Op], bwds: list[Op]) -> None:
@@ -203,13 +206,27 @@ class ComputePipeline:
         if env.world_size > 1:
             model_parallel_transform(ops)
 
-        self._fwd = get_list(ops, "forward")
-        self._bwd = get_list(ops, "backward")
         self._inf = get_list(ops, "inference")
 
-        self.functions = split_into_self_contained(self._fwd, self._bwd)
+        self.functions = split_into_self_contained(
+            get_list(ops, "forward"), get_list(ops, "backward")
+        )
 
     def run_inference(self, x: nvte.Tensor) -> nvte.Tensor:
         for op in self._inf:
             x = op.inference(x)
         return x
+
+    def __str__(self):
+        return f"""ComputePipeline(
+            forward: {(
+                op
+                for f in self.functions
+                for op in f.fwds
+            )},
+            backward: {(
+                op
+                for f in self.functions
+                for op in f.bwds
+            )},
+        )"""
