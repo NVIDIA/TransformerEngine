@@ -41,7 +41,7 @@ def _bwd_ln_sm_margin():
 def _sm_total_count() -> int:
     return torch.cuda.get_device_properties(  # type: ignore
         torch.cuda.current_device()
-    ).multiProcessorCount
+    ).multi_processor_count
 
 
 def _sm_margin():
