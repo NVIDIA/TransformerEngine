@@ -185,7 +185,7 @@ class LayerNorm(Op):
         zero_centered_gamma: bool,
         weight: nvte.Tensor,
         bias: nvte.Tensor,
-        x_dtype: nvte.DType | None = None,
+        x_dtype: nvte.DType | None = nvte.DType.BFloat16,
         weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = None,
