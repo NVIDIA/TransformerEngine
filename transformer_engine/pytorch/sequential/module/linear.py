@@ -55,7 +55,7 @@ class Linear(BaseModule):
 
         super().__init__(
             ops.MMT(make_nvte_tensor(self.weight)),
-            ops.Add(make_nvte_tensor(self.bias)) if self.bias else None,
+            ops.Add(make_nvte_tensor(self.bias)) if self.bias is not None else None,
         )
 
     def extra_repr(self):
