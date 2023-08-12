@@ -219,14 +219,14 @@ class ComputePipeline:
 
     def __repr__(self):
         return f"""ComputePipeline(
-            forward: {(
-                op
-                for f in self.functions
-                for op in f.fwds
-            )},
-            backward: {(
-                op
-                for f in self.functions
-                for op in f.bwds
-            )},
-        )"""
+    forward: {tuple(
+        op
+        for f in self.functions
+        for op in f.fwds
+    )},
+    backward: {tuple(
+        op
+        for f in self.functions
+        for op in f.bwds
+    )},
+)"""
