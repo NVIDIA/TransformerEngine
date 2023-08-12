@@ -137,10 +137,10 @@ def get_list(ops: list[Op], fuse_by: Literal["forward", "backward", "inference"]
         fusion_dict = FUSIONS_INF
     fusions = [(len(arg_types), arg_types, f) for arg_types, f in fusion_dict.items()]
     fusions.sort(key=lambda x: x[0], reverse=True)  # largest first
-    for _, arg_types, f in fusions:
-        for startPos in range(len(ops) - len(arg_types) + 1):
+    for cnt, arg_types, f in fusions:
+        for startPos in range(len(ops) - cnt + 1):
             if all(
-                isinstance(ops[i], arg_types[i - startPos])
+                isinstance(ops[startPos + i], arg_types[i])
                 for i in range(len(arg_types))
             ):
                 fused_ops = ops[startPos : startPos + len(arg_types)]
