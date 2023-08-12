@@ -57,7 +57,7 @@ inline CUresult call(const char *symbol, ArgTs... args) {
 #define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                               \
   do {                                                                         \
     CUresult status =                                                          \
-        transformer_engine::cuda_driver::call(symbol, __VA_ARGS__);            \
+        transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__);           \
     NVTE_CHECK_CUDA_DRIVER(status);                                            \
   } while (false)
 
