@@ -93,7 +93,9 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                     nvte_tensor
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
+            nvte_x_container = [nvte_x]
             x = ComputePipelineFunction.apply(  # type: ignore
-                x, *exposed_tensors, contained_op, [nvte_x]
+                x, *exposed_tensors, contained_op, nvte_x_container
             )
+            nvte_x = nvte_x_container[0]
         return x
