@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from .base import BaseModule
 from .. import ops
-from ..nvte_utils import make_nvte_tensor
+from ..nvte import make_nvte_tensor
 
 
 def _default_weight_init_method(weight: torch.Tensor):

@@ -1,9 +1,6 @@
 from __future__ import annotations
 from typing import OrderedDict, overload
-import torch
 from torch import nn
-
-from transformer_engine.pytorch.sequential.ops import Op
 from .base import BaseModule
 
 

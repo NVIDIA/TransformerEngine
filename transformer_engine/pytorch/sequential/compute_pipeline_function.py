@@ -1,12 +1,9 @@
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-import transformer_engine_cuda as nvte
-
+import transformer_engine_cuda as _nvte
 from .ops import Context, Op
-
-from .nvte_utils import is_fp8, make_nvte_tensor, set_current_pass
-
+from .nvte import is_fp8, make_nvte_tensor, set_current_pass
 from .compute_pipeline import ComputePipeline
 
 
@@ -15,7 +12,7 @@ class ComputePipelineFunction(autograd.Function):
     def forward(
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *args: torch.Tensor | Op | list[nvte.Tensor]
+        *args: torch.Tensor | Op | list[_nvte.Tensor]
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
@@ -29,7 +26,7 @@ class ComputePipelineFunction(autograd.Function):
         assert isinstance(nvte_x_container, list)
         assert len(nvte_x_container) == 1
         nvte_x = nvte_x_container[0]
-        assert isinstance(nvte_x, nvte.Tensor)
+        assert isinstance(nvte_x, _nvte.Tensor)
 
         set_current_pass("forward")
         y, to_save = op.forward(nvte_x)

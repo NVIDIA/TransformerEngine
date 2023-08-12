@@ -1,12 +1,10 @@
 import copy
-from copy import deepcopy
 from functools import partial, reduce
 import operator
-from typing import Callable, Literal
-from typing_extensions import Unpack
+from typing import Literal
+import transformer_engine_cuda as _nvte
 from .utils import set_attribute
-import transformer_engine_cuda as nvte
-from .nvte_utils import is_fp8
+from .nvte import is_fp8
 from .ops import (
     BackwardFused,
     ForwardFused,
@@ -34,11 +32,11 @@ class FusedOp(Op):
         self.inference_ = inference
         self.ops = ops
 
-    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
+    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
         assert self.inference_ is not None
         return self.inference_(x)
 
-    def forward(self, x: nvte.Tensor):
+    def forward(self, x: _nvte.Tensor):
         assert self.forward_ is not None
         y, ctxs = self.forward_(x)
         full_ctx = Context()
@@ -48,7 +46,7 @@ class FusedOp(Op):
             full_ctx |= ctx
         return y, full_ctx
 
-    def backward(self, ctx: Context, dy: nvte.Tensor):
+    def backward(self, ctx: Context, dy: _nvte.Tensor):
         assert self.backward_ is not None
         ctxs = list[Context]()
         for op in self.ops:
@@ -66,7 +64,7 @@ class FusedOp(Op):
         return dx, grads_total
 
     def args(self):
-        return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
+        return list(sum((op.args() for op in self.ops), list[_nvte.Tensor]()))
 
     def __repr__(self):
         return f"""FusedOp{self.ops}"""
@@ -77,10 +75,10 @@ class SelfContainedOp(Op):
         self.fwds = fwds
         self.bwds = bwds
 
-    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
+    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
         raise AssertionError("Not used for inference")
 
-    def forward(self, x: nvte.Tensor):
+    def forward(self, x: _nvte.Tensor):
         full_ctx = Context()
         for op in self.fwds:
             x, ctx = op.forward(x)
@@ -90,7 +88,7 @@ class SelfContainedOp(Op):
             full_ctx |= ctx
         return x, full_ctx
 
-    def backward(self, ctx: Context, dy: nvte.Tensor):
+    def backward(self, ctx: Context, dy: _nvte.Tensor):
         ctxs = list[Context]()
         for op in self.bwds:
             if isinstance(op, FusedOp):
@@ -112,7 +110,7 @@ class SelfContainedOp(Op):
         return dy, full_grads
 
     def args(self):
-        return list(sum((op.args() for op in self.fwds), list[nvte.Tensor]()))
+        return list(sum((op.args() for op in self.fwds), list[_nvte.Tensor]()))
 
 
 def force_use_bf16(ops: list[Op]):
@@ -121,8 +119,8 @@ def force_use_bf16(ops: list[Op]):
         dtype_attributes = [attr for attr in attributes if attr.endswith("_dtype")]
         for dtype_attribute in dtype_attributes:
             attr_val = getattr(op, dtype_attribute)
-            if isinstance(attr_val, nvte.DType) and is_fp8(attr_val):
-                setattr(op, dtype_attribute, nvte.DType.BFloat16)
+            if isinstance(attr_val, _nvte.DType) and is_fp8(attr_val):
+                setattr(op, dtype_attribute, _nvte.DType.BFloat16)
 
 
 def model_parallel_transform(ops: list[Op]):
@@ -192,7 +190,7 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
 
 def copy_op_list(ops: list[Op]):
     "Deep copy ops, except for tensors"
-    with set_attribute(nvte.Tensor, "__deepcopy__", lambda self, memo: self):
+    with set_attribute(_nvte.Tensor, "__deepcopy__", lambda self, memo: self):
         return copy.deepcopy(ops)
 
 
@@ -211,22 +209,16 @@ class ComputePipeline:
         self.functions = split_into_self_contained(
             get_list(ops, "forward"), get_list(ops, "backward")
         )
+        self.forward = tuple(op for f in self.functions for op in f.fwds)
+        self.backward = tuple(op for f in self.functions for op in f.bwds)
 
-    def run_inference(self, x: nvte.Tensor) -> nvte.Tensor:
+    def run_inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
         for op in self._inf:
             x = op.inference(x)
         return x
 
     def __repr__(self):
         return f"""ComputePipeline(
-    forward: {tuple(
-        op
-        for f in self.functions
-        for op in f.fwds
-    )},
-    backward: {tuple(
-        op
-        for f in self.functions
-        for op in f.bwds
-    )},
+    forward: {self.forward},
+    backward: {self.backward},
 )"""
