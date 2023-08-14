@@ -34,7 +34,8 @@ def transpose(t: _nvte.Tensor):
 
 def cast_transpose(t: _nvte.Tensor, dtype: _nvte.DType):
     assert t.dtype != dtype
-    assert is_fp8(t) != is_fp8(dtype)
+    if is_fp8(t):
+        assert not is_fp8(dtype)
 
     out_cast, out_transpose = multi_empty_share_metadata(
         (t.shape, dtype), (t.shape[::-1], dtype)
