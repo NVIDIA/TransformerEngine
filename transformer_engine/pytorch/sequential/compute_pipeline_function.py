@@ -50,9 +50,10 @@ class ComputePipelineFunction(autograd.Function):
         nvte_x_container[0] = y
 
         # Expose result for Pytorch
-        exposed_y = torch.Tensor()
-        exposed_y.shape = torch.Size(y.shape)  # needed for autograd to not complain
-        exposed_y.grad_fn = exposed_x.grad_fn  # needed to preserve computation graph
+        x_data = exposed_x.data
+        exposed_x.data = torch.Tensor()  # avoid copy
+        exposed_y = exposed_x.clone()
+        exposed_x.data = x_data
 
         return exposed_y
 
