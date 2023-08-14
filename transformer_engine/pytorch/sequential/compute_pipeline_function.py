@@ -1,9 +1,8 @@
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
+from . import nvte
 from .ops import Context, Op
-from .nvte import is_fp8, make_nvte_tensor, set_current_pass
 from .compute_pipeline import ComputePipeline
 
 
@@ -12,7 +11,7 @@ class ComputePipelineFunction(autograd.Function):
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *args: torch.Tensor | Op | list[_nvte.Tensor]
+        *args: torch.Tensor | Op | list[nvte.Tensor]
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
@@ -26,9 +25,9 @@ class ComputePipelineFunction(autograd.Function):
         assert isinstance(nvte_x_container, list)
         assert len(nvte_x_container) == 1
         nvte_x = nvte_x_container[0]
-        assert isinstance(nvte_x, _nvte.Tensor)
+        assert isinstance(nvte_x, nvte.Tensor)
 
-        set_current_pass("forward")
+        nvte.set_current_pass("forward")
         y, to_save = op.forward(nvte_x)
 
         # Expose backward context for tracing
@@ -64,13 +63,13 @@ class ComputePipelineFunction(autograd.Function):
         saved: Context = getattr(ctx, "nvte_ctx")
         op: Op = getattr(ctx, "nvte_op")
 
-        set_current_pass("backward")
-        data_grad, param_grads = op.backward(saved, make_nvte_tensor(grad_output))
+        nvte.set_current_pass("backward")
+        data_grad, param_grads = op.backward(saved, nvte.make_nvte_tensor(grad_output))
 
         # Check that gradients are not fp8 and can be processed by the optimizer
         # TODO: change this when fp8 optimizer comes along
-        assert not is_fp8(data_grad)
-        assert all(not is_fp8(g) for g in param_grads)
+        assert not nvte.is_fp8(data_grad)
+        assert all(not nvte.is_fp8(g) for g in param_grads)
 
         torch_grads = [data_grad.data] + [g.data for g in param_grads]
 
@@ -78,18 +77,18 @@ class ComputePipelineFunction(autograd.Function):
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
-    nvte_x = make_nvte_tensor(x)
+    nvte_x = nvte.make_nvte_tensor(x)
     if not training:
-        set_current_pass("inference")
+        nvte.set_current_pass("inference")
         y = pipeline.run_inference(nvte_x)
-        assert not is_fp8(y)
+        assert not nvte.is_fp8(y)
         return y.data
     else:
         for contained_op in pipeline.functions:
             nvte_tensors = contained_op.args()
             exposed_tensors = list[torch.Tensor]()
             for nvte_tensor in nvte_tensors:
-                assert not is_fp8(
+                assert not nvte.is_fp8(
                     nvte_tensor
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)

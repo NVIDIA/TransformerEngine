@@ -1,5 +1,4 @@
 from __future__ import annotations
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
 from .. import nvte
 from .op import Op, Context
 
@@ -7,13 +6,13 @@ from .op import Op, Context
 class Add(Op):
     def __init__(
         self,
-        bias: _nvte.Tensor,
-        x_dtype: _nvte.DType | None = None,
-        bias_dtype: _nvte.DType | None = _nvte.DType.Float8E4M3,
-        dy_dtype: _nvte.DType | None = _nvte.DType.Float8E5M2,
-        y_dtype: _nvte.DType = _nvte.DType.Float8E4M3,
-        dx_dtype: _nvte.DType = _nvte.DType.BFloat16,
-        dbias_dtype: _nvte.DType = _nvte.DType.BFloat16,
+        bias: nvte.Tensor,
+        x_dtype: nvte.DType | None = None,
+        bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
+        y_dtype: nvte.DType = nvte.DType.Float8E4M3,
+        dx_dtype: nvte.DType = nvte.DType.BFloat16,
+        dbias_dtype: nvte.DType = nvte.DType.BFloat16,
     ):
         self.bias = bias
         self.x_dtype = x_dtype
@@ -23,10 +22,10 @@ class Add(Op):
         self.dx_dtype = dx_dtype
         self.dbias_dtype = dbias_dtype
 
-    def inference(self, x: _nvte.Tensor):
+    def inference(self, x: nvte.Tensor):
         return self.forward(x)[0]
 
-    def forward(self, x: _nvte.Tensor):
+    def forward(self, x: nvte.Tensor):
         x = nvte.cast_checked(x, self.x_dtype)
         bias = nvte.cast_checked(self.bias, self.bias_dtype)
 
@@ -34,7 +33,7 @@ class Add(Op):
 
         return y, Context()
 
-    def backward(self, ctx: Context, dy: _nvte.Tensor):
+    def backward(self, ctx: Context, dy: nvte.Tensor):
         del ctx
         dy = nvte.cast_checked(dy, self.dy_dtype)
 

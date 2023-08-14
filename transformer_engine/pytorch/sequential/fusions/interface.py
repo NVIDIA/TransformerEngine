@@ -2,7 +2,7 @@ from __future__ import annotations
 from functools import partial
 from ..ops import Op
 from typing import Literal
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
+from .. import nvte
 from ..ops_types import (
     BackwardFused,
     ForwardFused,
@@ -11,6 +11,7 @@ from ..ops_types import (
     Inference,
 )
 from ._storage import FUSIONS_FWD, FUSIONS_BWD, FUSIONS_INF
+
 
 class FusedOp(Op):
     def __init__(
@@ -25,11 +26,11 @@ class FusedOp(Op):
         self.inference_ = inference
         self.ops = ops
 
-    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
+    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
         assert self.inference_ is not None
         return self.inference_(x)
 
-    def forward(self, x: _nvte.Tensor):
+    def forward(self, x: nvte.Tensor):
         assert self.forward_ is not None
         y, ctxs = self.forward_(x)
         full_ctx = Context()
@@ -39,7 +40,7 @@ class FusedOp(Op):
             full_ctx |= ctx
         return y, full_ctx
 
-    def backward(self, ctx: Context, dy: _nvte.Tensor):
+    def backward(self, ctx: Context, dy: nvte.Tensor):
         assert self.backward_ is not None
         ctxs = list[Context]()
         for op in self.ops:
@@ -57,7 +58,7 @@ class FusedOp(Op):
         return dx, grads_total
 
     def args(self):
-        return list(sum((op.args() for op in self.ops), list[_nvte.Tensor]()))
+        return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
 
     def __repr__(self):
         return f"""FusedOp{self.ops}"""
@@ -85,5 +86,6 @@ def get_fused_op_list(
                 ops[startPos : startPos + cnt] = [fused_op]
             startPos += 1
     return ops
+
 
 __all__ = ["FusedOp", "get_fused_op_list"]

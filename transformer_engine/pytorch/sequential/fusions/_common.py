@@ -4,7 +4,7 @@ import typing
 from typing import Callable, Any
 from typing_extensions import TypeVarTuple, Unpack
 from ..ops import Context, Grads
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
+from .. import nvte
 from ._storage import FUSIONS_FWD, FUSIONS_BWD, FUSIONS_INF
 
 _Ops = TypeVarTuple("_Ops")
@@ -23,7 +23,7 @@ def _get_arg_types(f: Callable[..., Any]):
     return arg_types
 
 
-def register_fusion_inference(f: Callable[[Unpack[_Ops], _nvte.Tensor], _nvte.Tensor]):  # type: ignore[invalid-typevar-use]
+def register_fusion_inference(f: Callable[[Unpack[_Ops], nvte.Tensor], nvte.Tensor]):  # type: ignore[invalid-typevar-use]
     fused_modules = _get_arg_types(f)[:-1]
     FUSIONS_INF[fused_modules] = f
     return f
@@ -31,8 +31,8 @@ def register_fusion_inference(f: Callable[[Unpack[_Ops], _nvte.Tensor], _nvte.Te
 
 def register_fusion_forward(
     f: Callable[
-        [Unpack[_Ops], _nvte.Tensor],  # type: ignore[invalid-typevar-use]
-        tuple[_nvte.Tensor, tuple[Context, ...]],
+        [Unpack[_Ops], nvte.Tensor],  # type: ignore[invalid-typevar-use]
+        tuple[nvte.Tensor, tuple[Context, ...]],
     ]
 ):
     fused_modules = _get_arg_types(f)[:-1]
@@ -42,8 +42,8 @@ def register_fusion_forward(
 
 def register_fusion_backward(
     f: Callable[
-        [Unpack[_OpsAndCtxs], _nvte.Tensor],  # type: ignore[invalid-typevar-use]
-        tuple[_nvte.Tensor, tuple[Grads, ...]],
+        [Unpack[_OpsAndCtxs], nvte.Tensor],  # type: ignore[invalid-typevar-use]
+        tuple[nvte.Tensor, tuple[Grads, ...]],
     ]
 ):
     arg_types = _get_arg_types(f)

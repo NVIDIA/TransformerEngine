@@ -1,11 +1,11 @@
 import copy
 from functools import reduce
 import operator
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
-from .utils import set_attribute
+from . import nvte
 from .nvte import is_fp8
 from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
+from .utils import set_attribute
 from .environment import Environment
 
 
@@ -14,10 +14,10 @@ class SelfContainedOp(Op):
         self.fwds = fwds
         self.bwds = bwds
 
-    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
+    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
         raise AssertionError("Not used for inference")
 
-    def forward(self, x: _nvte.Tensor):
+    def forward(self, x: nvte.Tensor):
         full_ctx = Context()
         for op in self.fwds:
             x, ctx = op.forward(x)
@@ -27,7 +27,7 @@ class SelfContainedOp(Op):
             full_ctx |= ctx
         return x, full_ctx
 
-    def backward(self, ctx: Context, dy: _nvte.Tensor):
+    def backward(self, ctx: Context, dy: nvte.Tensor):
         ctxs = list[Context]()
         for op in self.bwds:
             if isinstance(op, FusedOp):
@@ -49,7 +49,7 @@ class SelfContainedOp(Op):
         return dy, full_grads
 
     def args(self):
-        return list(sum((op.args() for op in self.fwds), list[_nvte.Tensor]()))
+        return list(sum((op.args() for op in self.fwds), list[nvte.Tensor]()))
 
 
 def force_use_bf16(ops: list[Op]):
@@ -58,8 +58,8 @@ def force_use_bf16(ops: list[Op]):
         dtype_attributes = [attr for attr in attributes if attr.endswith("_dtype")]
         for dtype_attribute in dtype_attributes:
             attr_val = getattr(op, dtype_attribute)
-            if isinstance(attr_val, _nvte.DType) and is_fp8(attr_val):
-                setattr(op, dtype_attribute, _nvte.DType.BFloat16)
+            if isinstance(attr_val, nvte.DType) and is_fp8(attr_val):
+                setattr(op, dtype_attribute, nvte.DType.BFloat16)
 
 
 def model_parallel_transform(ops: list[Op]):
@@ -106,7 +106,7 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
 
 def copy_op_list(ops: list[Op]):
     "Deep copy ops, except for tensors"
-    with set_attribute(_nvte.Tensor, "__deepcopy__", lambda self, memo: self):  # type: ignore[unknown-lambda-type]
+    with set_attribute(nvte.Tensor, "__deepcopy__", lambda self, memo: self):  # type: ignore[unknown-lambda-type]
         return copy.deepcopy(ops)
 
 
@@ -128,7 +128,7 @@ class ComputePipeline:
         self.forward = tuple(op for f in self.functions for op in f.fwds)
         self.backward = tuple(op for f in self.functions for op in f.bwds)
 
-    def run_inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
+    def run_inference(self, x: nvte.Tensor) -> nvte.Tensor:
         for op in self._inf:
             x = op.inference(x)
         return x

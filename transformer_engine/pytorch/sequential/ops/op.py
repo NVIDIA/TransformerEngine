@@ -1,25 +1,26 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
+from .. import nvte
 
-Context = dict[str, _nvte.Tensor]
-Grads = list[_nvte.Tensor]
+Context = dict[str, nvte.Tensor]
+Grads = list[nvte.Tensor]
+
 
 class Op(ABC):
     @abstractmethod
-    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
+    def inference(self, x: nvte.Tensor) -> nvte.Tensor:
         ...
 
     @abstractmethod
-    def forward(self, x: _nvte.Tensor) -> tuple[_nvte.Tensor, Context]:
+    def forward(self, x: nvte.Tensor) -> tuple[nvte.Tensor, Context]:
         ...
 
     @abstractmethod
-    def backward(self, ctx: Context, dy: _nvte.Tensor) -> tuple[_nvte.Tensor, Grads]:
+    def backward(self, ctx: Context, dy: nvte.Tensor) -> tuple[nvte.Tensor, Grads]:
         ...
 
     @abstractmethod
-    def args(self) -> list[_nvte.Tensor]:
+    def args(self) -> list[nvte.Tensor]:
         ...
 
     def __repr__(self):

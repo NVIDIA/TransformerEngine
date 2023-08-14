@@ -1,5 +1,5 @@
 from __future__ import annotations
-import transformer_engine_cuda as _nvte  # pylint: disable=import-error
+from .. import nvte
 from ..ops import Context, MMT, Add
 from .. import nvte
 from ._common import (
@@ -10,7 +10,7 @@ from ._common import (
 
 
 @register_fusion_inference
-def mmt_add_inf_fused(mmt: MMT, add: Add, x: _nvte.Tensor):
+def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     x = nvte.cast_checked(x, mmt.x_dtype)
     weight = nvte.cast_checked(mmt.weight, mmt.weight_dtype)
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
@@ -21,7 +21,7 @@ def mmt_add_inf_fused(mmt: MMT, add: Add, x: _nvte.Tensor):
 
 
 @register_fusion_forward
-def mmt_add_fwd_fused(mmt: MMT, add: Add, x: _nvte.Tensor):
+def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     (x, x_t), (weight, weight_t) = nvte.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
@@ -38,7 +38,7 @@ def mmt_add_bwd_fused(
     add: Add,
     mmt_ctx: Context,
     add_ctx: Context,
-    dy: _nvte.Tensor,
+    dy: nvte.Tensor,
 ):
     del add_ctx
     x_t, weight_t = mmt_ctx["x_t"], mmt_ctx["weight_t"]
