@@ -3,7 +3,7 @@ import torch
 from . import _nvte
 from .dtype import torch_to_te_dtype
 
-pass_: Literal["forward", "backward", "inference"]
+pass_: Literal["forward", "backward", "inference"] = None  # type: ignore
 
 
 def make_nvte_tensor(t: torch.Tensor):
