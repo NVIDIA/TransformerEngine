@@ -149,7 +149,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         assert (
             attn_mask_type in AttnMaskTypes
-        ), f"attn_mask_type {attn_mask_type} not supported"
+            ), f"attn_mask_type {attn_mask_type} not supported"
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -180,39 +180,23 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
+
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
-        assert (qkv_format != 'thd'
-            ), "UnfusedDotProductAttention currently does not support inputs
-            with variable sequence lengths!" 
         assert (
             qkv_layout in QKVLayouts
-            ), f"FlashAttention does not support {qkv_layout} qkv_layout!" 
+            ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
+        assert (qkv_format != 'thd'
+            ), "UnfusedDotProductAttention currently does not support inputs
+            with variable sequence lengths!"
         if qkv_format == 'bshd':
             query_layer, key_layer, value_layer = [x.transpose(0, 1)
                 for x in [query_layer, key_layer, value_layer]]
-        #if qkv_format in ['sbhd', 'bshd']:
-        #    batch_size = q.shape[1] if qkv_format == 'sbhd' else q.shape[0]
-        #    max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
-        #    max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
-        #if qkv_format == 'thd':
-        #    assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
-        #        ), "cu_seqlens_q and cu_seqlens_kv are required for qkv_format = thd!"
-        #    batch_size = len(cu_seqlens_q) - 1
-        #    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        #    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-        #    max_seqlen_q = seqlens_q.max().item()
-        #    max_seqlen_kv = seqlens_kv.max().item()
-        #num_heads, head_dim = q.shape[-2:]
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
         # [b, np, sq, sk]
         output_size = (
-            #batch_size,
-            #num_heads,
-            #max_seqlen_q,
-            #max_seqlen_kv,
             query_layer.size(1),
             query_layer.size(2),
             query_layer.size(0),
@@ -337,7 +321,99 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 
-def _get_qkv_layout_and_strides(
+def _get_qkv_layout(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        qkv_format: str = 'sbhd',
+    ) -> Tuple[Union[str, List, Tuple, None], ...]:
+    """Get qkv layout.
+
+    Parameters
+    ----------
+    q: torch.Tensor
+        Query tensor.
+    k: torch.Tensor
+        Key tensor.
+    v: torch.Tensor
+        Value tensor.
+    qkv_format: str, default = `sbhd`
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` is
+        the sequence length dimension, `b` the batch size, `h` the number of heads,
+        `d` the head size, and `t` the total number of sequences in a batch,
+        `t = sum(s_i) for i = 0...b-1`.
+
+    Returns
+    ----------
+    qkv_layout: str
+       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped into one of five
+       memory layouts:
+       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
+       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
+       `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
+    """
+
+    check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
+    assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
+
+    data_ptr = q.untyped_storage().data_ptr()
+    check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+    data_ptr = k.untyped_storage().data_ptr()
+    check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
+
+    stride = q.stride()
+    check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
+    stride = k.stride()
+    check_strides_kv = all(stride == x.stride() for x in [k, v])
+
+    shape = q.shape
+    check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
+    shape = k.shape
+    check_shapes_kv = all(shape == x.shape for x in [k, v])
+
+    last_dim_size = q.shape[-1]
+    check_last_dim_offsets_qkv = all(i * last_dim_size == x.storage_offset()
+                        for i, x in enumerate([q, k, v]))
+    last_dim_size = k.shape[-1]
+    check_last_dim_offsets_kv = all(i * last_dim_size == x.storage_offset()
+                        for i, x in enumerate([k, v]))
+
+    last_two_dims_size = q.shape[-1] * q.shape[-2]
+    check_last_two_dims_offsets_qkv = all(i * last_two_dims_size == x.storage_offset()
+                        for i, x in enumerate([q, k, v]))
+    last_two_dims_size = k.shape[-1] * k.shape[-2]
+    check_last_two_dims_offsets_kv = all(i * last_two_dims_size == x.storage_offset()
+                        for i, x in enumerate([k, v]))
+
+    qkv_layout = None
+    supported_attn_type = None
+    if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_two_dims_offsets_qkv:
+        # sb3hd, bs3hd, t3hd
+        qkv_layout = qkv_format[:-2] + '3' + qkv_format[-2:]
+        supported_attn_type = ("self")
+    elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_dim_offsets_qkv:
+        # sbh3d, bsh3d, th3d
+        qkv_layout = qkv_format[:-1] + '3' + qkv_format[-1:]
+        supported_attn_type = ("self")
+    elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
+        and check_last_two_dims_offsets_kv):
+        # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
+        qkv_layout = qkv_format + '_' + qkv_format[:-2] + '2' + qkv_format[-2:]
+        supported_attn_type = ("self", "cross")
+    elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
+        and check_last_dim_offsets_kv):
+        # sbhd_sbh2d, bshd_bsh2d, thd_th2d
+        qkv_layout = qkv_format + '_' + qkv_format[:-1] + '2' + qkv_format[-1:]
+        supported_attn_type = ("self", "cross")
+    elif (check_strides_kv and check_shapes_kv and check_last_dim_offsets_kv
+        and check_last_two_dims_offsets_kv):
+        # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
+        qkv_layout = '_'.join(list(repeat(qkv_format, 3)))
+        supported_attn_type = ("self", "cross")
+    else:
+        raise Exception("The provided qkv memory layout is not supported!")
+
+def _get_qkvso_strides(
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -346,20 +422,21 @@ def _get_qkv_layout_and_strides(
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
     ) -> Tuple[Union[str, List, Tuple, None], ...]:
-    """Get qkv layout and strides based on qkv format and q, k, v tensors' memory layout.
-    
+    """Get memory strides.
+
     Parameters
     ----------
-    q: torch.Tensor 
+    q: torch.Tensor
         Query tensor.
-    k: torch.Tensor 
+    k: torch.Tensor
         Key tensor.
-    v: torch.Tensor 
+    v: torch.Tensor
         Value tensor.
     qkv_format: str, default = `sbhd`
-        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}, where `s` is
-        the sequence length dimension, `b` batch size, `h` number of heads, `d` head size,
-        and `t` total number of sequences in a batch, `t = sum(s_i) for i = 0...b-1`.
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` is
+        the sequence length dimension, `b` the batch size, `h` the number of heads,
+        `d` the head size, and `t` the total number of sequences in a batch,
+        `t = sum(s_i) for i = 0...b-1`.
     batch_size: Optional[int], default = `None`
         Batch size. Required for `qkv_format = thd`.
     max_seqlen_q: Optional[int], default = `None`
@@ -369,144 +446,80 @@ def _get_qkv_layout_and_strides(
 
     Returns
     ----------
-    qkv_layout: str
-       Each qkv_format can map to one of five qkv_layouts:
-       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
-       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
-       `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
-    strides: List 
-       An 2D integer list in shape [7, 4]. The 7 rows represent matrices
-       `Q`, `K`, `V`, `K transposed`, `V transposed`, `S` (softmax), and `O` (fwd output).
-       The 4 columns represent a particular matrix's strides in the
-       batch_size (`b`), num_heads (`h`), seq_len (`s`), and hidden_dim (`d`) dimensions.
+    qkvso_strides: List
+       A 2D integer list in shape [7, 4]. The 7 rows represent 7 matrices:
+       `Q`, `K`, `V`, `K transposed`, `V transposed`, `S` (softmax), and `O` (output of fwd).
+       The 4 columns represent the matrix's strides in these 4 dimensions:
+       batch_size (`b`), num_heads (`h`), seq_len (`s`), hidden_dim (`d`)
+       for `Q`, `K`, `V`, `O`;
+       batch_size (`b`), num_heads (`h`), hidden_dim (`d`), seq_len (`s`)
+       for `K transposed`, `V transposed`; and
+       batch_size (`b`), num_heads (`h`), seqlen_q (`s_q`), seqlen_kv (`s_kv`)
+       for `S`.
     """
-
-    check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
-    assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
 
     if qkv_format == 'thd':
         assert (batch_size is not None
             and max_seqlen_q is not None
             and max_seqlen_kv is not None
-            ), "batch_size, max_seqlen_q and max_seqlen_kv are required for qkv_format = thd!"
-    if qkv_format in ['sbhd', 'bshd']:
+            ), "batch_size, max_seqlen_q and max_seqlen_kv can not be None when qkv_format = thd!"
+    elif qkv_format in ['sbhd', 'bshd']:
         _batch_size = q.shape[1] if qkv_format == 'sbhd' else q.shape[0]
         _max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
         _max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
         if batch_size is not None:
             assert (batch_size == _batch_size
-                ), "The batch dimension in q, k, v does not match batch_size!"
+                ), "batch_size does not match the batch dimension in q, k, v tensors!"
         if max_seqlen_q is not None:
             assert (max_seqlen_q == _max_seqlen_q
-                ), "The sequence length dimension in q does not match max_seqlen_q!"
+                ), "max_seqlen_q does not match the sequence length in q!"
         if max_seqlen_kv is not None:
             assert (max_seqlen_kv == _max_seqlen_kv
-                ), "The sequence length dimension in k, v does not match max_seqlen_kv!"
+                ), "max_seqlen_kv does not match the sequence length in k, v tensors!"
+    else:
+        raise Exception(f"qkv_format {qkv_format} is not supported!")
 
     num_heads, head_dim = q.shape[-2:]
 
-    data_ptr = q.untyped_storage().data_ptr()
-    check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-    data_ptr = k.untyped_storage().data_ptr()
-    check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
-
-    stride = q.stride()
-    check_strides = all(stride == x.stride() for x in [q, k, v])
-    stride = k.stride()
-    check_strides_kv = all(stride == x.stride() for x in [k, v])
-
-    shape = q.shape
-    check_shapes = all(shape == x.shape for x in [q, k, v])
-    shape = k.shape
-    check_shapes_kv = all(shape == x.shape for x in [k, v])
-
-    last_dim_size = q.shape[-1]
-    check_last_dim_offsets = all(i * last_dim_size == x.storage_offset()
-                        for i, x in enumerate([q, k, v]))
-    last_dim_size = k.shape[-1]
-    check_last_dim_offsets_kv = all(i * last_dim_size == x.storage_offset()
-                        for i, x in enumerate([k, v]))
-
-    last_two_dims_size = q.shape[-1]
-    check_last_two_dims_offsets = all(i * last_two_dims_size == x.storage_offset()
-                        for i, x in enumerate([q, k, v]))
-    last_two_dims_size = k.shape[-1]
-    check_last_two_dims_offsets_kv = all(i * last_two_dims_size == x.storage_offset()
-                        for i, x in enumerate([k, v]))
-
-    if check_ptrs and check_strides and check_shapes and check_last_two_dims_offsets: 
-        # sb3hd, bs3hd, t3hd
-        qkv_layout = qkv_format[:-2] + '3' + qkv_format[-2:]
-        supported_attn_type = ("self") 
-    elif check_ptrs and check_strides and check_shapes and check_last_dim_offsets: 
-        # sbh3d, bsh3d, th3d
-        qkv_layout = qkv_format[:-1] + '3' + qkv_format[-1:]
-        supported_attn_type = ("self") 
-    elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
-        and check_last_two_dims_offsets_kv): 
-        # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
-        qkv_layout = qkv_format + '_' + qkv_format[:-2] + '2' + qkv_format[-2:]
-        supported_attn_type = ("self", "cross") 
-    elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
-        and check_last_dim_offsets_kv): 
-        # sbhd_sbh2d, bshd_bsh2d, thd_th2d
-        qkv_layout = qkv_format + '_' + qkv_format[:-1] + '2' + qkv_format[-1:]
-        supported_attn_type = ("self", "cross") 
-    elif (check_strides_kv and check_shapes_kv and check_last_dim_offsets):
-        # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd 
-        qkv_layout = '_'.join(list(repeat(qkv_format, 3)))
-        supported_attn_type = ("self", "cross") 
-    else:
-        raise Exception("No supported qkv memory qkv_layout is found!")
-
+    qkvso_strides = []
     if qkv_format == 'sbhd':
-        strides = [
-            q.stride().transpose(0, 1),
-            k.stride().transpose(0, 1),
-            v.stride().transpose(0, 1),
+        qkvso_strides = [
+            q.stride().permute(1, 2, 0, 3), # Q
+            k.stride().permute(1, 2, 0, 3), # K
+            v.stride().permute(1, 2, 0, 3), # V
         ]
-        strides.append(
-            strides[1].transpose(2, 3),
-            strides[2].transpose(2, 3),
-            [num_heads * max_seqlen_q * max_seqlen_kv,
-                max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1],
-            [num_heads * head_dim,
-                batch_size * num_heads * head_dim, head_dim, 1],
-        )
     if qkv_format == 'bshd':
-        strides = [
-            q.stride(),
-            k.stride(),
-            v.stride(),
+        qkvso_strides = [
+            q.stride().transpose(1, 2),
+            k.stride().transpose(1, 2),
+            v.stride().transpose(1, 2),
         ]
-        strides.append(
-            strides[1].transpose(2, 3),
-            strides[2].transpose(2, 3),
-            [num_heads * max_seqlen_q * max_seqlen_kv,
-                max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1],
-            [num_heads * head_dim,
-                batch_size * num_heads * head_dim, head_dim, 1],
-            #[max_seqlen_q * num_heads * head_dim,
-            #    num_heads * head_dim, head_dim, 1],
-        )
     if qkv_format == 'thd':
-        strides = [
-            [q.stride()[0] * max_seqlen_q, *q.stride()],
-            [k.stride()[0] * max_seqlen_kv, *k.stride()],
-            [v.stride()[0] * max_seqlen_kv, *v.stride()],
+        qkvso_strides = [
+            [q.stride()[0] * max_seqlen_q, q.stride()[1], q.stride()[0], q.stride()[2]],
+            [k.stride()[0] * max_seqlen_kv, k.stride()[1], k.stride()[0], k.stride()[2]],
+            [v.stride()[0] * max_seqlen_kv, v.stride()[1], v.stride()[0], v.stride()[2]],
         ]
-        strides.append(
-            strides[1].transpose(2, 3),
-            strides[2].transpose(2, 3),
-            [num_heads * max_seqlen_q * max_seqlen_kv,
-                max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1],
-            [num_heads * head_dim,
-                batch_size * num_heads * head_dim, head_dim, 1],
-            #[max_seqlen_q * num_heads * head_dim,
-            #    num_heads * head_dim, head_dim, 1],
+    qkvso_strides.append(
+        qkvso_strides[1].transpose(2, 3), # K transposed
+        qkvso_strides[2].transpose(2, 3), # V transposed
+        [num_heads * max_seqlen_q * max_seqlen_kv,
+            max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1], # S
+        #[num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
         )
+    if qkv_format == 'sbhd':
+        qkvso_strides.append(
+        [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
+        )
+    if qkv_format == 'bshd' or 'thd':
+        qkvso_strides.append(
+        [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
+        )
+    assert (len(qkvso_strides) == 7
+            and len(qkvso_strides[0] == 4)
+            ), "qkvso_strides should be in [7, 4] shape!"
 
-    return qkv_layout, strides, supported_attn_type 
+    return qkvso_strides
 
 def _check_if_interleaved_qkv(q, k, v):
     data_ptr = q.untyped_storage().data_ptr()
@@ -598,9 +611,10 @@ class FlashAttention(torch.nn.Module):
             ), "FlashAttention currently only supports CUDA tensors."
         assert (
             qkv_layout in QKVLayouts
-            ), f"FlashAttention does not support {qkv_layout} qkv_layout!" 
+            ), f"FlashAttention does not support {qkv_layout} qkv_layout!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+
         if qkv_format == 'sbhd':
             # For now just 128, will make it more general in the future
             if (query_layer.shape[-1] == 128 and
@@ -614,14 +628,14 @@ class FlashAttention(torch.nn.Module):
                                for x in (query_layer, key_layer, value_layer)]
 
         if qkv_format in ['sbhd', 'bshd']:
-            max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
-            max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
+            # qkv layout is now bshd_bshd_bshd
+            batch_size = query_layer.shape[0]
+            max_seqlen_q = query_layer.shape[1]
+            max_seqlen_kv = key_layer.shape[1]
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.Tensor([max_seqlen_q] * batch_size).cumsum(0)
             if cu_seqlens_kv is None:
                 cu_seqlens_kv = torch.Tensor([max_seqlen_kv] * batch_size).cumsum(0)
-
-            # [b, sq, np, hn]
             query_layer, key_layer, value_layer = [
                 x.view(x.shape[0] * x.shape[1], *x.shape[2:])
                 for x in [query_layer, key_layer, value_layer]
@@ -636,7 +650,7 @@ class FlashAttention(torch.nn.Module):
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
-            
+
         with self.attention_dropout_ctx():
             fa_optional_forward_kwargs = {}
             if not _flash_attn_2_available:
@@ -873,19 +887,20 @@ class FusedAttention(torch.nn.Module):
             ), 'FusedAttention only supports CUDA tensors.'
         assert (
             qkv_layout in QKVLayouts
-            ), f"FlashAttention does not support {qkv_layout} qkv_layout!" 
+            ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
         if qkv_format in ['sbhd', 'bshd']:
-            max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
-            max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
+            batch_size = query_layer.shape[1] if qkv_format = 'sbhd' else query_layer.shape[0]
+            max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
+            max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.Tensor([max_seqlen_q] * batch_size).cumsum(0)
             if cu_seqlens_kv is None:
                 cu_seqlens_kv = torch.Tensor([max_seqlen_kv] * batch_size).cumsum(0)
         if qkv_format == 'thd':
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
-                ), "cu_seqlens_q and cu_seqlens_kv are required for qkv_format = thd!"
+                ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             max_seqlen_q = seqlens_q.max().item()
@@ -1227,18 +1242,18 @@ class DotProductAttention(torch.nn.Module):
                      Value tensor.
         qkv_format: str, default = `sbhd`
                    Dimension format for `query_layer`, `key_layer` and `value_layer`,
-                   {`sbhd`, `bshd`, `thd`}, where `s` is the sequence length dimension,
-                   `b` batch size, `h` number of heads, `d` head size, and `t` total number
-                   of sequences in a batch, `t = sum(s_i) for i = 0...b-1`. `sbhd` and `bshd`
-                   are used for cases where sequences in a batch are of equal length or padded
-                   to the same length, and `thd` is used for when sequence lengths are different.
-                   The formats do not describe how `query_layer`, `key_layer` and `value_layer`
-                   are laid out in memory, for which, please see `_get_qkv_layout_and_strides`.
+                   {`sbhd`, `bshd`, `thd`}. `s` is the sequence length dimension,
+                   `b` the batch size, `h` the number of heads, `d` the head size,
+                   and `t` the total number of sequences in a batch, `t = sum(s_i) for i = 0...b-1`.
+                   `sbhd` and `bshd` are used for cases where sequences in a batch are of equal length
+                   or padded to the same length, and `thd` is used for when sequence lengths in a batch
+                   are different. These formats do not describe how `query_layer`, `key_layer` and `value_layer`
+                   are laid out in memory, for which, please see `_get_qkv_layout`.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths in a batch for the query tensor,
+                   Cumulative sum of sequence lengths in a batch for `query_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths in a batch for the key and value tensors,
+                   Cumulative sum of sequence lengths in a batch for `key_layer` and `value_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
         attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
@@ -1259,20 +1274,19 @@ class DotProductAttention(torch.nn.Module):
             ), "Keys and values must have the same shape!"
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
-            ), f"Keys and values must have {self.num_gqa_groups} heads!"
-
+            ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
         assert (qkv_format in ['sbhd', 'bshd', 'thd']
             ), "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
 
         if qkv_format == 'thd':
             assert (all(len(x.shape) == 3 for x in (query_layer, key_layer, value_layer))
-                ), "Queries, keys and values must be 3D tensors to be in qkv_format thd!"
+                ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
-                ), "cu_seqlens_q and cu_seqlens_kv can not be None if qkv_format is thd!"
+                ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             assert (cu_seqlens_q.shape == cu_seqlens_kv.shape
                 and len(cu_seqlens_q.shape) == 1
                 and len(cu_seqlens_kv.shape) == 1
-                ), "cu_seqlens_q and cu_seqlens_q must have the same shape [batch_size + 1]!"
+                ), "cu_seqlens_q and cu_seqlens_q must both have shape [batch_size + 1]!"
             assert (cu_seqlens_q.dtype == torch.int32
                 and cu_seqlens_kv.dtype == torch.int32
                 ), "cu_seqlens_q and cu_seqlens_q must have dtype torch.int32!"
@@ -1283,40 +1297,41 @@ class DotProductAttention(torch.nn.Module):
             max_seqlen_kv = seqlens_kv.max().item()
             if (all(seqlens_q == seqlens_q[0])
                 and all(seqlens_kv == seqlens_kv[0])
-                and q.shape[0] == batch_size * seqlens_q[0]):
+                and query_layer.shape[0] == batch_size * seqlens_q[0]
+                and key_layer.shape[0] == batch_size * seqlens_kv[0]):
                 qkv_format = 'bshd'
                 query_layer = query_layer.view(batch_size, seqlens_q[0], *query_layer.shape[-2:])
                 key_layer, value_layer = [x.view(batch_size, seqlens_kv[0], *x.shape[-2:])
-                    for x in (key_layer, value_layer)] 
+                    for x in (key_layer, value_layer)]
                 warnings.warn(
-                    "Please use qkv_format = bshd since sequences have the same length
-                    within a batch."
-                )
+                    "Please use qkv_format bshd instead of thd when sequences in a batch
+                    are of equal length."
+                    )
+
         if qkv_format in ['sbhd', 'bshd']:
             assert (all(len(x.shape) == 4 for x in (query_layer, key_layer, value_layer))
-                ), f"Queries, keys and values must be 4D tensors to be in qkv_format {qkv_format}!"
-            batch_size = q.shape[1] if qkv_format == 'sbhd' else q.shape[0]
-            max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
-            max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
+                ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
+            batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
+            max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
+            max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                 assert (all(seqlens_q <= max_seqlen_q)
-                    ), "Sequence lengths indicated by cu_seqlens_q must be smaller than
+                    ), "Sequence lengths indicated by cu_seqlens_q must not be greater than
                     the sequence dimention in the query tensor!"
-            else:
-                cu_seqlens_q = None #torch.Tensor([max_seqlen_q] * batch_size).cumsum(0)
             if cu_seqlens_kv is not None:
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                 assert (all(seqlens_kv <= max_seqlen_kv)
-                    ), "Sequence lengths indicated by cu_seqlens_kv must be smaller than
-                    the sequence dimention in the key/value tensor!"
-            else:
-                cu_seqlens_kv = None #torch.Tensor([max_seqlen_kv] * batch_size).cumsum(0)
-                
-        qkv_layout, strides, supported_attn_type = _get_qkv_layout_and_strides(query_layer,
-            key_layer, value_layer, qkv_format)
+                    ), "Sequence lengths indicated by cu_seqlens_kv must not be greater than
+                    the sequence dimention in the key and value tensors!"
+
+        qkv_layout, supported_attn_type = _get_qkv_layout(query_layer,
+            key_layer,
+            value_layer,
+            qkv_format = qkv_format)
         assert (self.attention_type in supported_attn_type
-            ), f"Supported attention types are {supported_attn_type}!"
+            ), f"Attention type {self.attention_type} is not supported for the
+            provided query, key and value tensors and qkv_format {qkv_format}!"
 
         use_flash_attention = self.use_flash_attention
         use_fused_attention = self.use_fused_attention
@@ -1344,18 +1359,15 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
             use_fused_attention = False
 
-        #qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
         fused_attention_backend = tex.get_fused_attn_backend(
             TE_DType[query_layer.dtype],
             TE_DType[key_layer.dtype],
-            #QKVFormat[qkv_format], # fmha v2 doesn't support thd; v1 supports all; fp8 only thd
-            QKVLayout[qkv_layout],
+            QKVLayout[qkv_layout], #### ??
             AttnBiasType[core_attention_bias_type],
             AttnMaskType[self.attn_mask_type],
             self.attention_dropout,
             max_seqlen_q, max_seqlen_kv,
-            #query_layer.shape[0], key_layer.shape[0],
-            query_layer.shape[-1])
+            head_dim)
         # DPA does not support FP8; for FP8, use cpp_extensions modules directly
         is_backend_avail = (fused_attention_backend in
             [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
@@ -1387,6 +1399,13 @@ class DotProductAttention(torch.nn.Module):
                                                             )
 
         if use_fused_attention:
+            qkvso_strides = _get_qkvso_strides(query_layer,
+                key_layer,
+                value_layer,
+                qkv_format = qkv_format,
+                batch_size = batch_size,
+                max_seqlen_q = max_seqlen_q,
+                max_seqlen_kv = max_seqlen_kv)
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                     query_layer,
@@ -1414,12 +1433,16 @@ class DotProductAttention(torch.nn.Module):
                 query_layer,
                 key_layer,
                 value_layer,
-                attention_mask = attention_mask,
                 qkv_layout = qkv_layout,
+                cu_seqlens_q = cu_seqlens_q,
+                cu_seqlens_kv = cu_seqlens_kv,
+                attention_mask = attention_mask,
             )
         return self.unfused_attention(query_layer, key_layer, value_layer,
-                attention_mask = attention_mask,
                 qkv_layout = qkv_layout,
+                cu_seqlens_q = cu_seqlens_q,
+                cu_seqlens_kv = cu_seqlens_kv,
+                attention_mask = attention_mask,
             )
 
 

@@ -347,7 +347,8 @@ void nvte_fused_attn_bwd_kvpacked(
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor, [total_seqs_q, num_heads, head_dim].
- *  \param[in]     KV                       The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     K                        The K tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     V                        The V tensor, [total_seqs_kv, 2, num_heads, head_dim].
  *  \param[in]     Bias                     The Bias tensor.
  *  \param[in,out] S                        The S tensor.
  *  \param[out]    O                        The output O tensor.
@@ -396,7 +397,8 @@ void nvte_fused_attn_fwd_q_k_v(
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor, [total_seqs_q, num_heads, head_dim].
- *  \param[in]     KV                       The KV tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     K                        The K tensor, [total_seqs_kv, 2, num_heads, head_dim].
+ *  \param[in]     V                        The V tensor, [total_seqs_kv, 2, num_heads, head_dim].
  *  \param[in]     O                        The O tensor from forward.
  *  \param[in]     dO                       The gradient of the O tensor.
  *  \param[in]     S                        The S tensor.
@@ -404,7 +406,8 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
  *                                          e.g. M, ZInv, rng_state.
  *  \param[out]    dQ                       The gradient of the Q tensor.
- *  \param[out]    dKV                      The gradient of the KV tensor.
+ *  \param[out]    dK                       The gradient of the K tensor.
+ *  \param[out]    dV                       The gradient of the V tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].

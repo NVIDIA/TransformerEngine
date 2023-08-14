@@ -46,5 +46,43 @@ void fused_attn_fp8_bwd_qkvpacked(
             Tensor *workspace,
             cudaStream_t stream,
             cudnnHandle_t handle);
+// fused attention FWD FP8 with separate Q, K, V
+void fused_attn_fp8_fwd_q_k_v(
+            size_t b, size_t max_seqlen,
+            size_t h, size_t d,
+            bool is_training, float attn_scale,
+            float p_dropout, NVTE_QKV_Layout qkv_layout,
+            const Tensor *input_Q, const Tenosr *input_K,
+	    const Tensor *input_V,
+            Tensor *input_output_S,
+            Tensor *output_O,
+            NVTETensorPack* Aux_CTX_Tensors,
+            const Tensor *cu_seqlens,
+            const Tensor *rng_state,
+            Tensor *workspace,
+            cudaStream_t stream,
+            cudnnHandle_t handle);
+
+// fused attention BWD FP8 with separate Q, K, V
+void fused_attn_fp8_bwd_qkvpacked(
+            size_t b, size_t max_seqlen,
+            size_t h, size_t d,
+            float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+            const Tensor *input_Q, const Tenosr *input_K,
+	    const Tensor *input_V,
+            const Tensor *input_O,
+            const Tensor *input_dO,
+            const Tensor *input_M,
+            const Tensor *input_ZInv,
+            const Tensor *input_S,
+            Tensor *input_output_dP,
+            const Tensor *output_dQ,
+            const Tensor *output_dK,
+            const Tensor *output_dV,
+            const Tensor *cu_seqlens,
+            const Tensor *rng_state,
+            Tensor *workspace,
+            cudaStream_t stream,
+            cudnnHandle_t handle);
 #endif  // end of CUDNN>=8900
 }  // namespace transformer_engine
