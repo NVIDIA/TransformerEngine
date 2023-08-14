@@ -4,7 +4,7 @@ import os
 import subprocess
 from typing import Literal, Sequence
 import torch
-import transformer_engine_cuda as _nvte
+import transformer_engine_cuda as _nvte  # pylint: disable=import-error
 
 
 @cache

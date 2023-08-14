@@ -1,73 +1,12 @@
 import copy
-from functools import partial, reduce
+from functools import reduce
 import operator
-from typing import Literal
-import transformer_engine_cuda as _nvte
+import transformer_engine_cuda as _nvte  # pylint: disable=import-error
 from .utils import set_attribute
 from .nvte import is_fp8
-from .ops import (
-    BackwardFused,
-    ForwardFused,
-    Grads,
-    Op,
-    FUSIONS_INF,
-    FUSIONS_FWD,
-    FUSIONS_BWD,
-    Context,
-    Inference,
-)
+from .ops import Op, Grads, Context
+from .fusions import FusedOp, get_fused_op_list
 from .environment import Environment
-
-
-class FusedOp(Op):
-    def __init__(
-        self,
-        ops: list[Op],
-        forward: ForwardFused | None = None,
-        backward: BackwardFused | None = None,
-        inference: Inference | None = None,
-    ):
-        self.forward_ = forward
-        self.backward_ = backward
-        self.inference_ = inference
-        self.ops = ops
-
-    def inference(self, x: _nvte.Tensor) -> _nvte.Tensor:
-        assert self.inference_ is not None
-        return self.inference_(x)
-
-    def forward(self, x: _nvte.Tensor):
-        assert self.forward_ is not None
-        y, ctxs = self.forward_(x)
-        full_ctx = Context()
-        for op, ctx in zip(self.ops, ctxs):
-            op_name = getattr(op, "name")
-            ctx: Context = {op_name + name: tensor for name, tensor in ctx.items()}
-            full_ctx |= ctx
-        return y, full_ctx
-
-    def backward(self, ctx: Context, dy: _nvte.Tensor):
-        assert self.backward_ is not None
-        ctxs = list[Context]()
-        for op in self.ops:
-            op_name = getattr(op, "name")
-            ctxs.append(
-                {
-                    name[len(op_name) :]: tensor
-                    for name, tensor in ctx.items()
-                    if name.startswith(op_name)
-                }
-            )
-
-        dx, grads = self.backward_(*ctxs, dy)
-        grads_total: Grads = [grad for op_grads in grads for grad in op_grads]
-        return dx, grads_total
-
-    def args(self):
-        return list(sum((op.args() for op in self.ops), list[_nvte.Tensor]()))
-
-    def __repr__(self):
-        return f"""FusedOp{self.ops}"""
 
 
 class SelfContainedOp(Op):
@@ -127,28 +66,6 @@ def model_parallel_transform(ops: list[Op]):
     raise NotImplementedError()
 
 
-def get_list(ops: list[Op], fuse_by: Literal["forward", "backward", "inference"]):
-    ops = ops.copy()
-    if fuse_by == "forward":
-        fusion_dict = FUSIONS_FWD
-    elif fuse_by == "backward":
-        fusion_dict = FUSIONS_BWD
-    else:  # pass_ == "inference":
-        fusion_dict = FUSIONS_INF
-    fusions = [(len(arg_types), arg_types, f) for arg_types, f in fusion_dict.items()]
-    fusions.sort(key=lambda x: x[0], reverse=True)  # largest first
-    for cnt, arg_types, f in fusions:
-        startPos = 0
-        while startPos < len(ops) - cnt + 1:
-            if all(isinstance(ops[startPos + i], arg_types[i]) for i in range(cnt)):
-                fused_ops = ops[startPos : startPos + cnt]
-                func = partial(f, *fused_ops)
-                fused_op = FusedOp(fused_ops, **{fuse_by: func})
-                ops[startPos : startPos + cnt] = [fused_op]
-            startPos += 1
-    return ops
-
-
 def name_ops(ops: list[Op]):
     for i, op in enumerate(ops):
         setattr(op, "name", f"{i}({op.__class__.__name__})")
@@ -189,7 +106,7 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
 
 def copy_op_list(ops: list[Op]):
     "Deep copy ops, except for tensors"
-    with set_attribute(_nvte.Tensor, "__deepcopy__", lambda self, memo: self):
+    with set_attribute(_nvte.Tensor, "__deepcopy__", lambda self, memo: self):  # type: ignore[unknown-lambda-type]
         return copy.deepcopy(ops)
 
 
@@ -203,10 +120,10 @@ class ComputePipeline:
         if env.world_size > 1:
             model_parallel_transform(ops)
 
-        self._inf = get_list(ops, "inference")
+        self._inf = get_fused_op_list(ops, "inference")
 
         self.functions = split_into_self_contained(
-            get_list(ops, "forward"), get_list(ops, "backward")
+            get_fused_op_list(ops, "forward"), get_fused_op_list(ops, "backward")
         )
         self.forward = tuple(op for f in self.functions for op in f.fwds)
         self.backward = tuple(op for f in self.functions for op in f.bwds)

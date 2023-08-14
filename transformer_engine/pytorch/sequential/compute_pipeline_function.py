@@ -1,7 +1,7 @@
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-import transformer_engine_cuda as _nvte
+import transformer_engine_cuda as _nvte  # pylint: disable=import-error
 from .ops import Context, Op
 from .nvte import is_fp8, make_nvte_tensor, set_current_pass
 from .compute_pipeline import ComputePipeline
@@ -9,7 +9,7 @@ from .compute_pipeline import ComputePipeline
 
 class ComputePipelineFunction(autograd.Function):
     @staticmethod
-    def forward(
+    def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
         *args: torch.Tensor | Op | list[_nvte.Tensor]
@@ -56,7 +56,7 @@ class ComputePipelineFunction(autograd.Function):
         return exposed_x
 
     @staticmethod
-    def backward(ctx: FunctionCtx, grad_output: torch.Tensor):
+    def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
         # The context needs to think that the tensors were read
         _ = ctx.saved_tensors  # type: ignore
 

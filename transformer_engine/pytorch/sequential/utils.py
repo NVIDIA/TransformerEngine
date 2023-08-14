@@ -13,6 +13,6 @@ def set_attribute(obj: object, attr: str, value: Any):
         yield
     finally:
         if had_value:
-            setattr(obj, attr, old_value)
+            setattr(obj, attr, old_value)  # type:ignore
         else:
             delattr(obj, attr)
