@@ -1,10 +1,10 @@
-from typing import Callable
 from math import sqrt
 import torch
 from torch import nn
-from .base import BaseModule
 from .. import ops
 from ..nvte import make_nvte_tensor
+from ._common import ParameterInitMethod
+from .base import BaseModule
 
 
 def _default_weight_init_method(weight: torch.Tensor):
@@ -26,12 +26,8 @@ class Linear(BaseModule):
         out_features: int,
         use_bias: bool = True,
         param_dtype: torch.dtype = torch.get_default_dtype(),
-        weight_init_method: Callable[
-            [torch.Tensor], torch.Tensor
-        ] = _default_weight_init_method,
-        bias_init_method: Callable[
-            [torch.Tensor], torch.Tensor
-        ] = _default_bias_init_method,
+        weight_init_method: ParameterInitMethod = _default_weight_init_method,
+        bias_init_method: ParameterInitMethod = _default_bias_init_method,
     ):
         nn.Module.__init__(self)  # type: ignore
 

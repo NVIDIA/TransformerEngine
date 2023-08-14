@@ -12,6 +12,7 @@ from .cast_transpose import (
 )
 from .dtype import te_to_torch_dtype, torch_to_te_dtype, bit_width, dtype_name, is_fp8
 from .empty import empty, empty_like, multi_empty_share_metadata
+from .gelu import gelu, dgelu
 from .interface import set_current_pass
 from .layernorm import layernorm, dlayernorm
 from .misc_fusions import cast_transpose_dbias_checked
@@ -34,12 +35,14 @@ __all__ = [
     "cast_transpose",
     "cast",
     "dbias",
+    "dgelu",
     "dlayernorm",
     "dtype_name",
     "DType",
     "empty_like",
     "empty",
     "FusedAttnBackend",
+    "gelu",
     "is_fp8",
     "layernorm",
     "make_nvte_tensor",

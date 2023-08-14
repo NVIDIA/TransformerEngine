@@ -1,6 +1,6 @@
 from __future__ import annotations
 from .. import nvte
-from ..ops import Context, MMT, Add
+from ..ops import Context, MMT, Add, GELU
 from .. import nvte
 from ._common import (
     register_fusion_inference,
@@ -50,6 +50,9 @@ def mmt_add_bwd_fused(
     dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
 
     return dx, ([dweight], [dbias])
+
+
+# TODO: implement gelu fusions
 
 
 # fusion function names (ex. mmt_add_bwd_fused) are for debugging only, as they are called from a dictionary like FUSIONS_FWD
