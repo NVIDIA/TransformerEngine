@@ -49,7 +49,12 @@ class ComputePipelineFunction(autograd.Function):
         # Actually store the result
         nvte_x_container[0] = y
 
-        return exposed_x
+        # Expose result for Pytorch
+        exposed_y = torch.Tensor()
+        exposed_y.shape = torch.Size(y.shape)  # needed for autograd to not complain
+        exposed_y.grad_fn = exposed_x.grad_fn  # needed to preserve computation graph
+
+        return exposed_y
 
     @staticmethod
     def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
@@ -94,5 +99,4 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 x, *exposed_tensors, contained_op, nvte_x_container
             )
             nvte_x = nvte_x_container[0]
-        x.data = nvte_x.data
         return x
