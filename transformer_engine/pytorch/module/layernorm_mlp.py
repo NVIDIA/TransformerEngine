@@ -874,8 +874,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    cpu_initialization : bool, default = `False`
-          if set to `True`, the parameters of the model will be initialized on the CPU.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -946,12 +948,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
-        cpu_initialization: bool = False,
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
-        device = "cpu" if cpu_initialization else torch.cuda.current_device()
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"

@@ -149,8 +149,10 @@ class TransformerLayer(torch.nn.Module):
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
           Options are: 'gelu', 'relu', 'reglu', 'geglu' and 'swiglu'.
-    cpu_initialization : bool, default = `False`
-          if set to `True`, the parameters of the model will be initialized on the CPU.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -235,7 +237,7 @@ class TransformerLayer(torch.nn.Module):
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
-        cpu_initialization: bool = False,
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
@@ -329,7 +331,7 @@ class TransformerLayer(torch.nn.Module):
             attention_type="self",
             bias=bias,
             normalization=normalization,
-            cpu_initialization=cpu_initialization,
+            device=device,
         )
 
         if layer_type == "decoder":
@@ -341,7 +343,7 @@ class TransformerLayer(torch.nn.Module):
                 attention_type="cross",
                 bias=bias,
                 normalization=normalization,
-                cpu_initialization=cpu_initialization,
+                device=device,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -374,7 +376,7 @@ class TransformerLayer(torch.nn.Module):
             ub_split_ag=ub_split_ag,
             activation=activation,
             normalization=normalization,
-            cpu_initialization=cpu_initialization,
+            device=device,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -409,7 +411,7 @@ class TransformerLayer(torch.nn.Module):
                 sequence_parallel=self.sequence_parallel,
                 params_dtype=params_dtype,
                 zero_centered_gamma=zero_centered_gamma,
-                cpu_initialization=cpu_initialization,
+                device=device,
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
