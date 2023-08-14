@@ -24,7 +24,7 @@ class Linear(BaseModule):
         self,
         in_features: int,
         out_features: int,
-        use_bias: bool = True,
+        bias: bool = True,
         param_dtype: torch.dtype = torch.get_default_dtype(),
         weight_init_method: ParameterInitMethod = _default_weight_init_method,
         bias_init_method: ParameterInitMethod = _default_bias_init_method,
@@ -45,7 +45,7 @@ class Linear(BaseModule):
                     torch.empty(out_features, dtype=param_dtype, device="cuda")
                 )
             )
-            if use_bias
+            if bias
             else None
         )
 

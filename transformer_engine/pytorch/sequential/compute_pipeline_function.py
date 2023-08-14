@@ -49,9 +49,6 @@ class ComputePipelineFunction(autograd.Function):
         # Actually store the result
         nvte_x_container[0] = y
 
-        # Preserve computation graph
-        exposed_x.data = y.data
-
         return exposed_x
 
     @staticmethod
@@ -97,4 +94,5 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 x, *exposed_tensors, contained_op, nvte_x_container
             )
             nvte_x = nvte_x_container[0]
+        x.data = nvte_x.data
         return x
