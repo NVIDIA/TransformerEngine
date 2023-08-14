@@ -65,7 +65,8 @@ Let's say you're adding `awesomeLU`:
         ```
 4. In `modules`/`__init__.py` add `from awesomelu import AwesomeLU`.
 5. In `modules`/`__init__.py` insert `AwesomeLU` to the module's `__all__` list, while maintaining lexicographical order (for consistency).
-
+6. in `__init__.py` add `from .modules import AwesomeLU`.
+7. In `__init__.py` insert `AwesomeLU` to the module's `__all__` list, while maintaining lexicographical order (for consistency).
 
 ## Recipe: Adding a new `Op`
 
