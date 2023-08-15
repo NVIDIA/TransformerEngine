@@ -44,6 +44,12 @@ def matmul_transpose_gelu(mat: _nvte.Tensor, mul: _nvte.Tensor, out_dtype: _nvte
     return matmul_transpose_add_gelu(mat, mul, empty(), out_dtype)
 
 
+def matmul_transpose_gelu_add(mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor):
+    "returns mat @ mul^T, GELU(mat @ mul^T) + add"
+    assert mat.dtype == mul.dtype
+    return matmul_transpose_add_gelu_add(mat, mul, empty(), add)
+
+
 def matmul_transpose_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor, out_dtype: _nvte.DType
 ):
