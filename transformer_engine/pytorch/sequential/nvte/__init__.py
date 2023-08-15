@@ -12,12 +12,24 @@ from .cast_transpose import (
 )
 from .dtype import te_to_torch_dtype, torch_to_te_dtype, bit_width, dtype_name, is_fp8
 from .empty import empty, empty_like, multi_empty_share_metadata
-from .activations import relu, drelu, reglu, dreglu, gelu, dgelu, swiglu, dswiglu
+from .activations import (
+    relu,
+    drelu,
+    reglu,
+    dreglu,
+    gelu,
+    dgelu,
+    geglu,
+    dgeglu,
+    swiglu,
+    dswiglu,
+)
 from .interface import set_current_pass
 from .layernorm import layernorm, dlayernorm
 from .misc_fusions import (
     cast_transpose_dbias_checked,
     cast_transpose_dbias_dgelu_checked,
+    cast_transpose_dgeglu_checked,
 )
 from .mmt import (
     matmul_transpose_add_add,
@@ -37,19 +49,22 @@ __all__ = [
     "cast_transpose_checked",
     "cast_transpose_dbias_checked",
     "cast_transpose_dbias_dgelu_checked",
+    "cast_transpose_dgeglu_checked",
     "cast_transpose",
     "cast",
     "dbias",
+    "dgeglu",
     "dgelu",
     "dlayernorm",
     "dreglu",
     "drelu",
+    "dswiglu",
     "dtype_name",
     "DType",
-    "dswiglu",
     "empty_like",
     "empty",
     "FusedAttnBackend",
+    "geglu",
     "gelu",
     "is_fp8",
     "layernorm",

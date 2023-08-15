@@ -1,6 +1,7 @@
 from __future__ import annotations
+
 from .. import nvte
-from ..ops import Context, MMT, Add, GELU, Grads
+from ..ops import Context, Grads, MMT, Add, GELU, GeGLU
 from .. import nvte
 from ._common import (
     register_fusion_inference,
@@ -205,6 +206,21 @@ def mmt_add_gelu_add_fwd_fused(
         {"x": pre_gelu},
         Context(),
     )
+
+
+# MMT, GEGLU
+@register_fusion_backward
+def mmt_geglu_bwd_fused(
+    mmt: MMT, geglu: GeGLU, mmt_ctx: Context, geglu_ctx: Context, grad: nvte.Tensor
+):
+    del geglu
+    x_t, weight_t, pre_geglu = mmt_ctx["x_t"], mmt_ctx["weight_t"], geglu_ctx["x"]
+    dy, dy_t = nvte.cast_transpose_dgeglu_checked(grad, pre_geglu, mmt.dy_dtype)
+
+    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype)
+    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
+
+    return dx, ([dweight], Grads())
 
 
 # fusion function names (ex. mmt_add_bwd_fused) are for debugging only, as they are called from a dictionary like FUSIONS_FWD

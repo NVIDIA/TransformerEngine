@@ -1,11 +1,21 @@
-from .module import GELU, LayerNorm, Linear, Sequential, ReGLU, ReLU, SwiGLU
+from .module import (
+    ReLU,
+    GELU,
+    ReGLU,
+    GeGLU,
+    SwiGLU,
+    LayerNorm,
+    Linear,
+    Sequential,
+)
 
 __all__ = [
+    "ReLU",
     "GELU",
+    "ReGLU",
+    "GeGLU",
+    "SwiGLU",
     "LayerNorm",
     "Linear",
-    "ReGLU",
-    "ReLU",
     "Sequential",
-    "SwiGLU",
 ]

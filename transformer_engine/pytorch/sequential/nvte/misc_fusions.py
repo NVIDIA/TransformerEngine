@@ -65,3 +65,22 @@ def cast_transpose_dbias_dgelu_checked(
         dgelu = empty(grad.shape, cast_dtype or grad.dtype)
         _nvte.dgelu(grad, pre_gelu, dgelu)
         return cast_transpose_dbias_checked(dgelu, cast_dtype, dbias_dtype)
+
+
+def cast_transpose_dgeglu_checked(
+    grad: _nvte.Tensor, pre_geglu: _nvte.Tensor, cast_dtype: _nvte.DType | None
+):
+    if (
+        grad.dtype == pre_geglu.dtype
+        and cast_dtype is not None
+        and cast_dtype != grad.dtype
+    ):
+        dgeglu_cast, dgeglu_transpose = multi_empty_share_metadata(
+            (grad.shape, cast_dtype), (grad.shape[::-1], cast_dtype)
+        )
+        _nvte.dgeglu_cast_transpose(grad, pre_geglu, dgeglu_cast, dgeglu_transpose)
+        return dgeglu_cast, dgeglu_transpose
+    else:
+        dgeglu = empty(grad.shape, cast_dtype or grad.dtype)
+        _nvte.dgeglu(grad, pre_geglu, dgeglu)
+        return cast_transpose_checked(dgeglu, cast_dtype)
