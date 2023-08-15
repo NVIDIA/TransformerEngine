@@ -81,6 +81,10 @@ struct Tensor {
         throw std::runtime_error(
             "Cannot create NVTE Tensor: !tensor.is_cuda()");
       }
+      if (!t.is_contiguous()) {
+        throw std::runtime_error(
+            "Cannot create NVTE Tensor: !tensor.is_contiguous()");
+      }
       return reinterpret_cast<float *>(t.data_ptr());
     } else {
       return nullptr;
