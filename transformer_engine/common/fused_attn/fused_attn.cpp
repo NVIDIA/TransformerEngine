@@ -430,7 +430,7 @@ void nvte_fused_attn_fwd_q_k_v(
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTE_Mask_Type attn_mask_type, // NVTE_Attn_Type attn_type,
             NVTETensor workspace,
             cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
@@ -477,11 +477,11 @@ void nvte_fused_attn_fwd_q_k_v(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
       fused_attn_arbitrary_seqlen_fwd_q_k_v(
-          b, max_seqlen, h, d,
+          b, max_seqlen_q, max_seqlen_kv, h, d,
           is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_Bias, output_O,
           Aux_CTX_Tensors,
-          input_cu_seqlens,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -491,11 +491,11 @@ void nvte_fused_attn_fwd_q_k_v(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_q_k_v(
-            b, max_seqlen, h, d,
+            b, max_seqlen_q, max_seqlen_kv, h, d,
             is_training, attn_scale, dropout, qkv_layout,
             input_Q, input_K, input_V, input_output_S, output_O,
             Aux_CTX_Tensors,
-            input_cu_seqlens,
+            input_cu_seqlens_q, input_cu_seqlens_kv,
             input_rng_state,
             wkspace, stream, handle);
 #else
@@ -524,7 +524,7 @@ void nvte_fused_attn_bwd_q_k_v(
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTE_Mask_Type attn_mask_type, // NVTE_Attn_Type attn_type,
             NVTETensor workspace,
             cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
@@ -578,12 +578,12 @@ void nvte_fused_attn_bwd_q_k_v(
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
       fused_attn_arbitrary_seqlen_bwd_q_k_v(
-          b, max_seqlen, h, d,
+          b, max_seqlen_q, max_seqlen_kv, h, d,
           attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_O, input_dO,
           output_S,
           output_dQ, output_dK, output_dV, output_dBias,
-          input_cu_seqlens, input_rng_state,
+          input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state,
           wkspace, stream, handle);
 #else
     const char *err_msg =
@@ -597,13 +597,13 @@ void nvte_fused_attn_bwd_q_k_v(
     const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_q_k_v(
-                    b, max_seqlen, h, d,
+                    b, max_seqlen_q, max_seqlen_kv, h, d,
                     attn_scale, dropout, qkv_layout,
                     input_Q, input_K, input_V, input_O, input_dO,
                     input_M, input_ZInv,
                     input_S, input_output_dP,
                     output_dQ, output_dK, output_dV,
-                    input_cu_seqlens,
+                    input_cu_seqlens_q, input_cu_seqlens_kv,
                     input_rng_state,
                     wkspace, stream, handle);
 #else

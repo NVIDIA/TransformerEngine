@@ -386,32 +386,30 @@ def _get_qkv_layout(
                         for i, x in enumerate([k, v]))
 
     qkv_layout = None
-    supported_attn_type = None
-    if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_two_dims_offsets_qkv:
+    if (check_ptrs_qkv and check_strides_qkv and check_shapes_qkv
+        and check_last_two_dims_offsets_qkv
+        and not check_last_dim_offsets_qkv):
         # sb3hd, bs3hd, t3hd
         qkv_layout = qkv_format[:-2] + '3' + qkv_format[-2:]
-        supported_attn_type = ("self")
     elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_dim_offsets_qkv:
         # sbh3d, bsh3d, th3d
         qkv_layout = qkv_format[:-1] + '3' + qkv_format[-1:]
-        supported_attn_type = ("self")
     elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
-        and check_last_two_dims_offsets_kv):
+        and check_last_two_dims_offsets_kv
+        and not check_last_dim_offsets_kv):
         # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
         qkv_layout = qkv_format + '_' + qkv_format[:-2] + '2' + qkv_format[-2:]
-        supported_attn_type = ("self", "cross")
     elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
         and check_last_dim_offsets_kv):
         # sbhd_sbh2d, bshd_bsh2d, thd_th2d
         qkv_layout = qkv_format + '_' + qkv_format[:-1] + '2' + qkv_format[-1:]
-        supported_attn_type = ("self", "cross")
-    elif (check_strides_kv and check_shapes_kv and check_last_dim_offsets_kv
-        and check_last_two_dims_offsets_kv):
+    elif check_strides_kv and check_shapes_kv:
         # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
         qkv_layout = '_'.join(list(repeat(qkv_format, 3)))
-        supported_attn_type = ("self", "cross")
     else:
         raise Exception("The provided qkv memory layout is not supported!")
+
+    return qkv_layout
 
 def _get_qkvso_strides(
         q: torch.Tensor,
@@ -1325,13 +1323,10 @@ class DotProductAttention(torch.nn.Module):
                     ), "Sequence lengths indicated by cu_seqlens_kv must not be greater than
                     the sequence dimention in the key and value tensors!"
 
-        qkv_layout, supported_attn_type = _get_qkv_layout(query_layer,
+        qkv_layout = _get_qkv_layout(query_layer,
             key_layer,
             value_layer,
             qkv_format = qkv_format)
-        assert (self.attention_type in supported_attn_type
-            ), f"Attention type {self.attention_type} is not supported for the
-            provided query, key and value tensors and qkv_format {qkv_format}!"
 
         use_flash_attention = self.use_flash_attention
         use_fused_attention = self.use_fused_attention

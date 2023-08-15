@@ -736,7 +736,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
   // create output tensor O
-  auto O = torch::zero_like(Q);
+  auto O = torch::zeros_like(Q);
   //auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   //auto O = torch::empty({static_cast<int64_t>(total_seqs_q),
   //                static_cast<int64_t>(h), static_cast<int64_t>(d)}, options);
@@ -904,9 +904,9 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   using namespace transformer_engine;
 
   // create output tensors dQ and dKV
-  at::Tensor dQ = torch::zero_like(Q);
-  at::Tensor dK = torch::zero_like(K);
-  at::Tensor dV = torch::zero_like(V);
+  at::Tensor dQ = torch::zeros_like(Q);
+  at::Tensor dK = torch::zeros_like(K);
+  at::Tensor dV = torch::zeros_like(V);
   //at::Tensor dQ = torch::empty_like(Q);
   //at::Tensor dK = torch::empty_like(K);
   //at::Tensor dV = torch::empty_like(V);
@@ -930,7 +930,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   TensorWrapper te_dBias;
   if (bias_type != NVTE_NO_BIAS) {
     auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
-    dBias = torch::zeros({1, static_cast<int64_t>(Q.sizes(-2)),
+    dBias = torch::zeros({1, static_cast<int64_t>(Q.size(-2)),
                     static_cast<int64_t>(max_seqlen_q),
                     static_cast<int64_t>(max_seqlen_kv)}, options);
     te_dBias = makeTransformerEngineTensor(dBias);

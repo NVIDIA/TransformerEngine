@@ -58,6 +58,107 @@ batch_sizes = [1, 2, 32]
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
+def test_dpa_qkv_layout(dtype, bs, model):
+    """Test DotProductAttention module with different QKV layouts"""
+
+    config = model_configs[model]
+
+    qkv_layouts = [
+        'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+        'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+        't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+        ]
+
+    for qkv_layout in qkv_layouts:
+
+        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+                dtype, bs, config, "FlashAttention", qkv_layout)
+        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype, bs, config, "FusedAttention", qkv_layout)
+        unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
+                dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
+
+        atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
+        assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+        assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
+
+def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
+
+    torch.manual_seed(1234)
+    torch.cuda.manual_seed(1234)
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    if backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+
+    dim_to_num = {'b': bs,
+                    's': config.seq_len,
+                    'h': config.num_attention_heads,
+                    'd': config.head_dim,
+                    't': bs * config.seq_len,
+                    '3': 3,
+                    '2': 2,
+                 }
+
+    inp = []
+    for i,layout in enumerate(qkv_layout.split('_')):
+        tensor_shape = [dim_to_num[j] for j in layout]
+        tensor = 0.1 * torch.randn(tensor_shape, dtype = dtype).cuda()
+        tensor_count = 1
+        split_dim = 0
+        for dim,l in enumerate(layout):
+             if l.isdigit():
+                 tensor_count = int(l)
+                 split_dim = dim
+                 break
+        tensors = torch.split(tensor, 1, dim = split_dim) if split_dim != 0 else [tensor]
+        for j in range(tensor_count):
+            inp.append(tensors[j])
+    for i in range(3):
+        inp[i].requires_grad=True
+
+    seqlens = torch.empty(bs, dtype = torch.int32).cuda()
+    seqlens.fill_(config.seq_len)
+    cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
+    qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+    op_grad_shape = [dim_to_num[i] for i in qkv_format]
+    op_grad_shape_new = [*op_grad_shape[:-2], op_grad_shape[-2] * op_grad_shape[-1]]
+    op_grad = 0.001 * torch.randint(0, 200, op_grad_shape_new, dtype = dtype).cuda()
+
+    block = (
+         DotProductAttention(
+                config.num_attention_heads,
+                config.head_dim,
+                attention_dropout = config.dropout_p,
+                attn_mask_type = config.attn_mask_type,
+                sequence_parallel = False,
+                tp_size = 1,
+                get_rng_state_tracker = None,
+                tp_group = None,
+                layer_number = 1,
+                attention_type = "self"
+        ).to(dtype = dtype).cuda()
+    )
+
+    #q = inp[:, :,0,:,:]
+    #k = inp[:, :,1,:,:]
+    #v = inp[:, :,2,:,:]
+    #op = block(q, k, v)
+    op = block(inp[0], inp[1], inp[2])
+    op.backward(op_grad)
+
+    return op, inp.grad
+
+@pytest.mark.skipif(
+    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
 def test_dot_product_attention(dtype, bs, model):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""

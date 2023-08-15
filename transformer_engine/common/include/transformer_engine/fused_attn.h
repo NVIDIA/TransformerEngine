@@ -94,6 +94,16 @@ enum NVTE_Mask_Type {
     NVTE_CAUSAL_MASK = 2,
 };
 
+/*! \enum NVTE_Attn_Type
+ *  \brief Attention types
+ */
+enum NVTE_Attn_Type {
+    /*! Self attention */
+    NVTE_SELF_ATTN = 0,
+    /*! Cross attention */
+    NVTE_CROSS_ATTN = 1,
+};
+
 enum NVTE_Fused_Attn_Backend {
     /*! No supported backend */
     NVTE_No_Backend = -1,
@@ -384,7 +394,7 @@ void nvte_fused_attn_fwd_q_k_v(
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTE_Mask_Type attn_mask_type, //NVTE_Attn_Type attn_type,
             NVTETensor workspace,
             cudaStream_t stream);
 
@@ -423,7 +433,7 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_bwd_kvpacked(
+void nvte_fused_attn_bwd_q_k_v(
             const NVTETensor Q,
             const NVTETensor K,
             const NVTETensor V,
@@ -441,7 +451,7 @@ void nvte_fused_attn_bwd_kvpacked(
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-            NVTE_Mask_Type attn_mask_type, NVTE_Attn_Type attn_type,
+            NVTE_Mask_Type attn_mask_type, //NVTE_Attn_Type attn_type,
             NVTETensor workspace,
             cudaStream_t stream);
 #ifdef __cplusplus
