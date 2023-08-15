@@ -4,6 +4,8 @@ ARG FRAMEWORK=pytorch
 FROM ${BASE_IMAGE}
 ARG FRAMEWORK
 
+SHELL ["bash", "-c"]
+
 COPY .git/ /opt/transformerengine/.git/
 COPY .gitignore /opt/transformerengine/
 COPY .gitlab-ci.yml docker-build.sh Dockerfile.base Dockerfile.devel Dockerfile.qa /opt/transformerengine/
