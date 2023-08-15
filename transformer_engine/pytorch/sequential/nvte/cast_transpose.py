@@ -72,7 +72,9 @@ def multi_cast_transpose_checked(*desc: tuple[_nvte.Tensor, _nvte.DType | None])
         else:
             to_cast_transpose.append((t, dtype))
             transpose_results.append(None)
-    cast_transpose_results = multi_cast_transpose(*to_cast_transpose)
+    cast_transpose_results = (
+        multi_cast_transpose(*to_cast_transpose) if to_cast_transpose else []
+    )
     results = list[tuple[_nvte.Tensor, _nvte.Tensor]]()
     i = 0
     for result in transpose_results:
