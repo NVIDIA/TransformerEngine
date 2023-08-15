@@ -2,7 +2,6 @@ import copy
 from functools import reduce
 import operator
 from . import nvte
-from .nvte import is_fp8
 from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
 from .utils import set_attribute
@@ -52,14 +51,26 @@ class SelfContainedOp(Op):
         return list(sum((op.args() for op in self.fwds), list[nvte.Tensor]()))
 
 
-def force_use_bf16(ops: list[Op]):
+def force_use_precision(ops: list[Op], allowed: nvte.DType):
+    PRECISION = {
+        nvte.DType.Float8E4M3: 0,
+        nvte.DType.Float8E5M2: 0,
+        nvte.DType.BFloat16: 1,
+        nvte.DType.Float16: 2,
+        nvte.DType.Float32: 3,
+        nvte.DType.Int64: 4,
+    }
+
     for op in ops:
         attributes = dir(op)
         dtype_attributes = [attr for attr in attributes if attr.endswith("_dtype")]
         for dtype_attribute in dtype_attributes:
             attr_val = getattr(op, dtype_attribute)
-            if isinstance(attr_val, nvte.DType) and is_fp8(attr_val):
-                setattr(op, dtype_attribute, nvte.DType.BFloat16)
+            if (
+                isinstance(attr_val, nvte.DType)
+                and PRECISION[attr_val] < PRECISION[allowed]
+            ):
+                setattr(op, dtype_attribute, allowed)
 
 
 def model_parallel_transform(ops: list[Op]):
@@ -115,8 +126,7 @@ class ComputePipeline:
         ops = copy_op_list(ops)
 
         name_ops(ops)
-        if not env.fp8_enabled:
-            force_use_bf16(ops)
+        force_use_precision(ops, nvte.torch_to_te_dtype(env.lowp))
         if env.world_size > 1:
             model_parallel_transform(ops)
 

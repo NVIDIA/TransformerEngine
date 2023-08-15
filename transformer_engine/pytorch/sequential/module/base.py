@@ -1,7 +1,5 @@
 import torch
 from torch import nn
-from ...distributed import get_distributed_world_size
-from ...fp8 import is_fp8_enabled
 from ..ops import Op
 from ..environment import Environment
 from ..compute_pipeline import ComputePipeline
@@ -28,4 +26,4 @@ class BaseModule(nn.Module):
         return apply(x, self.pipeline, self.training)
 
     def _current_env(self) -> Environment:
-        return Environment(is_fp8_enabled(), get_distributed_world_size())
+        return Environment.current()
