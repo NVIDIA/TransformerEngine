@@ -4,6 +4,7 @@ from .reglu import ReGLU
 from .geglu import GeGLU
 from .swiglu import SwiGLU
 from .layernorm import LayerNorm
+from .rmsnorm import RMSNorm
 from .linear import Linear
 from .sequential import Sequential
 
@@ -14,6 +15,7 @@ __all__ = [
     "GeGLU",
     "SwiGLU",
     "LayerNorm",
+    "RMSNorm",
     "Linear",
     "Sequential",
 ]

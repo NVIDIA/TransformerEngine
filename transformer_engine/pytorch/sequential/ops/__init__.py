@@ -5,6 +5,7 @@ from .reglu import ReGLU
 from .geglu import GeGLU
 from .swiglu import SwiGLU
 from .layernorm import LayerNorm
+from .rmsnorm import RMSNorm
 from .mmt import MMT
 from .add import Add
 
@@ -18,6 +19,7 @@ __all__ = [
     "GeGLU",
     "SwiGLU",
     "LayerNorm",
+    "RMSNorm",
     "MMT",
     "Add",
 ]

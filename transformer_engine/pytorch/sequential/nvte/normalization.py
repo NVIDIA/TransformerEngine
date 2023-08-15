@@ -9,12 +9,12 @@ from .empty import empty, empty_like
 
 
 @cache
-def _fwd_ln_sm_margin():
+def _fwd_sm_margin():
     return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
 
 
 @cache
-def _bwd_ln_sm_margin():
+def _bwd_sm_margin():
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
 
@@ -27,14 +27,14 @@ def _sm_total_count() -> int:
 
 def _sm_margin():
     if pass_ == "backward":
-        return _bwd_ln_sm_margin()
+        return _bwd_sm_margin()
     elif pass_ == "forward":
-        return _fwd_ln_sm_margin()
+        return _fwd_sm_margin()
     else:
         return 0
 
 
-class _LayerNormConfig:
+class _NormConfig:
     def __init__(
         self, hidden_size: int, gamma: _nvte.Tensor, x: _nvte.Tensor, out: _nvte.Tensor
     ):
@@ -55,23 +55,21 @@ class _LayerNormConfig:
 
 
 @contextmanager
-def _handle_unsupported_layernorm_config(
-    hidden_size: int, gamma: _nvte.Tensor, x: _nvte.Tensor, out: _nvte.Tensor
+def _handle_unsupported_config(
+    func_name: str,
+    hidden_size: int,
+    gamma: _nvte.Tensor,
+    x: _nvte.Tensor,
+    out: _nvte.Tensor,
 ):
     try:
         yield
     except RuntimeError as error:
-        config = _LayerNormConfig(hidden_size, gamma, x, out)
-        if "in function get_fwd_launcher: FWD: Unsupported types." in str(error):
+        config = _NormConfig(hidden_size, gamma, x, out)
+        if "Unsupported types." in str(error):
             raise ValueError(
-                "This configuration for layernorm is not supported. "
+                f"This configuration for {func_name} is not supported. "
                 "(Regex) Search for REGISTER_FWD_(TUNED|GENERAL)_LAUNCHER to see possible options. "
-                f"Used configuration: {config}"
-            ) from error
-        elif "in function get_bwd_launcher: BWD: Unsupported types." in str(error):
-            raise ValueError(
-                "This configuration for layernorm is not supported. "
-                "(Regex) Search for REGISTER_BWD_(TUNED|GENERAL)_LAUNCHER to see possible options. "
                 f"Used configuration: {config}"
             ) from error
         else:
@@ -99,7 +97,7 @@ def layernorm(
     else:
         func = _nvte.layernorm_fwd
 
-    with _handle_unsupported_layernorm_config(hidden_size, gamma, x, out):
+    with _handle_unsupported_config("layernorm", hidden_size, gamma, x, out):
         workspace = empty()
         barrier = empty()
         for _ in range(2):
@@ -143,7 +141,7 @@ def dlayernorm(
     else:
         func = _nvte.layernorm_bwd
 
-    with _handle_unsupported_layernorm_config(x.shape[1], gamma, x, dx):
+    with _handle_unsupported_config("dlayernorm",x.shape[1], gamma, x, dx):
         workspace = empty()
         barrier = empty()
         dgamma_part = empty()
@@ -170,3 +168,86 @@ def dlayernorm(
             dbeta_part = empty_like(dbeta_part)
 
     return dx, dgamma, dbeta
+
+
+def rmsnorm(
+    x: _nvte.Tensor,
+    eps: float,
+    zero_centered_gamma: bool,
+    gamma: _nvte.Tensor,
+    out_dtype: _nvte.DType,
+):
+    "returns x / sqrt(var(x) + eps) * gamma, rsigma (for bwd)"
+
+    assert len(x.shape) == 2
+
+    n, hidden_size = x.shape
+    rsigma = empty((n,), _nvte.DType.Float32)
+    out = empty(x.shape, out_dtype)
+
+    if zero_centered_gamma:
+        raise NotImplementedError()
+    else:
+        func = _nvte.rmsnorm_fwd
+
+    with _handle_unsupported_config("rmsnorm",hidden_size, gamma, x, out):
+        workspace = empty()
+        barrier = empty()
+        for _ in range(2):
+            func(
+                x,
+                gamma,
+                eps,
+                out,
+                rsigma,
+                _sm_total_count() - _sm_margin(),
+                workspace,
+                barrier,
+            )
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+
+    return out, rsigma
+
+
+def drmsnorm(
+    grad: _nvte.Tensor,
+    zero_centered_gamma: bool,
+    x: _nvte.Tensor,
+    gamma: _nvte.Tensor,
+    rsigma: _nvte.Tensor,
+    dx_dtype: _nvte.DType,
+    dgamma_dtype: _nvte.DType,
+):
+    "returns dx, dgamma"
+
+    dx = empty(x.shape, dx_dtype)
+    dgamma = empty(gamma.shape, dgamma_dtype)
+
+    if zero_centered_gamma:
+        raise NotImplementedError()
+    else:
+        func = _nvte.rmsnorm_bwd
+
+    with _handle_unsupported_config("drmsnorm",x.shape[1], gamma, x, dx):
+        workspace = empty()
+        barrier = empty()
+        dgamma_part = empty()
+        for _ in range(2):
+            func(
+                grad,
+                x,
+                rsigma,
+                gamma,
+                dx,
+                dgamma,
+                dgamma_part,
+                _sm_total_count() - _sm_margin(),
+                workspace,
+                barrier,
+            )
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+            dgamma_part = empty_like(dgamma_part)
+
+    return dx, dgamma

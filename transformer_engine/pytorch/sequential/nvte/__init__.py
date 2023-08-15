@@ -25,7 +25,7 @@ from .activations import (
     dswiglu,
 )
 from .interface import set_current_pass
-from .layernorm import layernorm, dlayernorm
+from .normalization import layernorm, dlayernorm, rmsnorm, drmsnorm
 from .misc_fusions import (
     cast_transpose_dbias_checked,
     cast_transpose_dbias_dgelu_checked,
@@ -58,6 +58,7 @@ __all__ = [
     "dlayernorm",
     "dreglu",
     "drelu",
+    "drmsnorm",
     "dswiglu",
     "dtype_name",
     "DType",
@@ -83,6 +84,7 @@ __all__ = [
     "QKVLayout",
     "reglu",
     "relu",
+    "rmsnorm",
     "set_current_pass",
     "swiglu",
     "te_to_torch_dtype",

@@ -5,6 +5,7 @@ from .module import (
     GeGLU,
     SwiGLU,
     LayerNorm,
+    RMSNorm,
     Linear,
     Sequential,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "GeGLU",
     "SwiGLU",
     "LayerNorm",
+    "RMSNorm",
     "Linear",
     "Sequential",
 ]
