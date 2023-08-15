@@ -4,6 +4,7 @@
 
 """Linear API"""
 import warnings
+import os
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
@@ -78,6 +79,7 @@ class _Linear(torch.autograd.Function):
         ub_split_rs: bool,
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
+        ub_atomic_gemm_ag: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -94,6 +96,8 @@ class _Linear(torch.autograd.Function):
             if tp_world_size == 1:
                 ub_split_rs = False
                 ub_atomic_gemm_rs = False
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+            assert fp8, f"AtomicGemm overlap supported only for FP8 GEMM."
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
@@ -190,6 +194,8 @@ class _Linear(torch.autograd.Function):
                 ub=ub_obj_projout if (ub_split_rs or ub_atomic_gemm_rs) else None,
                 extra_output_tensor=rs_out if (ub_split_rs or ub_atomic_gemm_rs) else None,
             )
+            if bool(int(os.getenv("PRINT_SHAPE", "0"))):
+                print (f"proj fprop {out.size(1)}x{out.size(0)}x{weight_fp8.size(1)}")
         else:
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
@@ -249,6 +255,7 @@ class _Linear(torch.autograd.Function):
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_split_ag = ub_split_ag
+            ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
@@ -279,11 +286,12 @@ class _Linear(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
-            if ctx.ub_split_ag:
+            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
                     ctx.ub_split_ag = False
-            if ctx.ub_split_ag:
+                    ctx.ub_atomic_gemm_ag = False
+            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ctx.ub_obj_gradout = get_ub("proj_dgrad")
@@ -327,6 +335,8 @@ class _Linear(torch.autograd.Function):
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
 
+            ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None
+            ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     dgrad = fp8_gemm(
@@ -341,9 +351,11 @@ class _Linear(torch.autograd.Function):
                         ctx.activation_dtype,
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
-                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
+                        ub_algo=ub_algo,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag else None,
                     )
+                    if bool(int(os.getenv("PRINT_SHAPE", "0"))):
+                        print (f"proj dgrad {dgrad.size(1)}x{dgrad.size(0)}x{weight_t_fp8.size(1)}")
                 else:
                     dgrad, _, _ = gemm(
                         weight,
@@ -370,7 +382,7 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        if ctx.ub_split_ag:
+                        if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                         wgrad = fp8_gemm(
                             inputmat_t_total,
@@ -425,6 +437,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -535,6 +548,7 @@ class Linear(TransformerEngineBaseModule):
         ub_split_ag: bool = False,
         device: Union[torch.device, str] = "cuda",
         ub_atomic_gemm_rs: bool = False,
+        ub_atomic_gemm_ag: bool = False,
     ) -> None:
         super().__init__()
 
@@ -557,6 +571,7 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
+        self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -783,7 +798,8 @@ class Linear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.ub_split_rs,
                 self.ub_split_ag,
-                self.ub_atomic_gemm_rs
+                self.ub_atomic_gemm_rs,
+                self.ub_atomic_gemm_ag,
             )
             out = linear_fn(*args)
 

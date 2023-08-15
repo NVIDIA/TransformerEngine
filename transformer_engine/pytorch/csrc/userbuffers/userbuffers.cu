@@ -1620,21 +1620,21 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
         if(warps<ar_nvsize) warps=ar_nvsize;
 
         SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
-        if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+        //if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
           //callranks_rs_oopMC(2)
           //callranks_rs_oopMC(4)
           //callranks_rs_oopMC(8)
-        } else {
-          if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
+        //} else {
+        //  if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
             //callranks_rs_oopUCPTR(2)
             //callranks_rs_oopUCPTR(4)
             //callranks_rs_oopUCPTR(8)
-          } else {
+        //  } else {
         callranks_rs_oop_stride(2)
         callranks_rs_oop_stride(4)
         callranks_rs_oop_stride(8)
-          }
-        }
+        //  }
+        //}
     }
   void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream) {
     const int elements = rowelements*colelements;
@@ -1651,21 +1651,21 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
         if(warps<ar_nvsize) warps=ar_nvsize;
 
         SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
-        if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
-          //callranks_rs_oopMC(2)
-          //callranks_rs_oopMC(4)
-          //callranks_rs_oopMC(8)
-        } else {
-          if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
-            //callranks_rs_oopUCPTR(2)
-            //callranks_rs_oopUCPTR(4)
-            //callranks_rs_oopUCPTR(8)
-          } else {
+        //if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+        //  //callranks_rs_oopMC(2)
+        //  //callranks_rs_oopMC(4)
+        //  //callranks_rs_oopMC(8)
+        //} else {
+        //  if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
+        //    //callranks_rs_oopUCPTR(2)
+        //    //callranks_rs_oopUCPTR(4)
+        //    //callranks_rs_oopUCPTR(8)
+        //  } else {
         callranks_rs_oop_stride_atomic(2)
         callranks_rs_oop_stride_atomic(4)
         callranks_rs_oop_stride_atomic(8)
-          }
-        }
+        //  }
+        //}
     }
 
   void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream) {
@@ -1683,21 +1683,21 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
         if(warps<ar_nvsize) warps=ar_nvsize;
 
         SETUP_LAUNCH_CONFIG(sms,warps*32,stream);
-        if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
-          //callranks_rs_oopMC(2)
-          //callranks_rs_oopMC(4)
-          //callranks_rs_oopMC(8)
-        } else {
-          if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
-            //callranks_rs_oopUCPTR(2)
-            //callranks_rs_oopUCPTR(4)
-            //callranks_rs_oopUCPTR(8)
-          } else {
+        //if(comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+        //  //callranks_rs_oopMC(2)
+        //  //callranks_rs_oopMC(4)
+        //  //callranks_rs_oopMC(8)
+        //} else {
+        //  if(comm->memflags[handler] & NVTE_UB_MEM_UC_CONTIG) {
+        //    //callranks_rs_oopUCPTR(2)
+        //    //callranks_rs_oopUCPTR(4)
+        //    //callranks_rs_oopUCPTR(8)
+        //  } else {
         callranks_rs_oop_stride_multiatomic(2)
         callranks_rs_oop_stride_multiatomic(4)
         callranks_rs_oop_stride_multiatomic(8)
-          }
-        }
+        //  }
+        //}
     }
 
 int allgather2_userbuff_inplace_gpu(const int maxcredit, const int handler, const int offset,
@@ -2038,6 +2038,7 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
 
     for(int j = 0; j < nchunks-1; j++) {
     int send_chunk = (nchunks + myrank - j) % nchunks;
+    int recv_chunk = (nchunks + myrank - j - 1) % nchunks;
     int offset = (send_chunk*send_stride)/16;
 
     if(lines) {
@@ -2080,7 +2081,7 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
 
         // Decrement atomic val to signal current output tile finish
         if(counters) {
-            ((unsigned int*)counters)[j+1] = 0;
+            ((unsigned int*)counters)[recv_chunk] = 0;
             asm volatile ("fence.sc.gpu;\n");
         }
     }
@@ -2089,7 +2090,7 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
         int old_val2;
         atomicInc(((unsigned int *)counters)+nchunks+j, gridDim.x-1);
         clock_t s=clock64();
-        while ( 0 != ( old_val2 = atomicCAS( ((unsigned int*)counters)+nchunks+j, 0, 0) ) ) {if(clock64()-s>TIMEOUT) {printf("pusg_sendrecv %d chunk %d stuck at %d expect %d\n", myrank, j, old_val2, gridDim.x);}}
+        while ( 0 != ( old_val2 = atomicCAS( ((unsigned int*)counters)+nchunks+j, 0, 0) ) ) {if(clock64()-s>TIMEOUT) {printf("push_sendrecv %d chunk %d stuck at %d expect %d\n", myrank, j, old_val2, gridDim.x);}}
     }
     __syncthreads();
     }

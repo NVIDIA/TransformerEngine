@@ -261,6 +261,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     return;
   }  // split_overlap_rs
+
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
@@ -513,7 +514,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
     auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     counter = torch::zeros({tp_size*2}, counter_options);
     counter.index_put_({Slice(None, tp_size)}, 1);
-    counter.index_put_({0}/*_tp_id}*/, 0);
+    counter.index_put_({_tp_id}, 0);
 
     // CUDA event creation
     cudaEventCreateWithFlags(&_start_compute, 0);
@@ -599,12 +600,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
                             _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
           producer(counter_ptr, i+1/*recv_chunk_id*/, (cudaStream_t)_stream_recv);
         }
-      } else if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
-                                   _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
-                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_recv));
       }
     }
     // GEMM
@@ -613,9 +608,16 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
             transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
             workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
             _math_sms, 0 /*m_split*/, _tp_size /*n_split*/, false /*gemm_producer*/, counter);
+    if (B_copy.numel() > 0) {
+        assert(B_copy.numel() == _ubufs[_tp_id].numel());
+        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
+        CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
+                                   _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_recv));
+    }
     for (int i = 0; i < _tp_size-1; i++) {
       int recv_chunk_id = (_tp_size + _tp_id - i - 1) % _tp_size;
-      consumer(counter_ptr, i+1/*recv_chunk_id*/, (cudaStream_t)stream_main);//_stream_compute[0]);
+      consumer(counter_ptr, recv_chunk_id, (cudaStream_t)stream_main);
     }
     CHECK_CUDA(cudaStreamSynchronize(_stream_recv));
 

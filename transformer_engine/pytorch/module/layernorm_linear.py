@@ -114,6 +114,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+        if ub_atomic_gemm_ag:
+            assert fp8, f"AtomicGemm overlap supported only for FP8 GEMM."
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -195,6 +197,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub=ub_obj_lnout if (ub_split_ag or ub_atomic_gemm_ag) else None,
                 extra_output_tensor=ln_out if (ub_split_ag or ub_atomic_gemm_ag) else None,
             )
+            if bool(int(os.getenv("PRINT_SHAPE", "0"))):
+                print (f"QKV fprop {out.size(1)}x{out.size(0)}x{weight_fp8.size(1)}")
         else:
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
