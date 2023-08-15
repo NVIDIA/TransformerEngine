@@ -24,7 +24,7 @@ def cast_transpose_dbias_checked(
             )
             workspace = empty_like(workspace)
         return grad_cast, grad_transpose, out_dbias
-    elif is_fp8(grad.dtype) and cast_dtype is None or cast_dtype == grad.dtype:
+    elif is_fp8(grad) and (cast_dtype is None or cast_dtype == grad.dtype):
         grad_transpose = empty(grad.shape[::-1], grad.dtype)
         out_dbias = empty((grad.shape[1],), dbias_dtype)
         workspace = empty()
