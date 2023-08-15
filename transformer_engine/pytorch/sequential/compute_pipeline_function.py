@@ -68,7 +68,9 @@ class ComputePipelineFunction(autograd.Function):
         op: Op = getattr(ctx, "nvte_op")
 
         nvte.set_current_pass("backward")
-        data_grad, param_grads = op.backward(saved, nvte.make_nvte_tensor(grad_output))
+        data_grad, param_grads = op.backward(
+            saved, nvte.make_nvte_tensor(grad_output.contiguous())
+        )  # TODO: avoid this call to contiguous
 
         # Check that gradients are not fp8 and can be processed by the optimizer
         # TODO: change this when fp8 optimizer comes along
