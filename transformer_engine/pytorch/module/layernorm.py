@@ -104,6 +104,10 @@ class LayerNorm(torch.nn.Module):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
     """
 
     def __init__(
@@ -113,6 +117,7 @@ class LayerNorm(torch.nn.Module):
         sequence_parallel: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
@@ -121,14 +126,14 @@ class LayerNorm(torch.nn.Module):
         self.weight = Parameter(
             torch.empty(
                 hidden_size,
-                device=torch.cuda.current_device(),
+                device=device,
                 dtype=params_dtype,
             )
         )
         self.bias = Parameter(
             torch.empty(
                 hidden_size,
-                device=torch.cuda.current_device(),
+                device=device,
                 dtype=params_dtype,
             )
         )

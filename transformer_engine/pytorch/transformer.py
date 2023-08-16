@@ -149,6 +149,10 @@ class TransformerLayer(torch.nn.Module):
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
           Options are: 'gelu', 'relu', 'reglu', 'geglu' and 'swiglu'.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -233,6 +237,7 @@ class TransformerLayer(torch.nn.Module):
         bias: bool = True,
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
@@ -326,6 +331,7 @@ class TransformerLayer(torch.nn.Module):
             attention_type="self",
             bias=bias,
             normalization=normalization,
+            device=device,
         )
 
         if layer_type == "decoder":
@@ -337,6 +343,7 @@ class TransformerLayer(torch.nn.Module):
                 attention_type="cross",
                 bias=bias,
                 normalization=normalization,
+                device=device,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -369,6 +376,7 @@ class TransformerLayer(torch.nn.Module):
             ub_split_ag=ub_split_ag,
             activation=activation,
             normalization=normalization,
+            device=device,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -402,7 +410,8 @@ class TransformerLayer(torch.nn.Module):
                 eps=layernorm_epsilon,
                 sequence_parallel=self.sequence_parallel,
                 params_dtype=params_dtype,
-                zero_centered_gamma=zero_centered_gamma
+                zero_centered_gamma=zero_centered_gamma,
+                device=device,
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
