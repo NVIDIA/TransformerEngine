@@ -13,7 +13,7 @@ import transformer_engine_paddle as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
-from .fp8_buffer import Fp8MetaBuffer
+from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer
 
 # FP8 support
 _is_fp8_available = None
@@ -58,9 +58,9 @@ class FP8State:
         self._fp8_distributed_group = None
         self._is_first_fp8_module = False
         self._fp8_autocast_counter = 0
-        self._fp8_current_context_id = 0
         self._fp8_autocast_depth = 0
-        self._fp8_buffer = Fp8MetaBuffer()
+        self._fp8_fwd_buffer = FP8MetaFwdBuffer()
+        self._fp8_bwd_buffer = FP8MetaBwdBuffer()
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -81,18 +81,9 @@ class FP8State:
         """
         return DelayedScaling()
 
-    def get_fp8_context_id(self) -> int:
-        """Returns an ID for the current FP8 context."""
-        return self._fp8_current_context_id
-
-    def set_fp8_context_id(self, ctx_id: int) -> None:
-        """Sets the current FP8 context."""
-        self._fp8_current_context_id = ctx_id
-
-    def new_fp8_context_id(self) -> int:
-        """Returns global autocast counter as a proxy to be used
-        as the autocast ID for FP8 modules.
-        """
+    def get_autocast_id(self) -> int:
+        """Returns the number of times of entering the `fp8_autocast` context.
+        as a unique ID for different training steps."""
         return self._fp8_autocast_counter
 
     def is_first_fp8_module(self):
@@ -107,9 +98,13 @@ class FP8State:
         """Return the fp8 group for scale/amax comm"""
         return self._fp8_distributed_group
 
-    def get_fp8_buffer(self) -> Fp8MetaBuffer:
-        """Returns global fp8 buffer."""
-        return self._fp8_buffer
+    def get_fp8_fwd_buffer(self) -> FP8MetaFwdBuffer:
+        """Returns global fp8 forward buffer."""
+        return self._fp8_fwd_buffer
+
+    def get_fp8_bwd_buffer(self) -> FP8MetaBwdBuffer:
+        """Returns global fp8 backward buffer."""
+        return self._fp8_bwd_buffer
 
     def enter(
         self,
@@ -141,7 +136,7 @@ class FP8State:
         self._fp8_autocast_depth -= 1
 
         if self._fp8_autocast_depth == 0:
-            self._fp8_buffer.finalize_fwd()
+            self._fp8_fwd_buffer.finalize()
 
 
 _global_fp8_state = FP8State()

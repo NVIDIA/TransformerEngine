@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """FP8 meta buffer for FP8 amax reduction"""
 
+from abc import ABC, abstractmethod
 from functools import partial
 import os
 from typing import Dict, Any, List, Union
@@ -13,61 +14,41 @@ import paddle
 from .constants import dist_group_type
 
 
-class Fp8MetaBuffer:
+class FP8MetaBufferBase(ABC):
     """
     A global buffer that holds FP8 meta for reduction across trainers.
     """
 
     def __init__(self):
         self._data = {}
-        self._data = {}
-        self._buffer_delete_key_fwd = None
-        self._buffer_delete_key_bwd = None
-        self._amax_forward_global_reduce_func = None
-        self._amax_reduce_wait_func_fwd = None
-        self._amax_reduce_wait_func_bwd = None
+        self._buffer_delete_key = None
+        self._amax_reduce_wait_func = None
         self._dp_amax_reduce_interval = None
-        self._dp_amax_reduce_forward_idx = 0
-        self._dp_amax_reduce_backward_idx = 0
+        self._dp_amax_reduce_idx = 0
 
     @staticmethod
-    def _get_meta_tensor_key(forward: bool = True) -> str:
+    @abstractmethod
+    def _get_meta_tensor_key():
         """Returns scaling key in `fp8_meta`."""
-        if forward:
-            return "scaling_fwd"
-        return "scaling_bwd"
 
     @staticmethod
-    def _get_buffer_position_key(forward: bool = True) -> str:
+    @abstractmethod
+    def _get_buffer_position_key():
         """Returns module position key in `fp8_meta`."""
-        if forward:
-            return "global_fp8_buffer_pos_fwd"
-        return "global_fp8_buffer_pos_bwd"
 
     @staticmethod
-    def _get_autocast_key(forward: bool = True) -> str:
-        """Returns module position key in `fp8_meta`."""
-        if forward:
-            return "autocast_id_fwd"
-        return "autocast_id_bwd"
+    @abstractmethod
+    def _get_autocast_key():
+        """Returns autocast id key in `fp8_meta`."""
 
-    @staticmethod
-    def _get_amax_buffer_key(fp8_meta: Dict[str, Any], forward: bool = True) -> str:
+    def _get_amax_buffer_key(self, fp8_meta: Dict[str, Any]) -> str:
         """Return a key in `_data` for the AMAX storage."""
-        if forward:
-            return f"FWD_AMAX_{fp8_meta['autocast_id_fwd']}"
-        return f"BWD_AMAX_{fp8_meta['autocast_id_bwd']}"
+        return f"AMAX_{fp8_meta[self._get_autocast_key()]}"
 
-    def _execute_deletion(self, forward: bool = True) -> None:
+    def _execute_deletion(self) -> None:
         """Delete the key from global amax buffer."""
-        if forward:
-            if (self._buffer_delete_key_fwd is not None
-                    and self._buffer_delete_key_fwd in self._data):
-                del self._data[self._buffer_delete_key_fwd]
-        else:
-            if (self._buffer_delete_key_bwd is not None
-                    and self._buffer_delete_key_bwd in self._data):
-                del self._data[self._buffer_delete_key_bwd]
+        if (self._buffer_delete_key is not None and self._buffer_delete_key in self._data):
+            del self._data[self._buffer_delete_key]
 
     def _wait_handle_and_split(
         self,
@@ -86,7 +67,6 @@ class Fp8MetaBuffer:
         fp8_meta: Dict[str, Any],
         tp_group: dist_group_type,
         tp_size: int,
-        forward: bool = True,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
 
@@ -101,7 +81,7 @@ class Fp8MetaBuffer:
                 return wait_handle
             return None
 
-        amax_buffer_key = self._get_amax_buffer_key(fp8_meta, forward=forward)
+        amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         # Key already deleted.
         if amax_buffer_key not in self._data:
             return None
@@ -111,20 +91,11 @@ class Fp8MetaBuffer:
             self._dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
         tp_amax_reduce = False
-        if forward:
-            if self._dp_amax_reduce_forward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
-            else:
-                tp_amax_reduce = True
-            self._dp_amax_reduce_forward_idx = (self._dp_amax_reduce_forward_idx +
-                                                1) % self._dp_amax_reduce_interval
+        if self._dp_amax_reduce_idx == 0:
+            reduce_group = fp8_meta["fp8_group"]
         else:
-            if self._dp_amax_reduce_backward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
-            else:
-                tp_amax_reduce = True
-            self._dp_amax_reduce_backward_idx = (self._dp_amax_reduce_backward_idx +
-                                                 1) % self._dp_amax_reduce_interval
+            tp_amax_reduce = True
+        self._dp_amax_reduce_idx = (self._dp_amax_reduce_idx + 1) % self._dp_amax_reduce_interval
 
         if tp_amax_reduce:
             if tp_size > 1:
@@ -149,11 +120,11 @@ class Fp8MetaBuffer:
             wait_handle,
         )
 
-    def add_amax(self, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+    def add_amax(self, fp8_meta: Dict[str, Any]) -> None:
         """Append `amax_history` to global buffer."""
-        buffer_key = self._get_amax_buffer_key(fp8_meta, forward=forward)
-        fp8_meta_tensor_key = self._get_meta_tensor_key(forward=forward)
-        buffer_position_key = self._get_buffer_position_key(forward=forward)
+        buffer_key = self._get_amax_buffer_key(fp8_meta)
+        fp8_meta_tensor_key = self._get_meta_tensor_key()
+        buffer_position_key = self._get_buffer_position_key()
 
         if buffer_key not in self._data:
             self._data[buffer_key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -170,82 +141,34 @@ class Fp8MetaBuffer:
             "unsupported. For more details and correct usage, please see " \
             "https://github.com/NVIDIA/TransformerEngine/pull/93."
 
-    def get_amax(self, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+    def get_amax(self, fp8_meta: Dict[str, Any]) -> None:
         """Populate current amax with the correct location from buffer."""
-        fp8_meta_tensor_key = self._get_meta_tensor_key(forward=forward)
-        buffer_position_key = self._get_buffer_position_key(forward=forward)
+        fp8_meta_tensor_key = self._get_meta_tensor_key()
+        buffer_position_key = self._get_buffer_position_key()
         if buffer_position_key not in fp8_meta:
             return
 
-        amax_buffer_key = self._get_amax_buffer_key(fp8_meta, forward=forward)
+        amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         assert amax_buffer_key in self._data, "TE internal error."
 
         fp8_meta[fp8_meta_tensor_key].amax_history[0] = self._data[amax_buffer_key][
             fp8_meta[buffer_position_key]]
 
-    def set_for_deletion(self, fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+    def set_for_deletion(self, fp8_meta: Dict[str, Any]) -> None:
         """Delete this amax key from global buffer during autocast end."""
-        if self._get_autocast_key(forward=forward) not in fp8_meta:
+        if self._get_autocast_key() not in fp8_meta:
             return
-        if forward:
-            self._buffer_delete_key_fwd = self._get_amax_buffer_key(fp8_meta, forward=forward)
-        else:
-            self._buffer_delete_key_bwd = self._get_amax_buffer_key(fp8_meta, forward=forward)
+        self._buffer_delete_key = self._get_amax_buffer_key(fp8_meta)
 
-    def get_amax_reduce_handle_fwd(self) -> Union[bool, None]:
-        """Return AMAX reduction wait handle of forward prop."""
-        return self._amax_reduce_handle_fwd
+    def get_amax_reduce_handle(self) -> Union[bool, None]:
+        """Return AMAX reduction wait handle."""
+        return self._amax_reduce_handle
 
-    def set_for_forward_amax_reduction(
-        self,
-        fp8_meta: Dict[str, Any],
-        tp_group: dist_group_type,
-        tp_size: int,
-    ) -> None:
-        """Sets up the function to call during autocast exit."""
-        self._amax_forward_global_reduce_func = partial(
-            self._global_amax_reduction,
-            fp8_meta,
-            tp_group,
-            tp_size,
-            forward=True,
-        )
-
-    def wait(self, forward: bool = True) -> None:
+    def wait(self) -> None:
         """Wait for reduced amax to be available in buffer."""
-        if forward:
-            if self._amax_reduce_wait_func_fwd is not None:
-                self._amax_reduce_wait_func_fwd()
-                self._amax_reduce_wait_func_fwd = None
-        else:
-            if self._amax_reduce_wait_func_bwd is not None:
-                self._amax_reduce_wait_func_bwd()
-                self._amax_reduce_wait_func_bwd = None
-
-    def finalize_fwd(self) -> None:
-        """
-        Called at FP8 autocast end.
-        Performs AMAX reduction and delete unused buffer entries.
-        """
-        if callable(self._amax_forward_global_reduce_func):
-            self._amax_reduce_wait_func_fwd = self._amax_forward_global_reduce_func()
-        self._execute_deletion(forward=True)
-
-    def finalize_bwd(
-        self,
-        fp8_meta: Dict[str, Any],
-        tp_group: dist_group_type,
-        tp_size: int,
-    ) -> None:
-        """
-        Called at FP8 autocast end in backward.
-        Performs AMAX reduction and delete unused buffer entries.
-        """
-        self._amax_reduce_wait_func_bwd = self._global_amax_reduction(fp8_meta,
-                                                                      tp_group,
-                                                                      tp_size,
-                                                                      forward=False)
-        self._execute_deletion(forward=False)
+        if self._amax_reduce_wait_func is not None:
+            self._amax_reduce_wait_func()    # pylint: disable=not-callable
+            self._amax_reduce_wait_func = None
 
     def to_numpy(self) -> Dict[str, List[np.array]]:
         """Convert to numpy arrays"""
@@ -258,3 +181,77 @@ class Fp8MetaBuffer:
         """Set buffer values from numpy arrays"""
         for k, v in buffer.items():
             self._data[k] = [paddle.to_tensor(arr) for arr in v]
+
+
+class FP8MetaFwdBuffer(FP8MetaBufferBase):
+    """FP8Meta Buffer for forward"""
+
+    @staticmethod
+    def _get_meta_tensor_key() -> str:
+        """Returns scaling key in `fp8_meta`."""
+        return "scaling_fwd"
+
+    @staticmethod
+    def _get_buffer_position_key() -> str:
+        """Returns module position key in `fp8_meta`."""
+        return "global_fp8_buffer_pos_fwd"
+
+    @staticmethod
+    def _get_autocast_key() -> str:
+        """Returns module position key in `fp8_meta`."""
+        return "autocast_id_fwd"
+
+    def set_for_amax_reduction(
+        self,
+        fp8_meta: Dict[str, Any],
+        tp_group: dist_group_type,
+        tp_size: int,
+    ) -> None:
+        """Sets up the function to call during autocast exit."""
+        self._amax_global_reduce_func = partial(
+            self._global_amax_reduction,
+            fp8_meta,
+            tp_group,
+            tp_size,
+        )
+
+    def finalize(self) -> None:
+        """
+        Called at FP8 autocast end.
+        Performs AMAX reduction and delete unused buffer entries.
+        """
+        if hasattr(self, '_amax_global_reduce_func') and callable(self._amax_global_reduce_func):
+            self._amax_reduce_wait_func = self._amax_global_reduce_func()
+        self._execute_deletion()
+
+
+class FP8MetaBwdBuffer(FP8MetaBufferBase):
+    """FP8Meta Buffer for backward"""
+
+    @staticmethod
+    def _get_meta_tensor_key() -> str:
+        """Returns scaling key in `fp8_meta`."""
+        return "scaling_bwd"
+
+    @staticmethod
+    def _get_buffer_position_key() -> str:
+        """Returns module position key in `fp8_meta`."""
+        return "global_fp8_buffer_pos_bwd"
+
+    @staticmethod
+    def _get_autocast_key() -> str:
+        """Returns module position key in `fp8_meta`."""
+        return "autocast_id_bwd"
+
+    def finalize(
+        self,
+        fp8_meta: Dict[str, Any],
+        tp_group: dist_group_type,
+        tp_size: int,
+    ) -> None:
+        """
+        Called at FP8 autocast end in backward.
+        Performs AMAX reduction and delete unused buffer entries.
+        """
+        self._amax_reduce_wait_func = self._global_amax_reduction(fp8_meta, tp_group, tp_size)
+        self._execute_deletion()

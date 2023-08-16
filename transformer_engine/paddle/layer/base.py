@@ -145,7 +145,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             state = {}
             state["scaling_fwd"] = self.fp8_meta["scaling_fwd"].to_numpy()
             state["scaling_bwd"] = self.fp8_meta["scaling_bwd"].to_numpy()
-            state["global_fp8_buffer"] = get_global_fp8_state().get_fp8_buffer().to_numpy()
+            state["global_fp8_fwd_buffer"] = get_global_fp8_state().get_fp8_fwd_buffer().to_numpy()
+            state["global_fp8_bwd_buffer"] = get_global_fp8_state().get_fp8_bwd_buffer().to_numpy()
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
@@ -190,8 +191,10 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta["scaling_bwd"].from_numpy(state["scaling_bwd"])
 
         # Restore global FP8 buffer states.
-        global_fp8_buffer = get_global_fp8_state().get_fp8_buffer()
-        global_fp8_buffer.from_numpy(state["global_fp8_buffer"])
+        global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
+        global_fp8_bwd_buffer = get_global_fp8_state().get_fp8_bwd_buffer()
+        global_fp8_fwd_buffer.from_numpy(state["global_fp8_fwd_buffer"])
+        global_fp8_bwd_buffer.from_numpy(state["global_fp8_bwd_buffer"])
 
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
@@ -224,12 +227,12 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         # Previous iteration was grad_enabled
         if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            global_fp8_buffer = get_global_fp8_state().get_fp8_buffer()
-            global_fp8_buffer.wait(forward=True)
+            global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
+            global_fp8_fwd_buffer.wait()
             if self.fp8_meta["recipe"].reduce_amax:
-                global_fp8_buffer.get_amax(self.fp8_meta, True)
+                global_fp8_fwd_buffer.get_amax(self.fp8_meta)
                 amax_and_scale_update(self.fp8_meta, True)
-                global_fp8_buffer.set_for_deletion(self.fp8_meta, True)
+                global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
             else:
                 amax_and_scale_update(self.fp8_meta, True)
 
@@ -238,9 +241,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             if self.fp8_meta["recipe"].reduce_amax:
                 global_fp8_state = get_global_fp8_state()
                 self.fp8_meta["first_module"] = global_fp8_state.is_first_fp8_module()
-                self.fp8_meta["autocast_id_fwd"] = global_fp8_state.new_fp8_context_id(
-                ) if self.fp8_meta["first_module"] else global_fp8_state.get_fp8_context_id()
-                global_fp8_state.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                self.fp8_meta["autocast_id_fwd"] = global_fp8_state.get_autocast_id()
                 self.fp8_meta["autocast_id_fwd_stack"].append(self.fp8_meta["autocast_id_fwd"])
             self.fp8_meta["update_amax_and_scale_fwd"] = True
         else:
@@ -251,9 +252,9 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
 
         if self.fp8_enabled and self.training and self.fp8_meta["recipe"].reduce_amax:
             global_fp8_state = get_global_fp8_state()
-            global_fp8_buffer = global_fp8_state.get_fp8_buffer()
-            global_fp8_buffer.add_amax(self.fp8_meta, True)
-            global_fp8_buffer.set_for_forward_amax_reduction(
+            global_fp8_fwd_buffer = global_fp8_state.get_fp8_fwd_buffer()
+            global_fp8_fwd_buffer.add_amax(self.fp8_meta)
+            global_fp8_fwd_buffer.set_for_amax_reduction(
                 self.fp8_meta,
                 self.tp_group,
                 self.tp_size,
@@ -269,15 +270,15 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         """Checks and prep for BWD."""
         if fp8_enabled:
             global_fp8_state = get_global_fp8_state()
-            global_fp8_buffer = global_fp8_state.get_fp8_buffer()
-            global_fp8_buffer.wait(forward=False)
+            global_fp8_bwd_buffer = global_fp8_state.get_fp8_bwd_buffer()
+            global_fp8_bwd_buffer.wait()
 
             if not fp8_meta["recipe"].reduce_amax:
                 amax_and_scale_update(fp8_meta, False)
             else:
-                global_fp8_buffer.get_amax(fp8_meta, False)
+                global_fp8_bwd_buffer.get_amax(fp8_meta)
                 amax_and_scale_update(fp8_meta, False)
-                global_fp8_buffer.set_for_deletion(fp8_meta, False)
+                global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
 
                 # Get new backward key.
                 fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
@@ -286,9 +287,9 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             yield
 
         if fp8_enabled and fp8_meta["recipe"].reduce_amax:
-            global_fp8_buffer.add_amax(fp8_meta, False)
+            global_fp8_bwd_buffer.add_amax(fp8_meta)
             if fp8_meta["first_module"]:
-                global_fp8_buffer.finalize_bwd(fp8_meta, tp_group, tp_size)
+                global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
 
     @staticmethod
     def grad_output_preprocess(
