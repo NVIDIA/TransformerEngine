@@ -33,7 +33,7 @@ def max_abs_diff(a: torch.Tensor, b: torch.Tensor):
     if v >= 0.001:
         return f"\033[31m{v:12.10f}\033[0m"
     else:
-        return f"\033[32m{v}\033[0m"
+        return f"\033[32m{v:12.10f}\033[0m"
 
 
 def cpy(dst: torch.Tensor, src: torch.Tensor):
