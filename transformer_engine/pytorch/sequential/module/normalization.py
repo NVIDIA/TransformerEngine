@@ -39,9 +39,7 @@ class Normalization(BaseModule, ABC):
                         zero_centered_gamma,
                         make_nvte_tensor(self.weight),
                     )
-                    + (make_nvte_tensor(self.bias),)
-                    if self.bias is not None
-                    else ()
+                    + ((make_nvte_tensor(self.bias),) if self.bias is not None else ())
                 )
             )
         )
