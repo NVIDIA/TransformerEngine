@@ -23,7 +23,7 @@
 #define NVTE_CHECK(expr, ...)                                   \
   do {                                                          \
     if (!(expr)) {                                              \
-      NVTE_ERROR(std::string("Assertion failed: "  #x ". ")     \
+      NVTE_ERROR(std::string("Assertion failed: " #expr ". ")   \
                  + std::string(__VA_ARGS__));                   \
     }                                                           \
   } while (false)
