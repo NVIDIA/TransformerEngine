@@ -9,7 +9,6 @@ from .module import (
     RMSNorm,
     Linear,
     Sequential,
-    Residual,
 )
 from . import nvte, ops, fusions, module
 
@@ -25,7 +24,6 @@ __all__ = [
     "RMSNorm",
     "Linear",
     "Sequential",
-    "Residual",
     # Python modules
     "nvte",
     "ops",
