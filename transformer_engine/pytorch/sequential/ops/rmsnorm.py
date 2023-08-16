@@ -27,9 +27,6 @@ class RMSNorm(Op):
         self._dx_dtype = dx_dtype
         self.dweight_dtype = dweight_dtype
 
-    def inference(self, x: nvte.Tensor):
-        return self.forward(x)[0]
-
     def forward(self, x: nvte.Tensor):
         x = nvte.cast_checked(x, self.x_dtype)
         weight = nvte.cast_checked(self.weight, self.weight_dtype)

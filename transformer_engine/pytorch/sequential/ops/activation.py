@@ -19,9 +19,6 @@ class Activation(Op, ABC):
         self._y_dtype = y_dtype
         self._dx_dtype = dx_dtype
 
-    def inference(self, x: nvte.Tensor):
-        return self.forward(x)[0]
-
     def forward(self, x: nvte.Tensor):
         x = nvte.cast_checked(x, self.x_dtype)
 
