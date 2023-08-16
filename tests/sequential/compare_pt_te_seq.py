@@ -138,23 +138,24 @@ def cmp_linear_no_bias():
 print("\n ----- FP32 INPUT & WEIGHTS ------")
 x_src = torch.rand(SEQ_LEN, HIDDEN_DIM, device="cuda")
 
-print("\n### Comparing LayerNormMPL (gelu) ###")
-cmp_layernorm_mlp("LayerNorm", "gelu")
+for _ in range(10):
+    print("\n### Comparing LayerNormMPL (gelu) ###")
+    cmp_layernorm_mlp("LayerNorm", "gelu")
 
-print("\n### Comparing LayerNormMPL (relu) ###")
-cmp_layernorm_mlp("LayerNorm", "relu")
+    print("\n### Comparing LayerNormMPL (relu) ###")
+    cmp_layernorm_mlp("LayerNorm", "relu")
 
-print("\n### Comparing RMSNormMPL (gelu) ###")
-cmp_layernorm_mlp("RMSNorm", "gelu")
+    print("\n### Comparing RMSNormMPL (gelu) ###")
+    cmp_layernorm_mlp("RMSNorm", "gelu")
 
-print("\n### Comparing RMSNormMPL (relu) ###")
-cmp_layernorm_mlp("RMSNorm", "relu")
+    print("\n### Comparing RMSNormMPL (relu) ###")
+    cmp_layernorm_mlp("RMSNorm", "relu")
 
-print("\n### Comparing LayerNorm ###")
-cmp_layernorm()
+    print("\n### Comparing LayerNorm ###")
+    cmp_layernorm()
 
-print("\n### Comparing Linear ###")
-cmp_linear()
+    print("\n### Comparing Linear ###")
+    cmp_linear()
 
-print("\n### Comparing Linear (no bias) ###")
-cmp_linear_no_bias()
+    print("\n### Comparing Linear (no bias) ###")
+    cmp_linear_no_bias()
