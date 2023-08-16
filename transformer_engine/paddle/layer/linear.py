@@ -565,7 +565,6 @@ class Linear(TransformerEngineBaseLayer):
             self.out_features = divide(self.out_features, self.tp_size)
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
-        self.set_nccl_overlap_warning_if_tp()
 
         # Initialize weight parameter
         with track_rng_state(enable=self.tensor_parallel):

@@ -364,7 +364,6 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             self.out_features = divide(self.out_features, self.tp_size)
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
-        self.set_nccl_overlap_warning_if_tp()
 
         # LayerNorm weights
         self.ln_weight = self.create_parameter(

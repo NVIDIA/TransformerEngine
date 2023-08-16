@@ -8,7 +8,6 @@ from contextlib import contextmanager
 import os
 import pickle
 from typing import Generator, Dict, Tuple, Union, Any
-import warnings
 
 import numpy as np
 
@@ -337,21 +336,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             bgrad = None
 
         return grad_output_mat, grad_output_c, grad_output_t, bgrad
-
-    def set_nccl_overlap_warning_if_tp(self) -> None:
-        """When using TP, the NCCL communication needs to be scheduled
-        before the GEMM for there to be a guaranteed overlap. From the
-        host side in TE, the comm calls are always launched first, but
-        to ensure that the GEMM isn't scheduled first, the environment
-        variable `CUDA_DEVICE_MAX_CONNECTIONS` needs to be set to 1 to
-        force a single channel.
-        """
-        if self.tp_size == 1:
-            return
-        num_cuda_work_queues = int(os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", "0"))
-        if num_cuda_work_queues != 1:
-            warnings.warn("To guarantee overlapping TP and SP collectives with the backward"
-                          "GEMMs, set environment variable CUDA_DEVICE_MAX_CONNECTIONS = 1")
 
     @abstractmethod
     def forward(self):

@@ -579,7 +579,6 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             self.size_per_partition = divide(self.ffn_hidden_size, self.tp_size)
         else:
             self.size_per_partition = self.ffn_hidden_size
-        self.set_nccl_overlap_warning_if_tp()
 
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
