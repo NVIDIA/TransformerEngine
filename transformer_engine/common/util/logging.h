@@ -9,8 +9,8 @@
 
 #include <stdexcept>
 
-#include <cuda_runtime_api.h>
 #include <cublas_v2.h>
+#include <cuda_runtime_api.h>
 #include <cudnn.h>
 #include <nvrtc.h>
 

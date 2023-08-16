@@ -39,7 +39,6 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
-
 #include "logging.h"
 
 namespace transformer_engine {

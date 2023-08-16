@@ -4,15 +4,18 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/softmax.h>
 #include <assert.h>
 #include <stdint.h>
+
 #include <cfloat>
 #include <limits>
+
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_profiler_api.h>
+#include <cuda_runtime.h>
+
+#include <transformer_engine/softmax.h>
 #include "../common.h"
 #include "../utils.cuh"
 #include "../util/logging.h"
