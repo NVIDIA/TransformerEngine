@@ -17,7 +17,9 @@ def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     weight = nvte.cast_checked(mmt.weight, mmt.weight_dtype)
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
-    y = nvte.matmul_transpose_add(x, weight, bias, add.y_dtype)
+    y = nvte.matmul_transpose_add(
+        x, weight, bias, add.y_dtype or mmt.dy_dtype or x.dtype
+    )
 
     return y
 
@@ -29,7 +31,9 @@ def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     )
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
-    y = nvte.matmul_transpose_add(x, weight, bias, add.y_dtype)
+    y = nvte.matmul_transpose_add(
+        x, weight, bias, add.y_dtype or mmt.dy_dtype or x.dtype
+    )
 
     return y, ({"x_t": x_t, "weight_t": weight_t}, Context())
 
@@ -45,11 +49,11 @@ def mmt_add_bwd_fused(
     del add_ctx
     x_t, weight_t = mmt_ctx["x_t"], mmt_ctx["weight_t"]
     dy, dy_t, dbias = nvte.cast_transpose_dbias_checked(
-        dy, mmt.dy_dtype, add.dbias_dtype
+        dy, mmt.dy_dtype, add.dbias_dtype or add.bias.dtype
     )
 
-    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype)
-    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
+    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype or add.dx_dtype or dy.dtype)
+    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype or mmt.weight.dtype)
 
     return dx, ([dweight], [dbias])
 
@@ -61,7 +65,9 @@ def mmt_add_gelu_inf_fused(mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor):
     weight = nvte.cast_checked(mmt.weight, mmt.weight_dtype)
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
-    _, y = nvte.matmul_transpose_add_gelu(x, weight, bias, gelu.y_dtype)
+    _, y = nvte.matmul_transpose_add_gelu(
+        x, weight, bias, gelu.y_dtype or add.y_dtype or mmt.y_dtype or x.dtype
+    )
 
     return y
 
@@ -73,7 +79,9 @@ def mmt_add_gelu_fwd_fused(mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor):
     )
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
-    pre_gelu, y = nvte.matmul_transpose_add_gelu(x, weight, bias, gelu.y_dtype)
+    pre_gelu, y = nvte.matmul_transpose_add_gelu(
+        x, weight, bias, gelu.y_dtype or add.y_dtype or mmt.y_dtype or x.dtype
+    )
 
     return y, ({"x_t": x_t, "weight_t": weight_t}, Context(), {"x": pre_gelu})
 
@@ -88,15 +96,16 @@ def mmt_add_gelu_bwd_fused(
     gelu_ctx: Context,
     dy: nvte.Tensor,
 ):
-    del gelu
     del add_ctx
     x_t, weight_t, pre_gelu = mmt_ctx["x_t"], mmt_ctx["weight_t"], gelu_ctx["x"]
     dy, dy_t, dbias = nvte.cast_transpose_dbias_dgelu_checked(
-        dy, pre_gelu, mmt.dy_dtype, add.dbias_dtype
+        dy, pre_gelu, mmt.dy_dtype, add.dbias_dtype or add.bias.dtype
     )
 
-    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype)
-    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
+    dx = nvte.matmul_transpose(
+        dy, weight_t, mmt.dx_dtype or add.dx_dtype or gelu.dx_dtype or dy.dtype
+    )
+    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype or mmt.weight.dtype)
 
     return dx, ([dweight], [dbias], Grads())
 
@@ -107,7 +116,7 @@ def mmt_gelu_inf_fused(mmt: MMT, gelu: GELU, x: nvte.Tensor):
     x = nvte.cast_checked(x, mmt.x_dtype)
     weight = nvte.cast_checked(mmt.weight, mmt.weight_dtype)
 
-    _, y = nvte.matmul_transpose_gelu(x, weight, gelu.y_dtype)
+    _, y = nvte.matmul_transpose_gelu(x, weight, gelu.y_dtype or mmt.y_dtype or x.dtype)
 
     return y
 
@@ -118,7 +127,9 @@ def mmt_gelu_fwd_fused(mmt: MMT, gelu: GELU, x: nvte.Tensor):
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
 
-    pre_gelu, y = nvte.matmul_transpose_gelu(x, weight, gelu.y_dtype)
+    pre_gelu, y = nvte.matmul_transpose_gelu(
+        x, weight, gelu.y_dtype or mmt.y_dtype or x.dtype
+    )
 
     return y, ({"x_t": x_t, "weight_t": weight_t}, {"x": pre_gelu})
 
@@ -213,12 +224,11 @@ def mmt_add_gelu_add_fwd_fused(
 def mmt_geglu_bwd_fused(
     mmt: MMT, geglu: GeGLU, mmt_ctx: Context, geglu_ctx: Context, grad: nvte.Tensor
 ):
-    del geglu
     x_t, weight_t, pre_geglu = mmt_ctx["x_t"], mmt_ctx["weight_t"], geglu_ctx["x"]
     dy, dy_t = nvte.cast_transpose_dgeglu_checked(grad, pre_geglu, mmt.dy_dtype)
 
-    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype)
-    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype)
+    dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype or geglu.dx_dtype or dy.dtype)
+    dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype or mmt.weight.dtype)
 
     return dx, ([dweight], Grads())
 
