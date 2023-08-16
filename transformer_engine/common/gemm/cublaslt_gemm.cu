@@ -5,11 +5,11 @@
  ************************************************************************/
 
 #include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include "../common.h"
+#include "../util/logging.h"
 
 namespace {
 

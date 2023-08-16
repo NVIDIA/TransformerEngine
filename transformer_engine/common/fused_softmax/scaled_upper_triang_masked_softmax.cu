@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include <transformer_engine/softmax.h>
-#include <transformer_engine/logging.h>
 #include <assert.h>
 #include <stdint.h>
 #include <cfloat>
@@ -14,8 +13,9 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_profiler_api.h>
-#include "../utils.cuh"
 #include "../common.h"
+#include "../utils.cuh"
+#include "../util/logging.h"
 
 
 namespace transformer_engine {

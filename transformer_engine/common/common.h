@@ -8,7 +8,6 @@
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
 #include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -21,6 +20,8 @@
 #include <tuple>
 #include <vector>
 #include "nvtx.h"
+
+#include "./util/logging.h"
 
 namespace transformer_engine {
 
