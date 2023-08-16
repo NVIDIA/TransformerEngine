@@ -337,12 +337,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
-            state["global_fp8_buffer"] = FP8GlobalStateManager.get_global_fp8_buffer()
+            state["global_fp8_buffer"] = FP8GlobalStateManager.get_global_fp8_buffer_checkpoint()
+            state["global_fp8_state"] = FP8GlobalStateManager.get_global_fp8_state_checkpoint()
 
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
-                if isinstance(v, (bool, int, float, str)):
+                if isinstance(v, (bool, int, float, str, list)):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
@@ -384,7 +385,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
 
             # Restore global FP8 buffer state.
-            FP8GlobalStateManager.set_global_fp8_buffer(state[4])
+            FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state[4])
             self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
             self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
             self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
@@ -401,8 +402,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Restore global FP8 buffer states.
-        FP8GlobalStateManager.set_global_fp8_buffer(state["global_fp8_buffer"])
+        # Restore global FP8 amax buffer.
+        FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffer"])
+        # Restore global FP8 state.
+        if hasattr(state, "global_fp8_state"):
+            FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
+        else:
+            warnings.warn(
+                "This checkpoint format is deprecated and will be"
+                "removed in a future release of Transformer Engine"
+            )
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]

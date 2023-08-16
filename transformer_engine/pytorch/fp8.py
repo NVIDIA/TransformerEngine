@@ -83,13 +83,37 @@ class FP8GlobalStateManager:
         return cls.fp8_available, cls.reason_for_no_fp8
 
     @classmethod
-    def get_global_fp8_buffer(cls) -> Dict[str, List[torch.Tensor]]:
-        """Returns global fp8 buffer."""
+    def get_global_fp8_state_checkpoint(cls) -> Dict[str, Union[int, str]]:
+        """Returns global fp8 state variables."""
+        # Convert attributes to dictionary to make future proof against
+        # changes in global state variables in order to make setting the
+        # checkpoint backwards compatible.
+        global_fp8_state = {}
+        global_fp8_state["FP8_AUTOCAST_COUNTER"] = cls.FP8_AUTOCAST_COUNTER
+        global_fp8_state["FP8_CURRENT_CONTEXT_ID"] = cls.FP8_CURRENT_CONTEXT_ID
+        global_fp8_state["FP8_AUTOCAST_DEPTH"] = cls.FP8_AUTOCAST_DEPTH
+        global_fp8_state["buffer_delete_key_fwd"] = cls.buffer_delete_key_fwd
+        global_fp8_state["buffer_delete_key_bwd"] = cls.buffer_delete_key_bwd
+        global_fp8_state["dp_amax_reduce_interval"] = cls.dp_amax_reduce_interval
+        global_fp8_state["dp_amax_reduce_forward_idx"] = cls.dp_amax_reduce_forward_idx
+        global_fp8_state["dp_amax_reduce_backward_idx"] = cls.dp_amax_reduce_backward_idx
+        return global_fp8_state
+
+    @classmethod
+    def set_global_fp8_state_checkpoint(cls, state: Dict[str, Union[int, str]]) -> None:
+        """Sets global fp8 state variables."""
+        for k, v in state.items():
+            if hasattr(cls, k):
+                setattr(cls, k, v)
+
+    @classmethod
+    def get_global_fp8_buffer_checkpoint(cls) -> Dict[str, List[torch.Tensor]]:
+        """Returns global fp8 amax buffer."""
         return cls.global_fp8_buffer
 
     @classmethod
-    def set_global_fp8_buffer(cls, buffer: Dict[str, List[torch.Tensor]]) -> None:
-        """Sets global fp8 buffer."""
+    def set_global_fp8_buffer_checkpoint(cls, buffer: Dict[str, List[torch.Tensor]]) -> None:
+        """Sets global fp8 amax buffer."""
         # Map all tensors back to GPU.
         for k, v in buffer.items():
             buffer[k] = [tensor.cuda() for tensor in v]
@@ -250,8 +274,8 @@ class FP8GlobalStateManager:
         return cls.FP8_DISTRIBUTED_GROUP
 
     @classmethod
-    def get_fp8_state(cls) -> Tuple[bool, bool, DelayedScaling, dist_group_type, bool]:
-        """FP8 state getter"""
+    def get_fp8_autocast_state(cls) -> Tuple[bool, bool, DelayedScaling, dist_group_type, bool]:
+        """FP8 autocast state getter"""
         return (
             cls.FP8_ENABLED,
             cls.FP8_CALIBRATION,
@@ -260,11 +284,11 @@ class FP8GlobalStateManager:
             cls.IS_FIRST_FP8_MODULE)
 
     @classmethod
-    def set_fp8_state(
+    def set_fp8_autocast_state(
         cls,
         fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool]
     ) -> None:
-        """FP8 state setter"""
+        """FP8 autocast state setter"""
         (cls.FP8_ENABLED,
          cls.FP8_CALIBRATION,
          cls.FP8_RECIPE,
@@ -470,11 +494,11 @@ def fp8_autocast(
                are reduced at the end of each training step.
     """
     try:
-        fp8_state = FP8GlobalStateManager.get_fp8_state()
+        fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
         FP8GlobalStateManager.fp8_autocast_enter(enabled, calibrating, fp8_recipe, fp8_group)
         yield
     finally:
-        FP8GlobalStateManager.set_fp8_state(fp8_state) # pylint: disable=used-before-assignment
+        FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment
         FP8GlobalStateManager.fp8_autocast_exit()
 
 
