@@ -91,7 +91,7 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         for contained_op in pipeline.functions:
-            nvte_tensors = contained_op.args()
+            nvte_tensors = contained_op.require_grad()
             exposed_tensors = list[torch.Tensor]()
             for nvte_tensor in nvte_tensors:
                 assert not nvte.is_fp8(

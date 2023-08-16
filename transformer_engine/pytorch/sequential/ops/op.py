@@ -20,7 +20,7 @@ class Op(ABC):
         ...
 
     @abstractmethod
-    def args(self) -> list[nvte.Tensor]:
+    def require_grad(self) -> list[nvte.Tensor]:
         ...
 
     def __repr__(self):

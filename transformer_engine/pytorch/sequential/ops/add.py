@@ -42,7 +42,7 @@ class Add(Op):
 
         return dx, [dbias]
 
-    def args(self):
+    def require_grad(self):
         return [self.bias]
 
 

@@ -103,7 +103,7 @@ Let's say you're adding `awesomeLU`:
             >     dy_dtype: nvte.DType | None = ...,
             > ```
         4. Provide defaults for these types to allow for constructing the operation object `AwesomeLu` without having to explicitly specify the types. Choose such default types that will result in optimal performance in the FP8 computational regime.
-    2. In `AwesomeLU.args` return the list of all tensor attributes of `AwesomeLU` that require gradients.
+    2. In `AwesomeLU.require_grad` return the list of all tensor attributes of `AwesomeLU` that require gradients.
     3. In `AwesomeLU.forward` provide the implementation of the forward pass of the operation:
         1. The input activation is to be taken as an argument to the `forward` function. _Note: Contrary to Pytorch, any parameters or configuration, can be conveniently accessed using the `self` object._
             ```
@@ -131,8 +131,8 @@ Let's say you're adding `awesomeLU`:
             ```
                 dy = nvte.cast_checked(dy, self.dy_dtype)
             ```
-        3. Return `dy` and a list of the gradients of all tensors returned by `AwesomeLU.args` in **the same order** (if `args` returns `[weight, bias]`, `backward` **must** return `dy, [dweight, dbias]`).
-        4. If `AwesomeLU.args` returns `[]`, return `dy, []`.
+        3. Return `dy` and a list of the gradients of all tensors returned by `AwesomeLU.require_grad` in **the same order** (if `require_grad` returns `[weight, bias]`, `backward` **must** return `dy, [dweight, dbias]`).
+        4. If `AwesomeLU.require_grad` returns `[]`, return `dy, []`.
     6. Remember to use fused implementations, when possible. For example, in some cases, using a sequence of `nvte.cast_checked` calls may be suboptimal, when, for example, `nvte.multi_cast_transpose` could be used instead, if the tensors are to be later transposed.
 4. In `ops`/`__init__.py` add `from awesomelu import AwesomeLU`.
 5. In `ops`/`__init__.py` insert `AwesomeLU` to the module's `__all__` list, while maintaining lexicographical order (for consistency).

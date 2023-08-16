@@ -57,8 +57,8 @@ class FusedOp(Op):
         grads_total: Grads = [grad for op_grads in grads for grad in op_grads]
         return dx, grads_total
 
-    def args(self):
-        return list(sum((op.args() for op in self.ops), list[nvte.Tensor]()))
+    def require_grad(self):
+        return list(sum((op.require_grad() for op in self.ops), list[nvte.Tensor]()))
 
     def __repr__(self):
         return f"""FusedOp{self.ops}"""

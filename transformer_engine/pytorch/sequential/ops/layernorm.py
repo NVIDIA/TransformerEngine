@@ -64,7 +64,7 @@ class LayerNorm(Op):
 
         return dx, [dweight, dbias]
 
-    def args(self):
+    def require_grad(self):
         return [self.weight, self.bias]
 
 

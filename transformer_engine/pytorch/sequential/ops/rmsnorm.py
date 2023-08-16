@@ -55,7 +55,7 @@ class RMSNorm(Op):
 
         return dx, [dweight]
 
-    def args(self):
+    def require_grad(self):
         return [self.weight]
 
 

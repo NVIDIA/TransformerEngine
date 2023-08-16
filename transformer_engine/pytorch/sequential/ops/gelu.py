@@ -34,7 +34,7 @@ class GELU(Op):
 
         return dx, Grads()
 
-    def args(self):
+    def require_grad(self):
         return list[nvte.Tensor]()
 
 

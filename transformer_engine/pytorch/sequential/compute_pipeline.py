@@ -47,8 +47,8 @@ class SelfContainedOp(Op):
             full_grads += grads
         return dy, full_grads
 
-    def args(self):
-        return list(sum((op.args() for op in self.fwds), list[nvte.Tensor]()))
+    def require_grad(self):
+        return list(sum((op.require_grad() for op in self.fwds), list[nvte.Tensor]()))
 
 
 def force_use_precision(ops: list[Op], allowed: nvte.DType):
