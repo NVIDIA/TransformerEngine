@@ -11,10 +11,10 @@ class Op(ABC):
     def __init__(
         self,
         *,
-        x_dtype: nvte.DType | None,
-        y_dtype: nvte.DType | None,
-        dy_dtype: nvte.DType | None,
-        dx_dtype: nvte.DType | None,
+        x_dtype: nvte.DType | None = None,
+        y_dtype: nvte.DType | None = None,
+        dy_dtype: nvte.DType | None = None,
+        dx_dtype: nvte.DType | None = None,
     ):
         ...
 
