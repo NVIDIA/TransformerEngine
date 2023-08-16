@@ -10,7 +10,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     get_device_compute_capability,
 )
-from transformer_engine.pytorch.fp8 import is_fp8_available
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch import TransformerLayer
 from transformer_engine.pytorch.attention import DotProductAttention
 import os
@@ -18,7 +18,7 @@ import os
 from pkg_resources import packaging
 from importlib.metadata import version
 from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
-fp8_available, reason_for_no_fp8 = is_fp8_available()
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
