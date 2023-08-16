@@ -405,7 +405,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Restore global FP8 amax buffer.
         FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffer"])
         # Restore global FP8 state.
-        if hasattr(state, "global_fp8_state"):
+        if "global_fp8_state" in state:
             FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
         else:
             warnings.warn(
