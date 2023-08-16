@@ -31,7 +31,7 @@ HIDDEN_DIM = 768
 def max_abs_diff(a: torch.Tensor, b: torch.Tensor):
     v = (a - b).abs().max().item()
     if v >= 0.001:
-        return f"\033[31m{v}\033[0m"
+        return f"\033[31m{v:12.10f}\033[0m"
     else:
         return f"\033[32m{v}\033[0m"
 
@@ -53,13 +53,13 @@ def cmp_modules(te: nn.Module, seq: nn.Module, pt: nn.Module):
     y_seq.sum().backward()
     y_pt.sum().backward()
 
-    print(f"mad(dx_te, dx_seq): {max_abs_diff(x_te.grad, x_seq.grad):12.10f}")
-    print(f"mad(dx_te,  dx_pt): {max_abs_diff(x_te.grad, x_pt.grad):12.10f}")
-    print(f"mad(dx_seq, dx_pt): {max_abs_diff(x_seq.grad,x_pt.grad):12.10f}")
+    print(f"mad(dx_te, dx_seq): {max_abs_diff(x_te.grad, x_seq.grad)}")
+    print(f"mad(dx_te,  dx_pt): {max_abs_diff(x_te.grad, x_pt.grad)}")
+    print(f"mad(dx_seq, dx_pt): {max_abs_diff(x_seq.grad,x_pt.grad)}")
 
-    print(f"mad( y_te,  y_seq): {max_abs_diff(y_te, y_seq):12.10f}")
-    print(f"mad( y_te,   y_pt): {max_abs_diff(y_te, y_pt):12.10f}")
-    print(f"mad( y_seq,  y_pt): {max_abs_diff(y_seq,y_pt):12.10f}")
+    print(f"mad( y_te,  y_seq): {max_abs_diff(y_te, y_seq)}")
+    print(f"mad( y_te,   y_pt): {max_abs_diff(y_te, y_pt)}")
+    print(f"mad( y_seq,  y_pt): {max_abs_diff(y_seq,y_pt)}")
 
 
 def cmp_layernorm_mlp(norm: str, act: str):
