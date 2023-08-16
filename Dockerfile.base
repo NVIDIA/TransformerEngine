@@ -28,18 +28,25 @@ RUN pip install ninja pybind11
 # JAX build requires Praxis
 # Note: Praxis pins specific versions for its dependencies, so naively
 # installing will reinstall JAX.
-RUN [[ "${FRAMEWORK}" =~ jax|all ]] \
- && pip install fiddle \
- && SKIP_HEAD_INSTALLS=1 pip install git+https://github.com/google/praxis \
- || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ jax|all ]] \
+  && pip install fiddle \
+  && SKIP_HEAD_INSTALLS=1 pip install git+https://github.com/google/praxis \
+  || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+EOF
 
 # Install Transformer Engine
-RUN \
- NVTE_FRAMEWORK=${FRAMEWORK} \
- NVTE_WITH_USERBUFFERS=1 \
- MPI_HOME=/usr/local/mpi \
- MAX_JOBS=1 \
- pip install .[test] \
- && rm -rf transformer_engine.egg-info dist build
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ pytorch|all ]] \
+  && export NVTE_WITH_USERBUFFERS=1 \
+  && export MPI_HOME=/usr/local/mpi \
+  && export MAX_JOBS=1 \
+  || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
+
+  NVTE_FRAMEWORK=${FRAMEWORK} \
+  pip install .[test]
+
+  rm -rf transformer_engine.egg-info dist build
+EOF
 
 WORKDIR /workspace/
