@@ -801,7 +801,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
                   rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-  auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kInt64);
+  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
   //auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
   auto rng_state = torch::empty({2}, options);
   unpack<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(
