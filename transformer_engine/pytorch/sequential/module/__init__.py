@@ -1,21 +1,20 @@
-from .relu import ReLU
-from .gelu import GELU
-from .reglu import ReGLU
-from .geglu import GeGLU
-from .swiglu import SwiGLU
-from .layernorm import LayerNorm
-from .rmsnorm import RMSNorm
+from .activation import Activation, ReLU, GELU, ReGLU, GeGLU, SwiGLU
+from .normalization import Normalization, LayerNorm, RMSNorm
 from .linear import Linear
 from .sequential import Sequential
+from .residual import Residual
 
 __all__ = [
+    "Activation",
     "ReLU",
     "GELU",
     "ReGLU",
     "GeGLU",
     "SwiGLU",
+    "Normalization",
     "LayerNorm",
     "RMSNorm",
     "Linear",
     "Sequential",
+    "Residual",
 ]
