@@ -105,7 +105,7 @@ Let's say you're adding `awesomeLU`:
         4. Provide defaults for these types to allow for constructing the operation object `AwesomeLu` without having to explicitly specify the types. Choose such default types that will result in optimal performance in the FP8 computational regime.
     2. In `AwesomeLU.require_grad` return the list of all tensor attributes of `AwesomeLU` that require gradients.
     3. In `AwesomeLU.forward` provide the implementation of the forward pass of the operation:
-        1. The input activation is to be taken as an argument to the `forward` function. _Note: Contrary to Pytorch, any parameters or configuration, can be conveniently accessed using the `self` object._
+        1. The input activation is to be taken as an argument to the `forward` function. _Note: Contrary to Pytorch's `autograd.Function`, any parameters or configuration, can be conveniently accessed using the `self` object._
             ```
             def forward(self, x: nvte.Tensor):
             ```
@@ -122,7 +122,7 @@ Let's say you're adding `awesomeLU`:
         4. If no auxilary tensors are needed for the backward pass, return an empty context.
     4. In `AwesomeLU.inference` provide the implementation of the forward pass of the operation, optimized for inference-time use.
     5. In `AwesomeLU.backward` provide the implementation of the backward pass of the operation:
-        1. Retrieve the tensors stored in the forward pass inside the context, by using their keys. **Do not** attempt to access other keys of the dictionary. Example:
+        1. Retrieve the tensors stored in the forward pass inside the context, by using their keys. **Do not** attempt to access other keys of the dictionary. **Do not** use `Tensor`s stored in the `self` object for computations. Note: You **may** access the attributes to, for example, access the `dtype` of a tensor, but you **must not** access the tensor's `data` or other numerical data. Example:
             ```
             def backward(self, ctx: Context, dy: nvte.Tensor):
                 x, weight, mu, rsigma = ctx["x"], ctx["weight"], ctx["mu"], ctx["rsigma"]

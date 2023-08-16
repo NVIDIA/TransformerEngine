@@ -8,6 +8,17 @@ Grads = list[nvte.Tensor]
 
 class Op(ABC):
     @abstractmethod
+    def __init__(
+        self,
+        *,
+        x_dtype: nvte.DType | None,
+        y_dtype: nvte.DType | None,
+        dy_dtype: nvte.DType | None,
+        dx_dtype: nvte.DType | None,
+    ):
+        ...
+
+    @abstractmethod
     def inference(self, x: nvte.Tensor) -> nvte.Tensor:
         ...
 
@@ -25,6 +36,27 @@ class Op(ABC):
 
     def __repr__(self):
         return self.__class__.__name__
+
+    @property
+    def x_dtype(self):
+        return self._x_dtype
+
+    @property
+    def y_dtype(self):
+        return self._y_dtype or self.x_dtype
+
+    @property
+    def dy_dtype(self):
+        return self._dy_dtype
+
+    @property
+    def dx_dtype(self):
+        return self._dx_dtype or self._dy_dtype
+
+    _x_dtype: nvte.DType | None
+    _y_dtype: nvte.DType | None
+    _dy_dtype: nvte.DType | None
+    _dx_dtype: nvte.DType | None
 
 
 __all__ = ["Op", "Context", "Grads"]

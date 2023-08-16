@@ -8,15 +8,16 @@ from .op import Grads, Op, Context
 class Activation(Op, ABC):
     def __init__(
         self,
+        *,
         x_dtype: nvte.DType | None = None,
         dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
-        y_dtype: nvte.DType = nvte.DType.Float8E4M3,
-        dx_dtype: nvte.DType = nvte.DType.BFloat16,
+        y_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
     ):
-        self.x_dtype = x_dtype
-        self.dy_dtype = dy_dtype
-        self.y_dtype = y_dtype
-        self.dx_dtype = dx_dtype
+        self._x_dtype = x_dtype
+        self._dy_dtype = dy_dtype
+        self._y_dtype = y_dtype
+        self._dx_dtype = dx_dtype
 
     def inference(self, x: nvte.Tensor):
         return self.forward(x)[0]
@@ -24,7 +25,7 @@ class Activation(Op, ABC):
     def forward(self, x: nvte.Tensor):
         x = nvte.cast_checked(x, self.x_dtype)
 
-        y = type(self)._forward(x, self.y_dtype)
+        y = type(self)._forward(x, self.y_dtype or self.x_dtype or x.dtype)
 
         return y, {"x": x}
 
@@ -32,7 +33,7 @@ class Activation(Op, ABC):
         x = ctx["x"]
         dy = nvte.cast_checked(dy, self.dy_dtype)
 
-        dx = type(self)._backward(dy, x, self.dx_dtype)
+        dx = type(self)._backward(dy, x, self.dx_dtype or dy.dtype)
 
         return dx, Grads()
 
