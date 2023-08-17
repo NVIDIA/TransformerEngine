@@ -598,9 +598,9 @@ class Linear(TransformerEngineBaseLayer):
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.parallel_mode == "row" and self.tensor_parallel and self.has_bias:
-            self.gemm_bias_unfused_add = True
+            self.gemm_bias_fused_add = False
         else:
-            self.gemm_bias_unfused_add = False
+            self.gemm_bias_fused_add = True
 
     def _te_forward(
         self,
@@ -617,8 +617,8 @@ class Linear(TransformerEngineBaseLayer):
             out = _Linear.apply(
                 self.weight,
                 inp,
-                self.bias if not self.gemm_bias_unfused_add else None,
-                self.has_bias and not self.gemm_bias_unfused_add,
+                self.bias if self.gemm_bias_fused_add else None,
+                self.has_bias and self.gemm_bias_fused_add,
                 self.fp8_enabled,
                 self.fp8_calibration,
                 self.fp8_meta,
@@ -630,7 +630,7 @@ class Linear(TransformerEngineBaseLayer):
                 self.tp_size,
             )
 
-        if self.gemm_bias_unfused_add:
+        if not self.gemm_bias_fused_add:
             out = out + cast_if_needed_inplace(self.bias, self.activation_dtype)
 
         return out
@@ -642,7 +642,7 @@ class Linear(TransformerEngineBaseLayer):
         """Calls Paddle OP"""
         if self.parallel_mode == 'column' and self.tensor_parallel:
             inp = identity(inp, self.tp_group)
-        out = F.linear(inp, self.weight, self.bias if not self.gemm_bias_unfused_add else None)
+        out = F.linear(inp, self.weight, self.bias if self.gemm_bias_fused_add else None)
         if self.parallel_mode == 'row' and self.tensor_parallel:
             out = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out

@@ -141,7 +141,7 @@ class FP8MetaBufferBase(ABC):
             "unsupported. For more details and correct usage, please see " \
             "https://github.com/NVIDIA/TransformerEngine/pull/93."
 
-    def get_amax(self, fp8_meta: Dict[str, Any]) -> None:
+    def copy_amax_from_buffer(self, fp8_meta: Dict[str, Any]) -> None:
         """Populate current amax with the correct location from buffer."""
         fp8_meta_tensor_key = self._get_meta_tensor_key()
         buffer_position_key = self._get_buffer_position_key()

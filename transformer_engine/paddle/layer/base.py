@@ -230,7 +230,7 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
             global_fp8_fwd_buffer.wait()
             if self.fp8_meta["recipe"].reduce_amax:
-                global_fp8_fwd_buffer.get_amax(self.fp8_meta)
+                global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
                 amax_and_scale_update(self.fp8_meta, True)
                 global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
             else:
@@ -273,15 +273,15 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             global_fp8_bwd_buffer = global_fp8_state.get_fp8_bwd_buffer()
             global_fp8_bwd_buffer.wait()
 
-            if not fp8_meta["recipe"].reduce_amax:
-                amax_and_scale_update(fp8_meta, False)
-            else:
-                global_fp8_bwd_buffer.get_amax(fp8_meta)
+            if fp8_meta["recipe"].reduce_amax:
+                global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
                 amax_and_scale_update(fp8_meta, False)
                 global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
 
                 # Get new backward key.
                 fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
+            else:
+                amax_and_scale_update(fp8_meta, False)
 
         with nvtx_range(name + " backward"):
             yield

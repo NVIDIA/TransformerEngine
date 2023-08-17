@@ -652,9 +652,9 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.set_parallel_mode and self.tensor_parallel and self.has_bias:
-            self.gemm_bias_unfused_add = True
+            self.gemm_bias_fused_add = False
         else:
-            self.gemm_bias_unfused_add = False
+            self.gemm_bias_fused_add = True
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -706,7 +706,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         if self.return_layernorm_output:
             out, ln_out = out
 
-        if self.gemm_bias_unfused_add:
+        if not self.gemm_bias_fused_add:
             out = out + cast_if_needed_inplace(self.fc2_bias, self.activation_dtype)
 
         if self.return_layernorm_output:
@@ -733,7 +733,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         act_func = get_paddle_act_func(self.activation)
         act_out = act_func(fc1_out)
         out = F.linear(act_out, self.fc2_weight,
-                       self.fc2_bias if not self.gemm_bias_unfused_add else None)
+                       self.fc2_bias if self.gemm_bias_fused_add else None)
         if self.set_parallel_mode and self.tensor_parallel:
             out = allreduce(out, self.tp_group)
             out = out + self.fc2_bias if self.fc2_bias is not None else out
