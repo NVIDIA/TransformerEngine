@@ -7,6 +7,8 @@ import transformer_engine.pytorch.sequential as seq
 from transformer_engine.pytorch.sequential.nvte import DType
 import transformer_engine.pytorch as te
 
+torch.set_default_device("cuda")
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_dim: int, eps: float = 1e-5):
