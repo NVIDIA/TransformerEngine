@@ -230,6 +230,14 @@ def seq_test_fused(
     return inp.grad
 
 
+results = (
+    list[bool | None](),
+    list[bool | None](),
+    list[bool | None](),
+    list[bool | None](),
+)
+
+
 def test(
     normalization: NormalizationType,
     first_linear: bool,
@@ -241,152 +249,69 @@ def test(
     lin2_bias: torch.Tensor,
     x: torch.Tensor,
 ):
+    args = (
+        normalization,
+        first_linear,
+        activation,
+        second_linear,
+        lin1_weight,
+        lin1_bias,
+        lin2_weight,
+        lin2_bias,
+        x,
+    )
+
     # Pytorch reference implementation in FP32, no TF32
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    pt_fp32 = pt_test(
-        normalization,
-        first_linear,
-        activation,
-        second_linear,
-        lin1_weight,
-        lin1_bias,
-        lin2_weight,
-        lin2_bias,
-        x,
-    )
+    pt_fp32 = pt_test(*args)
     # Pytorch reference implementation in FP32, with TF32
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    pt_fp32 = pt_test(
-        normalization,
-        first_linear,
-        activation,
-        second_linear,
-        lin1_weight,
-        lin1_bias,
-        lin2_weight,
-        lin2_bias,
-        x,
-    )
+    pt_tf32 = pt_test(*args)
     # Pytorch reference implementation with autocast to float16
     with autocast("cuda", torch.float16):
-        pt_fp16 = pt_test(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        pt_fp16 = pt_test(*args)
     # Pytorch reference implementation with autocast to bfloat16
     with autocast("cuda", torch.bfloat16):
-        pt_bf16 = pt_test(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        pt_bf16 = pt_test(*args)
 
     with seq.environment(DType.Float32):
-        sequ_fp32 = seq_test_unfused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        sequ_fp32 = seq_test_unfused(*args)
     with seq.environment(DType.BFloat16):
-        sequ_bf16 = seq_test_unfused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        sequ_bf16 = seq_test_unfused(*args)
     with seq.environment(DType.Float16):
-        sequ_fp16 = seq_test_unfused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        sequ_fp16 = seq_test_unfused(*args)
 
     with seq.environment(DType.Float32):
-        seqf_fp32 = seq_test_fused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        seqf_fp32 = seq_test_fused(*args)
     with seq.environment(DType.BFloat16):
-        seqf_bf16 = seq_test_fused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        seqf_bf16 = seq_test_fused(*args)
     with seq.environment(DType.Float16):
-        seqf_fp16 = seq_test_fused(
-            normalization,
-            first_linear,
-            activation,
-            second_linear,
-            lin1_weight,
-            lin1_bias,
-            lin2_weight,
-            lin2_bias,
-            x,
-        )
+        seqf_fp16 = seq_test_fused(*args)
 
-    for cand in [sequ_fp32, sequ_bf16, sequ_fp16, seqf_fp32, seqf_bf16, seqf_fp16]:
-        for ref in [pt_fp32, pt_fp32, pt_fp16, pt_bf16]:
+    for i, ref in enumerate([pt_fp32, pt_tf32, pt_fp16, pt_bf16]):
+        for cand in [sequ_fp32, sequ_bf16, sequ_fp16, seqf_fp32, seqf_bf16, seqf_fp16]:
             try:
                 torch.testing.assert_close(cand, ref, atol=1e-5, rtol=1e-3)
                 ok = True
             except AssertionError:
                 ok = False
-            print_result(ok)
+            results[i].append(ok)
+        results[i].append(None)
+
+
+def print_results():
+    print("\\033[2J")
+    for i in range(4):
+        for res in results[i]:
+            if res is None:
+                print(" ", end="")
+            elif res:
+                print(f"\033[42;97mOK\033[0m", end="")
+            else:
+                print(f"\033[41;30mWA\033[0m", end="")
         print()
-    print()
-
-
-def print_result(ok: bool):
-    if ok:
-        print(f"\033[42;97mOK\033[0m", end="")
-    else:
-        print(f"\033[41;30mWA\033[0m", end="")
 
 
 BATCH_SIZE = 512
@@ -434,5 +359,7 @@ for input_init_method in InputInitMethodType:
                             lin2.bias,
                             x,
                         )
+
+                        print_results()
 
         del lin1, lin2, x  # force recreation of tensors
