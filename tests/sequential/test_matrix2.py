@@ -6,6 +6,7 @@ import torch.backends.cudnn
 import transformer_engine.pytorch.sequential as seq
 from transformer_engine.pytorch.sequential.nvte import DType
 import transformer_engine.pytorch as te
+from math import sqrt
 
 torch.set_default_device("cuda")
 
