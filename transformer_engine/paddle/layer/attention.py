@@ -138,7 +138,7 @@ class DotProductAttention(paddle.nn.Layer):
     ----------
     norm_factor : float
                     normalization factor for the attention scores.
-    attention_dropout: float, default = 0.0
+    attention_dropout: float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation.
