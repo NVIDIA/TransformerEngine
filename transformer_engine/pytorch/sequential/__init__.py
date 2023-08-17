@@ -11,6 +11,7 @@ from .module import (
     Sequential,
 )
 from . import nvte, ops, fusions, module
+from .environment import environment
 
 __all__ = [
     # nn.Modules
@@ -29,4 +30,6 @@ __all__ = [
     "ops",
     "fusions",
     "module",
+    # Environment context manager
+    "environment",
 ]
