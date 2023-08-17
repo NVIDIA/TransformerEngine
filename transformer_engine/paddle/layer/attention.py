@@ -33,6 +33,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, qkv, cu_seqlens, attn_bias, rng_state, max_seqlen, attn_scale, qkv_dtype,
                 dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type, is_training):
+        """Forward function for FusedAttention with packed QKV input"""
         out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
             qkv,
             cu_seqlens,
@@ -63,6 +64,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, d_out):
+        """Backward function for FusedAttention with packed QKV input"""
         qkv, out, cu_seqlens, rng_state, aux_ctx_tensors = ctx.saved_tensor()
         dqkv, *rest = fused_attn_bwd_qkvpacked(qkv, cu_seqlens, rng_state, out, d_out,
                                                aux_ctx_tensors, ctx.max_seqlen, ctx.qkv_dtype,
@@ -84,6 +86,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
     def forward(ctx, q, kv, cu_seqlens_q, cu_seqlens_kv, attn_bias, rng_state, max_seqlen_q,
                 max_seqlen_kv, attn_scale, qkv_dtype, dropout_p, set_zero, qkv_layout,
                 attn_bias_type, attn_mask_type, is_training):
+        """Forward function for FusedAttention with packed KV input"""
         out, aux_ctx_tensors = fused_attn_fwd_kvpacked(q, kv, cu_seqlens_q, cu_seqlens_kv,
                                                        rng_state, is_training, max_seqlen_q,
                                                        max_seqlen_kv, qkv_dtype, attn_bias,
@@ -105,6 +108,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, d_out):
+        """Backward function for FusedAttention with packed KV input"""
         q, kv, out, cu_seqlens_q, cu_seqlens_kv, rng_state, aux_ctx_tensors = ctx.saved_tensor()
         dq, dkv, *rest = fused_attn_bwd_kvpacked(q, kv, cu_seqlens_q, cu_seqlens_kv, rng_state, out,
                                                  d_out, aux_ctx_tensors, ctx.max_seqlen_q,
@@ -121,12 +125,33 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
 
 class DotProductAttention(paddle.nn.Layer):
     """Dot Product Attention Layer
-    BMM1 -> softmax + dropout -> BMM2
+    Allows the model to jointly attend to information from different
+    representation subspaces as described in the paper:
+    `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
+
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`attn_mask_type` is set to `"causal"`.
+
+    Parameters
+    ----------
+    norm_factor : float
+                    normalization factor for the attention scores.
+    attention_dropout: float, default = 0.0
+                      dropout probability for the dropout op during multi-head attention.
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                   type of attention mask passed into softmax operation.
+    attention_type: {'self', 'cross'}, default = `self`
+                    type of attention operation.
+    backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
+                backend to use for attention operation.
+
     """
 
     def __init__(self,
-                 norm_factor: int,
-                 attention_dropout: float = 0.0,
+                 norm_factor: float,
+                 attention_dropout: float = 0.1,
                  attn_mask_type: str = "causal",
                  attention_type: str = "self",
                  backend: str = 'transformer_engine') -> None:
@@ -153,6 +178,43 @@ class DotProductAttention(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
     ) -> paddle.Tensor:
+        """
+        Dot Product Attention Layer.
+
+        .. note::
+
+            Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
+            is set to `"causal"`.
+
+        .. note::
+
+            For self attention, :attr:`query_layer` is the `[query, key, value]` tensor
+            stacked along the 2nd dimension, which must be of shape (:attr:`batch_size`,
+            :attr:`seq_length`, 3, :attr:`num_attention_heads`, :attr:`size_per_head`).
+            And :attr:`key_value_layer` is `None`.
+            For cross attention, :attr:`query_layer` is the `[query]` tensor, which must
+            be of shape (:attr:`batch_size`, :attr:`seq_length`, :attr:`num_attention_heads`,
+            :attr:`size_per_head`). And :attr:`key_value_layer` is the `[key, value]` tensor,
+            which must be of shape (:attr:`batch_size`, :attr:`seq_length`, 2,
+            :attr:`num_attention_heads`, :attr:`size_per_head`).
+
+
+
+        Parameters
+        ----------
+        query_layer : paddle.Tensor
+                     Query tensor.
+        key_value_layer : paddle.Tensor
+                   Key tensor.
+        attention_mask : Optional[paddle.Tensor], default = `None`
+                        Boolean tensor used to mask out softmax input when not using attention.
+        core_attention_bias_type: str, default = `no_bias`
+                                only support no_bias type currently, {`no_bias`}
+        core_attention_bias: Optional[paddle.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        set_zero: bool, defautl = `True`
+                    Whether to use the fast path to set output tensors to 0 or not.
+        """
 
         if self.backend == 'transformer_engine':
             return self._te_forward(query_layer, key_value_layer, attention_mask,
@@ -283,14 +345,43 @@ class DotProductAttention(paddle.nn.Layer):
 
 class MultiHeadAttention(TransformerEngineBaseLayer):
     """Attention w/ QKV and Proj Gemms
+
+    Parameters
+    ----------
+    hidden_size: int
+                    hidden size of the model.
+    num_attention_heads: int
+                    number of attention heads.
+    attention_dropout: float, default = 0.1
+                      dropout probability for the dropout op during multi-head attention.
+    layernorm_epsilon: float, default = 1e-5
+                          epsilon to use in the layer norm operations.
+    weight_attr: Union[paddle.ParamAttr, None], default = `None`
+                    paddle.ParamAttr object for the weight parameter.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = `None`
+                    paddle.ParamAttr object for the bias parameter.
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                   type of attention mask passed into softmax operation.
+    params_dtype: Optional[paddle.dtype], default = `None`
+                    data type for the weights and biases.
+    return_layernorm_output: bool, default = `False`
+                    whether to return the output of the layernorm operation.
+    input_layernorm: bool, default = `False`
+                    whether to apply layernorm to the input.
+    attention_type: {'self', 'cross'}, default = `self`
+                    type of attention operation.
+    zero_centered_gamma: bool, default = `False`
+                    whether to zero initialize the gamma of the layernorm operation.
+    backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
+                backend to use for attention operation.
     """
 
     def __init__(
         self,
         hidden_size: int,
         num_attention_heads: int,
-        attention_dropout: float,
-        layernorm_epsilon: float,
+        attention_dropout: float = 0.1,
+        layernorm_epsilon: float = 1e-5,
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         attn_mask_type: str = "causal",
@@ -393,7 +484,26 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
-        """MultiHeadAttention FWD"""
+        """
+        MultiHeadAttention Layer.
+
+
+        Parameters
+        ----------
+        hidden_states : paddle.Tensor
+                        Input tensor.
+        attention_mask : Optional[paddle.Tensor], default = `None`
+                        Boolean tensor used to mask out softmax input when not using attention.
+        encoder_output : Optional[paddle.Tensor], default = `None`
+                        Output of the encoder layer.
+        core_attention_bias_type: str, default = `no_bias`
+                                only support no_bias type currently, {`no_bias`}
+        core_attention_bias: Optional[paddle.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        set_zero: bool, defautl = `True`
+                    Whether to use the fast path to set output tensors to 0 or not.
+
+        """
 
         # hidden_states: [b, s_q, hidden_size]
         if self.attn_mask_type != "causal" and attention_mask is not None:
