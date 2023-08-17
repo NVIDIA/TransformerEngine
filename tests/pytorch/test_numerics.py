@@ -25,7 +25,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 
-
 seed = 1234
 rng_str = "rng_state"
 torch.manual_seed(seed)

@@ -294,7 +294,7 @@ class _Linear(torch.autograd.Function):
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            if weight.requires_grad and ctx.parallel_mode == "column" and ctx.sequence_parallel:
                 if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     inputmat_t_total, handle = gather_along_last_dim(
                         inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
@@ -306,6 +306,7 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat_t_total = inputmat_t
                 inputmat_total = inputmat
+                handle = None
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -353,7 +354,8 @@ class _Linear(torch.autograd.Function):
 
                 # Overlap dgrad-RS/AR with wgrad
                 if ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                    handle.wait()
+                    if handle is not None:
+                        handle.wait()
                     dgrad, handle = reduce_scatter_along_first_dim(
                         dgrad, ctx.tp_group, async_op=True
                     )
@@ -464,6 +466,10 @@ class Linear(TransformerEngineBaseModule):
                       module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
                       split along the first dimension, where `N` is the length of the argument
                       and the strings contained are the names of the split parameters.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -519,6 +525,7 @@ class Linear(TransformerEngineBaseModule):
         parameters_split: Optional[Tuple[str, ...]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
@@ -572,8 +579,7 @@ class Linear(TransformerEngineBaseModule):
 
         self.weight_tensor = torch.empty(
             self.out_features, self.in_features,
-            device=torch.cuda.current_device(),
-            dtype=params_dtype)
+            device=device, dtype=params_dtype)
 
         initialize_affine_weight_gpu(
             self.weight_tensor,
@@ -584,13 +590,9 @@ class Linear(TransformerEngineBaseModule):
         )
 
         if self.use_bias:
-            self.bias_tensor = torch.empty(
-                self.out_features,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype)
+            self.bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
         else:
-            self.bias_tensor = torch.Tensor().to(dtype=params_dtype,
-                                                    device=torch.cuda.current_device())
+            self.bias_tensor = torch.Tensor().to(dtype=params_dtype, device=device)
 
         with torch.no_grad():
             self.bias_tensor.zero_()
@@ -627,8 +629,7 @@ class Linear(TransformerEngineBaseModule):
                     bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
                 )
             else:
-                setattr(self, bname, torch.Tensor().to(dtype=params_dtype,
-                                                        device=torch.cuda.current_device()))
+                setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
             if parallel_mode == "column":
                 set_tensor_model_parallel_attributes(getattr(self, bname), True, 0, 1)

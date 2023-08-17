@@ -12,7 +12,7 @@ from torch.utils.checkpoint import detach_variable
 
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
-from .fp8 import is_fp8_enabled
+from .fp8 import FP8GlobalStateManager
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "tensor_model_parallel": False,
@@ -145,7 +145,8 @@ def activation_recompute_forward(
     """
     global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
     try:
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = activation_recompute and is_fp8_enabled()
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = (
+            activation_recompute and FP8GlobalStateManager.is_fp8_enabled())
         _FP8_ACTIVATION_RECOMPUTE_PHASE = recompute_phase
         yield
     finally:
