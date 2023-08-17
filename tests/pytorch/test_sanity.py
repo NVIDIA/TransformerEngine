@@ -5,7 +5,7 @@
 import torch
 import pytest
 
-from transformer_engine.pytorch.fp8 import fp8_autocast, is_fp8_available
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -21,7 +21,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 
 # Only run FP8 tests on H100.
-fp8_available, reason_for_no_fp8 = is_fp8_available()
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
 def custom_amax_to_scale(
