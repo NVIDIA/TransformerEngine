@@ -104,7 +104,7 @@ def pt_test(
     if activation is ActivationType.RELU:
         modules.append(nn.ReLU())
     elif activation is ActivationType.GELU:
-        modules.append(nn.GELU())
+        modules.append(nn.GELU(approximate="tanh"))
 
     if second_linear:
         if not first_linear:
