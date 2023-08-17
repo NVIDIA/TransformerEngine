@@ -10,7 +10,7 @@ class Activation(Op, ABC):
         self,
         *,
         x_dtype: nvte.DType | None = None,
-        dy_dtype: nvte.DType | None = None,
+        dy_dtype: nvte.DType | None = nvte.DType.BFloat16,
         y_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
     ):
