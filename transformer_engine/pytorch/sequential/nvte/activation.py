@@ -33,7 +33,7 @@ def reglu(x: _nvte.Tensor, out_dtype: _nvte.DType):
 
 
 def dreglu(grad: _nvte.Tensor, x: _nvte.Tensor, out_dtype: _nvte.DType):
-    output = empty((x.shape[0], x.shape[1] * 2), out_dtype)
+    output = empty(x.shape, out_dtype)
     _nvte.dreglu(grad, x, output)
     return output
 
@@ -45,7 +45,7 @@ def geglu(x: _nvte.Tensor, out_dtype: _nvte.DType):
 
 
 def dgeglu(grad: _nvte.Tensor, x: _nvte.Tensor, out_dtype: _nvte.DType):
-    output = empty((x.shape[0], x.shape[1] * 2), out_dtype)
+    output = empty(x.shape, out_dtype)
     _nvte.dgeglu(grad, x, output)
     return output
 
@@ -57,6 +57,6 @@ def swiglu(x: _nvte.Tensor, out_dtype: _nvte.DType):
 
 
 def dswiglu(grad: _nvte.Tensor, x: _nvte.Tensor, out_dtype: _nvte.DType):
-    output = empty((x.shape[0], x.shape[1] * 2), out_dtype)
+    output = empty(x.shape, out_dtype)
     _nvte.dswiglu(grad, x, output)
     return output
