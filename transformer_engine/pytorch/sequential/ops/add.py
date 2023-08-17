@@ -11,7 +11,7 @@ class Add(Op):
         x_dtype: nvte.DType | None = None,
         bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = None,
-        y_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        y_dtype: nvte.DType | None = None,
         dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
         dbias_dtype: nvte.DType | None = nvte.DType.BFloat16,
     ):

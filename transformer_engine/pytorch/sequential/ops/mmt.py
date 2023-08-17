@@ -11,7 +11,7 @@ class MMT(Op):
         x_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dy_dtype: nvte.DType | None = nvte.DType.Float8E5M2,
-        y_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        y_dtype: nvte.DType | None = nvte.DType.BFloat16,
         dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
         dweight_dtype: nvte.DType | None = nvte.DType.BFloat16,
     ):
@@ -45,7 +45,9 @@ class MMT(Op):
         dy, dy_t = nvte.cast_transpose_checked(dy, self.dy_dtype)
 
         dx = nvte.matmul_transpose(dy, weight_t, self.dx_dtype or dy.dtype)
-        dweight = nvte.matmul_transpose(x_t, dy_t, self.dweight_dtype or self.weight.dtype)
+        dweight = nvte.matmul_transpose(
+            x_t, dy_t, self.dweight_dtype or self.weight.dtype
+        )
 
         return dx, [dweight]
 

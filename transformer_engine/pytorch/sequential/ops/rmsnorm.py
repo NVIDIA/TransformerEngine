@@ -12,7 +12,7 @@ class RMSNorm(Op):
         *,
         x_dtype: nvte.DType | None = nvte.DType.BFloat16,
         weight_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
-        dy_dtype: nvte.DType | None = None,
+        dy_dtype: nvte.DType | None = nvte.DType.BFloat16,
         y_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
         dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
         dweight_dtype: nvte.DType | None = nvte.DType.BFloat16,
