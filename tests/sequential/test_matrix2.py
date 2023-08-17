@@ -302,7 +302,7 @@ def test(
 
 
 def print_results():
-    print("\\033[2J")
+    print("\033[2J")
     for i in range(4):
         for res in results[i]:
             if res is None:
