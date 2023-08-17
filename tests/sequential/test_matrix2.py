@@ -119,7 +119,7 @@ def pt_test(
     m = nn.Sequential(*modules)
     inp = x.detach().clone().requires_grad_()
     out = m(inp)
-    out.sum().backward
+    out.sum().backward()
     assert inp.grad is not None
     return inp.grad
 
@@ -170,7 +170,7 @@ def seq_test_unfused(
     m = nn.Sequential(*modules)
     inp = x.detach().clone().requires_grad_()
     out = m(inp)
-    out.sum().backward
+    out.sum().backward()
     assert inp.grad is not None
     return inp.grad
 
@@ -221,7 +221,7 @@ def seq_test_fused(
     m = seq.Sequential(*modules)
     inp = x.detach().clone().requires_grad_()
     out = m(inp)
-    out.sum().backward
+    out.sum().backward()
     assert inp.grad is not None
     return inp.grad
 
