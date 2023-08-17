@@ -4,6 +4,7 @@ from torch import nn, autocast
 import torch.backends.cuda
 import torch.backends.cudnn
 import transformer_engine.pytorch.sequential as seq
+from transformer_engine.pytorch.sequential.nvte import DType
 import transformer_engine.pytorch as te
 
 
@@ -292,7 +293,7 @@ def test(
             x,
         )
 
-    with seq.environment(torch.float32):
+    with seq.environment(DType.Float32):
         sequ_fp32 = seq_test_unfused(
             normalization,
             first_linear,
@@ -304,7 +305,7 @@ def test(
             lin2_bias,
             x,
         )
-    with seq.environment(torch.bfloat16):
+    with seq.environment(DType.BFloat16):
         sequ_bf16 = seq_test_unfused(
             normalization,
             first_linear,
@@ -316,7 +317,7 @@ def test(
             lin2_bias,
             x,
         )
-    with seq.environment(torch.float16):
+    with seq.environment(DType.Float16):
         sequ_fp16 = seq_test_unfused(
             normalization,
             first_linear,
@@ -329,7 +330,7 @@ def test(
             x,
         )
 
-    with seq.environment(torch.float32):
+    with seq.environment(DType.Float32):
         seqf_fp32 = seq_test_fused(
             normalization,
             first_linear,
@@ -341,7 +342,7 @@ def test(
             lin2_bias,
             x,
         )
-    with seq.environment(torch.bfloat16):
+    with seq.environment(DType.BFloat16):
         seqf_bf16 = seq_test_fused(
             normalization,
             first_linear,
@@ -353,7 +354,7 @@ def test(
             lin2_bias,
             x,
         )
-    with seq.environment(torch.float16):
+    with seq.environment(DType.Float16):
         seqf_fp16 = seq_test_fused(
             normalization,
             first_linear,
