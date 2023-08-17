@@ -378,13 +378,14 @@ def test(
                 ok = False
             print_result(ok)
         print()
+    print()
 
 
 def print_result(ok: bool):
     if ok:
-        print(f"a:\033[42;97mOK\033[0m", end="")
+        print(f"\033[42;97mOK\033[0m", end="")
     else:
-        print(f"a:\033[41;30mWA\033[0m", end="")
+        print(f"\033[41;30mWA\033[0m", end="")
 
 
 BATCH_SIZE = 512
