@@ -1,14 +1,15 @@
 import torch
 from dataclasses import dataclass
 from contextlib import contextmanager
+from .nvte import DType
 
-_lowp: torch.dtype = torch.float32
+_lowp: DType = DType.Float32
 _world_size: int = 1
 
 
 @dataclass
 class Environment:
-    lowp: torch.dtype
+    lowp: DType
     world_size: int
 
     @staticmethod
@@ -17,7 +18,7 @@ class Environment:
 
 
 @contextmanager
-def environment(lowp: torch.dtype = torch.float32, world_size: int = 1):
+def environment(lowp: DType = DType.Float32, world_size: int = 1):
     global _lowp, _world_size
 
     prev_lowp = _lowp

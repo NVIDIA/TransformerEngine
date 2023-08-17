@@ -126,7 +126,7 @@ class ComputePipeline:
         ops = copy_op_list(ops)
 
         name_ops(ops)
-        force_use_precision(ops, nvte.torch_to_te_dtype(env.lowp))
+        force_use_precision(ops, env.lowp)
         if env.world_size > 1:
             model_parallel_transform(ops)
 
