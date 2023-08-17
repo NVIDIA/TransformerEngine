@@ -303,11 +303,11 @@ def test(
 
 def print_results():
     print("\033[2J")
-    for chunk in range(0, len(results[0]), 120):
+    for chunk in range(0, len(results[0]), 126):
         for i in range(4):
-            for res in results[i][chunk : chunk + 120]:
+            for res in results[i][chunk : chunk + 126]:
                 if res is None:
-                    print(" ", end="")
+                    print("  ", end="")
                 elif res:
                     print(f"\033[42;97mOK\033[0m", end="")
                 else:
