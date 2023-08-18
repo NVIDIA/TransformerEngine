@@ -38,9 +38,9 @@ def empty_like(t: _nvte.Tensor):
 
 
 def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]):
-    amax = torch.empty(_AMAX_HISTORY_LEN, dtype=torch.float32, device="cuda")
-    scale = torch.empty(1, dtype=torch.float32, device="cuda")
-    scale_inv = torch.empty(1, dtype=torch.float32, device="cuda")
+    amax = torch.zeros(_AMAX_HISTORY_LEN, dtype=torch.float32, device="cuda")
+    scale = torch.ones(1, dtype=torch.float32, device="cuda")
+    scale_inv = torch.ones(1, dtype=torch.float32, device="cuda")
 
     return tuple(
         _nvte.Tensor(
