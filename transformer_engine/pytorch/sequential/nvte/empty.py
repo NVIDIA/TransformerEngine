@@ -19,9 +19,9 @@ def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
         return _nvte.Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
-            torch.empty(_AMAX_HISTORY_LEN, dtype=torch.float32, device="cuda"),
-            torch.empty(1, dtype=torch.float32, device="cuda"),
-            torch.empty(1, dtype=torch.float32, device="cuda"),
+            torch.zeros(_AMAX_HISTORY_LEN, dtype=torch.float32, device="cuda"),
+            torch.ones(1, dtype=torch.float32, device="cuda"),
+            torch.ones(1, dtype=torch.float32, device="cuda"),
         )
     else:
         return _nvte.Tensor(
