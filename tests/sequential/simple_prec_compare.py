@@ -12,6 +12,8 @@ m = seq.Sequential(
     seq.Linear(2 * HIDDEN_DIM, HIDDEN_DIM),
 )
 
+torch.set_printoptions(precision=4, sci_mode=False)
+
 with seq.environment(seq.nvte.DType.Float8E4M3):
     y = m(x)
     y.sum().backward()
