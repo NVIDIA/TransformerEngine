@@ -25,12 +25,6 @@ def te_to_torch_dtype(dtype: _nvte.DType):
 
 def torch_to_te_dtype(dtype: torch.dtype):
     match dtype:
-        case torch.int8:
-            return (
-                _nvte.DType.Float8E5M2
-                if pass_ == "backward"
-                else _nvte.DType.Float8E4M3
-            )
         case torch.int:
             return _nvte.DType.Int32
         case torch.int32:

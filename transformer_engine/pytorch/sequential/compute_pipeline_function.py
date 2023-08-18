@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import dataclass
 import torch
 from torch import autograd
@@ -11,6 +12,21 @@ from .compute_pipeline import ComputePipeline
 class CommWithLoop:
     nvte_x: nvte.Tensor
     is_exposed_x_squished_now: bool
+    upcoming_backward: BackwardComm | None
+
+
+class BackwardComm:
+    _nvte_grad_output: nvte.Tensor | None = None
+
+    @property
+    def nvte_grad_output(self):
+        assert self._nvte_grad_output is not None
+        return self._nvte_grad_output
+
+    @nvte_grad_output.setter
+    def nvte_grad_output(self, t: nvte.Tensor):
+        assert self._nvte_grad_output is None
+        self._nvte_grad_output = t
 
 
 class ComputePipelineFunction(autograd.Function):
@@ -102,6 +118,15 @@ class ComputePipelineFunction(autograd.Function):
             setattr(ctx, "nvte_unsquish_incoming_dgrad", False)
             comm.is_exposed_x_squished_now = False
 
+        # Save backward comm
+        # This object is allows for the current backward to
+        # pass data to the next backward (the backward of the
+        # preceding operation). This is needed to pass
+        # fp8 gradients properly.
+        setattr(ctx, "nvte_upcoming_backward_comm", comm.upcoming_backward)
+        comm.upcoming_backward = BackwardComm()
+        setattr(ctx, "nvte_preceding_backward_comm", comm.upcoming_backward)
+
         return exposed_y
 
     @staticmethod
@@ -109,11 +134,6 @@ class ComputePipelineFunction(autograd.Function):
         # The context needs to think that the tensors were read
         _ = ctx.saved_tensors  # type: ignore
 
-        # Get real context
-        saved: Context = getattr(ctx, "nvte_ctx")
-        op: Op = getattr(ctx, "nvte_op")
-
-        # Make sure that the gradient is contiguous
         grad_output = grad_output.contiguous()  # TODO: use transposed gradient instead
 
         # Check if incoming gradient needs to be unsquished
@@ -121,8 +141,33 @@ class ComputePipelineFunction(autograd.Function):
         if unsquish_incoming_dgrad:
             _unsquish(grad_output)
 
+        # Get real context
+        saved: Context = getattr(ctx, "nvte_ctx")
+        op: Op = getattr(ctx, "nvte_op")
+        preceding_backward: BackwardComm | None = getattr(
+            ctx, "nvte_preceding_backward_comm"
+        )
+        upcoming_backward: BackwardComm | None = getattr(
+            ctx, "nvte_upcoming_backward_comm"
+        )
+
+        # Get real gradient
+        if preceding_backward is None:
+            # This is the first backward in the compute pipeline
+            nvte_grad = nvte.make_nvte_tensor(grad_output)
+        else:
+            nvte_grad = preceding_backward.nvte_grad_output
+        del grad_output
+
         nvte.set_current_pass("backward")
-        data_grad, param_grads = op.backward(saved, nvte.make_nvte_tensor(grad_output))
+        data_grad, param_grads = op.backward(saved, nvte_grad)
+
+        # Store real gradient for next backward in pipeline
+        if upcoming_backward is None:
+            # This is the last backward in the compute pipeline
+            assert not nvte.is_fp8(data_grad)
+        else:
+            upcoming_backward.nvte_grad_output = data_grad
 
         # Check that gradients are not fp8 and can be processed by the optimizer
         # TODO: change this when fp8 optimizer comes along
@@ -146,7 +191,7 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         assert not nvte.is_fp8(y)
         return y.data
     else:
-        comm = CommWithLoop(nvte.make_nvte_tensor(x), False)
+        comm = CommWithLoop(nvte.make_nvte_tensor(x), False, None)
         for contained_op in pipeline.functions:
             nvte_tensors = contained_op.require_grad()
             exposed_tensors = list[torch.Tensor]()
