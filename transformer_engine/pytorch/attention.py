@@ -1217,6 +1217,7 @@ class MultiHeadAttention(torch.nn.Module):
         ub_split_ag: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
         self.layer_number = layer_number
@@ -1261,6 +1262,7 @@ class MultiHeadAttention(torch.nn.Module):
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": sequence_parallel,
             "params_dtype": self.params_dtype,
+            "device": device,
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None

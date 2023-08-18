@@ -126,7 +126,7 @@ class LayerNorm(paddle.nn.Layer):
                 "Paddle backend does not support LayerNorm with zero-centered scale.")
 
         return F.layer_norm(x=inp,
-                            normalized_shape=inp.shape[1:],
+                            normalized_shape=inp.shape[-1],
                             weight=self.weight,
                             bias=self.bias,
                             epsilon=self.eps)
