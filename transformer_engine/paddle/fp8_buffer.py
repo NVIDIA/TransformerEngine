@@ -103,7 +103,7 @@ class FP8MetaBufferBase(ABC):
             else:
                 return None
 
-        chunk_sizes = [x.numel() for x in self._data[amax_buffer_key]]
+        chunk_sizes = [x.shape[0] for x in self._data[amax_buffer_key]]
         contiguous_amax = paddle.concat(self._data[amax_buffer_key])
 
         wait_handle = _reduce_tensor_across_group_op_max(

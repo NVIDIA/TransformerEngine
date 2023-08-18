@@ -147,7 +147,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         tp_size: int,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
+        in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
         if fp8_enabled:
