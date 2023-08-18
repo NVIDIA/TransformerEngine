@@ -16,17 +16,7 @@ class CommWithLoop:
 
 
 class BackwardComm:
-    _nvte_grad_output: nvte.Tensor | None = None
-
-    @property
-    def nvte_grad_output(self):
-        assert self._nvte_grad_output is not None
-        return self._nvte_grad_output
-
-    @nvte_grad_output.setter
-    def nvte_grad_output(self, t: nvte.Tensor):
-        assert self._nvte_grad_output is None
-        self._nvte_grad_output = t
+    nvte_grad_output: nvte.Tensor | None = None
 
 
 class ComputePipelineFunction(autograd.Function):
@@ -144,15 +134,13 @@ class ComputePipelineFunction(autograd.Function):
         # Get real context
         saved: Context = getattr(ctx, "nvte_ctx")
         op: Op = getattr(ctx, "nvte_op")
-        preceding_backward: BackwardComm | None = getattr(
-            ctx, "nvte_preceding_backward_comm"
-        )
+        preceding_backward: BackwardComm = getattr(ctx, "nvte_preceding_backward_comm")
         upcoming_backward: BackwardComm | None = getattr(
             ctx, "nvte_upcoming_backward_comm"
         )
 
         # Get real gradient
-        if preceding_backward is None:
+        if preceding_backward.nvte_grad_output is None:
             # This is the first backward in the compute pipeline
             nvte_grad = nvte.make_nvte_tensor(grad_output)
         else:
