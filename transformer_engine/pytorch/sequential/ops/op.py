@@ -18,15 +18,15 @@ class Op(ABC):
     ):
         ...
 
-    def inference(self, x: nvte.Tensor):
+    def inference(self, x: nvte.Tensor, /):
         return self.forward(x)[0]
 
     @abstractmethod
-    def forward(self, x: nvte.Tensor) -> tuple[nvte.Tensor, Context]:
+    def forward(self, x: nvte.Tensor, /) -> tuple[nvte.Tensor, Context]:
         ...
 
     @abstractmethod
-    def backward(self, ctx: Context, dy: nvte.Tensor) -> tuple[nvte.Tensor, Grads]:
+    def backward(self, ctx: Context, dy: nvte.Tensor, /) -> tuple[nvte.Tensor, Grads]:
         ...
 
     @abstractmethod
