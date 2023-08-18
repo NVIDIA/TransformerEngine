@@ -78,7 +78,7 @@ def _prepare_backward(
 
         # Update amax and scale; Skip all setup for global amax reduction
         if not fp8_meta["recipe"].reduce_amax:
-            FP8GlobalStateManager.amax_and_scale_update(fp8_meta, False)
+            amax_and_scale_update(fp8_meta, False)
         else:
             # From previous iteration
             FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)

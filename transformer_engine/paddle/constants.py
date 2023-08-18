@@ -40,3 +40,9 @@ TE_DType = {
     paddle.float16: tex.DType.kFloat16,
     paddle.bfloat16: tex.DType.kBFloat16,
 }
+
+AttnMaskTypes = ("causal", "padding", "no_mask")
+
+AttnTypes = ("self", "cross")
+
+LayerTypes = ("encoder", "decoder")
