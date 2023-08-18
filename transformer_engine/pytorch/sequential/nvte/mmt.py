@@ -3,7 +3,7 @@ from functools import cache
 import torch
 from . import _nvte
 from .empty import empty
-from ._common import pass_
+from ._pass import pass_
 
 
 @cache

@@ -3,7 +3,7 @@ from functools import cache
 from contextlib import contextmanager
 import torch
 from . import _nvte
-from ._common import pass_
+from ._pass import pass_
 from .dtype import dtype_name
 from .empty import empty, empty_like
 
@@ -141,7 +141,7 @@ def dlayernorm(
     else:
         func = _nvte.layernorm_bwd
 
-    with _handle_unsupported_config("dlayernorm",x.shape[1], gamma, x, dx):
+    with _handle_unsupported_config("dlayernorm", x.shape[1], gamma, x, dx):
         workspace = empty()
         barrier = empty()
         dgamma_part = empty()
@@ -190,7 +190,7 @@ def rmsnorm(
     else:
         func = _nvte.rmsnorm_fwd
 
-    with _handle_unsupported_config("rmsnorm",hidden_size, gamma, x, out):
+    with _handle_unsupported_config("rmsnorm", hidden_size, gamma, x, out):
         workspace = empty()
         barrier = empty()
         for _ in range(2):
@@ -229,7 +229,7 @@ def drmsnorm(
     else:
         func = _nvte.rmsnorm_bwd
 
-    with _handle_unsupported_config("drmsnorm",x.shape[1], gamma, x, dx):
+    with _handle_unsupported_config("drmsnorm", x.shape[1], gamma, x, dx):
         workspace = empty()
         barrier = empty()
         dgamma_part = empty()

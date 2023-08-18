@@ -1,7 +1,6 @@
 from typing import Literal
-from . import _common
-
+from . import _pass
 
 
 def set_current_pass(pass__: Literal["forward", "backward", "inference"]):
-    _common.pass_ = pass__
+    _pass.pass_ = pass__
