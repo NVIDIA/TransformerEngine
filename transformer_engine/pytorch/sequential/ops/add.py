@@ -9,7 +9,7 @@ class Add(Op):
         bias: nvte.Tensor,
         *,
         x_dtype: nvte.DType | None = None,
-        bias_dtype: nvte.DType | None = nvte.DType.Float8E4M3,
+        bias_dtype: nvte.DType | None = nvte.DType.BFloat16,
         dy_dtype: nvte.DType | None = None,
         y_dtype: nvte.DType | None = None,
         dx_dtype: nvte.DType | None = nvte.DType.BFloat16,
