@@ -54,7 +54,7 @@
 #define NVTE_CHECK_CUDNN(expr)                                          \
   do {                                                                  \
     const cudnnStatus_t status_NVTE_CHECK_CUDNN = (expr);               \
-    if ( status_NVTE_CHECK_CUDNN != CUDNN_STATUS_SUCCESS ) {            \
+    if (status_NVTE_CHECK_CUDNN != CUDNN_STATUS_SUCCESS) {              \
       NVTE_ERROR("cuDNN Error: ",                                       \
                  cudnnGetErrorString(status_NVTE_CHECK_CUDNN),          \
                  ". "                                                   \

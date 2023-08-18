@@ -230,9 +230,12 @@ void cublas_gemm(const Tensor *inputA,
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
 
-  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                   Ddesc, preference, 1, &heuristicResult,
-                                                   &returnedResults));
+  const auto status = cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
+                                                     Ddesc, preference, 1, &heuristicResult,
+                                                     &returnedResults);
+  NVTE_CHECK(status != CUBLAS_STATUS_NOT_SUPPORTED,
+             "Unable to find suitable cuBLAS GEMM algorithm");
+  NVTE_CHECK_CUBLAS(status);
 
   if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
 
