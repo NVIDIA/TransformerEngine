@@ -57,7 +57,13 @@ class ComputePipelineFunction(autograd.Function):
 
         # Unsquish x if needed:
         if comm.is_exposed_x_squished_now:
-            _unsquish(exposed_x)
+            # Intentionally commented out - _unsquish(exposed_x)
+            # We don't need to perform the unsquish itself, as this
+            # data will not be read anyway.
+            # Actually, we cannot do that, as x,
+            # cannot be modified in place.
+            # It is only really neccesarry to notify
+            # the backward.
             comm.is_exposed_x_squished_now = False
             # If the input to the forward was squished,
             # Pytorch will expect its gradient to be squished
@@ -72,7 +78,7 @@ class ComputePipelineFunction(autograd.Function):
         # Expose result for Pytorch
         x_data = exposed_x.data
         exposed_x.data = torch.Tensor()  # avoid copy
-        exposed_y = exposed_x.clone()
+        exposed_y = exposed_x.clone()  # copy history
         exposed_x.data = x_data
         exposed_y.data = y.data
 
