@@ -57,7 +57,7 @@ else:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 
 
-__all__ = ["DotProductAttention"]
+__all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
