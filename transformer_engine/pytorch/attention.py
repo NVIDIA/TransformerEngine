@@ -1217,7 +1217,7 @@ class MultiheadAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
-    attn_mask_type: {'causal', 'padding'}, default = `causal`
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
@@ -1563,7 +1563,7 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if self.attn_mask_type != "causal" and attention_mask is not None:
+        if self.attn_mask_type == "padding" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"

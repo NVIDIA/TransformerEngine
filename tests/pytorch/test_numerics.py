@@ -61,6 +61,9 @@ all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
+mask_types = ["causal", "no_mask"]
+
+
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
@@ -763,14 +766,14 @@ def test_gpt_accuracy(dtype, bs, model):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
-def _test_mha_accuracy(block, bs, dtype, config):
+def _test_mha_accuracy(block, bs, dtype, config, mask_type):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     inp_hidden_states.retain_grad()
-    inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
 
     out = block(inp_hidden_states, inp_attn_mask)
     loss = out.sum()
@@ -787,7 +790,8 @@ def _test_mha_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_mha_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("mask_type", mask_types)
+def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
 
     te_mha = (
@@ -797,6 +801,7 @@ def test_mha_accuracy(dtype, bs, model):
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
             input_layernorm=False,
+            attn_mask_type=mask_type,
         )
         .to(dtype=dtype)
         .cuda()
@@ -820,8 +825,8 @@ def test_mha_accuracy(dtype, bs, model):
         torch_mha.mhsa.out_proj.weight = Parameter(te_mha.proj.weight.clone())
         torch_mha.mhsa.out_proj.bias = Parameter(te_mha.proj.bias.clone())
 
-    te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config)
-    torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config)
+    te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config, mask_type)
+    torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config, mask_type)
 
     # Check output.
     if dtype == torch.float32:
