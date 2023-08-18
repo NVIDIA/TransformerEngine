@@ -56,7 +56,7 @@ def _linear_fwd_fp8(
     """FP8 path of Linear Fwd"""
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
     bias_dtype = get_bias_dtype(activation_dtype)
-    bias = cast_if_needed_inplace(bias, bias_dtype)
+    bias = cast_if_needed(bias, bias_dtype)
 
     if is_grad_enabled:
         weight_fp8, weight_t_fp8 = cast_transpose(
