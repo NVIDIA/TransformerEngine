@@ -1275,6 +1275,7 @@ def test_export_multihead_attention(
         input_layernorm=input_layernorm,
         attention_type=attention_type,
         fuse_qkv_params=fuse_qkv_params,
+        return_bias=True,
     ).to(device='cuda')
 
     inp_context = (hidden_states_context, attention_mask, encoder_output)
