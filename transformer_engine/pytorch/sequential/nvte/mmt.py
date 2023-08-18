@@ -33,20 +33,16 @@ def _to_cublas_args(A: _nvte.Tensor, B: _nvte.Tensor, transA: bool, transB: bool
 
 def matmul_transpose(mat: _nvte.Tensor, mul: _nvte.Tensor, out_dtype: _nvte.DType):
     "returns mat @ mul^T"
-    # TODO: this should be allowed, though cublaslt_gemm cannot be used in this case
-    assert mat.dtype == mul.dtype
     return matmul_transpose_add(mat, mul, empty(), out_dtype)
 
 
 def matmul_transpose_gelu(mat: _nvte.Tensor, mul: _nvte.Tensor, out_dtype: _nvte.DType):
     "returns mat @ mul^T, GELU(mat @ mul^T)"
-    assert mat.dtype == mul.dtype
     return matmul_transpose_add_gelu(mat, mul, empty(), out_dtype)
 
 
 def matmul_transpose_gelu_add(mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor):
     "returns mat @ mul^T, GELU(mat @ mul^T) + add"
-    assert mat.dtype == mul.dtype
     return matmul_transpose_add_gelu_add(mat, mul, empty(), add)
 
 
@@ -54,7 +50,6 @@ def matmul_transpose_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor, out_dtype: _nvte.DType
 ):
     "returns mat @ mul^T + add"
-    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
     _nvte.cublas_gemm(
@@ -78,7 +73,6 @@ def matmul_transpose_add_gelu(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor, out_dtype: _nvte.DType
 ):
     "returns mat @ mul^T + add, GELU(mat @ mul^T + add)"
-    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
     pre_gelu = empty(out.shape, add.dtype)
@@ -103,7 +97,6 @@ def matmul_transpose_add_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add1: _nvte.Tensor, add2: _nvte.Tensor
 ):
     "returns mat @ mul^T + add1 + add2"
-    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     _nvte.cublas_gemm(
         a,
@@ -126,7 +119,6 @@ def matmul_transpose_add_gelu_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add1: _nvte.Tensor, add2: _nvte.Tensor
 ):
     "returns mat @ mul^T + add1, GELU(mat @ mul^T + add1) + add2"
-    assert mat.dtype == mul.dtype
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     pre_gelu = empty(add2.shape, add1.dtype)
     _nvte.cublas_gemm(
