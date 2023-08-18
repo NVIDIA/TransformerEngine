@@ -16,13 +16,16 @@ with seq.environment(seq.nvte.DType.Float8E4M3):
     y = m(x)
     y.sum().backward()
     print(x.grad)
+    x.grad = None
 
 with seq.environment(seq.nvte.DType.BFloat16):
     y = m(x)
     y.sum().backward()
     print(x.grad)
+    x.grad = None
 
 with seq.environment(seq.nvte.DType.Float32):
     y = m(x)
     y.sum().backward()
     print(x.grad)
+    x.grad = None
