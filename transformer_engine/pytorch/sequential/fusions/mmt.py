@@ -18,7 +18,7 @@ def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
     y = nvte.matmul_transpose_add(
-        x, weight, bias, add.y_dtype or mmt.dy_dtype or x.dtype
+        x, weight, bias, add.y_dtype or mmt.y_dtype or x.dtype
     )
 
     return y
@@ -32,7 +32,7 @@ def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
     bias = nvte.cast_checked(add.bias, add.bias_dtype)
 
     y = nvte.matmul_transpose_add(
-        x, weight, bias, add.y_dtype or mmt.dy_dtype or x.dtype
+        x, weight, bias, add.y_dtype or mmt.y_dtype or x.dtype
     )
 
     return y, ({"x_t": x_t, "weight_t": weight_t}, Context())
