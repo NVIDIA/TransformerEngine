@@ -48,8 +48,10 @@ inline CUresult call(const char *symbol, ArgTs... args) {
     const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);              \
     if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                \
       const char *desc_NVTE_CHECK_CUDA_DRIVER;                          \
-      ::transformer_engine::cuda_driver::call("cuGetErrorString",       \
-                                              &desc_NVTE_CHECK_CUDA_DRIVER); \
+      ::transformer_engine::cuda_driver::call(                          \
+        "cuGetErrorString",                                             \
+        status_NVTE_CHECK_CUDA_DRIVER,                                  \
+        &desc_NVTE_CHECK_CUDA_DRIVER);                                  \
       NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);          \
     }                                                                   \
   } while (false)
