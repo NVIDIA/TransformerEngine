@@ -1267,7 +1267,7 @@ def test_export_multihead_attention(
     input_ln_str = "_input-ln" if input_layernorm else ""
     fname = f"te.multihead_attention{fp8_str}{attn_mask_str}{attn_type_str}{input_ln_str}{fuse_qkv_str}{dtype_str}.onnx"
 
-    model = te.attention.MultiHeadAttention(
+    model = te.MultiheadAttention(
         *attention_args,
         attn_mask_type=attn_mask_type,
         params_dtype=precision,
