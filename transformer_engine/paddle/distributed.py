@@ -26,10 +26,10 @@ _weight_split_axis = {
 }
 
 
-def get_tp_group_and_world_size(
-        tp_group: Union[dist_group_type, None]) -> Tuple[Union[dist_group_type, None], int]:
+def get_tp_group_and_world_size(tp_group: Union[dist_group_type, None],
+                                enable_tp: bool = True) -> Tuple[Union[dist_group_type, None], int]:
     """Get TP group and world size using Fleet API"""
-    if not paddle.distributed.is_initialized():
+    if not (paddle.distributed.is_initialized() and enable_tp):
         return None, 1
     model_parallel_group = (tp._HYBRID_PARALLEL_GROUP.get_model_parallel_group()
                             if tp_group is None else tp_group)

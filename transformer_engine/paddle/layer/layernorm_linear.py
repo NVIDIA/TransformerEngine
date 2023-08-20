@@ -354,7 +354,9 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         self._dtype = self._helper.get_default_dtype()
 
         # Set parallel configs
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
+                                                                  enable_tp=parallel_mode
+                                                                  is not None)
         self.tensor_parallel = self.tp_size > 1
         self.parallel_mode = parallel_mode
         assert (self.parallel_mode

@@ -571,7 +571,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self._dtype = self._helper.get_default_dtype()
 
         # Set parallel configs
-        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group)
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
+                                                                  enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
         self.set_parallel_mode = set_parallel_mode
 

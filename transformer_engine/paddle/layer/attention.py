@@ -10,21 +10,18 @@ from typing import Optional, Tuple, Union
 import paddle
 import paddle.nn.functional as F
 
-from transformer_engine.paddle.constants import (
-    AttnTypes,
-    TE_DType,
-)
-from transformer_engine.paddle.cpp_extensions import (
+from .layernorm_linear import LayerNormLinear
+from .linear import Linear
+from .softmax import FusedScaleMaskSoftmax
+from ..constants import AttnTypes, TE_DType, dist_group_type
+from ..cpp_extensions import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
 )
-from transformer_engine.paddle.utils import (attention_mask_func, mask_to_cu_seqlens)
-from .base import TransformerEngineBaseLayer
-from .layernorm_linear import LayerNormLinear
-from .linear import Linear
-from .softmax import FusedScaleMaskSoftmax
+from ..distributed import get_tp_group_and_world_size, track_rng_state
+from ..utils import attention_mask_func, divide, mask_to_cu_seqlens
 
 
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
@@ -343,7 +340,7 @@ class DotProductAttention(paddle.nn.Layer):
         return out
 
 
-class MultiHeadAttention(TransformerEngineBaseLayer):
+class MultiHeadAttention(paddle.nn.Layer):
     """Attention w/ QKV and Proj Gemms
 
     Parameters
@@ -390,6 +387,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         input_layernorm: bool = False,
         attention_type: str = "self",
         zero_centered_gamma: bool = False,
+        set_parallel_mode: bool = False,
+        tp_group: Optional[dist_group_type] = None,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -403,10 +402,18 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
+                                                                  enable_tp=set_parallel_mode)
+        self.tensor_parallel = self.tp_size > 1
+
         self.hidden_size_per_attention_head = hidden_size // num_attention_heads
         self.num_attention_heads = num_attention_heads
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        self.set_parallel_mode = set_parallel_mode
         self.backend = backend
+
+        self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
+        qkv_parallel_mode = "column" if set_parallel_mode else None
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -418,6 +425,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                     bias_attr=self.bias_attr,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
+                    parallel_mode=qkv_parallel_mode,
+                    tp_group=self.tp_group,
                     backend=self.backend,
                 )
             else:
@@ -426,6 +435,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                     3 * hidden_size,
                     self.weight_attr,
                     self.bias_attr,
+                    parallel_mode=qkv_parallel_mode,
+                    tp_group=self.tp_group,
                     backend=self.backend,
                 )
 
@@ -439,6 +450,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                     bias_attr=self.bias_attr,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
+                    parallel_mode=qkv_parallel_mode,
+                    tp_group=self.tp_group,
                     backend=self.backend,
                 )
             else:
@@ -447,6 +460,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                     hidden_size,
                     self.weight_attr,
                     self.bias_attr,
+                    parallel_mode=qkv_parallel_mode,
+                    tp_group=self.tp_group,
                     backend=self.backend,
                 )
             self.key_value = Linear(
@@ -454,6 +469,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                 2 * hidden_size,
                 self.weight_attr,
                 self.bias_attr,
+                parallel_mode=qkv_parallel_mode,
+                tp_group=self.tp_group,
                 backend=self.backend,
             )
 
@@ -472,6 +489,8 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             hidden_size,
             self.weight_attr,
             self.bias_attr,
+            parallel_mode="row" if set_parallel_mode else None,
+            tp_group=self.tp_group,
             backend=self.backend,
         )
 
@@ -520,23 +539,26 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
                 mixed_qkv_layer = self.qkv(hidden_states)
 
             # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
-            mixed_qkv_layer = mixed_qkv_layer.reshape(
-                shape=[0, 0, 3, self.num_attention_heads, self.hidden_size_per_attention_head])
+            mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
+                0, 0, 3, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+            ])
 
-            context_layer = self.core_attention(
-                query_layer=mixed_qkv_layer,
-                key_value_layer=None,
-                attention_mask=attention_mask,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias=core_attention_bias,
-                set_zero=set_zero,
-            )
+            with track_rng_state(enable=self.tensor_parallel):
+                context_layer = self.core_attention(
+                    query_layer=mixed_qkv_layer,
+                    key_value_layer=None,
+                    attention_mask=attention_mask,
+                    core_attention_bias_type=core_attention_bias_type,
+                    core_attention_bias=core_attention_bias,
+                    set_zero=set_zero,
+                )
 
         else:    # cross attention
             mixed_kv_layer = self.key_value(encoder_output)
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
-            mixed_kv_layer = mixed_kv_layer.reshape(
-                shape=[0, 0, 2, self.num_attention_heads, self.hidden_size_per_attention_head])
+            mixed_kv_layer = mixed_kv_layer.reshape(shape=[
+                0, 0, 2, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+            ])
 
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(hidden_states)
@@ -547,16 +569,18 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             else:
                 query_layer = self.query_layer(hidden_states)
 
-            query_layer = query_layer.reshape(
-                shape=[0, 0, self.num_attention_heads, self.hidden_size_per_attention_head])
-            context_layer = self.core_attention(
-                query_layer=query_layer,
-                key_value_layer=mixed_kv_layer,
-                attention_mask=attention_mask,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias=core_attention_bias,
-                set_zero=set_zero,
-            )
+            query_layer = query_layer.reshape(shape=[
+                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+            ])
+            with track_rng_state(enable=self.tensor_parallel):
+                context_layer = self.core_attention(
+                    query_layer=query_layer,
+                    key_value_layer=mixed_kv_layer,
+                    attention_mask=attention_mask,
+                    core_attention_bias_type=core_attention_bias_type,
+                    core_attention_bias=core_attention_bias,
+                    set_zero=set_zero,
+                )
 
         context_layer = paddle.reshape(context_layer,
                                        [0, 0, context_layer.shape[2] * context_layer.shape[3]])

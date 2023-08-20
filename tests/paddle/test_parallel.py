@@ -75,5 +75,15 @@ class TestGroupSharding(TestDistributed):
         self.run_2gpu(str(test_root / 'parallel_tests' / 'group_sharding.py'))
 
 
+class TestParallelTransformerLayer(TestDistributed):
+    """Test Transformer Layer in Parallel mode"""
+
+    @unittest.skipIf(not is_devices_enough(2), "TestParallelTransformerLayer needs 2 GPUs")
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_transformer_tp(self):
+        """Tests Transformer Layer with tensor parallel in BF16"""
+        self.run_2gpu(str(test_root / 'parallel_tests' / 'transformer_tp.py'))
+
+
 if __name__ == '__main__':
     unittest.main()

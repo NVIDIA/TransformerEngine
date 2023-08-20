@@ -7,15 +7,11 @@ from typing import Optional, Union
 
 import paddle
 
-from transformer_engine.paddle.constants import (
-    AttnMaskTypes,
-    LayerTypes,
-)
-from transformer_engine.paddle.layer import (LayerNormMLP, LayerNorm, MultiHeadAttention)
-from .base import TransformerEngineBaseLayer
+from . import LayerNormMLP, LayerNorm, MultiHeadAttention
+from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
 
 
-class TransformerLayer(TransformerEngineBaseLayer):
+class TransformerLayer(paddle.nn.Layer):
     r"""
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
@@ -64,6 +60,16 @@ class TransformerLayer(TransformerEngineBaseLayer):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+
+    Parallelism parameters
+    ----------------------
+    set_parallel_mode : bool, default = `False`
+                      if set to `True`, QKV and FC1 layers are used as Column Parallel
+                      whereas PROJ and FC2 is used as Row Parallel as described
+                      `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+
     """
 
     def __init__(self,
@@ -82,6 +88,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
                  layer_type: str = "encoder",
                  zero_centered_gamma: bool = False,
                  activation: str = 'gelu',
+                 set_parallel_mode: bool = False,
+                 tp_group: Optional[dist_group_type] = None,
                  backend: str = 'transformer_engine') -> None:
         super().__init__()
 
@@ -90,6 +98,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
         self.layer_type = layer_type
         self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
         self.self_attn_mask_type = self_attn_mask_type
+        self.set_parallel_mode = set_parallel_mode
+        self.tp_group = tp_group
 
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -107,6 +117,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
             "params_dtype": params_dtype,
             "return_layernorm_output": apply_residual_connection_post_layernorm,
             "zero_centered_gamma": zero_centered_gamma,
+            "set_parallel_mode": set_parallel_mode,
+            "tp_group": tp_group,
             "backend": backend,
         }
 
@@ -136,6 +148,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
             activation=activation,
             return_layernorm_output=apply_residual_connection_post_layernorm,
             zero_centered_gamma=zero_centered_gamma,
+            set_parallel_mode=set_parallel_mode,
+            tp_group=tp_group,
             backend=backend,
         )
 
