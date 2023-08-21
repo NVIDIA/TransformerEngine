@@ -545,7 +545,7 @@ class FlashAttention(torch.nn.Module):
             )
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
