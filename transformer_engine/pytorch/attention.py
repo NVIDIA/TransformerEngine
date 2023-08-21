@@ -397,7 +397,8 @@ class FlashAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                            for x in (query_layer, key_layer, value_layer)]
 
-        batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
+        batch_size, seqlen_q = query_layer.shape[0], query_layer.shape[1]
+        seqlen_kv = key_layer.shape[1]
 
         # [b, sq, np, hn]
         query_layer, key_layer, value_layer = [
@@ -405,19 +406,19 @@ class FlashAttention(torch.nn.Module):
             for x in [query_layer, key_layer, value_layer]
         ]
 
-        max_seqlen = seqlen
-        cu_seqlens = torch.arange(
+        max_seqlen_q = seqlen_q
+        cu_seqlens_q = torch.arange(
             0,
-            (batch_size + 1) * seqlen,
-            step=seqlen,
+            (batch_size + 1) * max_seqlen_q,
+            step=max_seqlen_q,
             dtype=torch.int32,
             device=query_layer.device)
 
-        max_seqlen_k = key_layer.shape[0] // batch_size
-        cu_seqlens_k = torch.arange(
+        max_seqlen_kv = seqlen_kv
+        cu_seqlens_kv = torch.arange(
             0,
-            (batch_size + 1) * max_seqlen_k,
-            step=max_seqlen_k,
+            (batch_size + 1) * max_seqlen_kv,
+            step=max_seqlen_kv,
             dtype=torch.int32,
             device=key_layer.device)
         is_causal = self.attn_causal_mask and query_layer.shape[0] == key_layer.shape[0]
@@ -426,7 +427,7 @@ class FlashAttention(torch.nn.Module):
             if not _flash_attn_2_available:
                 fa_optional_forward_kwargs["deterministic"] = self.deterministic
             output = flash_attn_forward_func(
-                query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens_k, max_seqlen, max_seqlen_k,
+                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                 self.attention_dropout if self.training else 0.0,
                 softmax_scale=1.0/self.norm_factor, causal=is_causal,
                 **fa_optional_forward_kwargs
