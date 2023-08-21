@@ -624,7 +624,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 "Paddle backend does not support LayerNorm with zero-centered scale.")
 
         ln_out = F.layer_norm(x=inp,
-                              normalized_shape=inp.shape[1:],
+                              normalized_shape=inp.shape[-1],
                               weight=self.ln_weight,
                               bias=self.ln_bias,
                               epsilon=self.eps)

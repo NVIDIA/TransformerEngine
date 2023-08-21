@@ -3,6 +3,7 @@ extension-pkg-whitelist=torch,
                         transformer_engine_extensions
 
 disable=too-many-locals,
+        too-many-public-methods,
         invalid-name,
         too-many-arguments,
         abstract-method,

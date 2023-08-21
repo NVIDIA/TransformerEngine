@@ -48,7 +48,7 @@ Highlights
 
 * Easy-to-use modules for building Transformer layers with FP8 support 
 * Optimizations (e.g. fused kernels) for Transformer models 
-* Support for FP8 on NVIDIA Hopper (H100) and NVIDIA Ada (RTX 4 GPUs)
+* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
