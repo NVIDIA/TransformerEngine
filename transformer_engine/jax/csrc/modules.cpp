@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/common.h"
+#include "common/util/cuda_runtime.h"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/fused_attn.h"
@@ -91,9 +92,11 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 
 bool IsFusedAttnKernelAvailable() {
 #if (CUDNN_VERSION >= 8901)
-    auto major = cudaDevicePropertiesManager::Instance().GetMajor();
-    // Fused attention requires at least Ampere
-    return major >= 8;
+    int device_id = -1;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+    NVTE_CHECK(device_id >= 0, "device_id should >= 0");
+    const int sm_arch = cuda::sm_arch(device_id);
+    return sm_arch == 80 || sm_arch == 90;
 #else
     return false;
 #endif
