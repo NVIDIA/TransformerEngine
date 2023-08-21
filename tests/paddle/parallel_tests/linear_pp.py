@@ -129,6 +129,19 @@ class TestLinearPipelineParallel(unittest.TestCase):
             num_stages=self.pipeline_parallel_size,
         )
 
+        # Check if model is split across ranks as expected
+        for name, sublayer in pipe_model.named_sublayers():
+            if name in ('_loss_fn', 'shared_layers'):
+                continue
+            if self.rank == 0:
+                assert tuple(sublayer.weight.shape) == weight1_np.T.shape, \
+                    f"Shape does not match, expect: {weight1_np.T.shape}, " \
+                    f"actual: {tuple(sublayer.weight.shape)}"
+            elif self.rank == 1:
+                assert tuple(sublayer.weight.shape) == weight2_np.T.shape, \
+                    f"Shape does not match, expect: {weight2_np.T.shape}, " \
+                    f"actual: {tuple(sublayer.weight.shape)}"
+
         standalone_model = StandaloneModel(
             self.in_features,
             self.hidden_features,

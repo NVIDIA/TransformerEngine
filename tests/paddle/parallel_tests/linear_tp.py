@@ -64,6 +64,9 @@ class TestLinearTp(unittest.TestCase):
         partial_weight = layer_te.weight.clone().detach()
         paddle.distributed.all_gather(total_weight, partial_weight, group=self.tp_group)
         total_weight = paddle.concat(total_weight, axis=0)
+        assert total_weight.T.shape == layer_pd.weight.shape, \
+                f"Shapes of src:{total_weight.T.shape} and " \
+                f"dst:{layer_pd.weight.shape} do not match."
         layer_pd.weight.copy_(total_weight.T, True)
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_te.parameters())
@@ -112,6 +115,8 @@ class TestLinearTp(unittest.TestCase):
         partial_weight = layer_te.weight.clone().detach()
         paddle.distributed.all_gather(total_weight, partial_weight, group=self.tp_group)
         total_weight = paddle.concat(total_weight, axis=1)
+        assert total_weight.T.shape == layer_pd.weight.shape, \
+                f"Shapes of src:{total_weight.shape} and dst:{layer_pd.weight.shape} do not match."
         layer_pd.weight.copy_(total_weight.T, True)
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_te.parameters())
