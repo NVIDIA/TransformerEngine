@@ -37,11 +37,12 @@ class MetaTensorContext:
     def __enter__(self):
         global _current
         self.prev = _current
-        self.is_first_iter = self.last_iter_fwd is None and self.last_iter_bwd is None
         if self.current_pass == "forward":
             self.metatensors = self.metatensors_fwd or {}
+            self.is_first_iter = self.last_iter_fwd is None
         else:
             self.metatensors = self.metatensors_bwd or {}
+            self.is_first_iter = self.last_iter_bwd is None
         self.current_tensor = 0
         global pass_
         pass_ = self.current_pass
