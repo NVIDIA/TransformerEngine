@@ -20,8 +20,9 @@ at::Tensor scaled_softmax_forward(at::Tensor input,
     const int query_seq_len = input.size(2);
     const int key_seq_len = input.size(3);
 
-    TORCH_CHECK(key_seq_len <= 4096);
-    TORCH_CHECK(query_seq_len > 1);
+    AT_ASSERTM(key_seq_len <= 4096, "Key sequence length must be 4096 or less");
+    AT_ASSERTM(key_seq_len % 8 == 0, "Key sequence length must be divisible by 8");
+    AT_ASSERTM(query_seq_len > 1, "Query sequence length must be greater than 1");
 
     // Output
   auto act_options = input.options().requires_grad(false);
@@ -90,8 +91,10 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input,
     const int attn_heads = input.size(1);
     const int query_seq_len = input.size(2);
     const int key_seq_len = input.size(3);
-    TORCH_CHECK(key_seq_len <= 4096);
-    TORCH_CHECK(query_seq_len > 1);
+
+    AT_ASSERTM(key_seq_len <= 4096, "Key sequence length must be 4096 or less");
+    AT_ASSERTM(key_seq_len % 8 == 0, "Key sequence length must be divisible by 8");
+    AT_ASSERTM(query_seq_len > 1, "Query sequence length must be greater than 1");
     TORCH_CHECK(pad_batches == 1 || pad_batches == batches);
     TORCH_CHECK(mask.size(1) == 1);
     TORCH_CHECK(mask.size(2) == query_seq_len);
@@ -157,7 +160,7 @@ at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input,
 
     const int attn_batches = input.size(0);
     const int seq_len = input.size(1);
-    TORCH_CHECK(seq_len <= 2048);
+    AT_ASSERTM(seq_len <= 2048, "Sequence length must be 2048 or less");
 
     // Output
     auto act_options = input.options().requires_grad(false);
