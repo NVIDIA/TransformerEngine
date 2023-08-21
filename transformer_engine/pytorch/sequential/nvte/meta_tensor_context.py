@@ -42,7 +42,7 @@ class MetaTensorContext:
         _pass = self.current_pass
         _current = self
 
-    def __exit__(self):
+    def __exit__(self, exc_type: type, exc_value: object, exc_tb: object):
         global _current
         _current = self.prev
         if self.current_pass == "forward":
