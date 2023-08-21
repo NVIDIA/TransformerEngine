@@ -22,7 +22,7 @@ class MetaTensorContext:
         last_iter = (
             self.last_iter_fwd if current_pass == "forward" else self.last_iter_bwd
         )
-        if last_iter is not None and self.current_iter != last_iter + 1:
+        if last_iter is not None and current_iter != last_iter + 1:
             raise ValueError(
                 "Detected skipped iteration. This would most likely invalidate the current metatensors. Recreate the context instead."
             )
