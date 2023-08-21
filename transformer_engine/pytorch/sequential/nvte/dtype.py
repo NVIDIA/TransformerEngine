@@ -1,6 +1,5 @@
 import torch
 from . import _nvte
-from .tensor import Tensor
 from ._pass import pass_
 
 
@@ -86,8 +85,8 @@ def dtype_name(dtype: _nvte.DType):
             return "fp8e5m2"
 
 
-def is_fp8(t: Tensor | _nvte.DType):
-    if isinstance(t, Tensor):
+def is_fp8(t: _nvte.Tensor | _nvte.DType):
+    if isinstance(t, _nvte.Tensor):
         dtype = t.dtype
     else:
         dtype = t
