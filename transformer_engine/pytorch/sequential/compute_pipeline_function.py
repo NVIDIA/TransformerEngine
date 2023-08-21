@@ -24,23 +24,33 @@ class ComputePipelineFunction(autograd.Function):
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *args: torch.Tensor | Op | CommWithLoop,
+        *args: torch.Tensor | Op | CommWithLoop | int,
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
         real input and output is in list, as nvte.Tensor is immutable
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
-        exposed_tensors, op, comm = args[:-2], args[-2], args[-1]
+        exposed_tensors, op, comm, current_iteration = (
+            args[:-3],
+            args[-3],
+            args[-2],
+            args[-1],
+        )
         del exposed_tensors
 
         assert isinstance(op, Op)
         assert isinstance(comm, CommWithLoop)
         nvte_x = comm.nvte_x
         assert isinstance(nvte_x, nvte.Tensor)
+        assert isinstance(current_iteration, int)
 
-        nvte.set_current_pass("forward")
-        y, to_save = op.forward(nvte_x)
+        if not hasattr(op, "_nvte_metatensor_context"):
+            setattr(op, "_nvte_metatensor_context", nvte.MetaTensorContext())
+        metatensor_context = getattr(op, "_nvte_metatensor_context")
+
+        with metatensor_context("forward", current_iteration):
+            y, to_save = op.forward(nvte_x)
 
         # Expose backward context for tracing
         bwd_ctx = list[torch.Tensor]()
@@ -57,6 +67,7 @@ class ComputePipelineFunction(autograd.Function):
         # Save real context
         setattr(ctx, "nvte_ctx", to_save)
         setattr(ctx, "nvte_op", op)
+        setattr(ctx, "nvte_current_iteration", current_iteration)
 
         # Actually store the result
         comm.nvte_x = y
@@ -134,6 +145,7 @@ class ComputePipelineFunction(autograd.Function):
         # Get real context
         saved: Context = getattr(ctx, "nvte_ctx")
         op: Op = getattr(ctx, "nvte_op")
+        current_iteration: int = getattr(ctx, "nvte_current_iteration")
         preceding_backward: BackwardComm = getattr(ctx, "nvte_preceding_backward_comm")
         upcoming_backward: BackwardComm | None = getattr(
             ctx, "nvte_upcoming_backward_comm"
@@ -147,8 +159,10 @@ class ComputePipelineFunction(autograd.Function):
             nvte_grad = preceding_backward.nvte_grad_output
         del grad_output
 
-        nvte.set_current_pass("backward")
-        data_grad, param_grads = op.backward(saved, nvte_grad)
+        metatensor_context = getattr(op, "_nvte_metatensor_context")
+
+        with metatensor_context("backward", current_iteration):
+            data_grad, param_grads = op.backward(saved, nvte_grad)
 
         # Store real gradient for next backward in pipeline
         if upcoming_backward is None:
@@ -169,16 +183,23 @@ class ComputePipelineFunction(autograd.Function):
 
         torch_grads = [exposed_dgrad] + [g.data for g in param_grads]
 
-        return (*torch_grads, None, None)
+        return (*torch_grads, None, None, None)
+
+
+iteration: int = 0
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
     if not training:
-        nvte.set_current_pass("inference")
+        raise NotImplementedError()  # TODO
         y = pipeline.run_inference(nvte.make_nvte_tensor(x))
         assert not nvte.is_fp8(y)
         return y.data
     else:
+        global iteration
+        current_iteration = iteration
+        iteration += 1
+
         comm = CommWithLoop(nvte.make_nvte_tensor(x), False, None)
         for contained_op in pipeline.functions:
             nvte_tensors = contained_op.require_grad()
@@ -189,7 +210,7 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
             x = ComputePipelineFunction.apply(  # type: ignore
-                x, *exposed_tensors, contained_op, comm
+                x, *exposed_tensors, contained_op, comm, current_iteration
             )
         return x
 

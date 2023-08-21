@@ -25,8 +25,8 @@ from .activation import (
     swiglu,
     dswiglu,
 )
-from .interface import set_current_pass
 from .normalization import layernorm, dlayernorm, rmsnorm, drmsnorm
+from .meta_tensor_context import MetaTensorContext
 from .misc_fusions import (
     cast_transpose_dbias_checked,
     cast_transpose_dbias_dgelu_checked,
@@ -79,6 +79,7 @@ __all__ = [
     "matmul_transpose_gelu_add",
     "matmul_transpose_gelu",
     "matmul_transpose",
+    "MetaTensorContext",
     "multi_cast_transpose_checked",
     "multi_cast_transpose",
     "multi_empty_share_metadata",
@@ -86,7 +87,6 @@ __all__ = [
     "reglu",
     "relu",
     "rmsnorm",
-    "set_current_pass",
     "swiglu",
     "te_to_torch_dtype",
     "Tensor",
