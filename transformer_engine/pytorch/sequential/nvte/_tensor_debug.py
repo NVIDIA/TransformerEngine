@@ -6,7 +6,7 @@ from .dtype import dtype_name
 def tensor_repr(tensor: Tensor):
     if tensor.dtype == DType.Float8E4M3:
         conv_table = torch.tensor(DEBUG_FP8E4M3_TO_F32, device="cpu")
-        fp32_values = conv_table[tensor.data.cpu()]
+        fp32_values = conv_table[tensor.data.cpu().int()]
         data_repr = repr(fp32_values)
     else:
         data_repr = repr(tensor.data)
