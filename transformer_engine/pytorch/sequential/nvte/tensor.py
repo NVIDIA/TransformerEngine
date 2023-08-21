@@ -39,8 +39,8 @@ class Tensor(TensorBase):
         data_repr = "T" + data_repr[1:]
         return f"""\
 {data_repr},
-       dtype = {dtype_name(self.dtype)},\
-amax = {self.amax[0].item() if self.amax.numel() else None},\
-scale = {self.scale.item() if self.scale.numel() else None},\
-scale_inv = {self.scale_inv.item() if self.scale_inv.numel() else None}\
+       dtype={dtype_name(self.dtype)},\
+ amax={self.amax[0].item() if self.amax.numel() else None},\
+ scale={self.scale.item() if self.scale.numel() else None},\
+ scale_inv={self.scale_inv.item() if self.scale_inv.numel() else None}\
 )"""
