@@ -22,9 +22,9 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]
         Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
-            amax,  # type:ignore[possibly-unbound]
-            scale,  # type:ignore[possibly-unbound]
-            scale_inv,  # type:ignore[possibly-unbound]
+            amax,  # type: ignore[possibly-unbound]
+            scale,  # type: ignore[possibly-unbound]
+            scale_inv,  # type: ignore[possibly-unbound]
         )
         if is_fp8(dtype)
         else (
