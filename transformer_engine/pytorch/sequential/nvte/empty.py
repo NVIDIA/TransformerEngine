@@ -16,14 +16,15 @@ def empty_like(t: Tensor):
 
 
 def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]):
-    amax, scale, scale_inv = _create_metatensors()
+    if any(is_fp8(dtype) for _, dtype in shapes_dtypes):
+        amax, scale, scale_inv = _create_metatensors()
     return tuple(
         Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
-            amax,
-            scale,
-            scale_inv,
+            amax,  # type:ignore[possibly-unbound]
+            scale,  # type:ignore[possibly-unbound]
+            scale_inv,  # type:ignore[possibly-unbound]
         )
         if is_fp8(dtype)
         else (
