@@ -92,10 +92,7 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 
 bool IsFusedAttnKernelAvailable() {
 #if (CUDNN_VERSION >= 8901)
-    int device_id = -1;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-    NVTE_CHECK(device_id >= 0, "device_id should >= 0");
-    const int sm_arch = cuda::sm_arch(device_id);
+    const int sm_arch = cuda::sm_arch();
     return sm_arch == 80 || sm_arch == 90;
 #else
     return false;
