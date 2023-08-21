@@ -40,5 +40,5 @@ class Tensor(TensorBase):
         return f"""\
 Tensor(
     data = {data_repr},
-    dtype = {dtype_name(self.dtype)}, amax = {self.amax[0].item()}, scale = {self.scale.item()}, scale_inv = {self.scale_inv.item()})
+    dtype = {dtype_name(self.dtype)}, amax = {self.amax}, scale = {self.scale}, scale_inv = {self.scale_inv})
 """
