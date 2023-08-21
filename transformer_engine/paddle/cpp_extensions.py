@@ -435,9 +435,9 @@ def fused_attn_fwd_qkvpacked(
         assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
 
     if set_zero:
-        out = paddle.full(shape=[total_seqs, h, d], fill_value=0, dtype=qkv.dtype)
+        out = paddle.full(shape=[b, max_seqlen, h, d], fill_value=0, dtype=qkv.dtype)
     else:
-        out = paddle.empty(shape=[total_seqs, h, d], dtype=qkv.dtype)
+        out = paddle.empty(shape=[b, max_seqlen, h, d], dtype=qkv.dtype)
 
     if is_training:
         softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
@@ -574,9 +574,9 @@ def fused_attn_fwd_kvpacked(
         assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
 
     if set_zero:
-        out = paddle.full(shape=[total_seqs_q, h, d], fill_value=0, dtype=q.dtype)
+        out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
     else:
-        out = paddle.empty(shape=[total_seqs_q, h, d], dtype=q.dtype)
+        out = paddle.empty(shape=[b, max_seqlen_q, h, d], dtype=q.dtype)
 
     if is_training:
         softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)

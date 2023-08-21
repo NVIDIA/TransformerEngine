@@ -471,12 +471,16 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.ub_bulk_wgrad = False
             # Column Parallel Linear
             # Overlap input AG with dgrad
-            if (not ctx.ub_bulk_dgrad) and ctx.set_parallel_mode and ctx.sequence_parallel:
+            if (fc1_weight.requires_grad
+                and (not ctx.ub_bulk_dgrad)
+                and ctx.set_parallel_mode
+                and ctx.sequence_parallel):
                 ln_out_total, handle = gather_along_first_dim(
                     ln_out, ctx.tp_group, async_op=True
                 )
             else:
                 ln_out_total = ln_out
+                handle = None
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -687,7 +691,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             # Overlap dgrad-RS/AR with wgrad
             if ctx.set_parallel_mode and ctx.sequence_parallel:
-                if not ctx.ub_bulk_dgrad:
+                if not ctx.ub_bulk_dgrad and handle is not None:
                     handle.wait()
                 if not ctx.ub_bulk_wgrad:
                     fc1_dgrad, handle = reduce_scatter_along_first_dim(
@@ -870,6 +874,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -940,6 +948,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
@@ -986,20 +995,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         # LN init
         self.eps = eps
         self.layer_norm_weight = Parameter(
-            torch.empty(
-                hidden_size,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
+            torch.empty(hidden_size, device=device, dtype=params_dtype)
         )
         setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
         if self.normalization != "RMSNorm":
             self.layer_norm_bias = Parameter(
-                torch.empty(
-                    hidden_size,
-                    device=torch.cuda.current_device(),
-                    dtype=params_dtype,
-                )
+                torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
             setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
         else:
@@ -1012,12 +1013,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_output_features = self.size_per_partition
         # FC1 init
         self.fc1_weight = Parameter(
-            torch.empty(
-                fc1_output_features,
-                hidden_size,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
+            torch.empty(fc1_output_features, hidden_size, device=device, dtype=params_dtype)
         )
         self.fp8_weight_shapes.append(self.fc1_weight.shape)
 
@@ -1031,28 +1027,18 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         if self.use_bias:
             self.fc1_bias = Parameter(
-                torch.empty(
-                    fc1_output_features,
-                    device=torch.cuda.current_device(),
-                    dtype=params_dtype,
-                )
+                torch.empty(fc1_output_features, device=device, dtype=params_dtype)
             )
             set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
         else:
-            self.fc1_bias = torch.Tensor().to(dtype=params_dtype,
-                                              device=torch.cuda.current_device())
+            self.fc1_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
         with torch.no_grad():
             self.fc1_bias.zero_()
 
         # FC2 init
         self.fc2_weight = Parameter(
-            torch.empty(
-                hidden_size,
-                self.size_per_partition,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
+            torch.empty(hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
         )
         self.fp8_weight_shapes.append(self.fc2_weight.shape)
 
@@ -1066,13 +1052,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         if self.use_bias:
             self.fc2_bias = Parameter(
-                torch.empty(
-                    hidden_size, device=torch.cuda.current_device(), dtype=params_dtype
-                )
+                torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
         else:
-            self.fc2_bias = torch.Tensor().to(dtype=params_dtype,
-                                              device=torch.cuda.current_device())
+            self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
