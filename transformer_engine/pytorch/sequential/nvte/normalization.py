@@ -6,6 +6,7 @@ from . import _nvte
 from ._pass import pass_
 from .dtype import dtype_name
 from .empty import empty, empty_like
+from .tensor import Tensor
 
 
 @cache
@@ -35,9 +36,7 @@ def _sm_margin():
 
 
 class _NormConfig:
-    def __init__(
-        self, hidden_size: int, gamma: _nvte.Tensor, x: _nvte.Tensor, out: _nvte.Tensor
-    ):
+    def __init__(self, hidden_size: int, gamma: Tensor, x: Tensor, out: Tensor):
         self.hidden_size = hidden_size
         self.gamma_dtype_name = dtype_name(gamma.dtype)
         self.x_dtype_name = dtype_name(x.dtype)
@@ -58,9 +57,9 @@ class _NormConfig:
 def _handle_unsupported_config(
     func_name: str,
     hidden_size: int,
-    gamma: _nvte.Tensor,
-    x: _nvte.Tensor,
-    out: _nvte.Tensor,
+    gamma: Tensor,
+    x: Tensor,
+    out: Tensor,
 ):
     try:
         yield
@@ -77,11 +76,11 @@ def _handle_unsupported_config(
 
 
 def layernorm(
-    x: _nvte.Tensor,
+    x: Tensor,
     eps: float,
     zero_centered_gamma: bool,
-    gamma: _nvte.Tensor,
-    beta: _nvte.Tensor,
+    gamma: Tensor,
+    beta: Tensor,
     out_dtype: _nvte.DType,
 ):
     "returns (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
@@ -113,19 +112,19 @@ def layernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
+            workspace = empty_like(workspace.query_shape_and_dtype_())
+            barrier = empty_like(barrier.query_shape_and_dtype_())
 
     return out, mu, rsigma
 
 
 def dlayernorm(
-    grad: _nvte.Tensor,
+    grad: Tensor,
     zero_centered_gamma: bool,
-    x: _nvte.Tensor,
-    gamma: _nvte.Tensor,
-    mu: _nvte.Tensor,
-    rsigma: _nvte.Tensor,
+    x: Tensor,
+    gamma: Tensor,
+    mu: Tensor,
+    rsigma: Tensor,
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
     dbeta_dtype: _nvte.DType,
@@ -162,19 +161,19 @@ def dlayernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
-            dgamma_part = empty_like(dgamma_part)
-            dbeta_part = empty_like(dbeta_part)
+            workspace = empty_like(workspace.query_shape_and_dtype_())
+            barrier = empty_like(barrier.query_shape_and_dtype_())
+            dgamma_part = empty_like(dgamma_part.query_shape_and_dtype_())
+            dbeta_part = empty_like(dbeta_part.query_shape_and_dtype_())
 
     return dx, dgamma, dbeta
 
 
 def rmsnorm(
-    x: _nvte.Tensor,
+    x: Tensor,
     eps: float,
     zero_centered_gamma: bool,
-    gamma: _nvte.Tensor,
+    gamma: Tensor,
     out_dtype: _nvte.DType,
 ):
     "returns x / sqrt(var(x) + eps) * gamma, rsigma (for bwd)"
@@ -204,18 +203,18 @@ def rmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
+            workspace = empty_like(workspace.query_shape_and_dtype_())
+            barrier = empty_like(barrier.query_shape_and_dtype_())
 
     return out, rsigma
 
 
 def drmsnorm(
-    grad: _nvte.Tensor,
+    grad: Tensor,
     zero_centered_gamma: bool,
-    x: _nvte.Tensor,
-    gamma: _nvte.Tensor,
-    rsigma: _nvte.Tensor,
+    x: Tensor,
+    gamma: Tensor,
+    rsigma: Tensor,
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
 ):
@@ -246,8 +245,8 @@ def drmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
-            dgamma_part = empty_like(dgamma_part)
+            workspace = empty_like(workspace.query_shape_and_dtype_())
+            barrier = empty_like(barrier.query_shape_and_dtype_())
+            dgamma_part = empty_like(dgamma_part.query_shape_and_dtype_())
 
     return dx, dgamma

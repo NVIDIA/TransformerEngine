@@ -1,6 +1,7 @@
 from typing import Sequence
 import torch
 from . import _nvte
+from .tensor import Tensor
 from .dtype import te_to_torch_dtype, is_fp8
 
 _AMAX_HISTORY_LEN = 512
@@ -8,7 +9,7 @@ _AMAX_HISTORY_LEN = 512
 
 def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
     if shape == ():
-        return _nvte.Tensor(
+        return Tensor(
             dtype,
             torch.Tensor(),
             torch.Tensor(),
@@ -16,7 +17,7 @@ def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
             torch.Tensor(),
         )
     if is_fp8(dtype):
-        return _nvte.Tensor(
+        return Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
             torch.zeros(_AMAX_HISTORY_LEN, dtype=torch.float32, device="cuda"),
@@ -24,7 +25,7 @@ def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
             torch.ones(1, dtype=torch.float32, device="cuda"),
         )
     else:
-        return _nvte.Tensor(
+        return Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
             torch.Tensor(),
@@ -33,7 +34,7 @@ def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
         )
 
 
-def empty_like(t: _nvte.Tensor):
+def empty_like(t: Tensor):
     return empty(t.shape, t.dtype)
 
 
@@ -43,7 +44,7 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]
     scale_inv = torch.ones(1, dtype=torch.float32, device="cuda")
 
     return tuple(
-        _nvte.Tensor(
+        Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
             amax,
@@ -51,7 +52,7 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]
             scale_inv,
         )
         if is_fp8(dtype)
-        else _nvte.Tensor(
+        else Tensor(
             dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda"),
             torch.Tensor(),

@@ -1,5 +1,6 @@
 from ._common import make_nvte_tensor
-from ._nvte import QKVLayout, BiasType, MaskType, FusedAttnBackend, DType, Tensor
+from ._nvte import QKVLayout, BiasType, MaskType, FusedAttnBackend, DType
+from .tensor import Tensor
 from .add import add, dbias
 from .cast_transpose import (
     cast_checked,

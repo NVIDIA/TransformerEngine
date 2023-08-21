@@ -1,10 +1,10 @@
 import torch
-from . import _nvte
+from .tensor import Tensor
 from .dtype import torch_to_te_dtype
 
 
 def make_nvte_tensor(t: torch.Tensor):
-    return _nvte.Tensor(
+    return Tensor(
         torch_to_te_dtype(t.dtype),
         t.data,
         torch.Tensor(),
