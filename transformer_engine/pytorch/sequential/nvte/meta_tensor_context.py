@@ -82,7 +82,10 @@ class MetaTensorContext:
     def get_metatensors(self):
         assert not self.is_first_iter
         assert self.current_tensor in self.metatensors
-        return self.metatensors[self.current_tensor]
+        amax_history, scale, scale_inv = self.metatensors[self.current_tensor]
+        amax = amax_history[self.current_iter % amax_history.shape[0]]
+        # TODO compute scale and scale_inv
+        return amax, scale, scale_inv
 
 
 _current: MetaTensorContext | None = None
