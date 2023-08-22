@@ -2,11 +2,10 @@ import os
 from functools import cache
 from contextlib import contextmanager
 import torch
-from . import _nvte
-from ._pass import pass_
+from .. import cpp_extensions as _nvte
+from .execution_state import pass_
 from .dtype import dtype_name
 from .empty import empty, empty_like
-from .tensor import Tensor
 
 
 @cache
@@ -36,7 +35,9 @@ def _sm_margin():
 
 
 class _NormConfig:
-    def __init__(self, hidden_size: int, gamma: Tensor, x: Tensor, out: Tensor):
+    def __init__(
+        self, hidden_size: int, gamma: _nvte.Tensor, x: _nvte.Tensor, out: _nvte.Tensor
+    ):
         self.hidden_size = hidden_size
         self.gamma_dtype_name = dtype_name(gamma.dtype)
         self.x_dtype_name = dtype_name(x.dtype)
@@ -57,9 +58,9 @@ class _NormConfig:
 def _handle_unsupported_config(
     func_name: str,
     hidden_size: int,
-    gamma: Tensor,
-    x: Tensor,
-    out: Tensor,
+    gamma: _nvte.Tensor,
+    x: _nvte.Tensor,
+    out: _nvte.Tensor,
 ):
     try:
         yield
@@ -76,11 +77,11 @@ def _handle_unsupported_config(
 
 
 def layernorm(
-    x: Tensor,
+    x: _nvte.Tensor,
     eps: float,
     zero_centered_gamma: bool,
-    gamma: Tensor,
-    beta: Tensor,
+    gamma: _nvte.Tensor,
+    beta: _nvte.Tensor,
     out_dtype: _nvte.DType,
 ):
     "returns (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
@@ -112,19 +113,19 @@ def layernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
-            barrier = empty_like(barrier.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
 
     return out, mu, rsigma
 
 
 def dlayernorm(
-    grad: Tensor,
+    grad: _nvte.Tensor,
     zero_centered_gamma: bool,
-    x: Tensor,
-    gamma: Tensor,
-    mu: Tensor,
-    rsigma: Tensor,
+    x: _nvte.Tensor,
+    gamma: _nvte.Tensor,
+    mu: _nvte.Tensor,
+    rsigma: _nvte.Tensor,
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
     dbeta_dtype: _nvte.DType,
@@ -161,19 +162,19 @@ def dlayernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
-            barrier = empty_like(barrier.query_shape_and_dtype_())
-            dgamma_part = empty_like(dgamma_part.query_shape_and_dtype_())
-            dbeta_part = empty_like(dbeta_part.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+            dgamma_part = empty_like(dgamma_part)
+            dbeta_part = empty_like(dbeta_part)
 
     return dx, dgamma, dbeta
 
 
 def rmsnorm(
-    x: Tensor,
+    x: _nvte.Tensor,
     eps: float,
     zero_centered_gamma: bool,
-    gamma: Tensor,
+    gamma: _nvte.Tensor,
     out_dtype: _nvte.DType,
 ):
     "returns x / sqrt(var(x) + eps) * gamma, rsigma (for bwd)"
@@ -203,18 +204,18 @@ def rmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
-            barrier = empty_like(barrier.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
 
     return out, rsigma
 
 
 def drmsnorm(
-    grad: Tensor,
+    grad: _nvte.Tensor,
     zero_centered_gamma: bool,
-    x: Tensor,
-    gamma: Tensor,
-    rsigma: Tensor,
+    x: _nvte.Tensor,
+    gamma: _nvte.Tensor,
+    rsigma: _nvte.Tensor,
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
 ):
@@ -245,8 +246,8 @@ def drmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
-            barrier = empty_like(barrier.query_shape_and_dtype_())
-            dgamma_part = empty_like(dgamma_part.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
+            barrier = empty_like(barrier)
+            dgamma_part = empty_like(dgamma_part)
 
     return dx, dgamma

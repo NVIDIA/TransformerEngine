@@ -1,13 +1,12 @@
 from .dtype import is_fp8
-from . import _nvte
+from .. import cpp_extensions as _nvte
 from .cast_transpose import cast_transpose_checked
 from .empty import multi_empty_share_metadata, empty, empty_like
 from .add import dbias
-from .tensor import Tensor
 
 
 def cast_transpose_dbias_checked(
-    grad: Tensor, cast_dtype: _nvte.DType | None, dbias_dtype: _nvte.DType
+    grad: _nvte.Tensor, cast_dtype: _nvte.DType | None, dbias_dtype: _nvte.DType
 ):
     if (
         dbias_dtype == grad.dtype
@@ -23,7 +22,7 @@ def cast_transpose_dbias_checked(
             _nvte.cast_transpose_dbias(
                 grad, grad_cast, grad_transpose, out_dbias, workspace
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
         return grad_cast, grad_transpose, out_dbias
     elif is_fp8(grad) and (cast_dtype is None or cast_dtype == grad.dtype):
         grad_transpose = empty(grad.shape[::-1], grad.dtype)
@@ -31,7 +30,7 @@ def cast_transpose_dbias_checked(
         workspace = empty()
         for _ in range(2):
             _nvte.fp8_transpose_dbias(grad, grad_transpose, out_dbias, workspace)
-            workspace = empty_like(workspace.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
         return grad, grad_transpose, out_dbias
     else:
         grad_cast, grad_transpose = cast_transpose_checked(grad, cast_dtype)
@@ -40,8 +39,8 @@ def cast_transpose_dbias_checked(
 
 
 def cast_transpose_dbias_dgelu_checked(
-    grad: Tensor,
-    pre_gelu: Tensor,
+    grad: _nvte.Tensor,
+    pre_gelu: _nvte.Tensor,
     cast_dtype: _nvte.DType | None,
     dbias_dtype: _nvte.DType,
 ):
@@ -60,7 +59,7 @@ def cast_transpose_dbias_dgelu_checked(
             _nvte.cast_transpose_dbias_dgelu(
                 grad, pre_gelu, dgelu_cast, dgelu_transpose, out_dbias, workspace
             )
-            workspace = empty_like(workspace.query_shape_and_dtype_())
+            workspace = empty_like(workspace)
         return dgelu_cast, dgelu_transpose, out_dbias
     else:
         dgelu = empty(grad.shape, cast_dtype or grad.dtype)
@@ -69,7 +68,7 @@ def cast_transpose_dbias_dgelu_checked(
 
 
 def cast_transpose_dgeglu_checked(
-    grad: Tensor, pre_geglu: Tensor, cast_dtype: _nvte.DType | None
+    grad: _nvte.Tensor, pre_geglu: _nvte.Tensor, cast_dtype: _nvte.DType | None
 ):
     if (
         grad.dtype == pre_geglu.dtype

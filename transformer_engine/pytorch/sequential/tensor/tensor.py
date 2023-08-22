@@ -1,6 +1,6 @@
 import torch
-from ._nvte import Tensor as TensorBase, DType
-from ._tensor_debug import tensor_repr
+from ..cpp_extensions import Tensor as TensorBase, DType
+from .printing import tensor_repr
 
 
 class Tensor(TensorBase):
@@ -33,5 +33,4 @@ class Tensor(TensorBase):
         return self
 
     def __repr__(self):
-        self.query_shape_and_dtype_()
         return tensor_repr(self)

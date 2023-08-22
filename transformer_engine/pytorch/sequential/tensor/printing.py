@@ -1,11 +1,14 @@
 import torch
-from ._nvte import Tensor, DType
-from .dtype import dtype_name
+from ..cpp_extensions import Tensor, DType
 
 
 def tensor_repr(tensor: Tensor):
-    if tensor.dtype == DType.Float8E4M3:
-        conv_table = torch.tensor(DEBUG_FP8E4M3_TO_F32, device="cpu")
+    if tensor.dtype == DType.Float8E4M3 or DType.Float8E5M2:
+        conv_table = (
+            torch.tensor(ALL_FP8E4M3_VALUES, device="cpu")
+            if tensor.dtype == DType.Float8E4M3
+            else torch.tensor(ALL_FP8E5M2_VALUES, device="cpu")
+        )
         fp32_values = conv_table[tensor.data.cpu().int()]
         data_repr = repr(fp32_values)
     else:
@@ -14,7 +17,7 @@ def tensor_repr(tensor: Tensor):
     data_repr = "T" + data_repr[1:]
     return f"""\
 {data_repr},
-       dtype={dtype_name(tensor.dtype)},\
+       dtype={tensor.dtype.name},\
  amax={tensor.amax[0].item() if tensor.amax.numel() else None},\
  scale={tensor.scale.item() if tensor.scale.numel() else None},\
  scale_inv={tensor.scale_inv.item() if tensor.scale_inv.numel() else None}\
@@ -24,7 +27,7 @@ def tensor_repr(tensor: Tensor):
 # fmt: off
 nan = float("nan")
 inf = float("inf")
-DEBUG_FP8E4M3_TO_F32 = [
+ALL_FP8E4M3_VALUES = [
    0.         ,    0.001953125,    0.00390625 ,    0.005859375,    0.0078125  ,    0.009765625,    0.01171875 ,    0.013671875,
    0.015625   ,    0.017578125,    0.01953125 ,    0.021484375,    0.0234375  ,    0.025390625,    0.02734375 ,    0.029296875,
    0.03125    ,    0.03515625 ,    0.0390625  ,    0.04296875 ,    0.046875   ,    0.05078125 ,    0.0546875  ,    0.05859375 ,
@@ -58,9 +61,8 @@ DEBUG_FP8E4M3_TO_F32 = [
 -128.         , -144.         , -160.         , -176.         , -192.         , -208.         , -224.         , -240.         ,
 -256.         , -288.         , -320.         , -352.         , -384.         , -416.         , -448.         ,  nan          ,
 ]
-"All values representable with FP8E4M3"
 
-DEBUG_FP8E5M2_TO_F32 = [
+ALL_FP8E5M2_VALUES = [
       0.                ,      0.0000152587890625,      0.000030517578125 ,      0.0000457763671875,      0.00006103515625  ,     0.0000762939453125,      0.000091552734375 ,      0.0001068115234375,
       0.0001220703125   ,      0.000152587890625 ,      0.00018310546875  ,      0.000213623046875 ,      0.000244140625    ,     0.00030517578125  ,      0.0003662109375   ,      0.00042724609375  ,
       0.00048828125     ,      0.0006103515625   ,      0.000732421875    ,      0.0008544921875   ,      0.0009765625      ,     0.001220703125    ,      0.00146484375     ,      0.001708984375    ,
@@ -94,4 +96,3 @@ DEBUG_FP8E5M2_TO_F32 = [
   -8192.                , -10240.                , -12288.                , -14336.                , -16384.                , 20480.                , -24576.                , -28672.                ,
  -32768.                , -40960.                , -49152.                , -57344.                ,   -inf                 ,   nan                 ,    nan                 ,    nan                 ,
 ]
-"All values representable with FP8E5M2"

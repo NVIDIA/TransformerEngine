@@ -1,6 +1,12 @@
 from ._common import make_nvte_tensor
-from ._nvte import QKVLayout, BiasType, MaskType, FusedAttnBackend, DType
-from .tensor import Tensor
+from ..cpp_extensions import (
+    QKVLayout,
+    BiasType,
+    MaskType,
+    FusedAttnBackend,
+    DType,
+    Tensor,
+)
 from .add import add, dbias
 from .cast_transpose import (
     cast_checked,
@@ -26,7 +32,6 @@ from .activation import (
     dswiglu,
 )
 from .normalization import layernorm, dlayernorm, rmsnorm, drmsnorm
-from .meta_tensor_context import MetaTensorContext
 from .misc_fusions import (
     cast_transpose_dbias_checked,
     cast_transpose_dbias_dgelu_checked,
@@ -79,7 +84,6 @@ __all__ = [
     "matmul_transpose_gelu_add",
     "matmul_transpose_gelu",
     "matmul_transpose",
-    "MetaTensorContext",
     "multi_cast_transpose_checked",
     "multi_cast_transpose",
     "multi_empty_share_metadata",

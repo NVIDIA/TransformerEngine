@@ -1,6 +1,5 @@
 import torch
-from . import _nvte
-from ._pass import pass_
+from .. import cpp_extensions as _nvte
 
 
 def te_to_torch_dtype(dtype: _nvte.DType):

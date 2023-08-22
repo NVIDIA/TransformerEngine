@@ -1,10 +1,10 @@
-from . import _nvte
-from .tensor import Tensor
+from .. import cpp_extensions as _nvte
+
 from .dtype import is_fp8
 from .empty import empty, multi_empty_share_metadata
 
 
-def cast(t: Tensor, dtype: _nvte.DType):
+def cast(t: _nvte.Tensor, dtype: _nvte.DType):
     assert t.dtype != dtype
     if is_fp8(t):
         assert not is_fp8(dtype)
@@ -20,20 +20,20 @@ def cast(t: Tensor, dtype: _nvte.DType):
     return output
 
 
-def cast_checked(t: Tensor, dtype: _nvte.DType | None):
+def cast_checked(t: _nvte.Tensor, dtype: _nvte.DType | None):
     if dtype is None or t.dtype == dtype:
         return t
     else:
         return cast(t, dtype)
 
 
-def transpose(t: Tensor):
+def transpose(t: _nvte.Tensor):
     output = empty(t.shape[::-1], t.dtype)
     _nvte.transpose(t, output)
     return output
 
 
-def cast_transpose(t: Tensor, dtype: _nvte.DType):
+def cast_transpose(t: _nvte.Tensor, dtype: _nvte.DType):
     assert t.dtype != dtype
     if is_fp8(t):
         assert not is_fp8(dtype)
@@ -46,14 +46,14 @@ def cast_transpose(t: Tensor, dtype: _nvte.DType):
     return out_cast, out_transpose
 
 
-def cast_transpose_checked(t: Tensor, dtype: _nvte.DType | None):
+def cast_transpose_checked(t: _nvte.Tensor, dtype: _nvte.DType | None):
     if dtype is None or t.dtype == dtype:
         return t, transpose(t)
     else:
         return cast_transpose(t, dtype)
 
 
-def multi_cast_transpose(*desc: tuple[Tensor, _nvte.DType]):
+def multi_cast_transpose(*desc: tuple[_nvte.Tensor, _nvte.DType]):
     outs = [
         multi_empty_share_metadata((t.shape, dtype), (t.shape[::-1], dtype))
         for t, dtype in desc
@@ -64,9 +64,9 @@ def multi_cast_transpose(*desc: tuple[Tensor, _nvte.DType]):
     return outs
 
 
-def multi_cast_transpose_checked(*desc: tuple[Tensor, _nvte.DType | None]):
-    transpose_results = list[tuple[Tensor, Tensor] | None]()
-    to_cast_transpose = list[tuple[Tensor, _nvte.DType]]()
+def multi_cast_transpose_checked(*desc: tuple[_nvte.Tensor, _nvte.DType | None]):
+    transpose_results = list[tuple[_nvte.Tensor, _nvte.Tensor] | None]()
+    to_cast_transpose = list[tuple[_nvte.Tensor, _nvte.DType]]()
     for t, dtype in desc:
         if dtype is None or t.dtype == dtype:
             transpose_results.append((t, transpose(t)))
@@ -76,7 +76,7 @@ def multi_cast_transpose_checked(*desc: tuple[Tensor, _nvte.DType | None]):
     cast_transpose_results = (
         multi_cast_transpose(*to_cast_transpose) if to_cast_transpose else []
     )
-    results = list[tuple[Tensor, Tensor]]()
+    results = list[tuple[_nvte.Tensor, _nvte.Tensor]]()
     i = 0
     for result in transpose_results:
         if result is None:

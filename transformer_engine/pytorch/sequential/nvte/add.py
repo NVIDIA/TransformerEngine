@@ -1,11 +1,11 @@
 import torch
-from . import _nvte
-from .tensor import Tensor
+from .. import cpp_extensions as _nvte
+
 from ._common import make_nvte_tensor
 from .dtype import is_fp8, te_to_torch_dtype
 
 
-def add(A: Tensor, B: Tensor, out_dtype: _nvte.DType):
+def add(A: _nvte.Tensor, B: _nvte.Tensor, out_dtype: _nvte.DType):
     if is_fp8(A) or is_fp8(B):
         raise NotImplementedError()
     else:
@@ -14,7 +14,7 @@ def add(A: Tensor, B: Tensor, out_dtype: _nvte.DType):
         return make_nvte_tensor(output)
 
 
-def dbias(grad: Tensor, out_dtype: _nvte.DType):
+def dbias(grad: _nvte.Tensor, out_dtype: _nvte.DType):
     if is_fp8(grad):
         raise NotImplementedError()
     else:
