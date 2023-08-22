@@ -45,12 +45,8 @@ class ComputePipelineFunction(autograd.Function):
         assert isinstance(nvte_x, nvte.Tensor)
         assert isinstance(current_iteration, int)
 
-        if not hasattr(op, "_nvte_metatensor_context"):
-            setattr(op, "_nvte_metatensor_context", nvte.MetaTensorContext())
-        metatensor_context = getattr(op, "_nvte_metatensor_context")
-
-        with metatensor_context("forward", current_iteration):
-            y, to_save = op.forward(nvte_x)
+        nvte.set_execution_state("forward", meta_tensor_provider)
+        y, to_save = op.forward(nvte_x)
 
         # Expose backward context for tracing
         bwd_ctx = list[torch.Tensor]()
@@ -159,10 +155,8 @@ class ComputePipelineFunction(autograd.Function):
             nvte_grad = preceding_backward.nvte_grad_output
         del grad_output
 
-        metatensor_context = getattr(op, "_nvte_metatensor_context")
-
-        with metatensor_context("backward", current_iteration):
-            data_grad, param_grads = op.backward(saved, nvte_grad)
+        nvte.set_execution_state("backward", meta_tensor_provider)
+        data_grad, param_grads = op.backward(saved, nvte_grad)
 
         # Store real gradient for next backward in pipeline
         if upcoming_backward is None:

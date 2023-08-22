@@ -1,4 +1,3 @@
-from typing import Callable
 import torch
 from ..persistent import Persistent
 from . import recipe

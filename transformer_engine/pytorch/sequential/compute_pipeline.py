@@ -6,6 +6,7 @@ from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
 from .utils import set_attribute
 from .environment import Environment
+from .tensor import PersistentFP8Meta
 
 
 class SelfContainedOp(Op):
@@ -137,6 +138,9 @@ class ComputePipeline:
         )
         self.forward = tuple(op for f in self.functions for op in f.fwds)
         self.backward = tuple(op for f in self.functions for op in f.bwds)
+        self.meta_inf = PersistentFP8Meta()
+        self.meta_fwd = PersistentFP8Meta()
+        self.meta_bwd = PersistentFP8Meta()
 
     def run_inference(self, x: nvte.Tensor) -> nvte.Tensor:
         for op in self._inf:

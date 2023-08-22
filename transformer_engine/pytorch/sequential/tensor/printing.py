@@ -23,6 +23,8 @@ def tensor_repr(tensor: Tensor):
  scale_inv={tensor.scale_inv.item() if tensor.scale_inv.numel() else None}\
 )"""
 
+setattr(Tensor, "__repr__", tensor_repr)
+
 
 # fmt: off
 nan = float("nan")

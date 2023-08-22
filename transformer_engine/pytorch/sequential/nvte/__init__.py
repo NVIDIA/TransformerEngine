@@ -19,6 +19,7 @@ from .cast_transpose import (
 )
 from .dtype import te_to_torch_dtype, torch_to_te_dtype, bit_width, dtype_name, is_fp8
 from .empty import empty, empty_like, multi_empty_share_metadata
+from .execution_state import set_execution_state
 from .activation import (
     relu,
     drelu,
@@ -91,6 +92,7 @@ __all__ = [
     "reglu",
     "relu",
     "rmsnorm",
+    "set_execution_state",
     "swiglu",
     "te_to_torch_dtype",
     "Tensor",
