@@ -24,7 +24,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
     FusedAttnBackend,
 )
-from transformer_engine.pytorch.module import LayerNormLinear, Linear
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, LayerNorm, RMSNorm
 from transformer_engine.pytorch.utils import (
     divide,
     attention_mask_func,
@@ -1421,7 +1421,7 @@ class MultiheadAttention(torch.nn.Module):
         elif ((self.attention_type == "cross")
                 or (self.attention_type == "self"
                     and self.num_gqa_groups != self.num_attention_heads)):
-            if self.input_layernorm:
+            if self.input_layernorm and self.attention_type == "cross":
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
                     hidden_size,
@@ -1439,6 +1439,16 @@ class MultiheadAttention(torch.nn.Module):
                     **common_gemm_kwargs,
                 )
             else:
+                # self gqa + norm
+                if self.input_layernorm:
+                    Norm = LayerNorm if normalization == "LayerNorm" else RMSNorm
+                    self.norm = Norm(
+                            hidden_size=hidden_size,
+                            eps=layernorm_epsilon,
+                            sequence_parallel=sequence_parallel,
+                            params_dtype=params_dtype,
+                            zero_centered_gamma=zero_centered_gamma
+                        )
                 self.query_layer = Linear(
                     hidden_size,
                     hidden_size,
@@ -1650,6 +1660,8 @@ class MultiheadAttention(torch.nn.Module):
             if self.attention_type == "cross":
                 input_tensor = encoder_output
             else:
+                if self.input_layernorm:
+                    hidden_states = self.norm(hidden_states)
                 input_tensor = hidden_states
 
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
@@ -1684,7 +1696,7 @@ class MultiheadAttention(torch.nn.Module):
                 key_layer, value_layer = split_tensor_along_dim(mixed_kv_layer, split_dim, 2)
 
             # Attention head [sq, b, h] --> [sq, b, hp]
-            if self.input_layernorm:
+            if self.input_layernorm and self.attention_type == "cross":
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
