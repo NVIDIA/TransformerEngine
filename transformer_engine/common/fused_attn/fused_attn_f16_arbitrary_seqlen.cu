@@ -1327,7 +1327,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
 #if (CUDNN_VERSION >= 8905)
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
-    if (sm_arch_ >= 90) { 
+    if (sm_arch_ >= 90) {
         // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
         // plus buffer size 128MB
         size_t free_byte;
