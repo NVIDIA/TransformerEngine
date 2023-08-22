@@ -66,7 +66,7 @@ options=" \
     --global-batch-size ${GBS} \
     --train-iters ${STEPS} \
     --lr ${LR} \
-    --min-lr ${TP_SIZE} \
+    --min-lr ${MIN_LR} \
     --lr-decay-style cosine \
     --log-interval 1 \
     --eval-iters 50 \
@@ -97,13 +97,13 @@ options=" \
 if [[ "$SP" == "true" ]]; then
         options+=" --sequence-parallel"
 fi
-                                                                                                                                                                                                                                                               rs 200 --lr
-if [[ "$WGRAD_FUSION" == "false" ]]; then                                                                                                                                                                                                                      rval 100 --
-        options+=" --no-gradient-accumulation-fusion"                                                                                                                                                                                                          m --log-num
-fi                                                                                                                                                                                                                                                             ce-parallel
+
+if [[ "$WGRAD_FUSION" == "false" ]]; then
+        options+=" --no-gradient-accumulation-fusion"
+fi
 
 if [[ "$FP8" != "false" ]]; then
-        options+=" --${FP8}"
+        options+=" --fp8-${FP8}"
 fi
 
 if [[ "$DTYPE" != "fp32" ]]; then
