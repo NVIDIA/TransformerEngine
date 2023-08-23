@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from ..ops import Op
-from ..environment import Environment
+from ..recipe import Recipe
 from ..compute_pipeline import ComputePipeline
 from ..compute_pipeline_function import apply
 
@@ -9,7 +9,7 @@ from ..compute_pipeline_function import apply
 class BaseModule(nn.Module):
     ops: list[Op]
     pipeline: ComputePipeline | None
-    compile_env: Environment | None
+    compile_env: Recipe | None
 
     def __init__(self, *ops: Op | None):
         "Note: nn.Module.__init__ must be called by the derived class"
@@ -45,5 +45,5 @@ class BaseModule(nn.Module):
             self.compile_env = env
         return apply(x, self.pipeline, self.training)
 
-    def _current_env(self) -> Environment:
-        return Environment.current()
+    def _current_env(self) -> Recipe:
+        return Recipe.current()

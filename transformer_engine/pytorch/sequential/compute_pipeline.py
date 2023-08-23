@@ -5,8 +5,8 @@ from . import nvte
 from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
 from .utils import set_attribute
-from .environment import Environment
-from .tensor import PersistentFP8Meta
+from .recipe import Recipe
+from .meta import PersistentFP8Meta
 
 
 class SelfContainedOp(Op):
@@ -75,7 +75,7 @@ def force_use_precision(ops: list[Op], allowed: nvte.DType):
 
 
 def model_parallel_transform(ops: list[Op]):
-    raise NotImplementedError()
+    raise NotImplementedError()  # TODO
 
 
 def name_ops(ops: list[Op]):
@@ -123,7 +123,7 @@ def copy_op_list(ops: list[Op]):
 
 
 class ComputePipeline:
-    def __init__(self, ops: list[Op], env: Environment):
+    def __init__(self, ops: list[Op], env: Recipe):
         ops = copy_op_list(ops)
 
         name_ops(ops)

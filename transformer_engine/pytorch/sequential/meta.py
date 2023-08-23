@@ -1,6 +1,6 @@
 import torch
-from ..persistent import Persistent
-from . import recipe
+from .persistent import Persistent
+from .recipe import Recipe
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -24,7 +24,7 @@ class PersistentFP8Meta(Persistent[FP8Meta]):
             if self._iteration() == 2 and self._is_new_iteration():
                 # Allocate metatensors
                 self.amaxes = torch.zeros(
-                    (recipe.current().amax_history_len, self._max_index()),
+                    (Recipe.current().amax_history_len, self._max_index()),
                     device="cuda",
                 )
                 self.scaling_factors = torch.ones(self._max_index(), device="cuda")
@@ -35,12 +35,12 @@ class PersistentFP8Meta(Persistent[FP8Meta]):
                 self.amaxes[0] = torch.cat(self._first_iteration_amaxes)
                 # Delete first iteration amaxes
                 del self._first_iteration_amaxes
-            if self._iteration() % recipe.current().amax_reduction_period == 0:
+            if self._iteration() % Recipe.current().amax_reduction_period == 0:
                 amaxes_t = self.amaxes.T  # (num_tensors, amax_history_len)
-                reduced = recipe.current().amax_reduction_method(
+                reduced = Recipe.current().amax_reduction_method(
                     amaxes_t
                 )  # (num_tensors,)
-                recipe.current().scaling_factor_compute_method(
+                Recipe.current().scaling_factor_compute_method(
                     reduced, self.scaling_factors
                 )
                 torch.reciprocal(
@@ -49,7 +49,7 @@ class PersistentFP8Meta(Persistent[FP8Meta]):
             tensor_idx = self._index_within_iteration()
             return (
                 self.amaxes[
-                    self._iteration() % recipe.current().amax_history_len, tensor_idx
+                    self._iteration() % Recipe.current().amax_history_len, tensor_idx
                 ],
                 self.scaling_factors[tensor_idx],
                 self.scaling_factors_inversed[tensor_idx],

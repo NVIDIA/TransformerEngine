@@ -186,7 +186,7 @@ def rmsnorm(
     out = empty(x.shape, out_dtype)
 
     if zero_centered_gamma:
-        raise NotImplementedError()
+        raise NotImplementedError() # TODO
     else:
         func = _nvte.rmsnorm_fwd
 
@@ -225,7 +225,7 @@ def drmsnorm(
     dgamma = empty(gamma.shape, dgamma_dtype)
 
     if zero_centered_gamma:
-        raise NotImplementedError()
+        raise NotImplementedError() # TODO
     else:
         func = _nvte.rmsnorm_bwd
 
