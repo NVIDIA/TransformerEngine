@@ -54,33 +54,63 @@ if torch.cuda.is_bf16_supported():
 
 batch_sizes = [1, 2, 32]
 
-@pytest.mark.skipif(
-    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [True, False])
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
 def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
-    """Test DotProductAttention module with three backends,
-    FlashAttention, FusedAttention and UnfusedDotProductAttention"""
+    """Test DotProductAttention module with different backends"""
 
+    # Get configs
     config = model_configs[model]
+    tols = dict(atol=5e-3, rtol=5e-3)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=2.5e-2, rtol=2.5e-2)
 
-    if bias_type == "no_bias":
-        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
-    fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type)
+    # Skip if only unfused backend is supported
+    compute_capability = get_device_compute_capability()
+    if compute_capability < (8, 0):
+        pytest.skip(
+            "FusedAttention and FlashAttention are not supported "
+            f"with compute capability {compute_capability[0]}.{compute_capability[1]}"
+        )
+
+    # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
+        dtype,
+        bs,
+        config,
+        "UnfusedDotProductAttention",
+        ckpt_attn,
+        bias_type,
+    )
 
-    atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (5e-3, 5e-3)
-    if bias_type == "no_bias":
-        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
+    # FusedAttention backend
+    if compute_capability in ((8, 0), (9, 0)):
+        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            dtype,
+            bs,
+            config,
+            "FusedAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+
+    # FlashAttention backend
+    if compute_capability >= (8, 0) and bias_type == "no_bias":
+        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+            dtype,
+            bs,
+            config,
+            "FlashAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type):
 
@@ -135,33 +165,61 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
 
     return op, inp.grad
 
-@pytest.mark.skipif(
-    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
 def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
-    """Test TransformerLayer module when its DotProductAttention is enabled with
-    FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
+    """Test TransformerLayer module with different attention backends"""
 
+    # Get configs
     config = model_configs[model]
+    tols = dict(atol=5e-1, rtol=5e-2)
 
-    if bias_type == "no_bias":
-        flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
-    fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type)
+    # Skip if only unfused backend is supported
+    compute_capability = get_device_compute_capability()
+    if compute_capability < (8, 0):
+        pytest.skip(
+            "FusedAttention and FlashAttention are not supported "
+            f"with compute capability {compute_capability[0]}.{compute_capability[1]}"
+        )
+
+    # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
+        dtype,
+        bs,
+        config,
+        "UnfusedDotProductAttention",
+        ckpt_attn,
+        bias_type,
+    )
 
-    atol, rtol = (5e-1, 5e-2)
-    if bias_type == "no_bias":
-        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
+    # FusedAttention backend
+    if compute_capability in ((8, 0), (9, 0)):
+        fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
+            dtype,
+            bs,
+            config,
+            "FusedAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+
+    # FlashAttention backend
+    if compute_capability >= (8, 0) and bias_type == "no_bias":
+        flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
+            dtype,
+            bs,
+            config,
+            "FlashAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
@@ -247,7 +305,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
 @pytest.mark.skipif(not _flash_attn_2_available, reason="FA2.0 is not available")
 @pytest.mark.skipif(
-    get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
+    get_device_compute_capability() < (8, 0), reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -279,8 +337,11 @@ def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_gr
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
+    if backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
 
     inp = torch.randn(
             config.seq_len, bs, config.num_attention_heads * config.head_dim,
@@ -351,24 +412,47 @@ model_configs_fp8 = {
 batch_sizes_fp8 = [1, 4]
 param_types_fp8 = [torch.float16]
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("bs", batch_sizes_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8.keys())
 def test_dpa_fp8(dtype, bs, model):
-    """Test DotProductAttention module with FP8,
-    using cpp_extensions import fused_attn_fwd/bwd_qkvpacked and UnfusedDotProductAttention"""
+    """Test FP8 dot-product attention with different backends
+
+    FusedAttention uses fused_attn_fwd/bwd_qkvpacked from
+    cpp_extensions. UnfusedDotProductAttention uses
+
+    """
 
     config = model_configs_fp8[model]
 
-    fused_attn_fwd, fused_attn_bwd = _run_dpa_fp8(
-            dtype, bs, config, "FusedAttention")
-    unfused_attn_fwd, unfused_attn_bwd = _run_dpa_fp8_ref(
-            dtype, bs, config, "UnfusedDotProductAttention")
+    # Skip if not supported
+    compute_capability = get_device_compute_capability()
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if compute_capability in ((8, 0), (9, 0)):
+        pytest.skip(
+            "FusedAttention is not supported "
+            f"with compute capability {compute_capability[0]}.{compute_capability[1]}"
+        )
 
-    atol, rtol = (2.5e-2, 2.5e-2)
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
+    # Run dot-product attention with different backends
+    fused_attn_fwd, fused_attn_bwd = _run_dpa_fp8(
+        dtype,
+        bs,
+        config,
+        "FusedAttention"
+    )
+    unfused_attn_fwd, unfused_attn_bwd = _run_dpa_fp8_ref(
+        dtype,
+        bs,
+        config,
+        "UnfusedDotProductAttention",
+    )
+
+    # Check that results match
+    tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, **tols)
+    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dpa_fp8(dtype, bs, config, backend):
 

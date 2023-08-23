@@ -713,9 +713,11 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
-        self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
-                        and _flash_attn_2_available
-                        and get_device_compute_capability() == 9.0)
+        self.use_FAv2_bwd = (
+            os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
+            and _flash_attn_2_available
+            and get_device_compute_capability() == (9, 0)
+        )
 
     def forward(
         self,
@@ -960,7 +962,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
         if _flash_attn_2_available and self.deterministic:
             self.use_flash_attention = False
@@ -972,7 +974,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_fused_attention = (
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
 
         attn_kwargs = {
@@ -1094,9 +1096,12 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         if key_layer.shape[-1] > 64:
-            if self.device_compute_capability in (8.6, 8.7):
+            if self.device_compute_capability in ((8, 6), (8, 7)):
                 use_flash_attention = False
-            elif not _flash_attn_2_available and self.device_compute_capability == 8.9:
+            elif (
+                not _flash_attn_2_available
+                and self.device_compute_capability == (8, 9)
+            ):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
