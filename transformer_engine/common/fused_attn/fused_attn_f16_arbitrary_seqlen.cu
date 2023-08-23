@@ -556,7 +556,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 d,           scaling_factor,
                                 is_training, dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
+                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
+                                false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
@@ -687,7 +688,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 d,           scaling_factor,
                                 true,        dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
+                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
+                                use_workspace_opt};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_bprop_cache;
@@ -1329,15 +1331,16 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
         // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
-        // plus buffer size 128MB
         size_t free_byte;
         size_t total_byte;
         NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
-        size_t wkspace_size = 8 * batch * num_head * max_seqlen * head_dim * 2
-                        + 2 * batch * num_head * max_seqlen * sizeof(float)
-                        + batch * num_head * max_seqlen * max_seqlen * 2
-                        + 128 * 1024 * 1024;
-        use_workspace_opt = free_byte > wkspace_size;
+        size_t max_seqlen_div_up = ((max_seqlen + 64 - 1) / 64) * 64;
+        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up * head_dim * 2
+                        + 2 * batch * num_head * max_seqlen_div_up * sizeof(float)
+                        + batch * num_head * max_seqlen_div_up * max_seqlen_div_up * 2;
+        size_t max_allowed = 1024 * 1024 * 1024;
+
+        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
     }
 #endif
 
