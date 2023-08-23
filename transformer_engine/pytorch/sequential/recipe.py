@@ -33,16 +33,18 @@ class Recipe:
     lowp: DType = DType.Float32
     world_size: int = 1
 
+    recipe_stack: list[Recipe] = []  # static
+
     def __enter__(self):
-        __recipe_stack.append(self)
+        Recipe.recipe_stack.append(self)
 
     def __exit__(self, exc_type: type[T], exc_value: T, exc_traceback: TracebackType):
-        assert __recipe_stack[-1] is self
-        __recipe_stack.pop()
+        assert Recipe.recipe_stack[-1] is self
+        Recipe.recipe_stack.pop()
 
     @staticmethod
     def current() -> Recipe:
-        return __recipe_stack[-1]
+        return Recipe.recipe_stack[-1]
 
 
-__recipe_stack = [Recipe()]
+Recipe.recipe_stack.append(Recipe())
