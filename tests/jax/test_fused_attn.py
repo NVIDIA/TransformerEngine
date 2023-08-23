@@ -164,7 +164,11 @@ class TestSelfFusedAttn():
                                                           attn_mask_type != AttnMaskType.CAUSAL_MASK
                                                           or pad_ratio != 0):
             pytest.skip("Unsupported inputs combination.")
+
         if backend == Backend.Max512 and get_device_compute_capability(0) not in [80, 90]:
+            pytest.skip("Unsupported device compute capability.")
+
+        if backend == Backend.Arbitrary and get_device_compute_capability(0) < 80:
             pytest.skip("Unsupported device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
