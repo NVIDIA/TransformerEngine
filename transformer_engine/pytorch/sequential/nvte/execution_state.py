@@ -4,8 +4,8 @@ from ..persistent import Persistent
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
-pass_: Literal["forward", "backward", "inference"] = None  # type: ignore
-meta_tensor_provider: Persistent[FP8Meta] = None  # type: ignore
+pass_: Literal["forward", "backward", "inference"]
+meta_tensor_provider: Persistent[FP8Meta]
 
 
 def set_execution_state(

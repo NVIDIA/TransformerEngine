@@ -138,14 +138,17 @@ class ComputePipeline:
         )
         self.forward = tuple(op for f in self.functions for op in f.fwds)
         self.backward = tuple(op for f in self.functions for op in f.bwds)
-        self.meta_inf = PersistentFP8Meta()
         self.meta_fwd = PersistentFP8Meta()
         self.meta_bwd = PersistentFP8Meta()
 
-    def run_inference(self, x: nvte.Tensor) -> nvte.Tensor:
+    def run_inference(self, x: nvte.Tensor):
         for op in self._inf:
             x = op.inference(x)
         return x
+
+    def next_iteration(self):
+        self.meta_fwd.next_iteration()
+        self.meta_bwd.next_iteration()
 
     def __repr__(self):
         return f"""ComputePipeline(
