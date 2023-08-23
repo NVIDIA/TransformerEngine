@@ -7,7 +7,7 @@ T = TypeVar("T")
 ExcT = TypeVar("ExcT")
 
 
-class __Context:
+class __Context(Generic[PS, T]):
     def __init__(
         self,
         func: Callable[PS, Generator[T, None, None]],
