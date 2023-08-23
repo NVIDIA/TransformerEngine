@@ -1,7 +1,6 @@
 import os
-from functools import cache
-from contextlib import contextmanager
 import torch
+from ..utils import contextmanager, cache
 from .. import cpp_extensions as _nvte
 from . import execution_state
 from .dtype import dtype_name
@@ -186,7 +185,7 @@ def rmsnorm(
     out = empty(x.shape, out_dtype)
 
     if zero_centered_gamma:
-        raise NotImplementedError() # TODO
+        raise NotImplementedError()  # TODO
     else:
         func = _nvte.rmsnorm_fwd
 
@@ -225,7 +224,7 @@ def drmsnorm(
     dgamma = empty(gamma.shape, dgamma_dtype)
 
     if zero_centered_gamma:
-        raise NotImplementedError() # TODO
+        raise NotImplementedError()  # TODO
     else:
         func = _nvte.rmsnorm_bwd
 

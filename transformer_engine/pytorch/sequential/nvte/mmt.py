@@ -1,5 +1,5 @@
 import subprocess
-from functools import cache
+from ..utils import cache
 import torch
 from .. import cpp_extensions as _nvte
 from .empty import empty
