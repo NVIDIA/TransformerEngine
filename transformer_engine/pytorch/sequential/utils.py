@@ -7,7 +7,7 @@ T = TypeVar("T")
 ExcT = TypeVar("ExcT")
 
 
-class __Context(Generic[PS, T]):
+class _Context(Generic[PS, T]):
     def __init__(
         self,
         func: Callable[PS, Generator[T, None, None]],
@@ -37,7 +37,7 @@ class contextmanager(Generic[PS, T]):
         self.func = func
 
     def __call__(self, *args: PS.args, **kwargs: PS.kwargs):
-        return __Context(self.func, *args, **kwargs)
+        return _Context(self.func, *args, **kwargs)
 
 
 def cache(func: Callable[[], T]) -> Callable[[], T]:
