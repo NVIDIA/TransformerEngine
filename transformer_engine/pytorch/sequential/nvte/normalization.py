@@ -3,7 +3,7 @@ from functools import cache
 from contextlib import contextmanager
 import torch
 from .. import cpp_extensions as _nvte
-from .execution_state import pass_
+from . import execution_state
 from .dtype import dtype_name
 from .empty import empty, empty_like
 
@@ -26,9 +26,9 @@ def _sm_total_count() -> int:
 
 
 def _sm_margin():
-    if pass_ == "backward":
+    if execution_state.pass_ == "backward":
         return _bwd_sm_margin()
-    elif pass_ == "forward":
+    elif execution_state.pass_ == "forward":
         return _fwd_sm_margin()
     else:
         return 0

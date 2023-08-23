@@ -3,7 +3,7 @@ from functools import cache
 import torch
 from .. import cpp_extensions as _nvte
 from .empty import empty
-from .execution_state import pass_
+from . import execution_state
 
 
 @cache
@@ -60,10 +60,10 @@ def matmul_transpose_add(
         empty(),
         trans_a,
         trans_b,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         _cublas_workspace(),
         False,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         0,
     )
     return out
@@ -84,10 +84,10 @@ def matmul_transpose_add_gelu(
         pre_gelu,
         trans_a,
         trans_b,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         _cublas_workspace(),
         False,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         0,
     )
     return pre_gelu, out
@@ -106,10 +106,10 @@ def matmul_transpose_add_add(
         empty(),
         trans_a,
         trans_b,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         _cublas_workspace(),
         True,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         0,
     )
     return add2
@@ -129,10 +129,10 @@ def matmul_transpose_add_gelu_add(
         pre_gelu,
         trans_a,
         trans_b,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         _cublas_workspace(),
         True,
-        pass_ == "backward",
+        execution_state.pass_ == "backward",
         0,
     )
     return pre_gelu, add2
