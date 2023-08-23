@@ -1,4 +1,4 @@
-import printing # for side effects
+from . import printing  # for side effects
 from .meta import PersistentFP8Meta
 from .recipe import Recipe
 
