@@ -8,7 +8,7 @@ import unittest
 import paddle
 from paddle.distributed import fleet
 
-from utils import assert_allclose, set_random_seed
+from utils import assert_allclose, assert_shape, set_random_seed
 import transformer_engine.paddle as te
 
 
@@ -71,14 +71,15 @@ class TestLayerNormMLPTp(unittest.TestCase):
         # Get total weight
         total_fc1_weight = _get_total_weight(layer_te.fc1_weight, tp_group=self.tp_group, axis=0)
         total_fc2_weight = _get_total_weight(layer_te.fc2_weight, tp_group=self.tp_group, axis=1)
-        assert total_fc1_weight.T.shape == layer_pd.fc1_weight.shape, \
-                f"Shapes of src:{total_fc1_weight.T.shape} and " \
-                f"dst:{layer_pd.fc1_weight.shape} do not match."
         layer_pd.fc1_weight.copy_(total_fc1_weight.T, True)
-        assert total_fc2_weight.T.shape == layer_pd.fc2_weight.shape, \
-                f"Shapes of src:{total_fc2_weight.T.shape} and " \
-                f"dst:{layer_pd.fc2_weight.shape} do not match."
         layer_pd.fc2_weight.copy_(total_fc2_weight.T, True)
+
+        assert_shape(layer_te.fc1_weight,
+                     [self.ffn_hidden_size // self.model_parallel_size, self.hidden_size])
+        assert_shape(layer_te.fc1_bias, [self.ffn_hidden_size // self.model_parallel_size])
+        assert_shape(layer_te.fc2_weight,
+                     [self.hidden_size, self.ffn_hidden_size // self.model_parallel_size])
+        assert_shape(layer_te.fc2_bias, [self.hidden_size])
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_te.parameters())
         optimizer_pd = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_pd.parameters())

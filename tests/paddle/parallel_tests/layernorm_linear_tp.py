@@ -9,7 +9,7 @@ import paddle
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
 
-from utils import assert_allclose, set_random_seed
+from utils import assert_allclose, assert_shape, set_random_seed
 import transformer_engine.paddle as te
 
 
@@ -65,10 +65,11 @@ class TestLayerNormLinearTp(unittest.TestCase):
         partial_weight = layer_te.weight.clone().detach()
         paddle.distributed.all_gather(total_weight, partial_weight, group=self.tp_group)
         total_weight = paddle.concat(total_weight, axis=0)
-        assert total_weight.T.shape == layer_pd.weight.shape, \
-                f"Shapes of src:{total_weight.T.shape} and " \
-                f"dst:{layer_pd.weight.shape} do not match."
         layer_pd.weight.copy_(total_weight.T, True)
+
+        assert_shape(layer_te.weight,
+                     [self.out_features // self.model_parallel_size, self.in_features])
+        assert_shape(layer_te.bias, [self.out_features // self.model_parallel_size])
 
         optimizer_te = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_te.parameters())
         optimizer_pd = paddle.optimizer.SGD(learning_rate=0.001, parameters=layer_pd.parameters())
