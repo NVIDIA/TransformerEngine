@@ -6,8 +6,13 @@ from ..meta import PersistentFP8Meta
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
-pass_: Literal["forward", "backward", "inference"]
-meta_tensor_provider: Persistent[FP8Meta]
+def _default_meta_tensor_provider():
+    meta_tensor_provider = PersistentFP8Meta()
+    meta_tensor_provider.next_iteration()
+    return meta_tensor_provider
+
+pass_: Literal["forward", "backward", "inference"] = "inference"
+meta_tensor_provider: Persistent[FP8Meta] = _default_meta_tensor_provider()
 
 
 @contextmanager
@@ -23,6 +28,5 @@ def set_execution_state(
     try:
         yield
     finally:
-        meta_tensor_provider = PersistentFP8Meta()
-        meta_tensor_provider.next_iteration()
+        meta_tensor_provider = _default_meta_tensor_provider()
         pass_ = "inference"
