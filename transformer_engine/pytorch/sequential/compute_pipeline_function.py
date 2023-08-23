@@ -213,7 +213,11 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 pipeline.meta_bwd,
             )
             x = ComputePipelineFunction.apply(x, *exposed_tensors, args)  # type: ignore
-            nvte_x = args.nvte_x
+            nvte_x, is_exposed_x_squished_now, upcoming_backward = (
+                args.nvte_x,
+                args.is_exposed_x_squished_now,
+                args.upcoming_backward,
+            )
         return x
 
 
