@@ -14,19 +14,20 @@ m = seq.Sequential(
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
-with seq.environment(seq.nvte.DType.Float8E4M3):
+with seq.Recipe(lowp=seq.nvte.DType.Float8E4M3):
+    for _ in range(100):
+        y = m(x)
+        y.sum().backward()
+        print(x.grad)
+        x.grad = None
+
+with seq.Recipe(lowp=seq.nvte.DType.BFloat16):
     y = m(x)
     y.sum().backward()
     print(x.grad)
     x.grad = None
 
-with seq.environment(seq.nvte.DType.BFloat16):
-    y = m(x)
-    y.sum().backward()
-    print(x.grad)
-    x.grad = None
-
-with seq.environment(seq.nvte.DType.Float32):
+with seq.Recipe(lowp=seq.nvte.DType.Float32):
     y = m(x)
     y.sum().backward()
     print(x.grad)

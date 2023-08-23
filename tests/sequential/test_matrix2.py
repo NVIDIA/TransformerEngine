@@ -276,18 +276,18 @@ def test(
     with autocast("cuda", torch.bfloat16):
         pt_bf16 = pt_test(*args)
 
-    with seq.environment(DType.Float32):
+    with seq.Recipe(lowp=DType.Float32):
         sequ_fp32 = seq_test_unfused(*args)
-    with seq.environment(DType.BFloat16):
+    with seq.Recipe(lowp=DType.BFloat16):
         sequ_bf16 = seq_test_unfused(*args)
-    with seq.environment(DType.Float16):
+    with seq.Recipe(lowp=DType.Float16):
         sequ_fp16 = seq_test_unfused(*args)
 
-    with seq.environment(DType.Float32):
+    with seq.Recipe(lowp=DType.Float32):
         seqf_fp32 = seq_test_fused(*args)
-    with seq.environment(DType.BFloat16):
+    with seq.Recipe(lowp=DType.BFloat16):
         seqf_bf16 = seq_test_fused(*args)
-    with seq.environment(DType.Float16):
+    with seq.Recipe(lowp=DType.Float16):
         seqf_fp16 = seq_test_fused(*args)
 
     for i, ref in enumerate([pt_fp32, pt_tf32, pt_fp16, pt_bf16]):
