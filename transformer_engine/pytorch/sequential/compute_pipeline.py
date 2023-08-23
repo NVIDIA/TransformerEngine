@@ -116,10 +116,13 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
     return functions
 
 
+# Needed for copy_op_list
+# Shouldn't cause any issues
+setattr(nvte.Tensor, "__deepcopy__", lambda self, memo: self) # type: ignore
+
 def copy_op_list(ops: list[Op]):
     "Deep copy ops, except for tensors"
-    with set_attribute(nvte.Tensor, "__deepcopy__", lambda self, memo: self):  # type: ignore[unknown-lambda-type]
-        return copy.deepcopy(ops)
+    return copy.deepcopy(ops)
 
 
 class ComputePipeline:
