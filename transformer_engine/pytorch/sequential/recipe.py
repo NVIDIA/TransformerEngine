@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, ClassVar
 from types import TracebackType
 from dataclasses import dataclass
 from .cpp_extensions import DType
@@ -33,7 +33,7 @@ class Recipe:
     lowp: DType = DType.Float32
     world_size: int = 1
 
-    recipe_stack: list[Recipe] = []  # static
+    recipe_stack: ClassVar[list[Recipe]] = []  # static
 
     def __enter__(self):
         Recipe.recipe_stack.append(self)
