@@ -608,8 +608,8 @@ class TestLayerNormMLP:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
+@pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
+                    reason="cuDNN fMHA is not supported")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
@@ -721,8 +721,8 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
+@pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
+                    reason="cuDNN fMHA is not supported")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
@@ -886,8 +886,8 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             atol=0.5)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
+@pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
+                    reason="cuDNN fMHA is not supported")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
