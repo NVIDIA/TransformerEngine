@@ -55,7 +55,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED))) {
       flag_m512 = true;
     }
-    if ((sm_arch_ == 80 || sm_arch_ == 90)
+    if ((sm_arch_ >= 80)
             && (max_seqlen_q == max_seqlen_kv)
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)

@@ -91,11 +91,15 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 }
 
 bool IsFusedAttnKernelAvailable() {
-#if (CUDNN_VERSION >= 8901)
-    const int sm_arch = cuda::sm_arch();
-    return sm_arch == 80 || sm_arch == 90;
-#else
+#if (CUDNN_VERSION < 8901)
     return false;
+#else
+    const int sm_arch = cuda::sm_arch();
+#if (CUDNN_VERSION >= 8903)
+    return sm_arch >= 80;
+#else
+    return sm_arch == 80 || sm_arch == 90;
+#endif
 #endif
 }
 

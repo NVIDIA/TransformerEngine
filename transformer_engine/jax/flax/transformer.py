@@ -24,7 +24,6 @@ from jax import lax, vmap
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..fused_attn import AttnBiasType, AttnMaskType
-from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
@@ -431,7 +430,6 @@ class MultiHeadAttention(nn.Module):
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
             _check_seqlen(q_seqlen) and _check_seqlen(kv_seqlen) and \
             _check_head_dim(self.head_dim) and \
-            is_fused_attn_kernel_available() and \
             enable_fused_attn
 
         if enable_fused_attn and not use_fused_attn:
@@ -454,8 +452,6 @@ class MultiHeadAttention(nn.Module):
                           f"but got {kv_seqlen=}, "
             if not _check_head_dim(self.head_dim):
                 reason += f"head_dim should be 64 or 128 but got {self.head_dim}, "
-            if not is_fused_attn_kernel_available():
-                reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
 
             warnings.warn(
                 f"Fused attention is not enabled, " \
