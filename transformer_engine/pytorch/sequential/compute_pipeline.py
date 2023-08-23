@@ -52,12 +52,12 @@ class SelfContainedOp(Op):
 
 def force_use_precision(ops: list[Op], allowed: nvte.DType):
     PRECISION = {
-        nvte.DType.Float8E4M3: 0,
-        nvte.DType.Float8E5M2: 0,
-        nvte.DType.BFloat16: 1,
-        nvte.DType.Float16: 2,
-        nvte.DType.Float32: 3,
-        nvte.DType.Int64: 4,
+        nvte.DType.Float8E4M3.value: 0,
+        nvte.DType.Float8E5M2.value: 0,
+        nvte.DType.BFloat16.value: 1,
+        nvte.DType.Float16.value: 2,
+        nvte.DType.Float32.value: 3,
+        nvte.DType.Int64.value: 4,
     }
 
     for op in ops:
@@ -67,7 +67,7 @@ def force_use_precision(ops: list[Op], allowed: nvte.DType):
             attr_val = getattr(op, dtype_attribute)
             if (
                 isinstance(attr_val, nvte.DType)
-                and PRECISION[attr_val] < PRECISION[allowed]
+                and PRECISION[attr_val.value] < PRECISION[allowed.value]
             ):
                 setattr(op, dtype_attribute, allowed)
 
@@ -112,6 +112,7 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
                         unmatched_fwd_ops.add(op)
         functions.append(SelfContainedOp(used_forwards, used_backwards))
     return functions
+
 
 class ComputePipeline:
     def __init__(self, ops: list[Op], env: Recipe):
