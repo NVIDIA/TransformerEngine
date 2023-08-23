@@ -26,10 +26,8 @@ class Sequential(BaseModule):
         self,
         *args: BaseModule | OrderedDict[str, BaseModule],
     ):
-        nn.Module.__init__(self)  # type: ignore
-        modules = self._modules_from_args(args)
-        ops = self._ops_from_modules(modules)
-        super().__init__(*ops)
+        super().__init__()
+        self.contained_modules = self._modules_from_args(args)
 
     def _modules_from_args(
         self, args: tuple[BaseModule | OrderedDict[str, BaseModule], ...]
@@ -54,8 +52,8 @@ class Sequential(BaseModule):
                 self.add_module(submodule_name, submodule)
         return modules
 
-    def _ops_from_modules(self, modules: list[tuple[str, BaseModule]]):
-        return [op for _, module in modules for op in module.ops]
+    def _ops(self):
+        return [op for _, module in self.contained_modules for op in module._ops()]
 
     def __len__(self):
         return len(self._modules)

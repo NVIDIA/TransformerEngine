@@ -29,7 +29,7 @@ class Linear(BaseModule):
         weight_init_method: ParameterInitMethod = _default_weight_init_method,
         bias_init_method: ParameterInitMethod = _default_bias_init_method,
     ):
-        nn.Module.__init__(self)  # type: ignore
+        super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
@@ -49,10 +49,11 @@ class Linear(BaseModule):
             else None
         )
 
-        super().__init__(
+    def _ops(self) -> list[ops.Op | None]:
+        return [
             ops.MMT(make_nvte_tensor(self.weight)),
             ops.Add(make_nvte_tensor(self.bias)) if self.bias is not None else None,
-        )
+        ]
 
     def extra_repr(self):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"

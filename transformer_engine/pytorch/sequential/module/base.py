@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import torch
 from torch import nn
 from ..ops import Op
@@ -6,15 +7,16 @@ from ..compute_pipeline import ComputePipeline
 from ..compute_pipeline_function import apply
 
 
-class BaseModule(nn.Module):
-    ops: list[Op]
+class BaseModule(nn.Module, ABC):
     pipeline: ComputePipeline | None
     compile_env: Recipe | None
 
-    def __init__(self, *ops: Op | None):
-        "Note: nn.Module.__init__ must be called by the derived class"
-        ops_clean = [op for op in ops if op is not None]
-        self.ops = ops_clean
+    @abstractmethod
+    def _ops(self) -> list[Op | None]:
+        ...
+
+    def __init__(self):
+        super().__init__()  # type: ignore
         self.pipeline = None
         self.compile_env = None
 
@@ -41,7 +43,9 @@ class BaseModule(nn.Module):
 
         env = self._current_env()
         if self.pipeline is None or env != self.compile_env:
-            self.pipeline = ComputePipeline(self.ops, env)
+            self.pipeline = ComputePipeline(
+                [op for op in self._ops() if op is not None], env
+            )
             self.compile_env = env
         return apply(x, self.pipeline, self.training)
 

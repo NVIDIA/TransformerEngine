@@ -1,4 +1,3 @@
-import copy
 from functools import reduce
 import operator
 from . import nvte
@@ -114,21 +113,8 @@ def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
         functions.append(SelfContainedOp(used_forwards, used_backwards))
     return functions
 
-
-# Needed for copy_op_list
-# Shouldn't cause any issues
-setattr(nvte.Tensor, "__deepcopy__", lambda self, memo: self)  # type: ignore
-
-
-def copy_op_list(ops: list[Op]):
-    "Deep copy ops, except for tensors"
-    return copy.deepcopy(ops)
-
-
 class ComputePipeline:
     def __init__(self, ops: list[Op], env: Recipe):
-        ops = copy_op_list(ops)
-
         name_ops(ops)
         force_use_precision(ops, env.lowp)
         if env.world_size > 1:

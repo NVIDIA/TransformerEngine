@@ -14,7 +14,7 @@ class Normalization(BaseModule, ABC):
         zero_centered_gamma: bool = False,
         param_dtype: torch.dtype = torch.get_default_dtype(),
     ):
-        nn.Module.__init__(self)  # type: ignore
+        super().__init__()
 
         self.features = features
         self.eps = eps
@@ -31,18 +31,19 @@ class Normalization(BaseModule, ABC):
             else None
         )
 
-        super().__init__(
+    def _ops(self) -> list[ops.Op | None]:
+        return [
             type(self)._op_type(
                 *(
                     (
-                        eps,
-                        zero_centered_gamma,
+                        self.eps,
+                        self.zero_centered_gamma,
                         make_nvte_tensor(self.weight),
                     )
                     + ((make_nvte_tensor(self.bias),) if self.bias is not None else ())
                 )
-            )
-        )
+            ),
+        ]
 
     def extra_repr(self):
         return f"features={self.features}, eps={self.eps}, zero_centered_gamma={self.zero_centered_gamma}"

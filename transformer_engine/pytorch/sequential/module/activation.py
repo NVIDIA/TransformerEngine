@@ -1,13 +1,14 @@
 from abc import ABC
-from torch import nn
 from .base import BaseModule
 from .. import ops
 
 
 class Activation(BaseModule, ABC):
     def __init__(self):
-        nn.Module.__init__(self)  # type: ignore
-        super().__init__(type(self)._op_type())
+        super().__init__()
+
+    def _ops(self) -> list[ops.Op | None]:
+        return [type(self)._op_type()]
 
     _op_type: type[ops.Activation]
 

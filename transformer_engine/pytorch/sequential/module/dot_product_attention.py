@@ -1,10 +1,6 @@
 from abc import abstractmethod, ABC
-from math import sqrt
-import torch
-from torch import nn
 from .base import BaseModule
 from .. import ops
-from ..nvte import DType, make_nvte_tensor
 
 class Attention(ABC):
     @abstractmethod
@@ -29,11 +25,11 @@ class GroupedQuerySelfAttention(BaseModule):
         assert num_kv_heads <= num_query_heads
         assert num_query_heads % num_kv_heads == 0
         assert token_dim % num_query_heads == 0
-        nn.Module.__init__(self)  # type: ignore
+        self.attention_mechanism = attention_mechanism
+        super().__init__()
 
-        return super().__init__(
-            attention_type(),
-        )
+    def _ops(self) -> list[ops.Op | None]:
+        return [self.attention_mechanism.make_op()]
 
 
 class MultiQuerySelfAttention(GroupedQuerySelfAttention):
