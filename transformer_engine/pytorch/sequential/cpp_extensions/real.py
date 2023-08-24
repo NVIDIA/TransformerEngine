@@ -58,19 +58,24 @@ def inject_real(namespace: dict[str, Any]):
         real_func = real_function(func_name)
         exposed_return_type: type = get_return_type(func_obj)
 
-        def wrapper(*args: Any) -> Any:
-            real_args = ()
-            for arg in args:
-                if isinstance(arg, Enum):
-                    real_args += (arg.value,)
+        def make_wrapper(func_obj: Any):
+            def wrapper(*args: Any) -> Any:
+                real_args = ()
+                for arg in args:
+                    if isinstance(arg, Enum):
+                        real_args += (arg.value,)
+                    else:
+                        real_args += (arg,)
+                result: Any = real_func(*real_args)
+                if issubclass(exposed_return_type, Enum):
+                    assert isinstance(result, int)
+                    return exposed_return_type(result)  # type: ignore
                 else:
-                    real_args += (arg,)
-            result: Any = real_func(*real_args)
-            if issubclass(exposed_return_type, Enum):
-                assert isinstance(result, int)
-                return exposed_return_type(result)  # type: ignore
-            else:
-                return result
+                    return result
+
+            return wrapper
+
+        wrapper = make_wrapper(func_obj)
 
         wrapper.__name__ = func_name
         wrapper.__annotations__ = func_obj.__annotations__
