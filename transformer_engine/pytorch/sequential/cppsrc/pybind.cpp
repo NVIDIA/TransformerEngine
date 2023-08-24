@@ -215,18 +215,19 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 }
 
 // Manual wrapper around nvte_multi_cast_transpose
-void multi_cast_transpose(const std::vector<Tensor> &inputs,
-                          const std::vector<Tensor> &cast_outs,
-                          const std::vector<Tensor> &transposed_outs) {
+void multi_cast_transpose(
+    const std::vector<c10::intrusive_ptr<Tensor>> &inputs,
+    const std::vector<c10::intrusive_ptr<Tensor>> &cast_outs,
+    const std::vector<c10::intrusive_ptr<Tensor>> &transposed_outs) {
   auto count = inputs.size();
   std::vector<NVTETensor> inputs_(count);
   std::vector<NVTETensor> cast_outs_(count);
   std::vector<NVTETensor> transposed_outs_(count);
 
   for (int i = 0; i < inputs.size(); ++i) {
-    inputs_[i] = (NVTETensor)inputs[i].pimpl.get();
-    cast_outs_[i] = (NVTETensor)cast_outs[i].pimpl.get();
-    transposed_outs_[i] = (NVTETensor)transposed_outs[i].pimpl.get();
+    inputs_[i] = (NVTETensor)(inputs[i]->pimpl.get());
+    cast_outs_[i] = (NVTETensor)(cast_outs[i]->pimpl.get());
+    transposed_outs_[i] = (NVTETensor)(transposed_outs[i]->pimpl.get());
   }
 
   nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
