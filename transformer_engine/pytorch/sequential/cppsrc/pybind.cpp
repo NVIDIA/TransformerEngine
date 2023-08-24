@@ -140,6 +140,10 @@ template <typename T> struct wrapped : exposed_type<T> {
   static T wrap(T arg) { return arg; }
   static T unwrap(T arg) { return arg; }
 };
+template <> struct wrapped<void> : exposed_type<void> {
+  static float wrap(void) { return; }
+  static double unwrap(void) { return; }
+};
 template <> struct wrapped<float> : exposed_type<double> {
   static float wrap(double arg) { return arg; }
   static double unwrap(float arg) { return arg; }
