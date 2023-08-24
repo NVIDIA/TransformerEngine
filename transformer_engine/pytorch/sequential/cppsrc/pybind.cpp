@@ -158,13 +158,17 @@ remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
                               type_list<SuffixArgs...>) noexcept {
   return [func](wrapped_arg_t<PrefixArgs>... prefixArgs,
                 wrapped_arg_t<SuffixArgs>... suffixArgs) -> Ret {
-    auto result = func(wrapped_arg<PrefixArgs>::unwrap(prefixArgs)...,
-                       at::cuda::getCurrentCUDAStream(),
-                       wrapped_arg<SuffixArgs>::unwrap(suffixArgs)...);
-    cuda_check();
-    return result;
+    at_scope_exit _{cuda_check};
+    return func(wrapped_arg<PrefixArgs>::unwrap(prefixArgs)...,
+                at::cuda::getCurrentCUDAStream(),
+                wrapped_arg<SuffixArgs>::unwrap(suffixArgs)...);
   };
 }
+
+struct at_scope_exit {
+  void (*ptr)();
+  ~at_scope_exit() { ptr(); }
+};
 
 template <typename Ret, typename... Args>
 constexpr auto wrap(Ret(func)(Args...)) noexcept {
@@ -176,9 +180,8 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
-      auto result = func(wrapped_arg<Args>::unwrap(args)...);
-      cuda_check();
-      return result;
+      at_scope_exit _{cuda_check};
+      return func(wrapped_arg<Args>::unwrap(args)...);
     };
   }
 }
