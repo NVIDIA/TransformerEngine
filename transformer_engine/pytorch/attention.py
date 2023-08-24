@@ -508,35 +508,49 @@ class FlashAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                            for x in (query_layer, key_layer, value_layer)]
 
-        batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
+        batch_size, seqlen_q = query_layer.shape[0], query_layer.shape[1]
+        seqlen_k = key_layer.shape[1]
 
         # [b, sq, np, hn]
         query_layer, key_layer, value_layer = [
             x.view(x.shape[0] * x.shape[1], *x.shape[2:])
             for x in [query_layer, key_layer, value_layer]
         ]
-
-        max_seqlen = seqlen
-        cu_seqlens = torch.arange(
+        cu_seqlens_q = torch.arange(
             0,
-            (batch_size + 1) * seqlen,
-            step=seqlen,
+            (batch_size + 1) * seqlen_q,
+            step=seqlen_q,
             dtype=torch.int32,
             device=query_layer.device)
+
+        if self.training:
+            # during training q,k,v always have same seqlen
+            assert seqlen_k == seqlen_q
+
+            is_causal = self.attn_causal_mask
+            cu_seqlens_k = cu_seqlens_q
+            dropout_p = self.attention_dropout
+        else:
+            # turn off FA causal mask after first inference autoregressive iteration
+            # only on first autoregressive step q,k,v have same seqlen
+            is_causal = seqlen_q == seqlen_k
+            cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32,
+                        device=query_layer.device)
+            dropout_p = 0
 
         with self.attention_dropout_ctx():
             fa_optional_forward_kwargs = {}
             if not _flash_attn_2_available:
                 fa_optional_forward_kwargs["deterministic"] = self.deterministic
             output = flash_attn_forward_func(
-                query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
-                self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
+                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                dropout_p,
+                softmax_scale=1.0/self.norm_factor, causal=is_causal,
                 **fa_optional_forward_kwargs
             )
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        return output.view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous()
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
