@@ -55,7 +55,7 @@ all_boolean = [True, False]
 def get_bash_arguments(**kwargs) -> List[str]:
     args = []
     script_path = os.path.join(
-        os.getenv("TE_PATH", "/opt/transformer_engine"),
+        os.getenv("TE_PATH", "/opt/transformerengine"),
         "tests/pytorch/distributed/run_megatron_lm_gpt.sh")
     args.append(script_path)
 
@@ -81,4 +81,5 @@ def test_distributed(dtype, fp8_recipe, tp, pp, sp, model):
             PP_SIZE=pp,
             **asdict(model_configs[model]),
         ),
-        shell=True)
+        shell=True,
+        check=True)
