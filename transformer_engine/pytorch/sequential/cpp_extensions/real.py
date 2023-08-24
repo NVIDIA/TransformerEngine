@@ -7,6 +7,18 @@ from torch._ops import OpOverloadPacket, _OpNamespace  # type: ignore
 from torch._classes import _ClassNamespace  # type: ignore
 from torch._C import ScriptClass  # type: ignore
 
+try:
+    # Normally, torch.classes.load_library would be used
+    # to load the classes from the module.
+    # However, that requires knowing where the module is.
+    # A simpler way is to just import it.
+    import transformer_engine_cuda  # type: ignore
+except:
+    # The import will always fail, as torch libraries
+    # are not supposed to be imported directly.
+    # However, it does achieve the effect of loading the classes.
+    pass
+
 
 def inject_real(namespace: dict[str, Any]):
     stub = import_file_as_module("__init__.pyi")
