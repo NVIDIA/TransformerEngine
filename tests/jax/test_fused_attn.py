@@ -20,6 +20,7 @@ from jax import value_and_grad, jit
 
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
+from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 from transformer_engine_jax import get_device_compute_capability
 
 # Type annotations
@@ -157,19 +158,14 @@ class TestSelfFusedAttn():
     """Tests for transformer_engine.jax.fused_attn.self_fused_attn"""
 
     @staticmethod
-    def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, pad_ratio):
-        # Arbitrary seqlen backend has a limited spec for now
-        # No bias, only causal mask, and no variable seqlen
-        if (s > 512 or backend == Backend.Arbitrary) and (attn_bias_type != AttnBiasType.NO_BIAS or
-                                                          attn_mask_type != AttnMaskType.CAUSAL_MASK
-                                                          or pad_ratio != 0):
-            pytest.skip("Unsupported inputs combination.")
+    def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
+                      head_dim, pad_ratio):
+        if (s > 512 or backend == Backend.Arbitrary) and pad_ratio != 0:
+            pytest.skip("Arbitrary seqlen backend hasn't support padded input.")
 
-        if backend == Backend.Max512 and get_device_compute_capability(0) not in [80, 90]:
-            pytest.skip("Unsupported device compute capability.")
-
-        if backend == Backend.Arbitrary and get_device_compute_capability(0) < 80:
-            pytest.skip("Unsupported device compute capability.")
+        if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
+                                              dropout_probability, s, s, head_dim):
+            pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
                     dropout_probability, dtype, is_training, pad_ratio):
@@ -178,6 +174,9 @@ class TestSelfFusedAttn():
                                      attn_bias_type=attn_bias_type,
                                      attn_mask_type=attn_mask_type,
                                      backend=backend,
+                                     dropout_probability=dropout_probability,
+                                     dtype=dtype,
+                                     head_dim=d,
                                      pad_ratio=pad_ratio)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
