@@ -23,5 +23,9 @@ class __TensorImpostor:
     ):
         return raw_tensor(dtype.value, data, amax, scale, scale_inv)  # type: ignore
 
+    def dtype(self, self_: Any):  # type: ignore
+        raw_dtype = raw_tensor.dtype(self_)  # type: ignore
+        return DType(raw_dtype)  # type: ignore
+
 
 Tensor = __TensorImpostor()
