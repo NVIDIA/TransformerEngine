@@ -93,9 +93,10 @@ def import_file_as_module(
         old_cwd = None
 
     try:
-        path = Path(file_path).resolve(strict=True)
+        path = Path(file_path)
         if not path.suffix:
             path = path.with_suffix(".py")
+        path = path.resolve(strict=True)
 
         spec = spec_from_loader(path.name, SourceFileLoader(path.name, str(path)))
         if spec is None:
