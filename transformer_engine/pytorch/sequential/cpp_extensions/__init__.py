@@ -7,25 +7,28 @@ raw_tensor = globals().pop("Tensor")
 
 
 class __TensorImpostor:
-    def __getattribute__(self, __name: str) -> Any:
-        if __name == "__repr__":
-            return printing.tensor_repr  # type: ignore
-        else:
-            return getattr(raw_tensor, __name)
+    __raw: object
 
+    def __init__(self, __raw: object):
+        self.__raw = __raw
+
+    def __repr__(self) -> str:
+        return printing.tensor_repr(self.__raw)  # type: ignore
+
+    def __getattr__(self, __name: str) -> Any:
+        return getattr(self.__raw, __name)
+
+
+class __TensorTypeImpostor:
     def __call__(
         self,
-        dtype: Any,
+        dtype: Enum,
         data: torch.Tensor,
         amax: torch.Tensor,
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        return raw_tensor(dtype.value, data, amax, scale, scale_inv)  # type: ignore
-
-    def dtype(self, self_: Any):  # type: ignore
-        raw_dtype = raw_tensor.dtype(self_)  # type: ignore
-        return DType(raw_dtype)  # type: ignore
+        return __TensorImpostor(raw_tensor(dtype.value, data, amax, scale, scale_inv))  # type: ignore
 
 
-Tensor = __TensorImpostor()
+Tensor = __TensorTypeImpostor()
