@@ -141,8 +141,11 @@ template <typename T> struct wrapped : exposed_type<T> {
   static T unwrap(T arg) { return arg; }
 };
 template <> struct wrapped<void> : exposed_type<void> {
-  static float wrap(void) { return; }
-  static double unwrap(void) { return; }
+  // Intentionally left blank
+  // ie. this should never be used
+  // because an argument cannot have
+  // void type, while conversion
+  // should be skipped for void return type.
 };
 template <> struct wrapped<float> : exposed_type<double> {
   static float wrap(double arg) { return arg; }
@@ -207,9 +210,16 @@ remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
   return [func](wrapped_t<PrefixArgs>... prefixArgs,
                 wrapped_t<SuffixArgs>... suffixArgs) -> wrapped_t<Ret> {
     at_scope_exit _{cuda_check};
-    return wrapped<Ret>::wrap(func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
-                                   at::cuda::getCurrentCUDAStream(),
-                                   wrapped<SuffixArgs>::unwrap(suffixArgs)...));
+    if constexpr (!std::is_same_v<Ret, void>) {
+      return wrapped<Ret>::wrap(
+          func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
+               at::cuda::getCurrentCUDAStream(),
+               wrapped<SuffixArgs>::unwrap(suffixArgs)...));
+    } else {
+      return func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
+                  at::cuda::getCurrentCUDAStream(),
+                  wrapped<SuffixArgs>::unwrap(suffixArgs)...);
+    }
   };
 }
 
@@ -224,7 +234,11 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
   } else {
     return [func](wrapped_t<Args>... args) -> wrapped_t<Ret> {
       at_scope_exit _{cuda_check};
-      return wrapped<Ret>::wrap(func(wrapped<Args>::unwrap(args)...));
+      if constexpr (!std::is_same_v<Ret, void>) {
+        return wrapped<Ret>::wrap(func(wrapped<Args>::unwrap(args)...));
+      } else {
+        return func(wrapped<Args>::unwrap(args)...);
+      }
     };
   }
 }
