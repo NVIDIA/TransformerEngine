@@ -13,8 +13,15 @@ class __TensorImpostor:
         else:
             return getattr(raw_tensor, __name)
 
-    def __call__(self, *args: Any, **kwargs: Any):
-        return raw_tensor(*args, **kwargs)  # type: ignore
+    def __call__(
+        self,
+        self_: Any,
+        dtype: Any,
+        data: torch.Tensor,
+        scale: torch.Tensor,
+        scale_inv: torch.Tensor,
+    ):
+        return raw_tensor(self_, dtype.value, data, scale, scale_inv)  # type: ignore
 
 
 Tensor = __TensorImpostor()
