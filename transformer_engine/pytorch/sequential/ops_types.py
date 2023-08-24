@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Callable
 from typing_extensions import Unpack
 from . import nvte

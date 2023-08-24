@@ -1,3 +1,4 @@
+from __future__ import annotations
 import subprocess
 from ..utils import cache
 import torch

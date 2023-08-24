@@ -12,6 +12,8 @@ m = seq.Sequential(
     seq.Linear(2 * HIDDEN_DIM, HIDDEN_DIM),
 )
 
+torch.compile(m)(x)
+
 torch.set_printoptions(precision=4, sci_mode=False)
 
 with seq.Recipe(lowp=seq.nvte.DType.Float8E4M3):

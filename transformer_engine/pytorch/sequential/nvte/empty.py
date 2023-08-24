@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Sequence
 import torch
 from .. import cpp_extensions as _nvte

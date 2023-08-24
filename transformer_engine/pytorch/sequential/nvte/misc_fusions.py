@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .dtype import is_fp8
 from .. import cpp_extensions as _nvte
 from .cast_transpose import cast_transpose_checked

@@ -1,5 +1,6 @@
-# type: ignore[dynamic-code]
+from __future__ import annotations
 
+# type: ignore[dynamic-code]
 import torch
 from .real import Tensor, DType
 

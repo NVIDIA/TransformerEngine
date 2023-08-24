@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import transformer_engine.pytorch.sequential as seq
 from torch import nn

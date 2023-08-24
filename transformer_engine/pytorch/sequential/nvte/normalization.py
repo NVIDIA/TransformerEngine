@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import torch
 from ..utils import contextmanager, cache

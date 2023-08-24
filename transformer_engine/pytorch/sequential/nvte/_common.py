@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from .. import cpp_extensions as _nvte
 from .dtype import torch_to_te_dtype

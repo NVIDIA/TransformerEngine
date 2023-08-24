@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Literal
 import torch
 from ..utils import contextmanager

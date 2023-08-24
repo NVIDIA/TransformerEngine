@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from enum import Enum
 from torch import nn, autocast

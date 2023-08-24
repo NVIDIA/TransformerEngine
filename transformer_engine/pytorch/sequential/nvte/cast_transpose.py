@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .. import cpp_extensions as _nvte
 
 from .dtype import is_fp8
