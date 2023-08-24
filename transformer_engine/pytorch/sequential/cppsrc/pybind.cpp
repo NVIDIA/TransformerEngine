@@ -96,13 +96,14 @@ struct Tensor : torch::CustomClassHolder {
 
 // ----------- Wrapper for NVTETensorPack -----------
 struct TensorPack : NVTETensorPack {
-  TensorPack(const std::vector<Tensor> &tensors_) : NVTETensorPack{} {
+  TensorPack(const std::vector<c10::intrusive_ptr<Tensor>> &tensors_)
+      : NVTETensorPack{} {
     size = tensors_.size();
     if (size > MAX_SIZE) {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
     }
     for (size_t i = 0; i < size; ++i) {
-      tensors[i] = (NVTETensor)tensors_[i].pimpl.get();
+      tensors[i] = (NVTETensor)(tensors_[i]->pimpl.get());
     }
     nvte_tensor_pack_create(this);
   }
@@ -140,15 +141,25 @@ template <typename T> struct wrapped_arg : trait<T> {
 template <> struct wrapped_arg<float> : trait<double> {
   static double unwrap(float arg) { return arg; }
 };
-template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
-  static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
-};
-template <> struct wrapped_arg<NVTETensorPack *> : trait<std::vector<Tensor>> {
-  static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
+template <>
+struct wrapped_arg<NVTETensor> : trait<const c10::intrusive_ptr<Tensor> &> {
+  static NVTETensor unwrap(const c10::intrusive_ptr<Tensor> &arg) {
+    return (NVTETensor)(arg->pimpl.get());
+  }
 };
 template <>
-struct wrapped_arg<const NVTETensorPack *> : trait<std::vector<Tensor>> {
-  static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
+struct wrapped_arg<NVTETensorPack *>
+    : trait<std::vector<c10::intrusive_ptr<Tensor>>> {
+  static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
+    return TensorPack(arg);
+  }
+};
+template <>
+struct wrapped_arg<const NVTETensorPack *>
+    : trait<std::vector<c10::intrusive_ptr<Tensor>>> {
+  static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
+    return TensorPack(arg);
+  }
 };
 template <> struct wrapped_arg<NVTEDType> : trait<int64_t> {
   static NVTEDType unwrap(int64_t arg) { return NVTEDType(arg); }
