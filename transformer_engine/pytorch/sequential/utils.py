@@ -137,3 +137,21 @@ def get_arg_types(f: Callable[..., Any]) -> list[type]:
             raise ValueError("Unsupported function (type annotations not supported)")
 
         return arg_types
+
+
+def get_return_type(f: Callable[..., T]) -> type[T]:
+    import typing
+    import ast
+
+    return_annotation = typing.get_type_hints(f)["return"]
+    if not isinstance(return_annotation, (str, type)):
+        raise ValueError("Unsupported function (type annotations not supported)")
+    else:
+        return_type = (
+            ast.literal_eval(return_annotation)
+            if isinstance(return_annotation, str)
+            else return_annotation
+        )
+        if not isinstance(return_type, type):
+            raise ValueError("Unsupported function (type annotations not supported)")
+        return return_type  # type: ignore

@@ -113,14 +113,15 @@ struct TensorPack : NVTETensorPack {
 };
 
 // ----------- Function substitution template machinery -----------
-template <typename T> struct trait {
+template <typename T> struct exposed_type {
   using type = T;
 };
 
-template <typename T> struct wrapped_arg;
+template <typename T> struct wrapped;
 
 #define TO_INT64_T(...)                                                        \
-  template <> struct wrapped_arg<__VA_ARGS__> : trait<int64_t> {               \
+  template <> struct wrapped<__VA_ARGS__> : exposed_type<int64_t> {            \
+    static __VA_ARGS__ wrap(int64_t arg) { return (__VA_ARGS__)arg; }          \
     static int64_t unwrap(__VA_ARGS__ arg) { return (int64_t)arg; }            \
   }
 
@@ -135,50 +136,60 @@ TO_INT64_T(unsigned long);
 TO_INT64_T(signed long);
 TO_INT64_T(unsigned long long);
 
-template <typename T> struct wrapped_arg : trait<T> {
+template <typename T> struct wrapped : exposed_type<T> {
+  static T wrap(T arg) { return arg; }
   static T unwrap(T arg) { return arg; }
 };
-template <> struct wrapped_arg<float> : trait<double> {
+template <> struct wrapped<float> : exposed_type<double> {
+  static float wrap(double arg) { return arg; }
   static double unwrap(float arg) { return arg; }
 };
 template <>
-struct wrapped_arg<NVTETensor> : trait<const c10::intrusive_ptr<Tensor> &> {
+struct wrapped<NVTETensor> : exposed_type<const c10::intrusive_ptr<Tensor> &> {
+  // static c10::intrusive_ptr<Tensor> wrap(NVTETensor arg) {
+  //   return c10::make_intrusive<Tensor>(arg);
+  // }
   static NVTETensor unwrap(const c10::intrusive_ptr<Tensor> &arg) {
     return (NVTETensor)(arg->pimpl.get());
   }
 };
 template <>
-struct wrapped_arg<NVTETensorPack *>
-    : trait<std::vector<c10::intrusive_ptr<Tensor>>> {
+struct wrapped<NVTETensorPack *>
+    : exposed_type<std::vector<c10::intrusive_ptr<Tensor>>> {
   static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
     return TensorPack(arg);
   }
 };
 template <>
-struct wrapped_arg<const NVTETensorPack *>
-    : trait<std::vector<c10::intrusive_ptr<Tensor>>> {
+struct wrapped<const NVTETensorPack *>
+    : exposed_type<std::vector<c10::intrusive_ptr<Tensor>>> {
   static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
     return TensorPack(arg);
   }
 };
-template <> struct wrapped_arg<NVTEDType> : trait<int64_t> {
+template <> struct wrapped<NVTEDType> : exposed_type<int64_t> {
+  static int64_t wrap(NVTEDType arg) { return int64_t(arg); }
   static NVTEDType unwrap(int64_t arg) { return NVTEDType(arg); }
 };
-template <> struct wrapped_arg<NVTE_Fused_Attn_Backend> : trait<int64_t> {
+template <> struct wrapped<NVTE_Fused_Attn_Backend> : exposed_type<int64_t> {
+  static int64_t wrap(NVTE_Fused_Attn_Backend arg) { return int64_t(arg); }
   static NVTE_Fused_Attn_Backend unwrap(int64_t arg) {
     return NVTE_Fused_Attn_Backend(arg);
   }
 };
-template <> struct wrapped_arg<NVTE_QKV_Layout> : trait<int64_t> {
+template <> struct wrapped<NVTE_QKV_Layout> : exposed_type<int64_t> {
+  static int64_t wrap(NVTE_QKV_Layout arg) { return int64_t(arg); }
   static NVTE_QKV_Layout unwrap(int64_t arg) { return NVTE_QKV_Layout(arg); }
 };
-template <> struct wrapped_arg<NVTE_Bias_Type> : trait<int64_t> {
+template <> struct wrapped<NVTE_Bias_Type> : exposed_type<int64_t> {
+  static int64_t wrap(NVTE_Bias_Type arg) { return int64_t(arg); }
   static NVTE_Bias_Type unwrap(int64_t arg) { return NVTE_Bias_Type(arg); }
 };
-template <> struct wrapped_arg<NVTE_Mask_Type> : trait<int64_t> {
+template <> struct wrapped<NVTE_Mask_Type> : exposed_type<int64_t> {
+  static int64_t wrap(NVTE_Mask_Type arg) { return int64_t(arg); }
   static NVTE_Mask_Type unwrap(int64_t arg) { return NVTE_Mask_Type(arg); }
 };
-template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
+template <typename T> using wrapped_t = typename wrapped<T>::type;
 struct at_scope_exit {
   void (*ptr)();
   ~at_scope_exit() { ptr(); }
@@ -189,12 +200,12 @@ template <typename Ret, typename... PrefixArgs, typename... SuffixArgs,
 constexpr auto
 remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
                               type_list<SuffixArgs...>) noexcept {
-  return [func](wrapped_arg_t<PrefixArgs>... prefixArgs,
-                wrapped_arg_t<SuffixArgs>... suffixArgs) -> Ret {
+  return [func](wrapped_t<PrefixArgs>... prefixArgs,
+                wrapped_t<SuffixArgs>... suffixArgs) -> wrapped_t<Ret> {
     at_scope_exit _{cuda_check};
-    return func(wrapped_arg<PrefixArgs>::unwrap(prefixArgs)...,
-                at::cuda::getCurrentCUDAStream(),
-                wrapped_arg<SuffixArgs>::unwrap(suffixArgs)...);
+    return wrapped<Ret>::wrap(func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
+                                   at::cuda::getCurrentCUDAStream(),
+                                   wrapped<SuffixArgs>::unwrap(suffixArgs)...));
   };
 }
 
@@ -207,9 +218,9 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
     using suffix = typename tl::template pop_front<stream_arg_idx + 1>;
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
-    return [func](wrapped_arg_t<Args>... args) -> Ret {
+    return [func](wrapped_t<Args>... args) -> wrapped_t<Ret> {
       at_scope_exit _{cuda_check};
-      return func(wrapped_arg<Args>::unwrap(args)...);
+      return wrapped<Ret>::wrap(func(wrapped<Args>::unwrap(args)...));
     };
   }
 }

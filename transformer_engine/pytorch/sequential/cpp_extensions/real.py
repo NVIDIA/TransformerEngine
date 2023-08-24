@@ -2,7 +2,7 @@ from enum import Enum
 import inspect
 from typing import Any
 import transformer_engine_cuda  # type: ignore
-from ..utils import import_file_as_module
+from ..utils import import_file_as_module, get_return_type
 
 
 def inject_real(namespace: dict[str, Any]):
@@ -41,15 +41,21 @@ def inject_real(namespace: dict[str, Any]):
 
     for func_name, func_obj in stub_functions.items():
         real_func = real_functions[func_name]
+        exposed_return_type: type = get_return_type(func_obj)
 
-        def wrapper(*args: Any):
+        def wrapper(*args: Any) -> Any:
             real_args = ()
             for arg in args:
                 if isinstance(arg, Enum):
                     real_args += (arg.value,)
                 else:
                     real_args += (arg,)
-            real_func(*real_args)
+            result = real_func(*real_args)
+            if issubclass(exposed_return_type, Enum):
+                assert isinstance(result, int)
+                return exposed_return_type(result)  # type: ignore
+            else:
+                return result
 
         wrapper.__name__ = func_name
         wrapper.__annotations__ = func_obj.__annotations__
