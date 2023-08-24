@@ -63,3 +63,6 @@ def inject_real(namespace: dict[str, Any]):
         wrapper.__name__ = func_name
         wrapper.__annotations__ = func_obj.__annotations__
         namespace[func_name] = wrapper
+
+
+inject_real(globals())
