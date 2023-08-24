@@ -6,7 +6,7 @@ from . import printing
 raw_tensor = globals().pop("Tensor")
 
 
-class __TensorImpostor:
+class _TensorImpostor:
     __raw: object
 
     def __init__(self, __raw: object):
@@ -19,7 +19,7 @@ class __TensorImpostor:
         return getattr(self.__raw, __name)
 
 
-class __TensorTypeImpostor:
+class _TensorTypeImpostor:
     def __call__(
         self,
         dtype: Enum,
@@ -28,7 +28,7 @@ class __TensorTypeImpostor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        return __TensorImpostor(raw_tensor(dtype.value, data, amax, scale, scale_inv))  # type: ignore
+        return _TensorImpostor(raw_tensor(dtype.value, data, amax, scale, scale_inv))  # type: ignore
 
 
-Tensor = __TensorTypeImpostor()
+Tensor = _TensorTypeImpostor()
