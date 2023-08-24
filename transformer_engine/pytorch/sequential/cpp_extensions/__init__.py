@@ -17,10 +17,11 @@ class __TensorImpostor:
         self,
         dtype: Any,
         data: torch.Tensor,
+        amax: torch.Tensor,
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        return raw_tensor(self, dtype.value, data, scale, scale_inv)  # type: ignore
+        return raw_tensor(self, dtype.value, data, amax, scale, scale_inv)  # type: ignore
 
 
 Tensor = __TensorImpostor()
