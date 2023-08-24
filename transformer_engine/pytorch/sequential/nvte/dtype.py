@@ -86,8 +86,8 @@ def dtype_name(dtype: _nvte.DType):
 
 
 def is_fp8(t: _nvte.Tensor | _nvte.DType):
-    if isinstance(t, _nvte.Tensor):
-        dtype = t.dtype
-    else:
+    if isinstance(t, _nvte.DType):
         dtype = t
+    else:
+        dtype = t.dtype
     return dtype == _nvte.DType.Float8E4M3 or dtype == _nvte.DType.Float8E5M2
