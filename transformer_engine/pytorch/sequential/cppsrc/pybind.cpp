@@ -36,7 +36,6 @@
 #include <transformer_engine/transpose.h>
 #include <type_traits>
 
-
 #include "type_list.h"
 
 // ----------- Wrapper for NVTETensor -----------
@@ -123,7 +122,9 @@ struct TensorPack : NVTETensorPack {
 template <typename T> struct trait {
   using type = T;
 };
-template <typename T &&> struct wrapped_arg : trait<T &&> {
+
+template <typename T> struct wrapped_arg;
+template <typename T> struct wrapped_arg<T &&> : trait<T &&> {
   static T &&unwrap(T &&arg) { return std::forward<T>(arg); }
 };
 template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
