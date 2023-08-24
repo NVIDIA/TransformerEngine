@@ -55,10 +55,9 @@ def inject_real(namespace: dict[str, Any]):
         namespace[class_name] = real_type(class_name)
 
     for func_name, func_obj in stub_functions.items():
-        real_func = real_function(func_name)
         exposed_return_type: type = get_return_type(func_obj)
 
-        def make_wrapper(func_obj: Any):
+        def make_wrapper(real_func: Any):
             def wrapper(*args: Any) -> Any:
                 real_args = ()
                 for arg in args:
@@ -75,7 +74,7 @@ def inject_real(namespace: dict[str, Any]):
 
             return wrapper
 
-        wrapper = make_wrapper(func_obj)
+        wrapper = make_wrapper(real_function(func_name))
 
         wrapper.__name__ = func_name
         wrapper.__annotations__ = func_obj.__annotations__
