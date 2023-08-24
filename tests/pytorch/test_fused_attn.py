@@ -429,7 +429,7 @@ def test_dpa_fp8(dtype, bs, model):
     compute_capability = get_device_compute_capability()
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if compute_capability in ((8, 0), (9, 0)):
+    if compute_capability not in ((8, 0), (9, 0)):
         pytest.skip(
             "FusedAttention is not supported "
             f"with compute capability {compute_capability[0]}.{compute_capability[1]}"
@@ -451,8 +451,8 @@ def test_dpa_fp8(dtype, bs, model):
 
     # Check that results match
     tols = dict(atol=2.5e-2, rtol=2.5e-2)
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, **tols)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, **tols)
+    torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+    torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dpa_fp8(dtype, bs, config, backend):
 
