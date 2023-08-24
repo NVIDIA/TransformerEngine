@@ -126,6 +126,9 @@ template <typename T> struct trait {
 template <typename T> struct wrapped_arg : trait<T> {
   static T unwrap(T arg) { return arg; }
 };
+template <> struct wrapped_arg<float> : trait<double> {
+  static double unwrap(float arg) { return arg; }
+};
 template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
   static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
 };
@@ -150,6 +153,10 @@ template <> struct wrapped_arg<NVTE_Mask_Type> : trait<int64_t> {
   static NVTE_Mask_Type unwrap(int64_t arg) { return NVTE_Mask_Type(arg); }
 };
 template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
+struct at_scope_exit {
+  void (*ptr)();
+  ~at_scope_exit() { ptr(); }
+};
 
 template <typename Ret, typename... PrefixArgs, typename... SuffixArgs,
           typename... Args>
@@ -164,11 +171,6 @@ remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
                 wrapped_arg<SuffixArgs>::unwrap(suffixArgs)...);
   };
 }
-
-struct at_scope_exit {
-  void (*ptr)();
-  ~at_scope_exit() { ptr(); }
-};
 
 template <typename Ret, typename... Args>
 constexpr auto wrap(Ret(func)(Args...)) noexcept {
