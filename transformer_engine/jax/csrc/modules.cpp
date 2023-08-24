@@ -90,19 +90,6 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
                                                     bias_type, mask_type, dtype, is_training});
 }
 
-bool IsFusedAttnKernelAvailable() {
-#if (CUDNN_VERSION < 8901)
-    return false;
-#else
-    const int sm_arch = cuda::sm_arch();
-#if (CUDNN_VERSION >= 8903)
-    return sm_arch >= 80;
-#else
-    return sm_arch == 80 || sm_arch == 90;
-#endif
-#endif
-}
-
 void TransposeImpl(void *input, size_t rows, size_t cols, DType dtype, cudaStream_t stream,
                    void *output) {
     auto input_shape = std::vector<size_t>{rows, cols};

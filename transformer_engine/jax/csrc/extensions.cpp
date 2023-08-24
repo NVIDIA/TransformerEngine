@@ -63,7 +63,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_cuda_version", &GetCudaRuntimeVersion);
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
-    m.def("is_fused_attn_kernel_available", &IsFusedAttnKernelAvailable);
     m.def("get_fused_attn_backend", &GetFusedAttnBackend);
 
     pybind11::enum_<DType>(m, "DType", pybind11::module_local())
