@@ -27,7 +27,7 @@ done
 : ${SEQLEN:="2048"}
 : ${MAX_POSITION_EMBEDDINGS:="2048"}
 : ${MBS:="8"}
-: ${GBS:="16"}
+: ${GBS:="32"}
 : ${STEPS:="500"}
 : ${LR:="6.0e-4"}
 : ${MIN_LR:="6.0e-5"}

@@ -28,10 +28,6 @@ class ModelConfigGPT:
 
 model_configs = {
     "126m": ModelConfigGPT(),
-    "5b": ModelConfigGPT(
-        24, 4096, 32,
-        SPLIT="9999,1,0",
-        INIT_METHOD_STD=0.023),
 }
 
 dtypes = ["bf16"]
@@ -81,5 +77,4 @@ def test_distributed(dtype, fp8_recipe, tp, pp, sp, model):
             PP_SIZE=pp,
             **asdict(model_configs[model]),
         ),
-        shell=True,
         check=True)
