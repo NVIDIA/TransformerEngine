@@ -1,5 +1,5 @@
 import torch
-from ..cpp_extensions import Tensor, DType
+from .real import Tensor, DType
 
 
 def tensor_repr(tensor: Tensor):
@@ -22,6 +22,7 @@ def tensor_repr(tensor: Tensor):
  scale={tensor.scale.item() if tensor.scale.numel() else None},\
  scale_inv={tensor.scale_inv.item() if tensor.scale_inv.numel() else None}\
 )"""
+
 
 setattr(Tensor, "__repr__", tensor_repr)
 

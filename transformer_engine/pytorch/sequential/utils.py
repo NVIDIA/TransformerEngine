@@ -88,7 +88,7 @@ def import_file_as_module(
             strict=True
         )
         old_cwd = os.getcwd()
-        os.chdir(caller_path)
+        os.chdir(caller_path.parent)
     except:
         old_cwd = None
 
