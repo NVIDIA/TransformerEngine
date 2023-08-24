@@ -18,6 +18,10 @@ class _TensorImpostor:
     def __getattr__(self, __name: str) -> Any:
         return getattr(self.__raw, __name)
 
+    @property
+    def dtype(self):
+        return DType(self.__raw.dtype)  # type: ignore
+
 
 class _TensorTypeImpostor:
     def __call__(
