@@ -132,6 +132,9 @@ template <> struct wrapped_arg<float> : trait<double> {
 template <> struct wrapped_arg<size_t> : trait<int64_t> {
   static int64_t unwrap(size_t arg) { return (int64_t)arg; }
 };
+template <> struct wrapped_arg<bool> : trait<int64_t> {
+  static int64_t unwrap(bool arg) { return (int64_t)arg; }
+};
 template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
   static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
 };
