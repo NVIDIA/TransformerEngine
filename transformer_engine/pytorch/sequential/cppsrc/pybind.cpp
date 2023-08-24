@@ -123,16 +123,16 @@ template <typename T> struct wrapped_arg;
     static int64_t unwrap(__VA_ARGS__ arg) { return (int64_t)arg; }            \
   }
 
-TO_INT64_T(char)
-TO_INT64_T(unsigned char)
-TO_INT64_T(signed char)
-TO_INT64_T(unsigned short)
-TO_INT64_T(signed short)
-TO_INT64_T(unsigned int)
-TO_INT64_T(signed int)
-TO_INT64_T(unsigned long)
-TO_INT64_T(signed long)
-TO_INT64_T(unsigned long long)
+TO_INT64_T(char);
+TO_INT64_T(unsigned char);
+TO_INT64_T(signed char);
+TO_INT64_T(unsigned short);
+TO_INT64_T(signed short);
+TO_INT64_T(unsigned int);
+TO_INT64_T(signed int);
+TO_INT64_T(unsigned long);
+TO_INT64_T(signed long);
+TO_INT64_T(unsigned long long);
 
 template <typename T> struct wrapped_arg : trait<T> {
   static T unwrap(T arg) { return arg; }
