@@ -21,9 +21,9 @@
 #include <cuda_runtime.h>
 #include <exception>
 #include <memory>
-#include <pybind11/pybind11.h>
 #include <stdexcept>
 #include <torch/extension.h>
+#include <torch/script.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
@@ -36,8 +36,10 @@
 #include <transformer_engine/transpose.h>
 #include <type_traits>
 
+
 #include "type_list.h"
 
+// ----------- Wrapper for NVTETensor -----------
 void cuda_check() {
   static const bool perform_check = []() {
     const char *var = std::getenv("CUDA_LAUNCH_BLOCKING");
@@ -57,16 +59,15 @@ void cuda_check() {
     }
   }
 }
-
-namespace py = pybind11;
-
-struct Tensor {
+struct Tensor : torch::CustomClassHolder {
   static_assert(std::is_same_v<NVTETensor, void *>);
 
-  NVTEDType dtype() const { return nvte_tensor_type((NVTETensor)pimpl.get()); }
-  std::vector<size_t> shape() const {
+  int64_t dtype() const {
+    return (int64_t)nvte_tensor_type((NVTETensor)pimpl.get());
+  }
+  std::vector<int64_t> shape() const {
     NVTEShape s = nvte_tensor_shape((NVTETensor)pimpl.get());
-    return std::vector<size_t>(s.data, s.data + s.ndim);
+    return std::vector<int64_t>(s.data, s.data + s.ndim);
   }
 
   std::shared_ptr<void> pimpl;
@@ -91,17 +92,18 @@ struct Tensor {
     }
   }
 
-  Tensor(NVTEDType dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
+  Tensor(int64_t dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
          at::Tensor scale_inv)
       : pimpl{nvte_create_tensor(getDataPtr(data),
                                  NVTEShape{(size_t *)(data.sizes().data()),
                                            data.sizes().size()},
-                                 dtype, getDataPtr(amax), getDataPtr(scale),
-                                 getDataPtr(scale_inv)),
+                                 NVTEDType(dtype), getDataPtr(amax),
+                                 getDataPtr(scale), getDataPtr(scale_inv)),
               [](NVTETensor impl) { nvte_destroy_tensor(impl); }},
         data{data}, amax{amax}, scale{scale}, scale_inv{scale_inv} {}
 };
 
+// ----------- Wrapper for NVTETensorPack -----------
 struct TensorPack : NVTETensorPack {
   TensorPack(const std::vector<Tensor> &tensors_) : NVTETensorPack{} {
     size = tensors_.size();
@@ -117,26 +119,37 @@ struct TensorPack : NVTETensorPack {
   ~TensorPack() { nvte_tensor_pack_destroy(this); }
 };
 
+// ----------- Function subsitution template machinery -----------
 template <typename T> struct trait {
   using type = T;
 };
-
-template <typename T> struct wrapped_arg : trait<T> {};
-template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {};
-template <> struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {};
-
-template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
-
-template <typename T> decltype(auto) unwrap_arg(T &&arg) {
-  if constexpr (std::is_same_v<std::decay_t<T>, wrapped_arg_t<NVTETensor>>) {
-    return (NVTETensor)arg.pimpl.get();
-  } else if constexpr (std::is_same_v<std::decay_t<T>,
-                                      wrapped_arg_t<NVTETensorPack>>) {
-    return TensorPack(arg);
-  } else {
-    { return arg; }
+template <typename T &&> struct wrapped_arg : trait<T &&> {
+  static T &&unwrap(T &&arg) { return std::forward<T>(arg); }
+};
+template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
+  static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
+};
+template <> struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {
+  static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
+};
+template <> struct wrapped_arg<NVTEDType> : trait<int64_t> {
+  static NVTEDType unwrap(int64_t arg) { return NVTEDType(arg); }
+};
+template <> struct wrapped_arg<NVTE_Fused_Attn_Backend> : trait<int64_t> {
+  static NVTE_Fused_Attn_Backend unwrap(int64_t arg) {
+    return NVTE_Fused_Attn_Backend(arg);
   }
-}
+};
+template <> struct wrapped_arg<NVTE_QKV_Layout> : trait<int64_t> {
+  static NVTE_QKV_Layout unwrap(int64_t arg) { return NVTE_QKV_Layout(arg); }
+};
+template <> struct wrapped_arg<NVTE_Bias_Type> : trait<int64_t> {
+  static NVTE_Bias_Type unwrap(int64_t arg) { return NVTE_Bias_Type(arg); }
+};
+template <> struct wrapped_arg<NVTE_Mask_Type> : trait<int64_t> {
+  static NVTE_Mask_Type unwrap(int64_t arg) { return NVTE_Mask_Type(arg); }
+};
+template <typename T> using wrapped_arg_t = typename wrapped_arg<T>::type;
 
 template <typename Ret, typename... PrefixArgs, typename... SuffixArgs,
           typename... Args>
@@ -145,8 +158,11 @@ remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
                               type_list<SuffixArgs...>) noexcept {
   return [func](wrapped_arg_t<PrefixArgs>... prefixArgs,
                 wrapped_arg_t<SuffixArgs>... suffixArgs) -> Ret {
-    return func(unwrap_arg(prefixArgs)..., at::cuda::getCurrentCUDAStream(),
-                unwrap_arg(suffixArgs)...);
+    auto result = func(wrapped_arg_t<PrefixArgs>::unwrap(prefixArgs)...,
+                       at::cuda::getCurrentCUDAStream(),
+                       wrapped_arg_t<SuffixArgs>::unwrap(suffixArgs)...);
+    cuda_check();
+    return result;
   };
 }
 
@@ -160,7 +176,7 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
-      auto result = func(unwrap_arg(args)...);
+      auto result = func(wrapped_arg_t<Args>::unwrap(args)...);
       cuda_check();
       return result;
     };
@@ -189,43 +205,13 @@ void multi_cast_transpose(const std::vector<Tensor> &inputs,
   cuda_check();
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  py::enum_<NVTEDType>(m, "DType", py::module_local())
-      .value("Byte", kNVTEByte)
-      .value("Int32", kNVTEInt32)
-      .value("Int64", kNVTEInt64)
-      .value("Float32", kNVTEFloat32)
-      .value("Float16", kNVTEFloat16)
-      .value("BFloat16", kNVTEBFloat16)
-      .value("Float8E4M3", kNVTEFloat8E4M3)
-      .value("Float8E5M2", kNVTEFloat8E5M2);
-
-  py::enum_<NVTE_Fused_Attn_Backend>(m, "FusedAttnBackend", py::module_local())
-      .value("No_Backend", NVTE_No_Backend)
-      .value("F16_max512_seqlen", NVTE_F16_max512_seqlen)
-      .value("F16_arbitrary_seqlen", NVTE_F16_arbitrary_seqlen)
-      .value("FP8", NVTE_FP8);
-
-  py::enum_<NVTE_QKV_Layout>(m, "QKVLayout", py::module_local())
-      .value("NOT_INTERLEAVED", NVTE_NOT_INTERLEAVED)
-      .value("QKV_INTERLEAVED", NVTE_QKV_INTERLEAVED)
-      .value("KV_INTERLEAVED", NVTE_KV_INTERLEAVED);
-
-  py::enum_<NVTE_Bias_Type>(m, "BiasType", py::module_local())
-      .value("NO_BIAS", NVTE_NO_BIAS)
-      .value("PRE_SCALE_BIAS", NVTE_PRE_SCALE_BIAS)
-      .value("POST_SCALE_BIAS", NVTE_POST_SCALE_BIAS);
-
-  py::enum_<NVTE_Mask_Type>(m, "MaskType", py::module_local())
-      .value("NO_MASK", NVTE_NO_MASK)
-      .value("PADDING_MASK", NVTE_PADDING_MASK)
-      .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
-
-  py::class_<Tensor>(m, "Tensor", py::module_local())
-      .def(
-          py::init<NVTEDType, at::Tensor, at::Tensor, at::Tensor, at::Tensor>())
-      .def_property_readonly("dtype", &Tensor::dtype)
-      .def_property_readonly("shape", &Tensor::shape)
+// ----------- Registration of torch.ops -----------
+TORCH_LIBRARY(transformer_engine_cuda, m) {
+  m.class_<Tensor>(m, "Tensor")
+      .def(torch::init<int64_t, at::Tensor, at::Tensor, at::Tensor,
+                       at::Tensor>())
+      .def_property("dtype", &Tensor::dtype)
+      .def_property("shape", &Tensor::shape)
       .def_readonly("data", &Tensor::data)
       .def_readonly("amax", &Tensor::amax)
       .def_readonly("scale", &Tensor::scale)
