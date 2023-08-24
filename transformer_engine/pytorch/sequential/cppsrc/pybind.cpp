@@ -61,14 +61,6 @@ void cuda_check() {
 struct Tensor : torch::CustomClassHolder {
   static_assert(std::is_same_v<NVTETensor, void *>);
 
-  int64_t dtype() const {
-    return (int64_t)nvte_tensor_type((NVTETensor)pimpl.get());
-  }
-  std::vector<int64_t> shape() const {
-    NVTEShape s = nvte_tensor_shape((NVTETensor)pimpl.get());
-    return std::vector<int64_t>(s.data, s.data + s.ndim);
-  }
-
   std::shared_ptr<void> pimpl;
   at::Tensor data;
   at::Tensor amax;
@@ -115,6 +107,7 @@ struct TensorPack : NVTETensorPack {
     nvte_tensor_pack_create(this);
   }
   operator NVTETensorPack *() { return this; }
+  operator const NVTETensorPack *() const { return this; }
   ~TensorPack() { nvte_tensor_pack_destroy(this); }
 };
 
@@ -123,25 +116,36 @@ template <typename T> struct trait {
   using type = T;
 };
 
+#define TO_INT64_T(...)                                                        \
+  template <> struct wrapped_arg<__VA_ARGS__> : trait<int64_t> {               \
+    static int64_t unwrap(__VA_ARGS__ arg) { return (int64_t)arg; }            \
+  }
+
+TO_INT64_T(char)
+TO_INT64_T(unsigned char)
+TO_INT64_T(signed char)
+TO_INT64_T(unsigned short)
+TO_INT64_T(signed short)
+TO_INT64_T(unsigned int)
+TO_INT64_T(signed int)
+TO_INT64_T(unsigned long)
+TO_INT64_T(signed long)
+TO_INT64_T(unsigned long long)
+
 template <typename T> struct wrapped_arg : trait<T> {
   static T unwrap(T arg) { return arg; }
 };
 template <> struct wrapped_arg<float> : trait<double> {
   static double unwrap(float arg) { return arg; }
 };
-template <> struct wrapped_arg<size_t> : trait<int64_t> {
-  static int64_t unwrap(size_t arg) { return (int64_t)arg; }
-};
-template <> struct wrapped_arg<int> : trait<int64_t> {
-  static int64_t unwrap(int arg) { return (int64_t)arg; }
-};
-template <> struct wrapped_arg<unsigned int> : trait<int64_t> {
-  static int64_t unwrap(unsigned int arg) { return (int64_t)arg; }
-};
 template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
   static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
 };
 template <> struct wrapped_arg<NVTETensorPack *> : trait<std::vector<Tensor>> {
+  static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
+};
+template <>
+struct wrapped_arg<const NVTETensorPack *> : trait<std::vector<Tensor>> {
   static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
 };
 template <> struct wrapped_arg<NVTEDType> : trait<int64_t> {
@@ -224,8 +228,17 @@ TORCH_LIBRARY(transformer_engine_cuda, m) {
   m.class_<Tensor>("Tensor")
       .def(torch::init<int64_t, at::Tensor, at::Tensor, at::Tensor,
                        at::Tensor>())
-      .def_property("dtype", &Tensor::dtype)
-      .def_property("shape", &Tensor::shape)
+      .def_property("dtype",
+                    [](const c10::intrusive_ptr<Tensor> &self) {
+                      return (int64_t)nvte_tensor_type(
+                          (NVTETensor)(self->pimpl.get()));
+                    })
+      .def_property("shape",
+                    [](const c10::intrusive_ptr<Tensor> &self) {
+                      NVTEShape s =
+                          nvte_tensor_shape((NVTETensor)(self->pimpl.get()));
+                      return std::vector<int64_t>(s.data, s.data + s.ndim);
+                    })
       .def_readonly("data", &Tensor::data)
       .def_readonly("amax", &Tensor::amax)
       .def_readonly("scale", &Tensor::scale)
