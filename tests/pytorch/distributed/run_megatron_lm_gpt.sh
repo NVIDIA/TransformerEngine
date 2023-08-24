@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -26,20 +28,20 @@ done
 : ${MAX_POSITION_EMBEDDINGS:="2048"}
 : ${MBS:="8"}
 : ${GBS:="16"}
-: ${STEPS:="200"}
+: ${STEPS:="500"}
 : ${LR:="6.0e-4"}
 : ${MIN_LR:="6.0e-5"}
-: ${SAVE_INTERVAL:="100"}
+: ${SAVE_INTERVAL:="1000"}
 : ${SPLIT:="98,2,0"}
 : ${CLIP_GRAD:="1.0"}
 : ${WEIGHT_DECAY:="0.1"}
 : ${ADAM_BETA1:="0.9"}
 : ${ADAM_BETA2:="0.95"}
 : ${INIT_METHOD_STD:="0.023"}
-: ${SP:="false"}
+: ${SP:="False"}
 : ${DTYPE:="bf16"}
-: ${WGRAD_FUSION:="true"}
-: ${FP8:="false"}
+: ${WGRAD_FUSION:="True"}
+: ${FP8:="False"}
 : ${FP8_AMAX_HISTORY_LEN:="32"}
 
 # Logging.
@@ -94,15 +96,15 @@ options=" \
     --fp8-amax-history-len ${FP8_AMAX_HISTORY_LEN} \
     --fp8-amax-compute-algo max"
 
-if [[ "$SP" == "true" ]]; then
+if [[ "$SP" == "True" ]]; then
         options+=" --sequence-parallel"
 fi
 
-if [[ "$WGRAD_FUSION" == "false" ]]; then
+if [[ "$WGRAD_FUSION" == "False" ]]; then
         options+=" --no-gradient-accumulation-fusion"
 fi
 
-if [[ "$FP8" != "false" ]]; then
+if [[ "$FP8" != "False" ]]; then
         options+=" --fp8-${FP8}"
 fi
 
@@ -111,7 +113,7 @@ if [[ "$DTYPE" != "fp32" ]]; then
 fi
 
 # Run GPT3.
-NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=2 ${DIR}/pretrain_gpt.py ${options}
+NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=4 ${DIR}/pretrain_gpt.py ${options}
 
 # Remove checkpoints.
 rm -rf ${CHECKPOINT_DIR}/*
