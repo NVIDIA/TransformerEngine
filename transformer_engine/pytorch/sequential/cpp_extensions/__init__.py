@@ -13,5 +13,8 @@ class __TensorImpostor:
         else:
             return getattr(raw_tensor, __name)
 
+    def __call__(self, *args: Any, **kwargs: Any):
+        return raw_tensor(*args, **kwargs)  # type: ignore
+
 
 Tensor = __TensorImpostor()
