@@ -116,6 +116,8 @@ template <typename T> struct trait {
   using type = T;
 };
 
+template <typename T> struct wrapped_arg;
+
 #define TO_INT64_T(...)                                                        \
   template <> struct wrapped_arg<__VA_ARGS__> : trait<int64_t> {               \
     static int64_t unwrap(__VA_ARGS__ arg) { return (int64_t)arg; }            \
