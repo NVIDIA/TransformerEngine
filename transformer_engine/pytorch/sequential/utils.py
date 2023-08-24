@@ -126,17 +126,13 @@ def get_arg_types(f: Callable[..., Any]) -> list[type]:
     annotations = typing.get_type_hints(f)
     annotations.pop("return", None)
     arg_type_annotations = tuple(annotations.values())
-    if not all(isinstance(val, (str, type)) for val in arg_type_annotations):
-        raise ValueError("Unsupported function (type annotations not supported)")
-    else:
-        arg_types = [
-            ast.literal_eval(val) if isinstance(val, str) else val
-            for val in arg_type_annotations
-        ]
-        if not all(isinstance(val, type) for val in arg_types):
-            raise ValueError("Unsupported function (type annotations not supported)")
 
-        return arg_types
+    arg_types = [
+        ast.literal_eval(val) if isinstance(val, str) else val
+        for val in arg_type_annotations
+    ]
+
+    return arg_types
 
 
 def get_return_type(f: Callable[..., T]) -> type[T]:
@@ -144,14 +140,11 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
     import ast
 
     return_annotation = typing.get_type_hints(f)["return"]
-    if not isinstance(return_annotation, (str, type)):
-        raise ValueError("Unsupported function (type annotations not supported)")
-    else:
-        return_type = (
-            ast.literal_eval(return_annotation)
-            if isinstance(return_annotation, str)
-            else return_annotation
-        )
-        if not isinstance(return_type, type):
-            raise ValueError("Unsupported function (type annotations not supported)")
-        return return_type  # type: ignore
+
+    return_type = (
+        ast.literal_eval(return_annotation)
+        if isinstance(return_annotation, str)
+        else return_annotation
+    )
+
+    return return_type  # type: ignore
