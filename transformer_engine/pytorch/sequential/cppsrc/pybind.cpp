@@ -123,14 +123,13 @@ template <typename T> struct trait {
   using type = T;
 };
 
-template <typename T> struct wrapped_arg;
-template <typename T> struct wrapped_arg<T &&> : trait<T &&> {
-  static T &&unwrap(T &&arg) { return std::forward<T>(arg); }
+template <typename T> struct wrapped_arg : trait<T> {
+  static T unwrap(T arg) { return arg; }
 };
 template <> struct wrapped_arg<NVTETensor> : trait<Tensor> {
   static NVTETensor unwrap(Tensor arg) { return (NVTETensor)arg.pimpl.get(); }
 };
-template <> struct wrapped_arg<NVTETensorPack> : trait<std::vector<Tensor>> {
+template <> struct wrapped_arg<NVTETensorPack *> : trait<std::vector<Tensor>> {
   static TensorPack unwrap(std::vector<Tensor> arg) { return TensorPack(arg); }
 };
 template <> struct wrapped_arg<NVTEDType> : trait<int64_t> {
@@ -159,9 +158,9 @@ remove_cuda_stream_arg_helper(Ret(func)(Args...), type_list<PrefixArgs...>,
                               type_list<SuffixArgs...>) noexcept {
   return [func](wrapped_arg_t<PrefixArgs>... prefixArgs,
                 wrapped_arg_t<SuffixArgs>... suffixArgs) -> Ret {
-    auto result = func(wrapped_arg_t<PrefixArgs>::unwrap(prefixArgs)...,
+    auto result = func(wrapped_arg<PrefixArgs>::unwrap(prefixArgs)...,
                        at::cuda::getCurrentCUDAStream(),
-                       wrapped_arg_t<SuffixArgs>::unwrap(suffixArgs)...);
+                       wrapped_arg<SuffixArgs>::unwrap(suffixArgs)...);
     cuda_check();
     return result;
   };
@@ -177,7 +176,7 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
     return remove_cuda_stream_arg_helper(func, prefix(), suffix());
   } else {
     return [func](wrapped_arg_t<Args>... args) -> Ret {
-      auto result = func(wrapped_arg_t<Args>::unwrap(args)...);
+      auto result = func(wrapped_arg<Args>::unwrap(args)...);
       cuda_check();
       return result;
     };
@@ -208,7 +207,7 @@ void multi_cast_transpose(const std::vector<Tensor> &inputs,
 
 // ----------- Registration of torch.ops -----------
 TORCH_LIBRARY(transformer_engine_cuda, m) {
-  m.class_<Tensor>(m, "Tensor")
+  m.class_<Tensor>("Tensor")
       .def(torch::init<int64_t, at::Tensor, at::Tensor, at::Tensor,
                        at::Tensor>())
       .def_property("dtype", &Tensor::dtype)
