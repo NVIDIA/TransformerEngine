@@ -30,7 +30,11 @@ class _Context(Generic[PS, T]):
         exc_value: ExcT,
         exc_traceback: TracebackType,
     ):
-        next(self.gen)
+        try:
+            next(self.gen)
+        except StopIteration:
+            # Discard exception, it is expected
+            pass
 
 
 class contextmanager(Generic[PS, T]):
