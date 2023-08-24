@@ -118,7 +118,7 @@ struct TensorPack : NVTETensorPack {
   ~TensorPack() { nvte_tensor_pack_destroy(this); }
 };
 
-// ----------- Function subsitution template machinery -----------
+// ----------- Function substitution template machinery -----------
 template <typename T> struct trait {
   using type = T;
 };
