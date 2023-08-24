@@ -1,2 +1,2 @@
 from .real import *
-import .printing  # only for side effects
+from . import printing  # only for side effects
