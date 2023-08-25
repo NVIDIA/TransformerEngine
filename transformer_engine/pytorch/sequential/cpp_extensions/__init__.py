@@ -26,31 +26,31 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = make_tensor(dtype.value, data, amax, scale, scale_inv)
+        self.__raw = _make_tensor(dtype.value, data, amax, scale, scale_inv)
 
     @property
     def dtype(self) -> DType:
-        return DType(get_tensor_dtype(self.__raw))
+        return DType(_get_tensor_dtype(self.__raw))
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return tuple(get_tensor_shape(self.__raw))
+        return tuple(_get_tensor_shape(self.__raw))
 
     @property
     def data(self) -> torch.Tensor:
-        return get_tensor_data(self.__raw)
+        return _get_tensor_data(self.__raw)
 
     @property
     def amax(self) -> torch.Tensor:
-        return get_tensor_amax(self.__raw)
+        return _get_tensor_amax(self.__raw)
 
     @property
     def scale(self) -> torch.Tensor:
-        return get_tensor_scale(self.__raw)
+        return _get_tensor_scale(self.__raw)
 
     @property
     def scale_inv(self) -> torch.Tensor:
-        return get_tensor_scale_inv(self.__raw)
+        return _get_tensor_scale_inv(self.__raw)
 
     def __repr__(self) -> str:
         return printing.tensor_repr(self.__raw)
