@@ -97,7 +97,7 @@ class ComputePipelineFunction(autograd.Function):
 
         # Expose result for Pytorch
         x_data = exposed_x.data
-        exposed_x.data = torch.Tensor()  # avoid copy
+        exposed_x.data = torch.Tensor(device="cuda")  # avoid copy
         exposed_y = exposed_x.clone()  # copy history
         exposed_x.data = x_data
         exposed_y.data = y.data

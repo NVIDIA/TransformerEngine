@@ -24,7 +24,11 @@ def _cublas_workspace():
     workspace_size = 33_554_432 if _is_hopper() else 4_194_304
     data = torch.empty(workspace_size, dtype=torch.int8, device="cuda")
     return _nvte.Tensor(
-        _nvte.DType.Byte, data, torch.Tensor(), torch.Tensor(), torch.Tensor()
+        _nvte.DType.Byte,
+        data,
+        torch.Tensor(device="cuda"),
+        torch.Tensor(device="cuda"),
+        torch.Tensor(device="cuda"),
     )
 
 
