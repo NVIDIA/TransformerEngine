@@ -176,7 +176,7 @@ template <> struct wrapped<NVTEShape> : exposed_type<std::vector<int64_t>> {
   static NVTEShape unwrap(const std::vector<int64_t> &arg) {
     NVTEShape shape{};
     shape.ndim = arg.size();
-    shape.data = arg.data();
+    shape.data = (size_t*)arg.data();
     return shape;
   }
 };
