@@ -1,6 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
- *reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -233,11 +232,10 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 void multi_cast_transpose(const std::vector<int64_t> &inputs,
                           const std::vector<int64_t> &cast_outs,
                           const std::vector<int64_t> &transposed_outs) {
-  const auto &inputs_ =
-      *reinterpret_cast<const std::vector<NVTETensor> *>(&inputs);
-  const auto &cast_outs_ =
+  auto inputs_ = *reinterpret_cast<const std::vector<NVTETensor> *>(&inputs);
+  auto cast_outs_ =
       *reinterpret_cast<const std::vector<NVTETensor> *>(&cast_outs);
-  const auto &transposed_outs_ =
+  auto transposed_outs_ =
       *reinterpret_cast<const std::vector<NVTETensor> *>(&transposed_outs);
   nvte_multi_cast_transpose(inputs_.size(), inputs_.data(), cast_outs_.data(),
                             transposed_outs_.data(),
@@ -249,8 +247,8 @@ void multi_cast_transpose(const std::vector<int64_t> &inputs,
 // ----------- Registration of torch.ops -----------
 TORCH_LIBRARY(transformer_engine_cuda, m) {
   m.def("create_tensor",
-        wrap([](NVTEDType dtype, at::Tensor data, at::Tensor amax,
-                at::Tensor scale, at::Tensor scale_inv) -> NVTETensor {
+        wrap(+[](NVTEDType dtype, at::Tensor data, at::Tensor amax,
+                 at::Tensor scale, at::Tensor scale_inv) -> NVTETensor {
           return nvte_create_tensor(
               getDataPtr(data),
               NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()},
