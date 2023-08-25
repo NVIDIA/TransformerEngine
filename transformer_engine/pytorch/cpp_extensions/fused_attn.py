@@ -38,6 +38,24 @@ QKVLayout = {
     "kv_interleaved": NVTE_QKV_Layout.NVTE_KV_INTERLEAVED,
     }
 
+QKVLayout1 = {
+    "sb3hd": NVTE_QKV_Layout1.NVTE_SB3HD,
+    "sbh3d": NVTE_QKV_Layout1.NVTE_SBH3D,
+    "sbhd_sb2hd": NVTE_QKV_Layout1.NVTE_SBHD_SB2HD,
+    "sbhd_sbh2d": NVTE_QKV_Layout1.NVTE_SBHD_SBH2D,
+    "sbhd_sbhd_sbhd": NVTE_QKV_Layout1.NVTE_SBHD_SBHD_SBHD,
+    "bs3hd": NVTE_QKV_Layout1.NVTE_BS3HD,
+    "bsh3d": NVTE_QKV_Layout1.NVTE_BSH3D,
+    "bshd_bs2hd": NVTE_QKV_Layout1.NVTE_BSHD_BS2HD,
+    "bshd_bsh2d": NVTE_QKV_Layout1.NVTE_BSHD_BSH2D,
+    "bshd_bshd_bshd": NVTE_QKV_Layout1.NVTE_BSHD_BSHD_BSHD,
+    "t3hd": NVTE_QKV_Layout1.NVTE_T3HD,
+    "th3d": NVTE_QKV_Layout1.NVTE_TH3D,
+    "thd_t2hd": NVTE_QKV_Layout1.NVTE_THD_T2HD,
+    "thd_th2d": NVTE_QKV_Layout1.NVTE_THD_TH2D,
+    "thd_thd_thd": NVTE_QKV_Layout1.NVTE_THD_THD_THD,
+    }
+
 AttnBiasType = {
     "no_bias": NVTE_Bias_Type.NVTE_NO_BIAS,
     "pre_scale_bias": NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS,
@@ -830,6 +848,7 @@ def fused_attn_fwd_q_k_v(
     k: torch.Tensor,
     v: torch.Tensor,
     qkv_dtype: tex.DType,
+    qkvso_strides: List,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
@@ -881,6 +900,8 @@ def fused_attn_fwd_q_k_v(
                 or [seqlen_kv, batch_size, num_heads, head_dim]
     qkv_dtype: tex.DType
                 data type of Q, K and V; in tex.DType, not torch.dtype
+    qkvso_strides: List
+                strides for Q, K, V, K', V', S and O, shape [7, 4]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
     attn_bias: torch.Tensor, default = None
@@ -992,7 +1013,7 @@ def fused_attn_fwd_q_k_v(
             max_seqlen_q, max_seqlen_kv,
             is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
+            cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype, qkvso_strides,
             d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -1012,6 +1033,7 @@ def fused_attn_bwd_q_k_v(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
+    qkvso_strides: List,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -1069,6 +1091,8 @@ def fused_attn_bwd_q_k_v(
                 same shape as Q
     qkv_dtype: tex.DType
                 data type of QKV; in tex.DType, not torch.dtype
+    qkvso_strides: List
+                strides for Q, K, V, K', V', S and O, shape [7, 4]
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -1189,7 +1213,7 @@ def fused_attn_bwd_q_k_v(
             max_seqlen_q, max_seqlen_kv,
             attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, aux_ctx_tensors,
+            cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, qkvso_strides, aux_ctx_tensors,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )

@@ -21,6 +21,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
     QKVLayout,
+    QKVLayout1,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
@@ -548,26 +549,26 @@ def _get_qkvso_strides(
        for `S`.
     """
 
-    if qkv_format == 'thd':
-        assert (batch_size is not None
-            and max_seqlen_q is not None
-            and max_seqlen_kv is not None
-            ), "batch_size, max_seqlen_q and max_seqlen_kv can not be None when qkv_format = thd!"
-    elif qkv_format in ['sbhd', 'bshd']:
-        _batch_size = q.shape[1] if qkv_format == 'sbhd' else q.shape[0]
-        _max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
-        _max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
-        if batch_size is not None:
-            assert (batch_size == _batch_size
-                ), "batch_size does not match the batch dimension in q, k, v tensors!"
-        if max_seqlen_q is not None:
-            assert (max_seqlen_q == _max_seqlen_q
-                ), "max_seqlen_q does not match the sequence length in q!"
-        if max_seqlen_kv is not None:
-            assert (max_seqlen_kv == _max_seqlen_kv
-                ), "max_seqlen_kv does not match the sequence length in k, v tensors!"
-    else:
-        raise Exception(f"qkv_format {qkv_format} is not supported!")
+    #if qkv_format == 'thd':
+    #    assert (batch_size is not None
+    #        and max_seqlen_q is not None
+    #        and max_seqlen_kv is not None
+    #        ), "batch_size, max_seqlen_q and max_seqlen_kv can not be None when qkv_format = thd!"
+    #elif qkv_format in ['sbhd', 'bshd']:
+    #    _batch_size = q.shape[1] if qkv_format == 'sbhd' else q.shape[0]
+    #    _max_seqlen_q = q.shape[0] if qkv_format == 'sbhd' else q.shape[1]
+    #    _max_seqlen_kv = k.shape[0] if qkv_format == 'sbhd' else k.shape[1]
+    #    if batch_size is not None:
+    #        assert (batch_size == _batch_size
+    #            ), "batch_size does not match the batch dimension in q, k, v tensors!"
+    #    if max_seqlen_q is not None:
+    #        assert (max_seqlen_q == _max_seqlen_q
+    #            ), "max_seqlen_q does not match the sequence length in q!"
+    #    if max_seqlen_kv is not None:
+    #        assert (max_seqlen_kv == _max_seqlen_kv
+    #            ), "max_seqlen_kv does not match the sequence length in k, v tensors!"
+    #else:
+    #    raise Exception(f"qkv_format {qkv_format} is not supported!")
 
     num_heads, head_dim = q.shape[-2:]
 
@@ -595,16 +596,18 @@ def _get_qkvso_strides(
         qkvso_strides[2].transpose(2, 3), # V transposed
         [num_heads * max_seqlen_q * max_seqlen_kv,
             max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1], # S
-        #[num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
-        )
-    if qkv_format == 'sbhd':
-        qkvso_strides.append(
+        # always output sbhd
         [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
         )
-    if qkv_format == 'bshd' or 'thd':
-        qkvso_strides.append(
-        [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
-        )
+    # output the same format as the input
+    #if qkv_format == 'sbhd':
+    #    qkvso_strides.append(
+    #    [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
+    #    )
+    #if qkv_format == 'bshd' or 'thd':
+    #    qkvso_strides.append(
+    #    [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
+    #    )
     assert (len(qkvso_strides) == 7
             and len(qkvso_strides[0] == 4)
             ), "qkvso_strides should be in [7, 4] shape!"
@@ -912,17 +915,17 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-                q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
+                q, k, v, qkv_dtype, qkvso_strides, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend):
         out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-            q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
+            q, k, v, qkv_dtype, qkvso_strides, fused_attention_backend, attn_bias,
             None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
-        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
+        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -939,11 +942,11 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
+        q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides = ctx.saved_tensors
         dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
             ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, out, d_out,
-            ctx.qkv_dtype, ctx.aux_ctx_tensors,
+            ctx.qkv_dtype, qkvso_strides, ctx.aux_ctx_tensors,
             ctx.fused_attention_backend,
             None, None, None, None, None, None, None, None, None,
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
@@ -951,11 +954,11 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
-            return (None, None, None, None, None, dq, dk, dv, None, None, None,
+            return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, dq, dk, dv, None, rest[0], None,
+        return (None, None, None, None, None, dq, dk, dv, None, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
@@ -1052,14 +1055,23 @@ class FusedAttention(torch.nn.Module):
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
 
+        qkvso_strides = _get_qkvso_strides(query_layer,
+            key_layer,
+            value_layer,
+            qkv_format = qkv_format,
+            batch_size = batch_size,
+            max_seqlen_q = max_seqlen_q,
+            max_seqlen_kv = max_seqlen_kv)
+
         qkv_dtype = TE_DType[query_layer.dtype]
+
         with self.attention_dropout_ctx():
             output = FusedAttnFunc_q_k_v.apply(
                 self.training,
                 max_seqlen_q, max_seqlen_kv,
                 cu_seqlens_q, cu_seqlens_kv,
                 query_layer, key_layer, value_layer,
-                qkv_dtype,
+                qkv_dtype, qkvso_strides,
                 core_attention_bias,
                 1.0/self.norm_factor,
                 self.attention_dropout if self.training else 0.0,
@@ -1395,7 +1407,7 @@ class DotProductAttention(torch.nn.Module):
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
-                QKVLayout[qkv_layout], #### ??
+                QKVLayout1[qkv_layout],
                 AttnBiasType[core_attention_bias_type],
                 AttnMaskType[self.attn_mask_type],
                 self.attention_dropout,
@@ -1434,13 +1446,6 @@ class DotProductAttention(torch.nn.Module):
 
         if use_fused_attention:
             print('--------- fused')
-            qkvso_strides = _get_qkvso_strides(query_layer,
-                key_layer,
-                value_layer,
-                qkv_format = qkv_format,
-                batch_size = batch_size,
-                max_seqlen_q = max_seqlen_q,
-                max_seqlen_kv = max_seqlen_kv)
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                               query_layer,

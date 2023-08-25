@@ -56,7 +56,7 @@ createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
     int64_t s_dim[4] =  {b, h, s_q, s_kv};
     int64_t s_stride[4];
-    generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
+    //generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
     auto scaleTensor = tensor_create(
                        tensorType, S_CONST_ID, scale_dim,
@@ -82,16 +82,16 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     // Creates the necessary tensor descriptors
     int64_t q_dim[4] = {b, h, s_q, d};
     int64_t q_stride[4];
-    generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+    //generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
     int64_t k_dim[4] =  {b, h, d, s_kv};
     int64_t k_stride[4];
-    generateMatrixStrides(
-            b, h, s_q, s_kv, d, k_stride, layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
+    //generateMatrixStrides(
+    //        b, h, s_q, s_kv, d, k_stride, layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
     int64_t s_dim[4] = {b, h, s_q, s_kv};
     int64_t s_stride[4];
-    generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
+    //generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
     auto qTensor = tensor_create(tensorType, Q_ID, q_dim, q_stride, false, false);
     auto kTransposeTensor = tensor_create(
@@ -507,11 +507,11 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
     int64_t v_dim[4] =  {b, h, s_kv, d};
     int64_t v_stride[4];
-    generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+    //generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
     int64_t o_dim[4] =  {b, h, s_q, d};
     int64_t o_stride[4];
-    generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+    //generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
     auto vTensor = tensor_create(tensorType, V_ID, v_dim, v_stride, false, false);
     // second GEMM output
@@ -703,27 +703,27 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             // Creates the necessary tensor descriptors
             int64_t q_dim[4] = {b, h, s_q, d};
             int64_t q_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, q_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, q_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
             int64_t k_transpose_dim[4] =  {b, h, d, s_kv};
             int64_t k_transpose_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, k_transpose_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, k_transpose_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
             int64_t v_transpose_dim[4] =  {b, h, d, s_kv};
             int64_t v_transpose_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, v_transpose_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, v_transpose_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose);
 
             int64_t p_dim[4] = {b, h, s_q, s_kv};
             int64_t p_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, p_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, p_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
             int64_t p_transpose_dim[4] = {b, h, s_kv, s_q};
             int64_t p_transpose_stride[4];
@@ -734,14 +734,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             int64_t o_dim[4] =  {b, h, s_q, d};
             int64_t o_stride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, o_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, o_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
             int64_t dqAccum_dim[4] =  {b, h, s_q, d};
             int64_t dqAccum_stride[4];
-            generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            //generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
             int64_t scale_dim[4] = {1, 1, 1, 1};
             int64_t scale_stride[4] = {1, 1, 1, 1};
@@ -902,18 +902,18 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             // Outputs of bprop
             int64_t dq_dim[4] = {b, h, s_q, d};
             int64_t dq_stride[4];
-            generateMatrixStrides(b, h, s_q, s_kv, d, dq_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            //generateMatrixStrides(b, h, s_q, s_kv, d, dq_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
             int64_t dk_dim[4] = {b, h, s_kv, d};
             int64_t dk_stride[4];
-            generateMatrixStrides(b, h, s_q, s_kv, d, dk_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            //generateMatrixStrides(b, h, s_q, s_kv, d, dk_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
 
             int64_t dv_dim[4] = {b, h, s_kv, d};
             int64_t dv_stride[4];
-            generateMatrixStrides(b, h, s_q, s_kv, d, dv_stride,
-                            layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+            //generateMatrixStrides(b, h, s_q, s_kv, d, dv_stride,
+            //                layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
             // Outputs of backprop
             auto dQTensor = tensor_create(tensorType, dQ_ID, dq_dim, dq_stride, false, false);
@@ -1025,9 +1025,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             int64_t kDim[4] = {b, h, s_kv, d};
             int64_t kStride[4];
-            generateMatrixStrides(
-                            b, h, s_q, s_kv, d, kStride,
-                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            //generateMatrixStrides(
+            //                b, h, s_q, s_kv, d, kStride,
+            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
             auto kTensor = tensor_create(
                             tensorType, VIRTUAL_ID + 13, kDim,
                             kStride, true, false);  // is virtual
