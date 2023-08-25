@@ -181,9 +181,6 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
-    op_grad = torch.randn(
-        config.seq_len, bs, config.num_attention_heads * config.head_dim,
-        dtype = dtype).cuda()
 
     sigma = 0.02
     init_method = init_method_normal(sigma)
@@ -241,7 +238,8 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
             checkpoint_core_attention = ckpt_attn,
             core_attention_bias_type = bias_type,
             core_attention_bias = bias)
-        op.backward(op_grad)
+        loss = op.sum()
+        loss.backward()
 
     return op, inp.grad
 

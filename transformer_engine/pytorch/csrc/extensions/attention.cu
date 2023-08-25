@@ -194,7 +194,13 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
-    auto output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    at::Tensor output_tensor;
+    if (nvte_aux_tensor_pack.size >= 2) {
+        output_tensor = (i < nvte_aux_tensor_pack.size-1)
+            ? allocateSpace(tensor->data.shape, tensor->data.dtype, false) : rng_state;
+    } else {
+        output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    }
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
@@ -497,7 +503,13 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
-    auto output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    at::Tensor output_tensor;
+    if (nvte_aux_tensor_pack.size >= 2) {
+        output_tensor = (i < nvte_aux_tensor_pack.size-1)
+            ? allocateSpace(tensor->data.shape, tensor->data.dtype, false) : rng_state;
+    } else {
+        output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    }
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
