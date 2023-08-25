@@ -24,31 +24,47 @@ class BaseModule(nn.Module, ABC):
     def forward(
         self, x: torch.Tensor, seq_lens: torch.Tensor | None = None
     ) -> torch.Tensor:
+        self.precompiled_for(x, seq_lens)
         if seq_lens is None:
-            if x.dim() == 2:
-                seq_lens = torch.tensor([x.shape[0]], dtype=torch.int32, device="cuda")
-            elif x.dim() == 3:
-                seq_lens = torch.tensor(
-                    [x.shape[1]] * x.shape[0], dtype=torch.int32, device="cuda"
-                )
-                x = x.view(x.shape[1] * x.shape[0], x.shape[2])
-            else:
-                raise ValueError(f"Unsupported input shape: {x.shape}")
-        else:
-            assert x.dim() == 2
-            assert x.shape[0] == seq_lens.sum().item()
-        assert x.is_cuda
-        assert seq_lens.is_cuda
-        assert x.is_contiguous()
-        assert seq_lens.is_contiguous()
+            seq_lens = self.precompiled_seq_lens
+        assert self.pipeline is not None
 
+        return apply(x, self.pipeline, self.training)
+
+    def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
+        if seq_lens is None:
+            self.precompiled_seq_lens = BaseModule._create_seq_lens_tensor(x)
+
+        assert x.is_cuda
+        assert x.is_contiguous()
+        if seq_lens is not None:
+            assert seq_lens.is_cuda
+            assert seq_lens.is_contiguous()
+
+        self._setup_pipeline()
+
+        return self
+
+    @staticmethod
+    def _create_seq_lens_tensor(x: torch.Tensor):
+        if x.dim() == 2:
+            seq_lens = torch.tensor([x.shape[0]], dtype=torch.int32, device="cuda")
+        elif x.dim() == 3:
+            seq_lens = torch.tensor(
+                [x.shape[1]] * x.shape[0], dtype=torch.int32, device="cuda"
+            )
+            x = x.view(x.shape[1] * x.shape[0], x.shape[2])
+        else:
+            raise ValueError(f"Unsupported input shape: {x.shape}")
+        return seq_lens
+
+    def _setup_pipeline(self):
         env = self._current_env()
         if self.pipeline is None or env != self.compile_env:
             self.pipeline = ComputePipeline(
                 [op for op in self._ops() if op is not None], env
             )
             self.compile_env = env
-        return apply(x, self.pipeline, self.training)
 
     def _current_env(self) -> Recipe:
         return Recipe.current()
