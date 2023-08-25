@@ -1,7 +1,6 @@
 from __future__ import annotations
-from typing import Callable, TypeVar, ClassVar
+from typing import Callable, TypeVar, ClassVar, NamedTuple
 from types import TracebackType
-from dataclasses import dataclass
 from .cpp_extensions import DType
 import torch
 
@@ -20,8 +19,7 @@ def _default_scaling_factor_compute_method(
     out.fill_(1.0)  # TODO
 
 
-@dataclass
-class Recipe:
+class Recipe(NamedTuple):
     amax_history_len: int = 1024
     amax_reduction_period: int = 10
     amax_reduction_method: Callable[

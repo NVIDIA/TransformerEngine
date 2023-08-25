@@ -1,9 +1,8 @@
 from __future__ import annotations
-from dataclasses import dataclass
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-from typing import Final
+from typing import Final, NamedTuple
 from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
@@ -12,8 +11,7 @@ from .compute_pipeline import ComputePipeline
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-@dataclass
-class ForwardArgs:
+class ForwardArgs(NamedTuple):
     nvte_x: nvte.Tensor
     is_exposed_x_squished_now: bool
     upcoming_backward: BackwardComm | None
