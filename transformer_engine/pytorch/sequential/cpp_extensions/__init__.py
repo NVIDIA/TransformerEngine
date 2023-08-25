@@ -15,7 +15,7 @@ tensor_handles = set()
 def allocate_handles():
     HANDLE_COUNT = 1024
     for _ in range(HANDLE_COUNT):
-        tensor_handles.append(_TensorHandle())
+        tensor_handles.add(_TensorHandle())
 
 
 # Preallocate some tensors
