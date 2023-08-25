@@ -4,6 +4,7 @@
 """Attntion API"""
 
 import math
+import os
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -164,8 +165,12 @@ class DotProductAttention(paddle.nn.Layer):
         self.backend = backend
 
         arch = paddle.device.cuda.get_device_capability()
-        if arch not in ((8, 0), (9, 0)) and backend == 'transformer_engine':
-            # FMHA is not supported, falling back to Paddle backend
+        self.is_fused_attn_supported = arch in ((8, 0), (9, 0))
+        self.enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN",
+                                               "0")) and self.is_fused_attn_supported
+
+        if not self.enable_fused_attn and backend == 'transformer_engine':
+            # FMHA is not enabled, falling back to Paddle backend
             self.backend = 'paddle'
 
         if self.backend != 'transformer_engine':

@@ -120,8 +120,8 @@ class TestTransformerTp(unittest.TestCase):
         for _ in range(5):
             inp = paddle.uniform([self.batch_size, self.q_seqlen, self.hidden_size],
                                  self.global_dtype)
-            mask = paddle.ones(shape=(self.batch_size, 1, self.q_seqlen, self.kv_seqlen),
-                               dtype='bool')
+            mask = paddle.zeros(shape=(self.batch_size, 1, self.q_seqlen, self.kv_seqlen),
+                                dtype='bool')
             loss_tp = train_one_step(layer_tp, [inp, mask], optimizer_tp, self.fp8)
             loss_single = train_one_step(layer_single, [inp, mask], optimizer_single, self.fp8)
             assert_allclose(loss_tp, loss_single, rtol=self.rtol, atol=self.atol)
