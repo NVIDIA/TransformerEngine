@@ -1192,7 +1192,6 @@ test_configs_multihead_attention = [
     #"use_mask, attn_mask_type"
     (False,    "no_mask"), # calls ScaledUpperTriangMaskedSoftmax
     (True,     "padding"), # calls ScaledMaskedSoftmax
-    (False,    "no_mask"), # calls ScaledSoftmax
 ]
 test_configs_attention_type = [
     #"input_layernorm, attention_type, fuse_qkv_params"
