@@ -1190,9 +1190,9 @@ def test_export_core_attention(
 
 test_configs_multihead_attention = [
     #"use_mask, attn_mask_type"
-    (False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
+    (False,    "no_mask"), # calls ScaledUpperTriangMaskedSoftmax
     (True,     "padding"), # calls ScaledMaskedSoftmax
-    (False,    "padding"), # calls ScaledSoftmax
+    (False,    "no_mask"), # calls ScaledSoftmax
 ]
 test_configs_attention_type = [
     #"input_layernorm, attention_type, fuse_qkv_params"
@@ -1274,8 +1274,8 @@ def test_export_multihead_attention(
         return_bias=True,
     ).to(device='cuda')
 
-    inp_context = (hidden_states_context, attention_mask, attn_mask_type, encoder_output)
-    input_names = ["hidden_states", "attention_mask", "attn_mask_type", "encoder_output"]
+    inp_context = (hidden_states_context, attention_mask, encoder_output, attn_mask_type)
+    input_names = ["hidden_states", "attention_mask", "encoder_output", "attn_mask_type"]
     output_names=["attention_output", "attention_bias"]
     do_export(model, inp_context, fname, use_fp8, input_names=input_names, output_names=output_names,
         dynamic_axes={"hidden_states": {0: "seq", 1:"bs"},
