@@ -37,7 +37,7 @@ class BaseModule(nn.Module, ABC):
 
         self._setup_pipeline(x, seq_lens)
 
-        return self
+        return self._run
 
     def _run(self, x: torch.Tensor):
         assert self.pipeline is not None
