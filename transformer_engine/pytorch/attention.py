@@ -441,7 +441,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
 def flash_attn_forward_func_with_cp(q, k, v, cu_seqlens_q, cu_seqlens_k,
                                     max_seqlen_q, max_seqlen_k, dropout_p,
-                                    cp_group, cp_global_ranks,cp_stream,
+                                    cp_group, cp_global_ranks, cp_stream,
                                     softmax_scale=None, causal=False,
                                     deterministic=False):
     """Flash Attention implementation with context parallelism"""
