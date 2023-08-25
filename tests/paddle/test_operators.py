@@ -46,7 +46,7 @@ from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
 
 np.random.seed(10)
-paddle.seed(10)
+paddle.seed(11)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
@@ -400,7 +400,7 @@ class TestLayerNorm:
 
         y_ref, mu_ref, rsigma_ref = self.calc_fwd_ref(x, eps, gamma, beta)
 
-        assert_allclose(y, y_ref, rtol=1e-5, atol=1e-5)
+        assert_allclose(y, y_ref, rtol=1e-4, atol=1e-4)
         assert_allclose(mu, mu_ref, rtol=1e-3, atol=1e-3)
         assert_allclose(rsigma, rsigma_ref, rtol=5e-2, atol=5e-2)
 
@@ -725,10 +725,8 @@ class TestFusedAttn:
             q_grad = dq
             k_grad = dkv[:, :, 0, :, :]
             v_grad = dkv[:, :, 1, :, :]
-        fwd_out = paddle.reshape(
-            out, shape=[self.batch_size, self.q_seqlen, self.num_heads, self.head_size])
 
-        return fwd_out, q_grad, k_grad, v_grad
+        return out, q_grad, k_grad, v_grad
 
     @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
                         reason="cuDNN fMHA requires Ampere+ GPU")

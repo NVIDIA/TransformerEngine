@@ -21,10 +21,10 @@ from transformer_engine.pytorch.utils import (
     attention_mask_func,
 )
 from transformer_engine.pytorch import (
-    DotProductAttention, Linear, LayerNormLinear, LayerNormMLP, TransformerLayer, RMSNorm
+    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
+    MultiheadAttention, RMSNorm, TransformerLayer
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-
 
 seed = 1234
 rng_str = "rng_state"
@@ -60,6 +60,9 @@ all_boolean = [True, False]
 all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
+
+mask_types = ["causal", "no_mask"]
+
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
@@ -321,6 +324,7 @@ class TorchDotProductAttention(torch.nn.Module):
 
         return context_layer
 
+
 # Adapted from https://github.com/bzhangGo/rmsnorm/blob/c6691f20ec0af4128c8159c903071f7575404295/rmsnorm_torch.py
 class TorchRMSNorm(nn.Module):
     def __init__(self, in_features, eps=1e-5):
@@ -341,6 +345,7 @@ class TorchRMSNorm(nn.Module):
         x_normed = x * r_rms_x
 
         return (self.weight.float() * x_normed).to(x.dtype)
+
 
 class TorchLayerNormLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int,
@@ -372,13 +377,18 @@ class TorchMHA(nn.Module):
         )
 
     def forward(self, x, attn_mask=None):
-        return self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
+        output = self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
+        if isinstance(output, tuple):
+            output = output[0]
+        return output
+
 
 _supported_act = {'geglu'  : nn.GELU(approximate="tanh"),
                   'gelu'  : nn.GELU(approximate="tanh"),
                   'reglu'  : nn.ReLU(),
                   'relu'  : nn.ReLU(),
                   'swiglu' : nn.SiLU()}
+
 
 class TorchGLU(nn.Module):
     def __init__(self, activation: str):
@@ -391,6 +401,7 @@ class TorchGLU(nn.Module):
         b = x[..., (shape // 2):]
         a = self.act(a)
         return a * b
+
 
 class TorchLayerNormMLP(nn.Module):
     def __init__(self, hidden_size: int, ffn_hidden_size: int,
@@ -432,7 +443,7 @@ class TorchGPT(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         a = self.ln(x)
-        b, _ = self.causal_attn(a, attn_mask)
+        b = self.causal_attn(a, attn_mask)
         x = x + self.resid_attn_dropout(b)
         n = self.ln_mlp(x)
         x = x + self.resid_mlp_dropout(n)
@@ -747,6 +758,75 @@ def test_gpt_accuracy(dtype, bs, model):
 
     te_outputs = _test_e2e_gpt_accuracy(te_gpt, bs, dtype, config)
     torch_outputs = _test_e2e_gpt_accuracy(torch_gpt, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+
+
+def _test_mha_accuracy(block, bs, dtype, config, mask_type):
+    reset_rng_states()
+
+    inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    inp_hidden_states.retain_grad()
+    inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
+
+    out = block(inp_hidden_states, inp_attn_mask)
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("mask_type", mask_types)
+def test_mha_accuracy(dtype, bs, model, mask_type):
+    config = model_configs[model]
+
+    te_mha = (
+        MultiheadAttention(
+            config.hidden_size,
+            config.num_attention_heads,
+            fuse_qkv_params=True,
+            qkv_weight_interleaved=False,
+            input_layernorm=False,
+            attn_mask_type=mask_type,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_mha = (
+        TorchMHA(
+            config.hidden_size,
+            config.num_attention_heads,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_mha.mhsa.in_proj_weight = Parameter(te_mha.qkv.weight.clone())
+        torch_mha.mhsa.in_proj_bias = Parameter(te_mha.qkv.bias.clone())
+        torch_mha.mhsa.out_proj.weight = Parameter(te_mha.proj.weight.clone())
+        torch_mha.mhsa.out_proj.bias = Parameter(te_mha.proj.bias.clone())
+
+    te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config, mask_type)
+    torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config, mask_type)
 
     # Check output.
     if dtype == torch.float32:
