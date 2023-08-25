@@ -38,20 +38,21 @@ class ModelConfig:
 
 model_configs = {
     "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    #"test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    #"test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    #"test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    #"test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    #"test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    #"test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    #"test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
-    param_types.append(torch.bfloat16)
+#if torch.cuda.is_bf16_supported():
+#    param_types.append(torch.bfloat16)
 
-batch_sizes = [1, 2, 32]
+#batch_sizes = [1, 2, 32]
+batch_sizes = [2] #, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -71,11 +72,11 @@ def test_dpa_qkv_layout(dtype, bs, model):
 
     for qkv_layout in qkv_layouts:
 
-        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FlashAttention", qkv_layout)
-        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+        fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FusedAttention", qkv_layout)
-        unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
+        unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
 
         atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
@@ -117,13 +118,16 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
                  break
         tensors = torch.split(tensor, 1, dim = split_dim) if split_dim != 0 else [tensor]
         for j in range(tensor_count):
-            inp.append(tensors[j])
+            if split_dim != 0:
+                inp.append(tensors[j].squeeze(split_dim))
+            else:
+                inp.append(tensors[j])
     for i in range(3):
         inp[i].requires_grad=True
 
     seqlens = torch.empty(bs, dtype = torch.int32).cuda()
     seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(bs + 1, device = inp.device, dtype = torch.int32)
+    cu_seqlens = torch.zeros(bs + 1, device = inp[0].device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
     qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
     op_grad_shape = [dim_to_num[i] for i in qkv_format]

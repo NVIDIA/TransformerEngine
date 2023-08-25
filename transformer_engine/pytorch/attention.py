@@ -186,8 +186,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             qkv_layout in QKVLayouts
             ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
         assert (qkv_format != 'thd'
-            ), "UnfusedDotProductAttention currently does not support inputs
-            with variable sequence lengths!"
+            ), """UnfusedDotProductAttention currently does not support inputs
+            with variable sequence lengths!"""
         if qkv_format == 'bshd':
             query_layer, key_layer, value_layer = [x.transpose(0, 1)
                 for x in [query_layer, key_layer, value_layer]]
@@ -868,7 +868,8 @@ class FusedAttention(torch.nn.Module):
         qkv_layout: str = "sb3hd",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
-        fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+        fused_attention_backend: tex.NVTE_Fused_Attn_Backend
+            = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
@@ -889,7 +890,7 @@ class FusedAttention(torch.nn.Module):
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
         if qkv_format in ['sbhd', 'bshd']:
-            batch_size = query_layer.shape[1] if qkv_format = 'sbhd' else query_layer.shape[0]
+            batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is None:
@@ -1302,8 +1303,8 @@ class DotProductAttention(torch.nn.Module):
                 key_layer, value_layer = [x.view(batch_size, seqlens_kv[0], *x.shape[-2:])
                     for x in (key_layer, value_layer)]
                 warnings.warn(
-                    "Please use qkv_format bshd instead of thd when sequences in a batch
-                    are of equal length."
+                    """Please use qkv_format bshd instead of thd when sequences in a batch
+                    are of equal length."""
                     )
 
         if qkv_format in ['sbhd', 'bshd']:
@@ -1315,13 +1316,13 @@ class DotProductAttention(torch.nn.Module):
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                 assert (all(seqlens_q <= max_seqlen_q)
-                    ), "Sequence lengths indicated by cu_seqlens_q must not be greater than
-                    the sequence dimention in the query tensor!"
+                    ), """Sequence lengths indicated by cu_seqlens_q must not be greater than
+                    the sequence dimention in the query tensor!"""
             if cu_seqlens_kv is not None:
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                 assert (all(seqlens_kv <= max_seqlen_kv)
-                    ), "Sequence lengths indicated by cu_seqlens_kv must not be greater than
-                    the sequence dimention in the key and value tensors!"
+                    ), """Sequence lengths indicated by cu_seqlens_kv must not be greater than
+                    the sequence dimention in the key and value tensors!"""
 
         qkv_layout = _get_qkv_layout(query_layer,
             key_layer,
@@ -1378,6 +1379,7 @@ class DotProductAttention(torch.nn.Module):
             )
 
         if use_flash_attention:
+            print('--------- flash')
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
@@ -1388,12 +1390,13 @@ class DotProductAttention(torch.nn.Module):
                                                             cu_seqlens_kv = cu_seqlens_kv,
                                                             )
             return self.flash_attention(query_layer, key_layer, value_layer,
-                                                            qkv_layout = qkv_layout
+                                                            qkv_layout = qkv_layout,
                                                             cu_seqlens_q = cu_seqlens_q,
                                                             cu_seqlens_kv = cu_seqlens_kv,
                                                             )
 
         if use_fused_attention:
+            print('--------- fused')
             qkvso_strides = _get_qkvso_strides(query_layer,
                 key_layer,
                 value_layer,
@@ -1406,7 +1409,7 @@ class DotProductAttention(torch.nn.Module):
                     query_layer,
                     key_layer,
                     value_layer,
-                    qkv_layout = qkv_layout
+                    qkv_layout = qkv_layout,
                     cu_seqlens_q = cu_seqlens_q,
                     cu_seqlens_kv = cu_seqlens_kv,
                     fused_attention_backend = fused_attention_backend,
@@ -1414,7 +1417,7 @@ class DotProductAttention(torch.nn.Module):
                     core_attention_bias = core_attention_bias,
                     fast_zero_fill = fast_zero_fill)
             return self.fused_attention(query_layer, key_layer, value_layer,
-                qkv_layout = qkv_layout
+                qkv_layout = qkv_layout,
                 cu_seqlens_q = cu_seqlens_q,
                 cu_seqlens_kv = cu_seqlens_kv,
                 fused_attention_backend = fused_attention_backend,
@@ -1422,6 +1425,7 @@ class DotProductAttention(torch.nn.Module):
                 core_attention_bias = core_attention_bias,
                 fast_zero_fill = fast_zero_fill)
 
+        print('--------- unfused')
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
                 self.unfused_attention,
