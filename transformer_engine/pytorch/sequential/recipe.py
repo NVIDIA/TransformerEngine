@@ -19,6 +19,9 @@ def _default_scaling_factor_compute_method(
     out.fill_(1.0)  # TODO
 
 
+_recipe_stack: list[Recipe] = []
+
+
 class Recipe(NamedTuple):
     amax_history_len: int = 1024
     amax_reduction_period: int = 10
@@ -31,18 +34,16 @@ class Recipe(NamedTuple):
     lowp: DType = DType.Float32
     world_size: int = 1
 
-    recipe_stack: ClassVar[list[Recipe]] = []  # static
-
     def __enter__(self):
-        Recipe.recipe_stack.append(self)
+        _recipe_stack.append(self)
 
     def __exit__(self, exc_type: type[T], exc_value: T, exc_traceback: TracebackType):
-        assert Recipe.recipe_stack[-1] is self
-        Recipe.recipe_stack.pop()
+        assert _recipe_stack[-1] is self
+        _recipe_stack.pop()
 
     @staticmethod
     def current() -> Recipe:
-        return Recipe.recipe_stack[-1]
+        return _recipe_stack[-1]
 
 
-Recipe.recipe_stack.append(Recipe())
+_recipe_stack.append(Recipe())
