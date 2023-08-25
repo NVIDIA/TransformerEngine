@@ -114,7 +114,6 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
                 config.num_attention_heads,
                 config.head_dim,
                 attention_dropout = config.dropout_p,
-                attn_mask_type = config.attn_mask_type,
                 sequence_parallel = False,
                 tp_size = 1,
                 get_rng_state_tracker = get_dummy_cuda_rng_tracker,
@@ -127,7 +126,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v,
+    op = block(q, k, v, config.attn_mask_type,
         checkpoint_core_attention = ckpt_attn,
         core_attention_bias_type = bias_type,
         core_attention_bias = bias)
@@ -211,7 +210,6 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
             output_layer_init_method = output_layer_init_method,
             layer_number = layer_number,
             kv_channels = config.head_dim,
-            self_attn_mask_type = config.attn_mask_type,
             tp_group = None,
             tp_size =  1,
             params_dtype = dtype,
@@ -237,7 +235,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
     num_iters = 10
     for i in range(num_iters):
-        op = block(inp,
+        op = block(inp, config.attn_mask_type,
             checkpoint_core_attention = ckpt_attn,
             core_attention_bias_type = bias_type,
             core_attention_bias = bias)
@@ -316,7 +314,6 @@ def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_gr
             output_layer_init_method = output_layer_init_method,
             layer_number = layer_number,
             kv_channels = config.head_dim,
-            self_attn_mask_type = config.attn_mask_type,
             tp_group = None,
             tp_size =  1,
             params_dtype = dtype,
@@ -340,7 +337,7 @@ def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_gr
         .cuda()
     )
 
-    op = block(inp)
+    op = block(inp, config.attn_mask_type)
     op.backward(op_grad)
 
     return op, inp.grad
@@ -429,7 +426,6 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
                 config.num_attention_heads,
                 config.head_dim,
                 attention_dropout = config.dropout_p,
-                attn_mask_type = config.attn_mask_type,
                 sequence_parallel = False,
                 tp_size = 1,
                 get_rng_state_tracker = None,
@@ -442,7 +438,7 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v)
+    op = block(q, k, v, config.attn_mask_type)
     op.backward(op_grad)
     torch.save(op,'ctx_ref.pt')
     torch.save(inp.grad,'dqkv_ref.pt')
