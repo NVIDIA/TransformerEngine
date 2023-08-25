@@ -65,7 +65,7 @@ __all__ = ["DotProductAttention", "MultiheadAttention"]
 def flash_attn_p2p_communicate(rank, send_tensor, send_dst,
                                recv_tensor, recv_src,
                                cp_group, batch_p2p_comm):
-    """All-to-all communications of KV and dKV in Flash Attention with context parallelism"""
+    """Point-to-point communications of KV and dKV in Flash Attention with context parallelism"""
     send_recv_ops = []
 
     if batch_p2p_comm:
