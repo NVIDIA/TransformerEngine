@@ -1,10 +1,39 @@
 # type: ignore
-from typing import Any
+from __future__ import annotations
 from .real import *
 
 from . import printing
 
-globals().pop("Tensor")
+_TensorHandle = globals().pop("Tensor")
+
+# Use n object pool, as torch compile
+# does not like creating ScriptClass
+# objects on the fly.
+tensor_handles = {}
+
+
+def allocate_handles():
+    HANDLE_COUNT = 1024
+    for _ in range(HANDLE_COUNT):
+        tensor_handles.append(_TensorHandle())
+
+
+# Preallocate some tensors
+allocate_handles()
+
+
+def make_tensor(
+    dtype: DType,
+    data: torch.Tensor,
+    amax: torch.Tensor,
+    scale: torch.Tensor,
+    scale_inv: torch.Tensor,
+):
+    if not tensor_handles:
+        allocate_handles()
+    handle = tensor_handles.pop()
+    reset_tensor(handle, dtype, data, amax, scale, scale_inv)
+    return handle
 
 
 # Quacks like a Tensor. </joke>
@@ -26,7 +55,7 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = _make_tensor(dtype.value, data, amax, scale, scale_inv)
+        self.__raw = make_tensor(dtype.value, data, amax, scale, scale_inv)
 
     @property
     def dtype(self) -> DType:
@@ -54,3 +83,10 @@ class Tensor:
 
     def __repr__(self) -> str:
         return printing.tensor_repr(self.__raw)
+
+    def __del__(self):
+        try:
+            global tensor_handles
+            tensor_handles.append(self.__raw)
+        except AttributeError:
+            pass

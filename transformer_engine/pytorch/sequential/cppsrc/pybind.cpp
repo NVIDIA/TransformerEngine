@@ -1,5 +1,6 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
+ *reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -57,6 +58,22 @@ void cuda_check() {
     }
   }
 }
+
+float *getDataPtr(at::Tensor t) {
+  if (t.numel() > 0) {
+    if (!t.is_cuda()) {
+      throw std::runtime_error("Cannot create NVTE Tensor: !tensor.is_cuda()");
+    }
+    if (!t.is_contiguous()) {
+      throw std::runtime_error(
+          "Cannot create NVTE Tensor: !tensor.is_contiguous()");
+    }
+    return reinterpret_cast<float *>(t.data_ptr());
+  } else {
+    return nullptr;
+  }
+}
+
 struct Tensor : torch::CustomClassHolder {
   static_assert(std::is_same_v<NVTETensor, void *>);
 
@@ -66,31 +83,7 @@ struct Tensor : torch::CustomClassHolder {
   at::Tensor scale;
   at::Tensor scale_inv;
 
-  static float *getDataPtr(at::Tensor t) {
-    if (t.numel() > 0) {
-      if (!t.is_cuda()) {
-        throw std::runtime_error(
-            "Cannot create NVTE Tensor: !tensor.is_cuda()");
-      }
-      if (!t.is_contiguous()) {
-        throw std::runtime_error(
-            "Cannot create NVTE Tensor: !tensor.is_contiguous()");
-      }
-      return reinterpret_cast<float *>(t.data_ptr());
-    } else {
-      return nullptr;
-    }
-  }
-
-  Tensor(int64_t dtype, at::Tensor data, at::Tensor amax, at::Tensor scale,
-         at::Tensor scale_inv)
-      : pimpl{nvte_create_tensor(getDataPtr(data),
-                                 NVTEShape{(size_t *)(data.sizes().data()),
-                                           data.sizes().size()},
-                                 NVTEDType(dtype), getDataPtr(amax),
-                                 getDataPtr(scale), getDataPtr(scale_inv)),
-              [](NVTETensor impl) { nvte_destroy_tensor(impl); }},
-        data{data}, amax{amax}, scale{scale}, scale_inv{scale_inv} {}
+  Tensor() = default;
 };
 
 // ----------- Wrapper for NVTETensorPack -----------
@@ -267,43 +260,37 @@ void multi_cast_transpose(
 
 // ----------- Registration of torch.ops -----------
 TORCH_LIBRARY(transformer_engine_cuda, m) {
-  m.class_<Tensor>("Tensor")
-      .def(torch::init<int64_t, at::Tensor, at::Tensor, at::Tensor,
-                       at::Tensor>())
-      .def_property("dtype",
-                    [](const c10::intrusive_ptr<Tensor> &self) {
-                      return (int64_t)nvte_tensor_type(
-                          (NVTETensor)(self->pimpl.get()));
-                    })
-      .def_property("shape",
-                    [](const c10::intrusive_ptr<Tensor> &self) {
-                      NVTEShape s =
-                          nvte_tensor_shape((NVTETensor)(self->pimpl.get()));
-                      return std::vector<int64_t>(s.data, s.data + s.ndim);
-                    })
-      .def_readonly("data", &Tensor::data)
-      .def_readonly("amax", &Tensor::amax)
-      .def_readonly("scale", &Tensor::scale)
-      .def_readonly("scale_inv", &Tensor::scale_inv);
+  m.class_<Tensor>("Tensor").def(torch::init<>());
 
-  m.def("_make_tensor", [](int64_t dtype, at::Tensor data, at::Tensor amax,
+  m.def("reset_tensor", [](const c10::intrusive_ptr<Tensor> &self,
+                           int64_t dtype, at::Tensor data, at::Tensor amax,
                            at::Tensor scale, at::Tensor scale_inv) {
-    return c10::make_intrusive<Tensor>(dtype, data, amax, scale, scale_inv);
+    self->pimpl = std::shared_ptr<void>(
+        nvte_create_tensor(
+            getDataPtr(data),
+            NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()},
+            NVTEDType(dtype), getDataPtr(amax), getDataPtr(scale),
+            getDataPtr(scale_inv)),
+        nvte_destroy_tensor);
+    self->data = data;
+    self->amax = amax;
+    self->scale = scale;
+    self->scale_inv = scale_inv;
   });
-  m.def("_get_tensor_dtype", [](const c10::intrusive_ptr<Tensor> &self) {
+  m.def("get_tensor_dtype", [](const c10::intrusive_ptr<Tensor> &self) {
     return (int64_t)nvte_tensor_type((NVTETensor)(self->pimpl.get()));
   });
-  m.def("_get_tensor_shape", [](const c10::intrusive_ptr<Tensor> &self) {
+  m.def("get_tensor_shape", [](const c10::intrusive_ptr<Tensor> &self) {
     NVTEShape s = nvte_tensor_shape((NVTETensor)(self->pimpl.get()));
     return std::vector<int64_t>(s.data, s.data + s.ndim);
   });
-  m.def("_get_tensor_data",
+  m.def("get_tensor_data",
         [](const c10::intrusive_ptr<Tensor> &self) { return self->data; });
-  m.def("_get_tensor_amax",
+  m.def("get_tensor_amax",
         [](const c10::intrusive_ptr<Tensor> &self) { return self->amax; });
-  m.def("_get_tensor_scale",
+  m.def("get_tensor_scale",
         [](const c10::intrusive_ptr<Tensor> &self) { return self->scale; });
-  m.def("_get_tensor_scale_inv",
+  m.def("get_tensor_scale_inv",
         [](const c10::intrusive_ptr<Tensor> &self) { return self->scale_inv; });
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
