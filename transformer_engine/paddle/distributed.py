@@ -58,8 +58,8 @@ def set_tensor_dist_attr(tensor: paddle.Tensor, is_parallel: bool, axis: int) ->
         tensor.split_axis = axis
 
 
-def set_weight_tensor_dist_attr(tensor: paddle.Tensor, is_parallel: bool, parallel_mode: str,
-                                backend: str) -> None:
+def set_weight_tensor_dist_attr(tensor: paddle.Tensor, is_parallel: bool,
+                                parallel_mode: Optional[str], backend: str) -> None:
     """Set distributed attributes for the weight tensor"""
     if not is_parallel or parallel_mode is None:
         return

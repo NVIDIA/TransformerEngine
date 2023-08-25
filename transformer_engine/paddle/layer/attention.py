@@ -158,9 +158,16 @@ class DotProductAttention(paddle.nn.Layer):
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
-        self.backend = backend
         self.rng_state = paddle.zeros((2,), dtype='int64')
         self.rng_state.persistable = True
+
+        self.backend = backend
+
+        arch = paddle.device.cuda.get_device_capability()
+        if arch not in ((8, 0), (9, 0)) and backend == 'transformer_engine':
+            # FMHA is not supported, falling back to Paddle backend
+            self.backend = 'paddle'
+
         if self.backend != 'transformer_engine':
             self.scale_mask_softmax = FusedScaleMaskSoftmax(attn_mask_type,
                                                             attention_mask_func,

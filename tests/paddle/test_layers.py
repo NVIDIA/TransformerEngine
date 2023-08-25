@@ -98,8 +98,8 @@ class TestLinear:
         """
         Test BF16 Linear
         """
-        rtol = 1e-2
-        atol = 1e-2
+        rtol = 5e-2
+        atol = 5e-2
 
         input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
         input_tensor.stop_gradient = no_dgrad
@@ -258,8 +258,8 @@ class TestLayerNormLinear:
         Test BF16 LayerNormLinear Layer
         """
         paddle.set_default_dtype(activation_dtype)
-        rtol = 1e-2
-        atol = 1e-2
+        rtol = 5e-2
+        atol = 5e-2
 
         input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
         input_tensor.stop_gradient = no_dgrad

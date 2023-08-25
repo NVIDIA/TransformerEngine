@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Unittest for group sharding"""
 
+from enum import Enum
 import unittest
 
 import paddle
@@ -45,26 +46,28 @@ class TestGroupSharding(unittest.TestCase):
         self.strategy = strategy
         fleet.init(is_collective=True, strategy=strategy)
 
-    def _build_optimizer(self, model, is_stage1):
-        if is_stage1:
-            return DygraphShardingOptimizer(
+    def _get_model_and_optimizer(self, model, stage):
+        if stage == 1:
+            optimizer = DygraphShardingOptimizer(
                 hcg=fleet.get_hybrid_communicate_group(),
                 user_defined_strategy=self.strategy,
                 params=model.parameters(),
                 inner_optimizer_class=paddle.optimizer.AdamW,
                 learning_rate=0.01,
             )
-        return paddle.optimizer.AdamW(learning_rate=0.01, parameters=model.parameters())
-
-    def _get_model_and_optimizer(self, model, stage):
-        if stage == 1:
-            optimizer = self._build_optimizer(model, is_stage1=True)
             model = fleet.distributed_model(model)
             optimizer = fleet.distributed_optimizer(optimizer)
         elif stage in [2, 3]:
-            optimizer = self._build_optimizer(model, is_stage1=False)
+            optimizer = paddle.optimizer.AdamW(learning_rate=0.01, parameters=model.parameters())
             group = fleet.get_hybrid_communicate_group().get_sharding_parallel_group()
-            level = "p_g_os" if stage == 3 else "os_g"
+
+            class ShardingLevel(Enum):
+                """Paddle sharding options"""
+                kStage1 = 'os'
+                kStage2 = 'os_g'
+                kStage3 = 'p_g_os'
+
+            level = ShardingLevel.kStage3 if stage == 3 else ShardingLevel.kStage2
             model, optimizer, _ = paddle.distributed.sharding.group_sharded_parallel(
                 model=model,
                 optimizer=optimizer,
@@ -106,8 +109,7 @@ class TestGroupSharding(unittest.TestCase):
             assert_allclose(loss_te, loss_pd, rtol=self.rtol, atol=self.atol)
 
         assert len(optimizer_te.state_dict()) == 4, \
-            "Expect each rank to hold optimizer state for one parameter " \
-            "(4 entries for one param for AdamW)"
+            "Expect each rank to hold 4 optimizer state entries."
 
     def test_group_sharding_stage2(self):
         """Tests group sharding training"""
@@ -144,8 +146,7 @@ class TestGroupSharding(unittest.TestCase):
             assert_allclose(loss_te, loss_pd, rtol=self.rtol, atol=self.atol)
 
         assert len(optimizer_te.state_dict()) == 4, \
-            "Expect each rank to hold optimizer state for one parameter " \
-            "(4 entries for one param for AdamW)"
+            "Expect each rank to hold 4 optimizer state entries."
 
     def test_group_sharding_stage3(self):
         """Tests group sharding training"""
@@ -180,7 +181,7 @@ class TestGroupSharding(unittest.TestCase):
             if name.endswith('w_0_moment1_0'):
                 assert value.numel() == \
                     self.in_channels * self.out_channels // self.sharding_degree, \
-                    "Expect optimizer state of weight to be sharded across trainers."
+                    "Expect optimizer state to be sharded across trainers."
 
 
 if __name__ == '__main__':
