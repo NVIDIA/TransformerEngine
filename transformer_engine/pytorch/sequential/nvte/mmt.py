@@ -26,9 +26,9 @@ def _cublas_workspace():
     return _nvte.Tensor(
         _nvte.DType.Byte,
         data,
-        torch.Tensor(device="cuda"),
-        torch.Tensor(device="cuda"),
-        torch.Tensor(device="cuda"),
+        torch.Tensor().cuda(),
+        torch.Tensor().cuda(),
+        torch.Tensor().cuda(),
     )
 
 

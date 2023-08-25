@@ -8,7 +8,7 @@ def make_nvte_tensor(t: torch.Tensor):
     return _nvte.Tensor(
         torch_to_te_dtype(t.dtype),
         t.data,
-        torch.Tensor(device="cuda"),
-        torch.Tensor(device="cuda"),
-        torch.Tensor(device="cuda"),
+        torch.Tensor().cuda(),
+        torch.Tensor().cuda(),
+        torch.Tensor().cuda(),
     )
