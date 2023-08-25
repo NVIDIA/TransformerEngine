@@ -425,9 +425,9 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
         (workspace_size + barrier_size + dgamma_part_size + dbeta_part_size);
 
     void *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
-    void *barrier = static_cast<char *>(workspace) + workspace_size;
-    void *dgamma_part = static_cast<char *>(barrier) + barrier_size;
+    void *dgamma_part = static_cast<char *>(workspace) + workspace_size;
     void *dbeta_part = static_cast<char *>(dgamma_part) + dgamma_part_size;
+    void *barrier = static_cast<char *>(dbeta_part) + dbeta_part_size;
 
     auto workspace_tensor =
         TensorWrapper(workspace, dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype());
