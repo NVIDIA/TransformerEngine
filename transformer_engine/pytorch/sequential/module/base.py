@@ -25,25 +25,23 @@ class BaseModule(nn.Module, ABC):
         self, x: torch.Tensor, seq_lens: torch.Tensor | None = None
     ) -> torch.Tensor:
         self.precompiled_for(x, seq_lens)
-        if seq_lens is None:
-            seq_lens = self.precompiled_seq_lens
-        assert self.pipeline is not None
-
-        return apply(x, self.pipeline, self.training)
+        return self._run(x)
 
     def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
-        if seq_lens is None:
-            self.precompiled_seq_lens = BaseModule._create_seq_lens_tensor(x)
-
         assert x.is_cuda
         assert x.is_contiguous()
-        if seq_lens is not None:
-            assert seq_lens.is_cuda
-            assert seq_lens.is_contiguous()
+        if seq_lens is None:
+            seq_lens = BaseModule._create_seq_lens_tensor(x)
+        assert seq_lens.is_cuda
+        assert seq_lens.is_contiguous()
 
-        self._setup_pipeline()
+        self._setup_pipeline(x, seq_lens)
 
         return self
+
+    def _run(self, x: torch.Tensor):
+        assert self.pipeline is not None
+        return apply(x, self.pipeline, self.training)
 
     @staticmethod
     def _create_seq_lens_tensor(x: torch.Tensor):
@@ -58,7 +56,8 @@ class BaseModule(nn.Module, ABC):
             raise ValueError(f"Unsupported input shape: {x.shape}")
         return seq_lens
 
-    def _setup_pipeline(self):
+    def _setup_pipeline(self, x: torch.Tensor, seq_lens: torch.Tensor):
+        del x, seq_lens  # TODO: take x's type into account, save seq_lens
         env = self._current_env()
         if self.pipeline is None or env != self.compile_env:
             self.pipeline = ComputePipeline(
