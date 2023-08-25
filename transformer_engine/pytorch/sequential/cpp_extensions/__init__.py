@@ -3,28 +3,13 @@ from .real import *
 
 from . import printing
 
-raw_tensor = globals().pop("Tensor")
+_Tensor = globals().pop("Tensor")
 
-
-class _TensorImpostor:
+# Quacks like a Tensor. </joke>
+class Tensor:
     __raw: object
 
-    def __init__(self, __raw: object):
-        self.__raw = __raw
-
-    def __repr__(self) -> str:
-        return printing.tensor_repr(self.__raw)  # type: ignore
-
-    def __getattr__(self, __name: str) -> Any:
-        return getattr(self.__raw, __name)
-
-    @property
-    def dtype(self):
-        return DType(self.__raw.dtype)  # type: ignore
-
-
-class _TensorTypeImpostor:
-    def __call__(
+    def __init__(
         self,
         dtype: Enum,
         data: torch.Tensor,
@@ -32,7 +17,19 @@ class _TensorTypeImpostor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        return _TensorImpostor(raw_tensor(dtype.value, data, amax, scale, scale_inv))  # type: ignore
+        self.__raw = _Tensor(dtype.value, data, amax, scale, scale_inv)  # type: ignore
 
+    def __repr__(self) -> str:
+        return printing.tensor_repr(self.__raw)  # type: ignore
 
-Tensor = _TensorTypeImpostor()
+    # Note: cannot inherit from _Tensor as
+    # it is a torch.ScriptClass, and those,
+    # for some reason, do not support being
+    # inherited from. Using __getattr__ to
+    # work around this limitation.
+    def __getattr__(self, __name: str) -> Any:
+        return getattr(self.__raw, __name)
+
+    @property
+    def dtype(self):
+        return DType(self.__raw.dtype)  # type: ignore
