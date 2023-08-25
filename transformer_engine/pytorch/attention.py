@@ -1178,7 +1178,7 @@ class DotProductAttention(torch.nn.Module):
                               core_attention_bias_type=core_attention_bias_type,
                               core_attention_bias=core_attention_bias,
                               fast_zero_fill=fast_zero_fill)
-            return self.fused_attention(query_layer, key_layer, value_layer, 
+            return self.fused_attention(query_layer, key_layer, value_layer,
                               attn_mask_type=attn_mask_type,
                               fused_attention_backend=fused_attention_backend,
                               core_attention_bias_type=core_attention_bias_type,
@@ -1541,8 +1541,8 @@ class MultiheadAttention(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        attn_mask_type: str = "causal",
         encoder_output: Optional[torch.Tensor] = None,
+        attn_mask_type: str = "causal",
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
