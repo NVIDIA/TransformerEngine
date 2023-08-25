@@ -75,13 +75,13 @@ float *getDataPtr(at::Tensor t) {
 
 // ----------- Wrapper for NVTETensorPack -----------
 struct TensorPack : NVTETensorPack {
-  TensorPack(const std::vector<NVTETensor> &tensors_) : NVTETensorPack{} {
+  TensorPack(const std::vector<int64_t> &tensors_) : NVTETensorPack{} {
     size = tensors_.size();
     if (size > MAX_SIZE) {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
     }
     for (size_t i = 0; i < size; ++i) {
-      tensors[i] = tensors_[i];
+      tensors[i] = reinterpret_cast<NVTETensor>(tensors_[i]);
     }
     nvte_tensor_pack_create(this);
   }
@@ -136,14 +136,14 @@ template <> struct wrapped<NVTETensor> : exposed_type<int64_t> {
   }
 };
 template <>
-struct wrapped<NVTETensorPack *> : exposed_type<std::vector<NVTETensor>> {
-  static TensorPack unwrap(const std::vector<NVTETensor> &arg) {
+struct wrapped<NVTETensorPack *> : exposed_type<std::vector<int64_t>> {
+  static TensorPack unwrap(const std::vector<int64_t> &arg) {
     return TensorPack(arg);
   }
 };
 template <>
-struct wrapped<const NVTETensorPack *> : exposed_type<std::vector<NVTETensor>> {
-  static TensorPack unwrap(const std::vector<NVTETensor> &arg) {
+struct wrapped<const NVTETensorPack *> : exposed_type<std::vector<int64_t>> {
+  static TensorPack unwrap(const std::vector<int64_t> &arg) {
     return TensorPack(arg);
   }
 };
