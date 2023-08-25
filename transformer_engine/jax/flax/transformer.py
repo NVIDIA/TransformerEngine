@@ -414,7 +414,21 @@ class MultiHeadAttention(nn.Module):
 
             return jnp.stack([k_kernel, v_kernel], axis=-2, dtype=dtype)
 
-        first_sharding_type, second_sharding_type = infer_sharding_type()
+        # TODO(rewang): make it configurable for pre_scale_bias
+        attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
+
+        def canonicalize_attn_mask_type(attn_mask_type):
+            """
+            Convert the string to AttnMaskType
+            """
+            if attn_mask_type == 'causal':
+                return AttnMaskType.CAUSAL_MASK
+            if attn_mask_type == 'padding':
+                return AttnMaskType.PADDING_MASK
+            raise ValueError(f"Unsupported {attn_mask_type=}, "
+                             "supported attn_mask_type = {'causal', 'padding'}")
+
+        attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
@@ -427,11 +441,16 @@ class MultiHeadAttention(nn.Module):
         def _check_head_dim(head_dim):
             return head_dim in [64, 128]
 
+        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype,
+                                                               attn_bias_type, attn_mask_type,
+                                                               self.dropout_rate, q_seqlen,
+                                                               kv_seqlen, self.head_dim)
+
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
             _check_seqlen(q_seqlen) and _check_seqlen(kv_seqlen) and \
             _check_head_dim(self.head_dim) and \
-            is_fused_attn_kernel_available() and \
+            has_fused_attn_kernel and \
             enable_fused_attn
 
         if enable_fused_attn and not use_fused_attn:
@@ -454,12 +473,14 @@ class MultiHeadAttention(nn.Module):
                           f"but got {kv_seqlen=}, "
             if not _check_head_dim(self.head_dim):
                 reason += f"head_dim should be 64 or 128 but got {self.head_dim}, "
-            if not is_fused_attn_kernel_available():
-                reason += "GPU arch >= Ampere and cuDNN >= 8.9.1 are required, "
+            if not has_fused_attn_kernel:
+                reason += "no fused attention kernel is available, "
 
             warnings.warn(
-                f"Fused attention is not enabled, " \
-                f"{reason}fall back to unfused attention")
+                f"Fused attention is not enabled. Because " \
+                f"{reason}fall back to unfused attention.")
+
+        first_sharding_type, second_sharding_type = infer_sharding_type()
 
         residual = inputs_q
         if self.fuse_qkv:
@@ -628,22 +649,6 @@ class MultiHeadAttention(nn.Module):
                 seed = jax.random.split(dropout_rng, len(jax.devices()))
                 # ensure the old key never used
                 del dropout_rng
-
-            # TODO(rewang): make it configurable for pre_scale_bias
-            attn_bias_type = AttnBiasType.NO_BIAS if bias is None else AttnBiasType.POST_SCALE_BIAS
-
-            def canonicalize_attn_mask_type(attn_mask_type):
-                """
-                Convert the string to AttnMaskType
-                """
-                if attn_mask_type == 'causal':
-                    return AttnMaskType.CAUSAL_MASK
-                if attn_mask_type == 'padding':
-                    return AttnMaskType.PADDING_MASK
-                raise ValueError(f"Unsupported {attn_mask_type=}, "
-                                 "supported attn_mask_type = {'causal', 'padding'}")
-
-            attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
             if inputs_q is inputs_kv:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
