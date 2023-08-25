@@ -783,7 +783,6 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
             self.fake_bf16_io = fake_bf16_io
             if self.softmax_fn == te.softmax.FusedScaleMaskSoftmax:
                 self.fused_scaled_softmax = te.softmax.FusedScaleMaskSoftmax(
-                    attn_mask_type="causal",
                     mask_func=te.utils.attention_mask_func,
                     softmax_in_fp32=True,
                 )
@@ -793,7 +792,7 @@ def test_export_softmax(seed_default_rng, set_max_seq_len, softmax_fn, precision
                 inp = inp.type(torch.bfloat16)
 
             if self.fused_scaled_softmax:
-                ret = self.fused_scaled_softmax(inp, mask, self.scale)
+                ret = self.fused_scaled_softmax(inp, mask, "causal", self.scale)
             else:
                 if self.mask_inp:
                     ret = self.softmax_fn.apply(inp, mask, self.scale)
@@ -867,7 +866,6 @@ def test_softmax_mask_fn(seed_default_rng, precision):
             # even when is_in_onnx_export_mode()==False.
             os.environ["NVTE_MASKED_SOFTMAX_FUSION"] = "0"
             self.fused_scaled_softmax = te.softmax.FusedScaleMaskSoftmax(
-                attn_mask_type="causal",
                 mask_func=te.utils.attention_mask_func,
                 softmax_in_fp32=True,
             )
@@ -875,7 +873,7 @@ def test_softmax_mask_fn(seed_default_rng, precision):
         def forward(self, inp, mask):
             if self.fake_bf16_io:
                 inp = inp.type(torch.bfloat16)
-            ret = self.fused_scaled_softmax(inp, mask, self.scale)
+            ret = self.fused_scaled_softmax(inp, mask, "causal", scale=self.scale)
             if self.fake_bf16_io:
                 ret = ret.type(torch.float)
             return ret
@@ -1161,13 +1159,13 @@ def test_export_core_attention(
     query_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     key_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     value_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
-    input_names = ["query", "key", "value", "attention_mask"]
+    input_names = ["query", "key", "value", "attention_mask", "attn_mask_type"]
     attention_mask = None
     if use_mask:
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(qkv_size[1], qkv_size[2], qkv_size[0], qkv_size[0], device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
-    inp = (query_layer, key_layer, value_layer, attention_mask)
+    inp = (query_layer, key_layer, value_layer, attention_mask, attn_mask_type)
 
     mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
@@ -1177,7 +1175,6 @@ def test_export_core_attention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
         attention_dropout=0.5,
-        attn_mask_type=attn_mask_type,
     ).to(device='cuda')
     do_export(model,
             inp,
@@ -1269,7 +1266,6 @@ def test_export_multihead_attention(
 
     model = te.MultiheadAttention(
         *attention_args,
-        attn_mask_type=attn_mask_type,
         params_dtype=precision,
         return_layernorm_output=return_layernorm_output,
         input_layernorm=input_layernorm,
@@ -1278,8 +1274,8 @@ def test_export_multihead_attention(
         return_bias=True,
     ).to(device='cuda')
 
-    inp_context = (hidden_states_context, attention_mask, encoder_output)
-    input_names = ["hidden_states", "attention_mask", "encoder_output"]
+    inp_context = (hidden_states_context, attention_mask, attn_mask_type, encoder_output)
+    input_names = ["hidden_states", "attention_mask", "attn_mask_type", "encoder_output"]
     output_names=["attention_output", "attention_bias"]
     do_export(model, inp_context, fname, use_fp8, input_names=input_names, output_names=output_names,
         dynamic_axes={"hidden_states": {0: "seq", 1:"bs"},
@@ -1347,13 +1343,13 @@ def test_export_transformer_layer(
     num_attention_heads = 4
 
     input_tensor = torch.rand(sequence_length, batch_size, hidden_size, dtype=precision, device="cuda")
-    input_names = ["input", "attention_mask"]
+    input_names = ["input", "attention_mask", "self_attn_mask_type"]
     attention_mask = None
     if use_mask and attn_mask_type != "causal":
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(batch_size, 1, sequence_length, sequence_length, device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
-    inp = (input_tensor, attention_mask)
+    inp = (input_tensor, attention_mask, attn_mask_type)
 
     fp8_str = "_fp8" if use_fp8 else ""
     fuse_qkv_params_str = "_fused-qkv" if fuse_qkv_params else ""
@@ -1365,7 +1361,6 @@ def test_export_transformer_layer(
         hidden_size,
         ffn_hidden_size,
         num_attention_heads,
-        self_attn_mask_type=attn_mask_type,
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
@@ -1547,17 +1542,16 @@ def test_export_gpt_generation(
         hidden_size,
         ffn_hidden_size,
         num_attention_heads,
-        self_attn_mask_type=attn_mask_type,
         output_layernorm=output_layernorm,
         params_dtype=precision,
         fuse_qkv_params=fuse_qkv_params,
         zero_centered_gamma=zero_centered_gamma).to(device='cuda')
 
     # "Context phase": use full input sequence length
-    input_names = ["input"]
+    input_names = ["input", "attention_mask", "self_attn_mask_type"]
     output_names = ["output"]
     input_tensor = torch.rand(sequence_length, batch_size, hidden_size, dtype=precision, device="cuda")
-    inp = (input_tensor,)
+    inp = (input_tensor, None, attn_mask_type)
     do_export(model, inp, fname, use_fp8,
         input_names=input_names, output_names=output_names,
         dynamic_axes={"input": {0: "seq", 1:"bs"},

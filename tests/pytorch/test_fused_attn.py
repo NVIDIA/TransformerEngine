@@ -126,7 +126,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v, config.attn_mask_type,
+    op = block(q, k, v, attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention = ckpt_attn,
         core_attention_bias_type = bias_type,
         core_attention_bias = bias)
@@ -235,7 +235,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
 
     num_iters = 10
     for i in range(num_iters):
-        op = block(inp, config.attn_mask_type,
+        op = block(inp, attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention = ckpt_attn,
             core_attention_bias_type = bias_type,
             core_attention_bias = bias)
@@ -337,7 +337,7 @@ def _run_transformer_layer_gqa(dtype, bs, config, backend, num_querys_per_gqa_gr
         .cuda()
     )
 
-    op = block(inp, config.attn_mask_type)
+    op = block(inp, attn_mask_type=config.attn_mask_type)
     op.backward(op_grad)
 
     return op, inp.grad
@@ -438,7 +438,7 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v, config.attn_mask_type)
+    op = block(q, k, v, attn_mask_type=config.attn_mask_type)
     op.backward(op_grad)
     torch.save(op,'ctx_ref.pt')
     torch.save(inp.grad,'dqkv_ref.pt')
