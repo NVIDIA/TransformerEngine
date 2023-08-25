@@ -1,9 +1,11 @@
+# type: ignore
 from typing import Any
 from .real import *
 
 from . import printing
 
 _Tensor = globals().pop("Tensor")
+
 
 # Quacks like a Tensor. </joke>
 class Tensor:
@@ -17,10 +19,10 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = _Tensor(dtype.value, data, amax, scale, scale_inv)  # type: ignore
+        self.__raw = _Tensor(dtype.value, data, amax, scale, scale_inv)
 
     def __repr__(self) -> str:
-        return printing.tensor_repr(self.__raw)  # type: ignore
+        return printing.tensor_repr(self.__raw)
 
     # Note: cannot inherit from _Tensor as
     # it is a torch.ScriptClass, and those,
@@ -32,4 +34,4 @@ class Tensor:
 
     @property
     def dtype(self):
-        return DType(self.__raw.dtype)  # type: ignore
+        return DType(self.__raw.dtype)
