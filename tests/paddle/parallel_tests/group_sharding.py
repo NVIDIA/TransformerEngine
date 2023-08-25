@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """Unittest for group sharding"""
 
-from enum import Enum
 import unittest
 
 import paddle
@@ -61,7 +60,7 @@ class TestGroupSharding(unittest.TestCase):
             optimizer = paddle.optimizer.AdamW(learning_rate=0.01, parameters=model.parameters())
             group = fleet.get_hybrid_communicate_group().get_sharding_parallel_group()
 
-            class ShardingLevel(Enum):
+            class ShardingLevel:    # pylint: disable=too-few-public-methods,
                 """Paddle sharding options"""
                 kStage1 = 'os'
                 kStage2 = 'os_g'
