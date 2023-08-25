@@ -4,8 +4,6 @@ from typing import Any, Callable
 from ..utils import import_file_as_module, get_return_type
 import torch
 from torch._ops import OpOverloadPacket, _OpNamespace  # type: ignore
-from torch._classes import _ClassNamespace  # type: ignore
-from torch._C import ScriptClass  # type: ignore
 
 try:
     # Normally, torch.classes.load_library would be used
@@ -40,19 +38,13 @@ def inject_real(namespace: dict[str, Any]):
 
     function_ns = torch.ops.transformer_engine_cuda  # type: ignore
     assert isinstance(function_ns, _OpNamespace)
-    type_ns = torch.classes.transformer_engine_cuda  # type: ignore
-    assert isinstance(type_ns, _ClassNamespace)
 
     real_function: Callable[[str], OpOverloadPacket] = lambda name: getattr(
         function_ns, name
     )
-    real_type: Callable[[str], ScriptClass] = lambda name: getattr(type_ns, name)  # type: ignore
 
     for enum_name in enum_names:
         namespace[enum_name] = stub_types[enum_name]
-
-    for class_name in stub_types.keys() - enum_names:
-        namespace[class_name] = real_type(class_name)
 
     for func_name, func_obj in stub_functions.items():
         exposed_return_type: type = get_return_type(func_obj)

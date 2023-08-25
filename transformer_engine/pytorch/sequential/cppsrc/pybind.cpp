@@ -74,28 +74,15 @@ float *getDataPtr(at::Tensor t) {
   }
 }
 
-struct Tensor : torch::CustomClassHolder {
-  static_assert(std::is_same_v<NVTETensor, void *>);
-
-  std::shared_ptr<void> pimpl;
-  at::Tensor data;
-  at::Tensor amax;
-  at::Tensor scale;
-  at::Tensor scale_inv;
-
-  Tensor() = default;
-};
-
 // ----------- Wrapper for NVTETensorPack -----------
 struct TensorPack : NVTETensorPack {
-  TensorPack(const std::vector<c10::intrusive_ptr<Tensor>> &tensors_)
-      : NVTETensorPack{} {
+  TensorPack(const std::vector<NVTETensor> &tensors_) : NVTETensorPack{} {
     size = tensors_.size();
     if (size > MAX_SIZE) {
       throw std::runtime_error("TensorPack size exceeds MAX_SIZE");
     }
     for (size_t i = 0; i < size; ++i) {
-      tensors[i] = (NVTETensor)(tensors_[i]->pimpl.get());
+      tensors[i] = tensors_[i];
     }
     nvte_tensor_pack_create(this);
   }
@@ -143,26 +130,21 @@ template <> struct wrapped<float> : exposed_type<double> {
   static float wrap(double arg) { return arg; }
   static double unwrap(float arg) { return arg; }
 };
-template <>
-struct wrapped<NVTETensor> : exposed_type<const c10::intrusive_ptr<Tensor> &> {
-  // static c10::intrusive_ptr<Tensor> wrap(NVTETensor arg) {
-  //   return c10::make_intrusive<Tensor>(arg);
-  // }
-  static NVTETensor unwrap(const c10::intrusive_ptr<Tensor> &arg) {
-    return (NVTETensor)(arg->pimpl.get());
+template <> struct wrapped<NVTETensor> : exposed_type<int64_t> {
+  static int64_t wrap(NVTETensor arg) { return reinterpret_cast<int64_t>(arg); }
+  static NVTETensor unwrap(int64_t arg) {
+    return reinterpret_cast<NVTETensor>(arg);
   }
 };
 template <>
-struct wrapped<NVTETensorPack *>
-    : exposed_type<std::vector<c10::intrusive_ptr<Tensor>>> {
-  static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
+struct wrapped<NVTETensorPack *> : exposed_type<std::vector<NVTETensor>> {
+  static TensorPack unwrap(const std::vector<NVTETensor> &arg) {
     return TensorPack(arg);
   }
 };
 template <>
-struct wrapped<const NVTETensorPack *>
-    : exposed_type<std::vector<c10::intrusive_ptr<Tensor>>> {
-  static TensorPack unwrap(const std::vector<c10::intrusive_ptr<Tensor>> &arg) {
+struct wrapped<const NVTETensorPack *> : exposed_type<std::vector<NVTETensor>> {
+  static TensorPack unwrap(const std::vector<NVTETensor> &arg) {
     return TensorPack(arg);
   }
 };
@@ -188,6 +170,18 @@ template <> struct wrapped<NVTE_Mask_Type> : exposed_type<int64_t> {
   static int64_t wrap(NVTE_Mask_Type arg) { return int64_t(arg); }
   static NVTE_Mask_Type unwrap(int64_t arg) { return NVTE_Mask_Type(arg); }
 };
+template <> struct wrapped<NVTEShape> : exposed_type<std::vector<int64_t>> {
+  static std::vector<int64_t> wrap(NVTEShape arg) {
+    return std::vector<int64_t>(arg.data, arg.data + arg.ndim);
+  }
+  static NVTEShape unwrap(const std::vector<int64_t> &arg) {
+    NVTEShape shape{};
+    shape.ndim = arg.size();
+    shape.data = arg.data();
+    return shape;
+  }
+};
+
 template <typename T> using wrapped_t = typename wrapped<T>::type;
 struct at_scope_exit {
   void (*ptr)();
@@ -236,22 +230,16 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 }
 
 // Manual wrapper around nvte_multi_cast_transpose
-void multi_cast_transpose(
-    const std::vector<c10::intrusive_ptr<Tensor>> &inputs,
-    const std::vector<c10::intrusive_ptr<Tensor>> &cast_outs,
-    const std::vector<c10::intrusive_ptr<Tensor>> &transposed_outs) {
-  auto count = inputs.size();
-  std::vector<NVTETensor> inputs_(count);
-  std::vector<NVTETensor> cast_outs_(count);
-  std::vector<NVTETensor> transposed_outs_(count);
-
-  for (int i = 0; i < inputs.size(); ++i) {
-    inputs_[i] = (NVTETensor)(inputs[i]->pimpl.get());
-    cast_outs_[i] = (NVTETensor)(cast_outs[i]->pimpl.get());
-    transposed_outs_[i] = (NVTETensor)(transposed_outs[i]->pimpl.get());
-  }
-
-  nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
+void multi_cast_transpose(const std::vector<int64_t> &inputs,
+                          const std::vector<int64_t> &cast_outs,
+                          const std::vector<int64_t> &transposed_outs) {
+  const auto &inputs_ =
+      *reinterpret_cast<const std::vector<NVTETensor> *>(&inputs);
+  const auto &cast_outs_ =
+      *reinterpret_cast<const std::vector<NVTETensor> *>(&cast_outs);
+  const auto &transposed_outs_ =
+      *reinterpret_cast<const std::vector<NVTETensor> *>(&transposed_outs);
+  nvte_multi_cast_transpose(inputs_.size(), inputs_.data(), cast_outs_.data(),
                             transposed_outs_.data(),
                             at::cuda::getCurrentCUDAStream());
 
@@ -260,38 +248,19 @@ void multi_cast_transpose(
 
 // ----------- Registration of torch.ops -----------
 TORCH_LIBRARY(transformer_engine_cuda, m) {
-  m.class_<Tensor>("Tensor").def(torch::init<>());
+  m.def("create_tensor",
+        wrap([](NVTEDType dtype, at::Tensor data, at::Tensor amax,
+                at::Tensor scale, at::Tensor scale_inv) -> NVTETensor {
+          return nvte_create_tensor(
+              getDataPtr(data),
+              NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()},
+              dtype, getDataPtr(amax), getDataPtr(scale),
+              getDataPtr(scale_inv));
+        }));
+  m.def("get_tensor_dtype", wrap(nvte_tensor_type));
+  m.def("get_tensor_shape", wrap(nvte_tensor_shape));
+  m.def("destroy_tensor", wrap(nvte_destroy_tensor));
 
-  m.def("reset_tensor", [](const c10::intrusive_ptr<Tensor> &self,
-                           int64_t dtype, at::Tensor data, at::Tensor amax,
-                           at::Tensor scale, at::Tensor scale_inv) {
-    self->pimpl = std::shared_ptr<void>(
-        nvte_create_tensor(
-            getDataPtr(data),
-            NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()},
-            NVTEDType(dtype), getDataPtr(amax), getDataPtr(scale),
-            getDataPtr(scale_inv)),
-        nvte_destroy_tensor);
-    self->data = data;
-    self->amax = amax;
-    self->scale = scale;
-    self->scale_inv = scale_inv;
-  });
-  m.def("get_tensor_dtype", [](const c10::intrusive_ptr<Tensor> &self) {
-    return (int64_t)nvte_tensor_type((NVTETensor)(self->pimpl.get()));
-  });
-  m.def("get_tensor_shape", [](const c10::intrusive_ptr<Tensor> &self) {
-    NVTEShape s = nvte_tensor_shape((NVTETensor)(self->pimpl.get()));
-    return std::vector<int64_t>(s.data, s.data + s.ndim);
-  });
-  m.def("get_tensor_data",
-        [](const c10::intrusive_ptr<Tensor> &self) { return self->data; });
-  m.def("get_tensor_amax",
-        [](const c10::intrusive_ptr<Tensor> &self) { return self->amax; });
-  m.def("get_tensor_scale",
-        [](const c10::intrusive_ptr<Tensor> &self) { return self->scale; });
-  m.def("get_tensor_scale_inv",
-        [](const c10::intrusive_ptr<Tensor> &self) { return self->scale_inv; });
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
   m.def("geglu", wrap(nvte_geglu));
