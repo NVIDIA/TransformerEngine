@@ -9,7 +9,7 @@ _TensorHandle = globals().pop("Tensor")
 # Use n object pool, as torch compile
 # does not like creating ScriptClass
 # objects on the fly.
-tensor_handles = {}
+tensor_handles = set()
 
 
 def allocate_handles():
