@@ -19,7 +19,7 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = _Tensor(dtype.value, data, amax, scale, scale_inv)
+        self.__raw = _Tensor.__new__(_Tensor, dtype.value, data, amax, scale, scale_inv)
 
     def __repr__(self) -> str:
         return printing.tensor_repr(self.__raw)
