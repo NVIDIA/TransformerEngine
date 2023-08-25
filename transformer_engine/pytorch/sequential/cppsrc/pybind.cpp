@@ -1,5 +1,6 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
+ *reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -176,7 +177,7 @@ template <> struct wrapped<NVTEShape> : exposed_type<std::vector<int64_t>> {
   static NVTEShape unwrap(const std::vector<int64_t> &arg) {
     NVTEShape shape{};
     shape.ndim = arg.size();
-    shape.data = (size_t*)arg.data();
+    shape.data = (size_t *)arg.data();
     return shape;
   }
 };
@@ -247,13 +248,13 @@ void multi_cast_transpose(const std::vector<int64_t> &inputs,
 // ----------- Registration of torch.ops -----------
 TORCH_LIBRARY(transformer_engine_cuda, m) {
   m.def("create_tensor",
-        wrap(+[](NVTEDType dtype, at::Tensor data, at::Tensor amax,
-                 at::Tensor scale, at::Tensor scale_inv) -> NVTETensor {
+        wrap(+[](NVTEDType dtype, const std::vector<int64_t> &shape,
+                 at::Tensor data, at::Tensor amax, at::Tensor scale,
+                 at::Tensor scale_inv) -> NVTETensor {
           return nvte_create_tensor(
               getDataPtr(data),
-              NVTEShape{(size_t *)(data.sizes().data()), data.sizes().size()},
-              dtype, getDataPtr(amax), getDataPtr(scale),
-              getDataPtr(scale_inv));
+              NVTEShape{(size_t *)(shape.data()), shape.size()}, dtype,
+              getDataPtr(amax), getDataPtr(scale), getDataPtr(scale_inv));
         }));
   m.def("get_tensor_dtype", wrap(nvte_tensor_type));
   m.def("get_tensor_shape", wrap(nvte_tensor_shape));

@@ -29,7 +29,9 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.handle = create_tensor(dtype.value, data, amax, scale, scale_inv)
+        self.handle = create_tensor(
+            dtype.value, data.shape, data, amax, scale, scale_inv
+        )
         self.data = data
         self.amax = amax
         self.scale = scale
