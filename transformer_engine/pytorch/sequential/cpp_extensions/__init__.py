@@ -29,9 +29,15 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
+        assert data.is_cuda and data.is_contiguous()
+        assert amax.is_cuda and amax.is_contiguous()
+        assert scale.is_cuda and scale.is_contiguous()
+        assert scale_inv.is_cuda and scale_inv.is_contiguous()
+
         self.handle = create_tensor(
             dtype.value, data.shape, data, amax, scale, scale_inv
         )
+
         self.data = data
         self.amax = amax
         self.scale = scale
