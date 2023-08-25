@@ -4,10 +4,17 @@ from .real import *
 
 from . import printing
 
-_Tensor = globals().pop("Tensor")
+globals().pop("Tensor")
 
 
 # Quacks like a Tensor. </joke>
+# Note: cannot inherit from _Tensor as
+# it is a torch.ScriptClass, and those,
+# for some reason, do not support being
+# inherited from.
+# Also, having to use free functions
+# as ScriptClass methods are not
+# torch.compile friendly.
 class Tensor:
     __raw: object
 
@@ -19,19 +26,31 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = _Tensor.__new__(_Tensor, dtype.value, data, amax, scale, scale_inv)
+        self.__raw = make_tensor(dtype.value, data, amax, scale, scale_inv)
+
+    @property
+    def dtype(self) -> DType:
+        return DType(get_tensor_dtype(self.__raw))
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(get_tensor_shape(self.__raw))
+
+    @property
+    def data(self) -> torch.Tensor:
+        return get_tensor_data(self.__raw)
+
+    @property
+    def amax(self) -> torch.Tensor:
+        return get_tensor_amax(self.__raw)
+
+    @property
+    def scale(self) -> torch.Tensor:
+        return get_tensor_scale(self.__raw)
+
+    @property
+    def scale_inv(self) -> torch.Tensor:
+        return get_tensor_scale_inv(self.__raw)
 
     def __repr__(self) -> str:
         return printing.tensor_repr(self.__raw)
-
-    # Note: cannot inherit from _Tensor as
-    # it is a torch.ScriptClass, and those,
-    # for some reason, do not support being
-    # inherited from. Using __getattr__ to
-    # work around this limitation.
-    def __getattr__(self, __name: str) -> Any:
-        return getattr(self.__raw, __name)
-
-    @property
-    def dtype(self):
-        return DType(self.__raw.dtype)

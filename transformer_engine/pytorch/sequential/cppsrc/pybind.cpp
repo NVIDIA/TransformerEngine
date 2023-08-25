@@ -287,6 +287,25 @@ TORCH_LIBRARY(transformer_engine_cuda, m) {
       .def_readonly("scale", &Tensor::scale)
       .def_readonly("scale_inv", &Tensor::scale_inv);
 
+  m.def("make_tensor", [](int64_t dtype, at::Tensor data, at::Tensor amax,
+                          at::Tensor scale, at::Tensor scale_inv) {
+    return c10::make_intrusive<Tensor>(dtype, data, amax, scale, scale_inv);
+  });
+  m.def("get_tensor_dtype", [](const c10::intrusive_ptr<Tensor> &self) {
+    return (int64_t)nvte_tensor_type((NVTETensor)(self->pimpl.get()));
+  });
+  m.def("get_tensor_shape", [](const c10::intrusive_ptr<Tensor> &self) {
+    NVTEShape s = nvte_tensor_shape((NVTETensor)(self->pimpl.get()));
+    return std::vector<int64_t>(s.data, s.data + s.ndim);
+  });
+  m.def("get_tensor_data",
+        [](const c10::intrusive_ptr<Tensor> &self) { return self->data; });
+  m.def("get_tensor_amax",
+        [](const c10::intrusive_ptr<Tensor> &self) { return self->amax; });
+  m.def("get_tensor_scale",
+        [](const c10::intrusive_ptr<Tensor> &self) { return self->scale; });
+  m.def("get_tensor_scale_inv",
+        [](const c10::intrusive_ptr<Tensor> &self) { return self->scale_inv; });
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
   m.def("geglu", wrap(nvte_geglu));
