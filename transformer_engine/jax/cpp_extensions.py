@@ -68,6 +68,33 @@ def jax_dtype_to_te_dtype(jax_dtype):
     raise ValueError(f"Not support the {jax_dtype=}")
 
 
+@dataclass(frozen=True)
+class FusedAttnHelper:
+    """
+    Helper for the fused attention backend
+    """
+
+    q_type: jnp.dtype
+    kv_type: jnp.dtype
+    attn_bias_type: NVTE_Bias_Type
+    attn_mask_type: NVTE_Mask_Type
+    dropout_probability: float
+    max_seqlen_q: int
+    max_seqlen_kv: int
+    head_dim: int
+
+    def is_fused_attn_kernel_available(self):
+        """Check if there is available fused attention kernel"""
+        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+
+    def get_fused_attn_backend(self):
+        """Get the fused attention kernel backend"""
+        return transformer_engine_jax.get_fused_attn_backend(
+            jax_dtype_to_te_dtype(self.q_type), jax_dtype_to_te_dtype(self.kv_type),
+            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, self.attn_bias_type, self.attn_mask_type,
+            self.dropout_probability, self.max_seqlen_q, self.max_seqlen_kv, self.head_dim)
+
+
 def merge_named_shape(base, new):
     """
     merge named shape(ie, dict), no key conflict
@@ -2053,10 +2080,9 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (batch, max_seqlen, num_head, head_dim)
         output_dtype = qkv_dtype
 
-        backend = transformer_engine_jax.get_fused_attn_backend(
-            jax_dtype_to_te_dtype(qkv_dtype), jax_dtype_to_te_dtype(qkv_dtype),
-            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, attn_bias_type, attn_mask_type,
-            dropout_probability, max_seqlen, max_seqlen, head_dim)
+        backend = FusedAttnHelper(qkv_dtype, qkv_dtype, attn_bias_type, attn_mask_type,
+                                  dropout_probability, max_seqlen, max_seqlen,
+                                  head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)

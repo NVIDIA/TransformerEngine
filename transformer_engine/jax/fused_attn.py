@@ -8,10 +8,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-import transformer_engine_jax
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 
+from .cpp_extensions import FusedAttnHelper
 from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
 from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
 from .sharding import get_fused_attn_sharding_meta
@@ -20,13 +20,6 @@ from .sharding import xmap_runner, extend_fsdp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
-
-
-def is_fused_attn_kernel_available():
-    """
-    To check whether the fused attention kernel is available
-    """
-    return transformer_engine_jax.is_fused_attn_kernel_available()
 
 
 class AttnBiasType(Enum):
@@ -41,6 +34,16 @@ class AttnMaskType(Enum):
     NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
+
+
+def is_fused_attn_kernel_available(q_type, kv_type, attn_bias_type, attn_mask_type,
+                                   dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
+    """
+    To check whether the fused attention kernel is available
+    """
+    return FusedAttnHelper(q_type, kv_type, attn_bias_type.value, attn_mask_type.value,
+                           dropout_probability, max_seqlen_q, max_seqlen_kv,
+                           head_dim).is_fused_attn_kernel_available()
 
 
 def self_fused_attn(qkv: jnp.ndarray,
