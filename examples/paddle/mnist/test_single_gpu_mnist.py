@@ -57,11 +57,13 @@ class Net(nn.Layer):
 def train(args, model, train_loader, optimizer, epoch, use_fp8):
     """Training function."""
     model.train()
+    losses = []
     for batch_id, (data, labels) in enumerate(train_loader):
         with paddle.amp.auto_cast(dtype='bfloat16', level='O2'):    # pylint: disable=not-context-manager
             with te.fp8_autocast(enabled=use_fp8):
                 outputs = model(data)
             loss = F.cross_entropy(outputs, labels)
+            losses.append(loss.item())
 
         loss.backward()
         optimizer.step()
@@ -74,7 +76,9 @@ def train(args, model, train_loader, optimizer, epoch, use_fp8):
                   f"Loss: {loss.item():.6f}")
             if args.dry_run:
                 return loss.item()
-    return loss.item()
+    avg_loss = sum(losses) / len(losses)
+    print(f"Train Epoch: {epoch}, Average Loss: {avg_loss}")
+    return avg_loss
 
 
 def evaluate(model, test_loader, epoch, use_fp8):
@@ -226,7 +230,7 @@ class TestMNIST(unittest.TestCase):
     @staticmethod
     def verify(actual):
         """Check If loss and accuracy match target"""
-        desired_traing_loss = 0.5
+        desired_traing_loss = 0.1
         desired_test_accuracy = 0.98
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_test_accuracy
