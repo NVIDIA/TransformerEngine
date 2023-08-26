@@ -17,10 +17,40 @@
 extern "C" {
 #endif
 
+///*! \enum NVTE_QKV_Layout
+// *  \brief QKV matrix layouts
+// */
+//enum NVTE_QKV_Layout1 {
+//    NVTE_SB3HD = 0,
+//    NVTE_SBH3D = 1,
+//    NVTE_SBHD_SB2HD = 2,
+//    NVTE_SBHD_SBH2D = 3,
+//    NVTE_SBHD_SBHD_SBHD = 4,
+//    NVTE_BS3HD = 5,
+//    NVTE_BSH3D = 6,
+//    NVTE_BSHD_BS2HD = 7,
+//    NVTE_BSHD_BSH2D = 8,
+//    NVTE_BSHD_BSHD_BSHD = 9,
+//    NVTE_T3HD = 10,
+//    NVTE_TH3D = 11,
+//    NVTE_THD_T2HD = 12,
+//    NVTE_THD_TH2D = 13,
+//    NVTE_THD_THD_THD = 14,
+//};
+
+///*! \enum NVTE_QKV_Format
+// *  \brief QKV matrix formats 
+// */
+//enum NVTE_QKV_Format {
+//    NVTE_SBHD = 0,
+//    NVTE_BSHD = 1,
+//    NVTE_THD = 2,
+//};
+
 /*! \enum NVTE_QKV_Layout
  *  \brief QKV matrix layouts
  */
-enum NVTE_QKV_Layout1 {
+enum NVTE_QKV_Layout {
     NVTE_SB3HD = 0,
     NVTE_SBH3D = 1,
     NVTE_SBHD_SB2HD = 2,
@@ -36,21 +66,6 @@ enum NVTE_QKV_Layout1 {
     NVTE_THD_T2HD = 12,
     NVTE_THD_TH2D = 13,
     NVTE_THD_THD_THD = 14,
-};
-
-/*! \enum NVTE_QKV_Format
- *  \brief QKV matrix formats 
- */
-enum NVTE_QKV_Format {
-    NVTE_SBHD = 0,
-    NVTE_BSHD = 1,
-    NVTE_THD = 2,
-};
-
-/*! \enum NVTE_QKV_Layout
- *  \brief QKV matrix layouts
- */
-enum NVTE_QKV_Layout {
 /*! Separate Q, K, V tensors.
     \verbatim
       Q: [total_seqs_q, num_heads, head_dim]
@@ -70,7 +85,7 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_NOT_INTERLEAVED = 0,
+    NVTE_NOT_INTERLEAVED = 15, //0,
 
 /*! Packed QKV.
     \verbatim
@@ -81,7 +96,7 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_QKV_INTERLEAVED = 1,
+    NVTE_QKV_INTERLEAVED = 16, //,
 
  /*! Q and packed KV.
      \verbatim
@@ -97,7 +112,7 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_KV_INTERLEAVED = 2
+    NVTE_KV_INTERLEAVED = 17, //2
 };
 
 /*! \enum NVTE_Bias_Type
@@ -396,6 +411,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *                                          e.g. M, ZInv, rng_state.
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     qkvso_strides            Strides for matrices Q, K, V, K', V', S, O 
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
  *                                          it may be >= max(cu_seqlens_q). 
@@ -420,6 +436,7 @@ void nvte_fused_attn_fwd_q_k_v(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor qkvso_strides,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -451,6 +468,7 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
+ *  \param[in]     qkvso_strides            Strides for matrices Q, K, V, K', V', S, O 
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
  *                                          it may be >= max(cu_seqlens_q). 
  *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.  
@@ -478,6 +496,7 @@ void nvte_fused_attn_bwd_q_k_v(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
+            const NVTETensor qkvso_strides,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,

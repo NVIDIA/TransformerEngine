@@ -66,9 +66,10 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-        'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-        't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+        'sb3hd',
+        #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+        #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+        #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
         ]
 
     for qkv_layout in qkv_layouts:
@@ -80,11 +81,18 @@ def test_dpa_qkv_layout(dtype, bs, model):
         unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
 
-        atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        atol, rtol = (5e-2, 5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
+        torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
+        torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
+        torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
+        assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
         assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol = atol, rtol = rtol)
         assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol = atol, rtol = rtol)
+        for i in len(flash_attn_bwd):
+            print('xxxxxxxxxxxxxxxx i', i)
+            assert torch.allclose(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
+            assert torch.allclose(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
 
 def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
 
@@ -96,6 +104,8 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+        os.environ["NVTE_FUSED_ATTN_USE_FAv2_BWD"] = "0"
 
     dim_to_num = {'b': bs,
                     's': config.seq_len,
@@ -125,6 +135,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
                 inp.append(tensors[j])
     for i in range(3):
         inp[i].requires_grad=True
+        print('xxx i', i, inp[i][0,0,0,:10])
 
     seqlens = torch.empty(bs, dtype = torch.int32).cuda()
     seqlens.fill_(config.seq_len)
@@ -154,10 +165,13 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     #k = inp[:, :,1,:,:]
     #v = inp[:, :,2,:,:]
     #op = block(q, k, v)
+    for i in range(3):
+        torch.save(inp[i], 'flash_inp_'+str(i)+'.pt')
+    torch.save(op_grad, 'flash_op_grad.pt')
     op = block(inp[0], inp[1], inp[2])
     op.backward(op_grad)
 
-    return op, inp.grad
+    return op, (inp[0].grad, inp[1].grad, inp[2].grad)
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")

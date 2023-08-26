@@ -9,7 +9,7 @@ from itertools import repeat
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union, Dict, List
+from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
@@ -20,8 +20,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
+    fused_attn_fwd_q_k_v,
+    fused_attn_bwd_q_k_v,
     QKVLayout,
-    QKVLayout1,
+#    QKVLayout1,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
@@ -419,7 +421,7 @@ def _get_qkv_layout(
         k: torch.Tensor,
         v: torch.Tensor,
         qkv_format: str = 'sbhd',
-    ) -> Tuple[Union[str, List, Tuple, None], ...]:
+    ) -> str:
     """Get qkv layout.
 
     Parameters
@@ -512,7 +514,7 @@ def _get_qkvso_strides(
         batch_size: Optional[int] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
-    ) -> Tuple[Union[str, List, Tuple, None], ...]:
+    ) -> torch.Tensor:
     """Get memory strides.
 
     Parameters
@@ -537,8 +539,8 @@ def _get_qkvso_strides(
 
     Returns
     ----------
-    qkvso_strides: List
-       A 2D integer list in shape [7, 4]. The 7 rows represent 7 matrices:
+    qkvso_strides: torch.Tensor 
+       A 2D integer tensor in shape [7, 4]. The 7 rows represent 7 matrices:
        `Q`, `K`, `V`, `K transposed`, `V transposed`, `S` (softmax), and `O` (output of fwd).
        The 4 columns represent the matrix's strides in these 4 dimensions:
        batch_size (`b`), num_heads (`h`), seq_len (`s`), hidden_dim (`d`)
@@ -575,15 +577,15 @@ def _get_qkvso_strides(
     qkvso_strides = []
     if qkv_format == 'sbhd':
         qkvso_strides = [
-            q.stride().permute(1, 2, 0, 3), # Q
-            k.stride().permute(1, 2, 0, 3), # K
-            v.stride().permute(1, 2, 0, 3), # V
+            [q.stride()[i] for i in [1, 2, 0, 3]], # Q
+            [k.stride()[i] for i in [1, 2, 0, 3]], # K
+            [v.stride()[i] for i in [1, 2, 0, 3]], # V
         ]
     if qkv_format == 'bshd':
         qkvso_strides = [
-            q.stride().transpose(1, 2),
-            k.stride().transpose(1, 2),
-            v.stride().transpose(1, 2),
+            [q.stride()[i] for i in [1, 0, 2, 3]],
+            [k.stride()[i] for i in [1, 0, 2, 3]],
+            [v.stride()[i] for i in [1, 0, 2, 3]],
         ]
     if qkv_format == 'thd':
         qkvso_strides = [
@@ -591,14 +593,12 @@ def _get_qkvso_strides(
             [k.stride()[0] * max_seqlen_kv, k.stride()[1], k.stride()[0], k.stride()[2]],
             [v.stride()[0] * max_seqlen_kv, v.stride()[1], v.stride()[0], v.stride()[2]],
         ]
-    qkvso_strides.append(
-        qkvso_strides[1].transpose(2, 3), # K transposed
-        qkvso_strides[2].transpose(2, 3), # V transposed
-        [num_heads * max_seqlen_q * max_seqlen_kv,
-            max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1], # S
-        # always output sbhd
-        [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
-        )
+    qkvso_strides.append([qkvso_strides[1][i] for i in [0, 1, 3, 2]]) # K transposed
+    qkvso_strides.append([qkvso_strides[2][i] for i in [0, 1, 3, 2]]) # V transposed
+    qkvso_strides.append([num_heads * max_seqlen_q * max_seqlen_kv,
+            max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1]) # S
+    # always output sbhd
+    qkvso_strides.append([num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1]) # O
     # output the same format as the input
     #if qkv_format == 'sbhd':
     #    qkvso_strides.append(
@@ -609,10 +609,10 @@ def _get_qkvso_strides(
     #    [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
     #    )
     assert (len(qkvso_strides) == 7
-            and len(qkvso_strides[0] == 4)
+            and len(qkvso_strides[0]) == 4
             ), "qkvso_strides should be in [7, 4] shape!"
-
-    return qkvso_strides
+    print('xxxxxxxxxx qkvso_stride ',qkvso_strides)
+    return torch.Tensor(qkvso_strides).to(dtype = torch.int64)
 
 def _check_qkv_layout(q, k, v):
     data_ptr = q.untyped_storage().data_ptr()
@@ -724,6 +724,7 @@ class FlashAttention(torch.nn.Module):
             ), f"FlashAttention does not support {qkv_layout} qkv_layout!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+        print('xxxxxxx FA, qkv layout ',qkv_layout)
 
         if qkv_format == 'sbhd':
             # For now just 128, will make it more general in the future
@@ -734,22 +735,29 @@ class FlashAttention(torch.nn.Module):
                                                                              key_layer,
                                                                              value_layer)
             else:
+                print('xxxxxxx FA, torch convert', query_layer.shape)
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                                for x in (query_layer, key_layer, value_layer)]
+                print('xxxxxxx FA, torch convert', query_layer.shape)
 
+        print('xxxxxxxxxx FA, is cu seqlens None', cu_seqlens_q is None)
         if qkv_format in ['sbhd', 'bshd']:
             # qkv layout is now bshd_bshd_bshd
             batch_size = query_layer.shape[0]
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             if cu_seqlens_q is None:
-                cu_seqlens_q = torch.Tensor([max_seqlen_q] * batch_size).cumsum(0)
+                cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
+                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
             if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.Tensor([max_seqlen_kv] * batch_size).cumsum(0)
+                cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
+                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
             query_layer, key_layer, value_layer = [
                 x.view(x.shape[0] * x.shape[1], *x.shape[2:])
                 for x in [query_layer, key_layer, value_layer]
             ]
+        print('xxxx FA, seqlen q kv',max_seqlen_q, max_seqlen_q, batch_size, query_layer.shape)
+        print('xxxx FA, seqlen q kv', cu_seqlens_q, cu_seqlens_kv)
 
         if qkv_format == 'thd':
             assert (_flash_attn_2_available
@@ -774,7 +782,7 @@ class FlashAttention(torch.nn.Module):
             )
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
@@ -1044,9 +1052,11 @@ class FusedAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is None:
-                cu_seqlens_q = torch.Tensor([max_seqlen_q] * batch_size).cumsum(0)
+                cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
+                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
             if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.Tensor([max_seqlen_kv] * batch_size).cumsum(0)
+                cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
+                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
         if qkv_format == 'thd':
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -1082,8 +1092,9 @@ class FusedAttention(torch.nn.Module):
                 None, # rng_gen
                 fused_attention_backend,
             )
+        print('output:', output[:,1,:].nonzero(), output[64,1,:])
         # [s, b, h, d] regardless of qkv_layout
-        return output
+        return output.view(*output.shape[:-2], -1)
 
 class DotProductAttention(torch.nn.Module):
     """Allows the model to jointly attend to information from different
@@ -1358,6 +1369,7 @@ class DotProductAttention(torch.nn.Module):
             batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
+            print('xxxxxxxxxxxxx DPA, qkv format',qkv_format, 'cu seq',(cu_seqlens_q is None))
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                 assert (all(seqlens_q <= max_seqlen_q)
@@ -1407,12 +1419,13 @@ class DotProductAttention(torch.nn.Module):
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
-                QKVLayout1[qkv_layout],
+                QKVLayout[qkv_layout],
+                #QKVLayout["qkv_interleaved"],
                 AttnBiasType[core_attention_bias_type],
                 AttnMaskType[self.attn_mask_type],
                 self.attention_dropout,
                 max_seqlen_q, max_seqlen_kv,
-                head_dim)
+                query_layer.shape[-1])
             # DPA does not support FP8; for FP8, use cpp_extensions modules directly
             is_backend_avail = (fused_attention_backend in
                 [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
@@ -1445,7 +1458,7 @@ class DotProductAttention(torch.nn.Module):
                                                             )
 
         if use_fused_attention:
-            print('--------- fused')
+            print('--------- fused', int(fused_attention_backend))
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                               query_layer,
