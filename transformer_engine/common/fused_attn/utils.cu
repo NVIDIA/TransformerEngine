@@ -131,6 +131,66 @@ void generateMatrixStrides(
     }
 }
 
+// get qkv pointer offsets based on qkv layout
+void get_qkv_offset(void** devPtrQ, void** devPtrK, void** devPtrV,
+            int64_t num_heads, int64_t head_dim, NVTE_QKV_Layout qkv_layout,
+            NVTEDType qkv_dtype) {
+
+    size_t num_bytes = 0;
+    switch (qkv_dtype) {
+            case kNVTEByte:
+            case kNVTEFloat8E4M3:
+            case kNVTEFloat8E5M2:
+                    num_bytes = 1;
+                    break;
+            case kNVTEInt32:
+            case kNVTEFloat32:
+                    num_bytes = 4;
+                    break;
+            case kNVTEInt64:
+                    num_bytes = 8;
+                    break;
+            case kNVTEFloat16:
+            case kNVTEBFloat16:
+                    num_bytes = 2;
+                    break;
+            default:
+                    NVTE_ERROR("NVTEDType not supported!");
+    }
+    printf("get offset qkv: num_bytes %d\n", num_bytes);
+
+    int layout_mod = (int)qkv_layout % 5; 
+    size_t stride = 0;
+    //void *devPtrQ = static_cast<void *>(devPtrQKV);
+    //void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
+    //void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
+    switch (layout_mod) {
+        case 0:
+            stride = num_bytes * num_heads * head_dim;
+	    printf("---------- Im case 0, %d bytes, stide %d\n", num_bytes, stride);
+            *devPtrK = static_cast<void *>(static_cast<int8_t *>(*devPtrQ) + stride);
+            *devPtrV = static_cast<void *>(static_cast<int8_t *>(*devPtrQ) + 2 * stride);
+            break;
+        case 1:
+            stride = num_bytes * head_dim;
+            *devPtrK = static_cast<void *>(static_cast<int8_t *>(*devPtrQ) + stride);
+            *devPtrV = static_cast<void *>(static_cast<int8_t *>(*devPtrQ) + 2 * stride);
+            break;
+        case 2:
+            stride = num_bytes * num_heads * head_dim;
+            *devPtrV = static_cast<void *>(static_cast<int8_t *>(*devPtrK) + stride);
+            break;
+        case 3:
+            stride = num_bytes * head_dim;
+            *devPtrV = static_cast<void *>(static_cast<int8_t *>(*devPtrK) + stride);
+            break;
+        case 4:
+            break;
+        default:
+            NVTE_ERROR("QKV Layout not supported!");
+    }
+}
+
 bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
   (void)engine_config;
   return false;

@@ -1370,9 +1370,17 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
     //void *devPtrQ = static_cast<void *>(devPtrQKV);
     //void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
     //void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
+    const DType QKV_type = input_Q->data.dtype;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
+    std::cout << "fwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
+    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
+		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+    std::cout << "fwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
+    //devPtrQ = static_cast<void *>(devPtrQ);
+    //devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + stride);
+    //devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + 2 * stride);
 
     void *devPtrO = output_O->data.dptr;
 
@@ -1402,7 +1410,6 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-    const DType QKV_type = input_Q->data.dtype;
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
@@ -1450,9 +1457,17 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     //void *devPtrQ = devPtrQKV;
     //void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
     //void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
+    const auto QKV_type = input_Q->data.dtype;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
+    std::cout << "bwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
+    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
+		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+    std::cout << "bwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
+    //devPtrQ = static_cast<void *>(devPtrQ);
+    //devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + stride);
+    //devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + 2 * stride);
 
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
@@ -1465,6 +1480,13 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdK = output_dK->data.dptr;
     void *devPtrdV = output_dV->data.dptr;
+    std::cout << "bwd devPtrdQ " << devPtrdQ << " " << devPtrdK << " " << devPtrdV << std::endl;
+    get_qkv_offset(&devPtrdQ, &devPtrdK, &devPtrdV,
+		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+    std::cout << "bwd devPtrdQ " << devPtrdQ << " " << devPtrdK << " " << devPtrdV << std::endl;
+    //devPtrdQ = static_cast<void *>(devPtrdQ);
+    //devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQ) + stride);
+    //devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQ) + 2 * stride);
 
     void *devPtrSoftmaxStats = nullptr;
     devPtrSoftmaxStats = output_S->data.dptr;
@@ -1474,7 +1496,6 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-    const auto qkv_type = input_Q->data.dtype;
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
@@ -1482,7 +1503,7 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 devPtrStrides, devPtrDropoutSeed, devPtrDropoutOffset,
-                                get_cudnn_dtype(qkv_type),
+                                get_cudnn_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
     //cudaDeviceSynchronize();
     //cudaMemcpy(sm.hostW, sm.devPtrW, (size_t)(sizeof(sm.hostW[0]) * Wsize), cudaMemcpyDeviceToHost);

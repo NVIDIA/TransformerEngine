@@ -37,6 +37,11 @@ void generateMatrixStrides(
             int64_t d, int64_t* strideA,
             NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
+void get_qkv_offset(
+            void** devPtrQ, void** devPtrK, void** devPtrV,
+            int64_t num_heads, int64_t head_dim, NVTE_QKV_Layout qkv_layout,
+            NVTEDType qkv_dtype);
+
 bool allowAllConfig(cudnnBackendDescriptor_t engine_config);
 
 cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id,
