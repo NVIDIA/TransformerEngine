@@ -66,8 +66,8 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        'sb3hd',
-        #'bs3hd',
+        #'sb3hd',
+        'bs3hd',
         #'sbhd_sb2hd',
         #'sbhd_sbh2d',
         #'sbhd_sbhd_sbhd',

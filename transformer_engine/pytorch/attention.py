@@ -991,7 +991,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
             ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
-        print('q_k_v backward:',dv[0,1,:,:])
+        #print('q_k_v backward:',dv[0,1,:,:])
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
             return (None, None, None, None, None, dq, dk, dv, None, None, None, None,

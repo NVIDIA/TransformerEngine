@@ -1234,7 +1234,10 @@ def fused_attn_bwd_q_k_v(
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
 
-    print('cpp_ext: q_k_v backward:',output_tensors[2][0,1,:,:])
+    #print('cpp_ext: q_k_v backward:',output_tensors[2][0,1,:,:])
+    print('cpp_ext: q_k_v backward:',output_tensors[0].shape)#[0,1,:,:])
+    print('cpp_ext: q_k_v backward:',output_tensors[1].shape)#[0,1,:,:])
+    print('cpp_ext: q_k_v backward:',output_tensors[2].shape)#[0,1,:,:])
     if attn_bias_type == "no_bias":
         # return (d_q, d_k, d_v) when attn_bias_type is no_bias
         return output_tensors
