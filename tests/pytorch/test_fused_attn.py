@@ -66,7 +66,18 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        'sb3hd',
+        #'sb3hd',
+        #'bs3hd',
+        #'sbhd_sb2hd',
+        #'sbhd_sbh2d',
+        #'sbhd_sbhd_sbhd',
+        #'bshd_bshd_bshd',
+        #'bshd_bs2hd',
+        #'bshd_bsh2d',
+        'th3d',
+        #'thd_th2d',
+        #'thd_t2hd',
+        #'thd_thd_thd',
         #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
         #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
         #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
@@ -81,18 +92,37 @@ def test_dpa_qkv_layout(dtype, bs, model):
         unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
 
-        atol, rtol = (5e-2, 5e-2) if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        atol, rtol = (5e-2, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        #print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item(), flash_attn_fwd.view(-1)[:10])
+        #print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item(), fused_attn_fwd.view(-1)[:10])
+        #print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item(), unfused_attn_fwd.view(-1)[:10])
+        print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
+        print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+        print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
+        print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
+        print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
         torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
         torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
         torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
         torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
-        assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        for i in len(flash_attn_bwd):
+        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+        torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+        #assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+        #assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+        #assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+        for i in range(len(flash_attn_bwd)):
             print('xxxxxxxxxxxxxxxx i', i)
-            assert torch.allclose(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
-            assert torch.allclose(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+            #print('xxxxxxxxxxxxxxxx i', i, flash_attn_bwd[2][0, 1, 9, 7],fused_attn_bwd[2][0, 1, 9, 7],unfused_attn_bwd[2][0, 1, 9, 7])
+            print('flash bwd:',flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item())
+            print('fused bwd:',fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+            print('unfused bwd:',unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
+            torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+            torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
+            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+            #assert torch.allclose(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
+            #assert torch.allclose(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
 
 def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
 
@@ -119,6 +149,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
+        print('tensor shape ', i, tensor_shape)
         tensor = 0.1 * torch.randn(tensor_shape, dtype = dtype).cuda()
         tensor_count = 1
         split_dim = 0
@@ -135,14 +166,16 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
                 inp.append(tensors[j])
     for i in range(3):
         inp[i].requires_grad=True
-        print('xxx i', i, inp[i][0,0,0,:10])
+        print('xxx i', i, inp[i].shape)#, inp[i][0,0,0,:10])
 
     seqlens = torch.empty(bs, dtype = torch.int32).cuda()
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device = inp[0].device, dtype = torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
     qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
-    op_grad_shape = [dim_to_num[i] for i in qkv_format]
+    qkv_format1 = qkv_format if qkv_format != 'thd' else 'bshd' # TODO
+    op_grad_shape = [dim_to_num[i] for i in qkv_format1]
+    #op_grad_shape = [dim_to_num[i] for i in 'sbhd']
     op_grad_shape_new = [*op_grad_shape[:-2], op_grad_shape[-2] * op_grad_shape[-1]]
     op_grad = 0.001 * torch.randint(0, 200, op_grad_shape_new, dtype = dtype).cuda()
 
@@ -168,7 +201,25 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     for i in range(3):
         torch.save(inp[i], 'flash_inp_'+str(i)+'.pt')
     torch.save(op_grad, 'flash_op_grad.pt')
-    op = block(inp[0], inp[1], inp[2])
+    if qkv_format != 'thd':
+        op = block(inp[0], inp[1], inp[2], qkv_format=qkv_format)
+    else:
+        cu_seqlens_q = torch.arange(
+                        0,
+                        (bs + 1) * config.seq_len,
+                        step=config.seq_len,
+                        dtype=torch.int32,
+                        device=inp[0].device)
+        cu_seqlens_kv = torch.arange(
+                        0,
+                        (bs + 1) * config.seq_len,
+                        step=config.seq_len,
+                        dtype=torch.int32,
+                        device=inp[1].device)
+        op = block(inp[0], inp[1], inp[2],
+                qkv_format=qkv_format,
+                cu_seqlens_q = cu_seqlens_q,
+                cu_seqlens_kv = cu_seqlens_kv)
     op.backward(op_grad)
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)

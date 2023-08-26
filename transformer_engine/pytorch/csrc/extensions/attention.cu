@@ -801,7 +801,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-                    DType::kInt32, nullptr, nullptr, nullptr);
+                    DType::kInt64, nullptr, nullptr, nullptr);
 
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -1025,7 +1025,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-                    DType::kInt32, nullptr, nullptr, nullptr);
+                    DType::kInt64, nullptr, nullptr, nullptr);
 
   // convert auxiliary tensors from forward to NVTETensors
   NVTETensorPack nvte_aux_tensor_pack;

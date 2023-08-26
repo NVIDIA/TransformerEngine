@@ -383,7 +383,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # [sq, b, np, hn] --> [sq, b, hp]
         context_layer = context_layer.view(seqlen, batch_size, -1)
 
-        return context_layer
+        if qkv_format == 'sbhd':
+            # [(b sq), np, hn] -> [sq, b, (np hn)]
+            return context_layer
+        if qkv_format == 'bshd':
+            return context_layer.transpose(0,1).contiguous()
+
+        #return context_layer
 
 
 class _PrepareQKVForFA(torch.autograd.Function):
@@ -583,9 +589,9 @@ def _get_qkvso_strides(
         ]
     if qkv_format == 'bshd':
         qkvso_strides = [
-            [q.stride()[i] for i in [1, 0, 2, 3]],
-            [k.stride()[i] for i in [1, 0, 2, 3]],
-            [v.stride()[i] for i in [1, 0, 2, 3]],
+            [q.stride()[i] for i in [0, 2, 1, 3]],
+            [k.stride()[i] for i in [0, 2, 1, 3]],
+            [v.stride()[i] for i in [0, 2, 1, 3]],
         ]
     if qkv_format == 'thd':
         qkvso_strides = [
@@ -598,16 +604,16 @@ def _get_qkvso_strides(
     qkvso_strides.append([num_heads * max_seqlen_q * max_seqlen_kv,
             max_seqlen_q * max_seqlen_kv, max_seqlen_kv, 1]) # S
     # always output sbhd
-    qkvso_strides.append([num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1]) # O
+    #qkvso_strides.append([num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1]) # O
     # output the same format as the input
-    #if qkv_format == 'sbhd':
-    #    qkvso_strides.append(
-    #    [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
-    #    )
-    #if qkv_format == 'bshd' or 'thd':
-    #    qkvso_strides.append(
-    #    [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
-    #    )
+    if qkv_format == 'sbhd':
+        qkvso_strides.append(
+            [num_heads * head_dim, head_dim, batch_size * num_heads * head_dim, 1], # O
+            )
+    if qkv_format in ['bshd', 'thd']:
+        qkvso_strides.append(
+            [max_seqlen_q * num_heads * head_dim, head_dim, num_heads * head_dim, 1], # O
+            )
     assert (len(qkvso_strides) == 7
             and len(qkvso_strides[0]) == 4
             ), "qkvso_strides should be in [7, 4] shape!"
@@ -724,21 +730,31 @@ class FlashAttention(torch.nn.Module):
             ), f"FlashAttention does not support {qkv_layout} qkv_layout!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
-        print('xxxxxxx FA, qkv layout ',qkv_layout)
+        print('xxxxxxx FA, qkv layout ',qkv_layout, qkv_format)
 
         if qkv_format == 'sbhd':
             # For now just 128, will make it more general in the future
             if (query_layer.shape[-1] == 128 and
                 query_layer.shape[0] * query_layer.shape[1] >= 512 and
-                _check_if_interleaved_qkv(query_layer, key_layer, value_layer)):
+                _check_qkv_layout(query_layer, key_layer, value_layer) == "sbh3d"):
                 query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
                                                                              key_layer,
                                                                              value_layer)
             else:
-                print('xxxxxxx FA, torch convert', query_layer.shape)
+                print('xxxxxxx FA, torch convert', query_layer.shape, query_layer.is_contiguous())
+                query_layer, key_layer, value_layer = [x.contiguous()
+                               for x in (query_layer, key_layer, value_layer)]
+                print('xxxxxxx FA, torch convert', query_layer.shape, query_layer.is_contiguous())
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                                for x in (query_layer, key_layer, value_layer)]
-                print('xxxxxxx FA, torch convert', query_layer.shape)
+                print('xxxxxxx FA, torch convert', query_layer.shape, query_layer.is_contiguous())
+
+        if qkv_format == 'bshd':
+                print('xxxxxxx FA, bshd, torch convert', query_layer.shape, query_layer.is_contiguous())
+                query_layer, key_layer, value_layer = [x.contiguous()
+                               for x in (query_layer, key_layer, value_layer)]
+                print('xxxxxxx FA, bshd, torch convert', query_layer.shape, query_layer.is_contiguous())
+
 
         print('xxxxxxxxxx FA, is cu seqlens None', cu_seqlens_q is None)
         if qkv_format in ['sbhd', 'bshd']:
@@ -747,11 +763,23 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             if cu_seqlens_q is None:
-                cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                #cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_q = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_q,
+                        step=max_seqlen_q,
+                        dtype=torch.int32,
+                        device=query_layer.device)
             if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                #cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_kv = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_kv,
+                        step=max_seqlen_kv,
+                        dtype=torch.int32,
+                        device=key_layer.device)
             query_layer, key_layer, value_layer = [
                 x.view(x.shape[0] * x.shape[1], *x.shape[2:])
                 for x in [query_layer, key_layer, value_layer]
@@ -781,8 +809,11 @@ class FlashAttention(torch.nn.Module):
                 **fa_optional_forward_kwargs
             )
 
-        # [(b sq), np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
+        if qkv_format == 'sbhd':
+            # [(b sq), np, hn] -> [sq, b, (np hn)]
+            return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
+        if qkv_format == 'bshd':
+            return output.view(batch_size, max_seqlen_q, -1).contiguous()
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
@@ -960,6 +991,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
             ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
+        print('q_k_v backward:',dv[0,1,:,:])
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
             return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
@@ -1047,6 +1079,7 @@ class FusedAttention(torch.nn.Module):
             ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
+        print('----------- FU qkv format',qkv_format, 'layout ', qkv_layout)
         if qkv_format in ['sbhd', 'bshd']:
             batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
@@ -1092,8 +1125,13 @@ class FusedAttention(torch.nn.Module):
                 None, # rng_gen
                 fused_attention_backend,
             )
-        print('output:', output[:,1,:].nonzero(), output[64,1,:])
-        # [s, b, h, d] regardless of qkv_layout
+        #print('output:', output[:,1,:].nonzero(), output[64,1,:])
+        print('output:',output.shape)
+        ## [s, b, h, d] regardless of qkv_layout  TODO
+        #if qkv_format == 'bshd':
+        #    output = output.transpose(0,1).contiguous()
+        print('output:',output.shape)
+
         return output.view(*output.shape[:-2], -1)
 
 class DotProductAttention(torch.nn.Module):

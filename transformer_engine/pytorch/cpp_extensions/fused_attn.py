@@ -864,7 +864,7 @@ def fused_attn_fwd_q_k_v(
     k: torch.Tensor,
     v: torch.Tensor,
     qkv_dtype: tex.DType,
-    qkvso_strides: List,
+    qkvso_strides: torch.Tensor,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
@@ -916,7 +916,7 @@ def fused_attn_fwd_q_k_v(
                 or [seqlen_kv, batch_size, num_heads, head_dim]
     qkv_dtype: tex.DType
                 data type of Q, K and V; in tex.DType, not torch.dtype
-    qkvso_strides: List
+    qkvso_strides: torch.Tensor 
                 strides for Q, K, V, K', V', S and O, shape [7, 4]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
@@ -1049,7 +1049,7 @@ def fused_attn_bwd_q_k_v(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
-    qkvso_strides: List,
+    qkvso_strides: torch.Tensor,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -1107,7 +1107,7 @@ def fused_attn_bwd_q_k_v(
                 same shape as Q
     qkv_dtype: tex.DType
                 data type of QKV; in tex.DType, not torch.dtype
-    qkvso_strides: List
+    qkvso_strides: torch.Tensor 
                 strides for Q, K, V, K', V', S and O, shape [7, 4]
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
@@ -1234,6 +1234,7 @@ def fused_attn_bwd_q_k_v(
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
 
+    print('cpp_ext: q_k_v backward:',output_tensors[2][0,1,:,:])
     if attn_bias_type == "no_bias":
         # return (d_q, d_k, d_v) when attn_bias_type is no_bias
         return output_tensors

@@ -1484,6 +1484,8 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                 devPtrStrides, devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(qkv_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
+    //cudaDeviceSynchronize();
+    //cudaMemcpy(sm.hostW, sm.devPtrW, (size_t)(sizeof(sm.hostW[0]) * Wsize), cudaMemcpyDeviceToHost);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
