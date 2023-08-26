@@ -176,7 +176,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     use_fp8 = fp8_recipe is not None
     with torch.autocast(device_type="cuda", enabled=True, dtype=dtype):
         with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-            te_out = block(te_inp_hidden_states, te_inp_attn_mask)
+            te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
         loss = te_out.sum()
 
     loss.backward()
@@ -217,7 +217,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, bs, dtype, config, fp8_
 
     use_fp8 = fp8_recipe is not None
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        te_out = block(te_inp_hidden_states, te_inp_attn_mask)
+        te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
@@ -253,7 +253,7 @@ def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
 
     use_fp8 = fp8_recipe is not None
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        te_out = block(te_inp_hidden_states, te_inp_attn_mask)
+        te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
@@ -282,7 +282,9 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     use_fp8 = fp8_recipe is not None
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         te_out = block(
-            te_inp_hidden_states, te_inp_attn_mask, encoder_output=te_inp_hidden_states
+            te_inp_hidden_states,
+            attention_mask=te_inp_attn_mask,
+            encoder_output=te_inp_hidden_states
         )
     loss = te_out.sum()
     loss.backward()
