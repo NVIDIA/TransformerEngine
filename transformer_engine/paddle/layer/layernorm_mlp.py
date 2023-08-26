@@ -4,25 +4,38 @@
 """LayerNormMLP API"""
 
 import os
-from typing import Union, Tuple, Dict, Any
+from typing import Union, Tuple, Dict, Any, Optional
 
 import paddle
 import paddle.nn.functional as F
 from paddle.nn.initializer import Constant
 
+from .base import TransformerEngineBaseLayer
+from .layernorm_linear import _layernorm_fwd_fp8_cast, _layernorm_bwd
+from .linear import _linear_fwd_fp8, _linear_fwd_non_fp8, _linear_bwd_fp8, _linear_bwd_non_fp8
+from ..constants import TE_DType, FP8FwdTensors, FP8BwdTensors, dist_group_type
 from ..cpp_extensions import (
     cast_from_fp8,
     dgelu_cast_transpose_bgrad_fp8,
     gelu_fp8,
     transpose,
 )
-
-from .base import TransformerEngineBaseLayer
-from .layernorm_linear import _layernorm_fwd_fp8_cast, _layernorm_bwd
-from .linear import _linear_fwd_fp8, _linear_fwd_non_fp8, _linear_bwd_fp8, _linear_bwd_non_fp8
-from ..constants import TE_DType, FP8FwdTensors, FP8BwdTensors
+from ..distributed import (
+    allreduce,
+    get_tp_group_and_world_size,
+    identity,
+    track_rng_state,
+    set_tensor_dist_attr,
+    set_weight_tensor_dist_attr,
+)
 from ..fp8 import get_fp8_te_dtype
-from ..utils import cast_if_needed, assert_dim_for_fp8_forward_exec, get_paddle_act_func
+from ..utils import (
+    assert_dim_for_fp8_forward_exec,
+    cast_if_needed,
+    cast_if_needed_inplace,
+    divide,
+    get_paddle_act_func,
+)
 
 __all__ = ["LayerNormMLP"]
 
@@ -43,7 +56,11 @@ def _mlp_forward(
     fp8_calibration: bool,
     fp8_meta: Dict[str, Any],
     activation_dtype: paddle.dtype,
+    activation: str,
     is_grad_enabled: bool,
+    set_parallel_mode: bool,
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
 ):
     if fp8_enabled:
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -56,6 +73,9 @@ def _mlp_forward(
             use_fc1_bias,
             fp8_meta,
             activation_dtype,
+            'column' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
             is_grad_enabled,
         )
 
@@ -75,6 +95,9 @@ def _mlp_forward(
             use_fc2_bias,
             fp8_meta,
             activation_dtype,
+            'row' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
             is_grad_enabled,
         )
     else:
@@ -88,7 +111,10 @@ def _mlp_forward(
             fp8_calibration,
             fp8_meta,
             activation_dtype,
-            activation='gelu',
+            'column' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
+            activation=activation,
         )
 
         fc2_out = _linear_fwd_non_fp8(
@@ -101,6 +127,9 @@ def _mlp_forward(
             fp8_calibration,
             fp8_meta,
             activation_dtype,
+            'row' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
         )
     return (
         fc1_out,
@@ -136,6 +165,9 @@ def _mlp_backward(
     requires_dgrad: bool,
     activation_dtype: paddle.dtype,
     activation: str,
+    set_parallel_mode: bool,
+    tensor_parallel: bool,
+    tp_group: Union[dist_group_type, None],
 ):
     (
         fc1_dgrad,
@@ -179,6 +211,9 @@ def _mlp_backward(
             True,
             requires_fc2_wgrad,
             activation_dtype,
+            'row' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
         )
 
         # GELU Bwd
@@ -193,7 +228,7 @@ def _mlp_backward(
         if requires_fc1_bgrad:
             fc1_bgrad = fc1_bgrad_
 
-        # FC2 Bwd
+        # FC1 Bwd
         requires_fc1_wgrad = not fc1_weight.stop_gradient
         dgelu_no_fp8, fc1_input_no_fp8, fc1_input_t = None, None, None
         if requires_fc1_wgrad:
@@ -231,6 +266,9 @@ def _mlp_backward(
             requires_dgrad,
             requires_fc1_wgrad,
             activation_dtype,
+            'column' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
         )
     else:
         dgelu, fc2_wgrad, fc2_bgrad = _linear_bwd_non_fp8(
@@ -240,6 +278,9 @@ def _mlp_backward(
             requires_fc2_bgrad,
             True,
             activation_dtype,
+            'row' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
             gelu_input=fc1_out,
             activation=activation,
         )
@@ -250,6 +291,9 @@ def _mlp_backward(
             requires_fc1_bgrad,
             requires_dgrad,
             activation_dtype,
+            'column' if set_parallel_mode else None,
+            tensor_parallel,
+            tp_group,
         )
     return (
         fc1_dgrad,
@@ -286,9 +330,13 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
         activation: str,
+        set_parallel_mode: bool,
+        tensor_parallel: bool,
+        tp_group: Union[dist_group_type, None],
+        tp_size: int,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
+        in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.reshape((-1, in_features))
         if fp8_enabled:
@@ -341,7 +389,11 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             fp8_calibration,
             fp8_meta,
             activation_dtype,
+            activation,
             is_grad_enabled,
+            set_parallel_mode,
+            tensor_parallel,
+            tp_group,
         )
 
         if is_grad_enabled:
@@ -369,6 +421,10 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.return_layernorm_output = return_layernorm_output
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.set_parallel_mode = set_parallel_mode
+            ctx.tensor_parallel = tensor_parallel
+            ctx.tp_group = tp_group
+            ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
             ctx.requires_fc1_bgrad = use_fc1_bias and not fc1_bias.stop_gradient
             ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
@@ -387,6 +443,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                                       ...]) -> Tuple[Union[paddle.Tensor, None], ...]:
         with TransformerEngineBaseLayer.prepare_backward(ctx.fp8_enabled,
                                                          ctx.fp8_meta,
+                                                         ctx.tp_group,
+                                                         ctx.tp_size,
                                                          name="_LayerNormMLP"):
             (
                 inputmat,
@@ -442,6 +500,9 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 True,
                 ctx.activation_dtype,
                 ctx.activation,
+                ctx.set_parallel_mode,
+                ctx.tensor_parallel,
+                ctx.tp_group,
             )
             if not ctx.fp8_enabled:
                 # fc2_bias is fused with gemm for non-FP8 path
@@ -491,6 +552,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         activation: str = "gelu",
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
+        set_parallel_mode: bool = False,
+        tp_group: Optional[dist_group_type] = None,
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -506,6 +569,17 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         self._weight_attr = weight_attr
         self._bias_attr = bias_attr
         self._dtype = self._helper.get_default_dtype()
+
+        # Set parallel configs
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
+                                                                  enable_tp=set_parallel_mode)
+        self.tensor_parallel = self.tp_size > 1
+        self.set_parallel_mode = set_parallel_mode
+
+        if self.set_parallel_mode:
+            self.size_per_partition = divide(self.ffn_hidden_size, self.tp_size)
+        else:
+            self.size_per_partition = self.ffn_hidden_size
 
         # LayerNorm weights
         self.ln_weight = self.create_parameter(
@@ -524,36 +598,47 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         )
 
         # FC1 weights
-        self.fc1_weight = self.create_parameter(
-            shape=[self.ffn_hidden_size, self.hidden_size]
-            if self.backend == 'transformer_engine' else [self.hidden_size, self.ffn_hidden_size],
-            attr=self._weight_attr,
-            dtype=self._dtype,
-            is_bias=False,
-        )
+        with track_rng_state(enable=self.tensor_parallel):
+            self.fc1_weight = self.create_parameter(
+                shape=[self.size_per_partition, self.hidden_size] if self.backend
+                == 'transformer_engine' else [self.hidden_size, self.size_per_partition],
+                attr=self._weight_attr,
+                dtype=self._dtype,
+                is_bias=False,
+            )
+        set_weight_tensor_dist_attr(self.fc1_weight,
+                                    self.tensor_parallel,
+                                    parallel_mode='column',
+                                    backend=self.backend)
 
         self.has_bias = self._bias_attr is not False
-        if self._bias_attr is None or self._bias_attr is True:
+        use_default_bias = self._bias_attr is None or self._bias_attr is True
+        if use_default_bias:
             self._bias_attr = paddle.ParamAttr(initializer=Constant(value=0.0))
 
         if self.has_bias:
             self.fc1_bias = self.create_parameter(
-                shape=[self.ffn_hidden_size],
+                shape=[self.size_per_partition],
                 attr=self._bias_attr,
                 dtype=self._dtype,
                 is_bias=True,
             )
+            set_tensor_dist_attr(self.fc1_bias, self.tensor_parallel, axis=0)
         else:
             self.fc1_bias = None
 
         # FC2 weights
         self.fc2_weight = self.create_parameter(
-            shape=[self.hidden_size, self.ffn_hidden_size]
-            if self.backend == 'transformer_engine' else [self.ffn_hidden_size, self.hidden_size],
+            shape=[self.hidden_size, self.size_per_partition] if self.backend
+            == 'transformer_engine' else [self.size_per_partition, self.hidden_size],
             attr=self._weight_attr,
             dtype=self._dtype,
             is_bias=False,
         )
+        set_weight_tensor_dist_attr(self.fc2_weight,
+                                    self.tensor_parallel,
+                                    parallel_mode='row',
+                                    backend=self.backend)
 
         if self.has_bias:
             self.fc2_bias = self.create_parameter(
@@ -564,6 +649,13 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             )
         else:
             self.fc2_bias = None
+
+        # For RPL, bias has to be added after TP collectives
+        # So it cannot be fused with the GEMM
+        if self.set_parallel_mode and self.tensor_parallel and self.has_bias:
+            self.gemm_bias_fused_add = False
+        else:
+            self.gemm_bias_fused_add = True
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -606,12 +698,20 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
                 self.activation,
+                self.set_parallel_mode,
+                self.tensor_parallel,
+                self.tp_group,
+                self.tp_size,
             )
 
         if self.return_layernorm_output:
             out, ln_out = out
-            return out, ln_out
 
+        if not self.gemm_bias_fused_add:
+            out = out + cast_if_needed_inplace(self.fc2_bias, self.activation_dtype)
+
+        if self.return_layernorm_output:
+            return out, ln_out
         return out
 
     def _pd_forward(
@@ -628,11 +728,16 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                               weight=self.ln_weight,
                               bias=self.ln_bias,
                               epsilon=self.eps)
+        if self.set_parallel_mode and self.tensor_parallel:
+            ln_out = identity(ln_out, self.tp_group)
         fc1_out = F.linear(ln_out, self.fc1_weight, self.fc1_bias)
         act_func = get_paddle_act_func(self.activation)
         act_out = act_func(fc1_out)
-        out = F.linear(act_out, self.fc2_weight, self.fc2_bias)
-
+        out = F.linear(act_out, self.fc2_weight,
+                       self.fc2_bias if self.gemm_bias_fused_add else None)
+        if self.set_parallel_mode and self.tensor_parallel:
+            out = allreduce(out, self.tp_group)
+            out = out + self.fc2_bias if self.fc2_bias is not None else out
         if self.return_layernorm_output:
             return out, ln_out
         return out
