@@ -376,8 +376,8 @@ class TorchMHA(nn.Module):
             batch_first=False,
         )
 
-    def forward(self, x, attn_mask=None):
-        output = self.mhsa(x, x, x, attn_mask=attn_mask, need_weights=False)
+    def forward(self, x, attention_mask=None):
+        output = self.mhsa(x, x, x, attn_mask=attention_mask, need_weights=False)
         if isinstance(output, tuple):
             output = output[0]
         return output
@@ -461,7 +461,7 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
 
     te_out = block(
         te_inp_hidden_states,
-        te_inp_attn_mask,
+        attention_mask=te_inp_attn_mask,
         checkpoint_core_attention=recompute,
     )
     loss = te_out.sum()
@@ -526,13 +526,13 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
             get_dummy_cuda_rng_tracker,
             None,  # tp_group
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            attention_mask=te_inp_attn_mask,
             checkpoint_core_attention=False,
         )
     else:
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            attention_mask=te_inp_attn_mask,
             checkpoint_core_attention=False,
         )
     loss = te_out.sum()
@@ -766,7 +766,7 @@ def test_gpt_accuracy(dtype, bs, model):
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
 
-def _test_mha_accuracy(block, bs, dtype, config, mask_type):
+def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
@@ -775,7 +775,12 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type):
     inp_hidden_states.retain_grad()
     inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
 
-    out = block(inp_hidden_states, inp_attn_mask)
+    forward_kwargs = {}
+    if te:
+        forward_kwargs["attn_mask_type"] = mask_type
+    forward_kwargs["attention_mask"] = inp_attn_mask
+
+    out = block(inp_hidden_states, **forward_kwargs)
     loss = out.sum()
     loss.backward()
 
@@ -801,7 +806,6 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
             input_layernorm=False,
-            attn_mask_type=mask_type,
         )
         .to(dtype=dtype)
         .cuda()
@@ -825,8 +829,8 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
         torch_mha.mhsa.out_proj.weight = Parameter(te_mha.proj.weight.clone())
         torch_mha.mhsa.out_proj.bias = Parameter(te_mha.proj.bias.clone())
 
-    te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config, mask_type)
-    torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config, mask_type)
+    te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config, mask_type, te=True)
+    torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config, mask_type, te=False)
 
     # Check output.
     if dtype == torch.float32:
