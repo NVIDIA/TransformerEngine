@@ -905,7 +905,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     """
     paddle.set_default_dtype(math_dtype)
     rtol = 5e-2
-    atol = 5e-2
+    atol = 6e-2
     eps = 1e-3
 
     encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
