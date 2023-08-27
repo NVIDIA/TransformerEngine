@@ -178,10 +178,6 @@ class Decorator(Protocol):
 
 
 def cast(x: Any, t: type[T] | GenericAlias, /) -> T:
-    if not isinstance(t, GenericAlias):
-        assert isinstance(x, t)
-    else:
-        assert isinstance(x, t.__origin__)
     return x
 
 
