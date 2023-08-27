@@ -263,7 +263,7 @@ def torch_op(func: Callable[..., Any]):
                 lambda _: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
                 x,
                 lambda x: isinstance(x, cpp_extensions.Tensor),
-                lambda x: x.__qualname__,
+                lambda x: f"{x.__module__}.{x.__name__}",
             )
 
         def unwrap(x: Any) -> Any:
