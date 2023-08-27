@@ -18,7 +18,7 @@ import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
-from .test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
+from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
@@ -69,7 +69,7 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        'sb3hd',
+        #'sb3hd',
         #'bs3hd',
         #'sbhd_sb2hd',
         #'sbhd_sbh2d',
@@ -81,9 +81,9 @@ def test_dpa_qkv_layout(dtype, bs, model):
         #'thd_th2d',
         #'thd_t2hd',
         #'thd_thd_thd',
-        #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-        #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-        #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+        'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+        'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+        't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
         ]
 
     for qkv_layout in qkv_layouts:
