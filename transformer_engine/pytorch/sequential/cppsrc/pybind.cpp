@@ -28,7 +28,6 @@
 
 #include "type_list.h"
 
-// ----------- Wrapper for NVTETensor -----------
 void cuda_check() {
   static const bool perform_check = []() {
     const char *var = std::getenv("CUDA_LAUNCH_BLOCKING");
@@ -49,6 +48,7 @@ void cuda_check() {
   }
 }
 
+// ----------- Wrapper for NVTETensor -----------
 class Tensor {
   static_assert(std::is_same_v<NVTETensor, void *>);
   std::shared_ptr<void> tensor;
@@ -123,7 +123,6 @@ template <> struct wrapped<void> : exposed_type<void> {
   // should be skipped for void return type.
 };
 template <> struct wrapped<NVTETensor> : exposed_type<Tensor> {
-  static Tensor wrap(NVTETensor arg) { return static_cast<Tensor>(arg); }
   static NVTETensor unwrap(Tensor arg) { return static_cast<NVTETensor>(arg); }
 };
 template <>
@@ -169,11 +168,11 @@ constexpr auto cuda_stream_arg_helper(Ret(func)(Args...),
     if constexpr (!std::is_same_v<Ret, void>) {
       return wrapped<Ret>::wrap(
           func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
-               static_cast<cudaStream_t>(stream),
+               reinterpret_cast<cudaStream_t>(stream),
                wrapped<SuffixArgs>::unwrap(suffixArgs)...));
     } else {
       return func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
-                  static_cast<cudaStream_t>(stream),
+                  reinterpret_cast<cudaStream_t>(stream),
                   wrapped<SuffixArgs>::unwrap(suffixArgs)...);
     }
   };
@@ -215,12 +214,13 @@ void multi_cast_transpose(const std::vector<Tensor> &inputs,
   }
   nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
                             transposed_outs_.data(),
-                            static_cast<cudaStream_t>(stream));
+                            reinterpret_cast<cudaStream_t>(stream));
 
   cuda_check();
 }
 
-// ----------- Registration of torch.ops -----------
+// ----------- Registration of module -----------
+namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<NVTEDType>(m, "DType", py::module_local())
       .value("Byte", kNVTEByte)
@@ -258,10 +258,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                     size_t>())
       .def_property_readonly("dtype", &Tensor::dtype)
       .def_property_readonly("shape", &Tensor::shape)
-      .def_property_readonly("data_ptr", &Tensor::data_ptr)
-      .def_property_readonly("amax_ptr", &Tensor::amax_ptr)
-      .def_property_readonly("scale_ptr", &Tensor::scale_ptr)
-      .def_property_readonly("scale_inv_ptr", &Tensor::scale_inv_ptr);
+      .def("data_ptr", &Tensor::data_ptr)
+      .def("amax_ptr", &Tensor::amax_ptr)
+      .def("scale_ptr", &Tensor::scale_ptr)
+      .def("scale_inv_ptr", &Tensor::scale_inv_ptr);
 
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
