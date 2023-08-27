@@ -319,7 +319,7 @@ def outer_wrapper{outer_sig}:
     return result
 
 """
-        ns = dict(func=func)
+        ns = dict(func=func, __name__=__name__)
         exec(source, ns)
 
         declared = decl(name)(ns[func.__name__])
