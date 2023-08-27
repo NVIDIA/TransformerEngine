@@ -173,9 +173,9 @@ def cast(x: Any, _: type[T], /) -> T:
     return x
 
 
-def qual_name_set(qualname: str) -> Callable[..., Any]:
+def set_name(name: str) -> Callable[..., Any]:
     def decorator(func: Callable[..., Any]):
-        func.__qualname__ = qualname
+        func.__name__ = name
         return func
 
     return decorator
@@ -236,7 +236,7 @@ def torch_op(func: Callable[..., Any]):
                 return x
 
         @dec(name)
-        @qual_name_set(func.__name__)
+        @set_name(func.__name__)
         def wrapper1(*args: Any):
             unwrapped = unwrap(args)
             result = func(*unwrapped)
