@@ -228,7 +228,6 @@ def torch_op(func: Callable[..., Any]):
             version1 = True
         except AttributeError:
             pass
-
     if custom_ops is None:
         if not hasattr(torch_op, "warned"):  # type: ignore
             torch_op.warned = True  # type: ignore
@@ -240,76 +239,91 @@ def torch_op(func: Callable[..., Any]):
     name = f"nvte::{func.__name__}"
 
     def make_wrapper(func: Callable[..., Any]):
-        storage: dict[int, Any] = {}
+        def type_name(t: type) -> str:
+            return f"{t.__module__}.{t.__name__}"
 
-        def wrap(x: Any) -> Any:
-            def _(x: cpp_extensions.Tensor | Enum | Any):
-                if isinstance(x, cpp_extensions.Tensor):
-                    result = (x.data, x.amax, x.scale, x.scale_inv)
-                elif isinstance(x, Enum):
-                    result = x.value
-                else:
-                    result = x
-                storage[id(result)] = x
-                return result
+        def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
+            if arg_type is cpp_extensions.Tensor:
+                w = f"{arg_name}_ = ({arg_name}.dtype, {arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
+                u = f"{arg_name} = {arg_type_name}(*{arg_name}_)\n"
+            elif issubclass(arg_type, Enum):
+                w = f"{arg_name}_ = {arg_name}.value\n"
+                u = f"{arg_name} = {arg_type_name}({arg_name}_)\n"
+            elif arg_type in [int, float, bool, str]:
+                w = f"{arg_name}_ = {arg_name}\n"
+                u = f"{arg_name} = {arg_name}_\n"
+            else:
+                raise NotImplementedError()
+            return (w, u)
 
-            return recursive_apply(
-                _,
-                x,
-                lambda x: isinstance(
-                    x,
-                    cpp_extensions.Tensor
-                    | cpp_extensions.DType
-                    | cpp_extensions.BiasType
-                    | cpp_extensions.FusedAttnBackend
-                    | cpp_extensions.QKVLayout
-                    | cpp_extensions.MaskType,
-                ),
-            )
-
-        def wrap_type(x: Any) -> str:
-            return recursive_apply(
-                lambda _: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
-                x,
-                lambda x: x is cpp_extensions.Tensor,
-                lambda x: f"{x.__module__}.{x.__name__}",
-            )
-
-        def unwrap(x: Any) -> Any:
-            return recursive_apply(
-                lambda x: storage[id(x)],
-                x,
-                lambda x: id(x) in storage,  # type: ignore
-            )
+        def wrap_type(arg_type: type):
+            if arg_type is cpp_extensions.Tensor:
+                return tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            elif issubclass(arg_type, Enum):
+                return int
+            elif arg_type in [int, float, bool, str]:
+                return arg_type
+            else:
+                raise NotImplementedError()
 
         arg_types = get_arg_types(func)
+        arg_names = get_arg_names(func)
+        arg_type_names =  list(map(type_name, arg_types))
         return_type = get_return_type(func)
+        return_type_name = type_name(return_type)
+        outer_sig = f"({ ','.join(
+            f'{arg_name}: {arg_type_name}'
+            for arg_name, arg_type_name in zip(arg_names, arg_type_names)
+        ) }) -> {return_type_name}"
+        arg_wrapping_code = ""
+        arg_unwrapping_code = ""
+        for arg_name, arg_type, arg_type_name in zip(arg_names, arg_types, arg_type_names):
+            w, u = wrap_unwrap_code(arg_name, arg_type, arg_type_name)
+            arg_wrapping_code += w
+            arg_unwrapping_code += u
+        wrapped_args = ','.join(f'{arg_name}_' for arg_name in arg_names)
 
+        result_wrapping_code, result_unwrapping_code = wrap_unwrap_code("result", return_type, return_type_name)
+
+        wrapped_arg_names = [f"{arg_name}_" for arg_name in arg_names]
         wrapped_arg_types = [wrap_type(t) for t in arg_types]
+        wrapped_arg_type_names = [type_name(t) for t in wrapped_arg_types]
+        wrapped_return_type = wrap_type(return_type)
+        wrapped_return_type_name = type_name(wrapped_return_type)
+        inner_sig = f"({ ','.join(
+            f'{arg_name}_: {arg_type_name}'
+            for arg_name, arg_type_name in zip(wrapped_arg_names, wrapped_arg_type_names)
+        ) }) -> {wrapped_return_type_name}"
+        unwrapped_args = ','.join(f'{arg_name}' for arg_name in arg_names)
 
-        template = f"""\
+
+        source = f"""\
 import torch
-def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_type_name in zip(get_arg_names(func), wrapped_arg_types))}) -> {wrap_type(return_type)}:
-    unwrapped = unwrap(({"".join(f"{arg_name}," for arg_name in get_arg_names(func))}))
-    result = func(*unwrapped)
-    return wrap(result)
-"""
+from . import cpp_extensions
 
-        ns = dict(func=func, wrap=wrap, unwrap=unwrap)
-        exec(template, ns)
+def {func.__name__}{inner_sig}:
+    {arg_unwrapping_code}
+    result = func({unwrapped_args})
+    {result_wrapping_code}
+    return result_
+
+def outer_wrapper{outer_sig}:
+    {arg_wrapping_code}
+    result_ = {func.__name__}({wrapped_args})
+    {result_unwrapping_code}
+    return result
+
+"""
+        ns = dict(func=func)
+        exec(source, ns)
+
         declared = decl(name)(ns[func.__name__])
         if version1:
-            impl = declared.impl("cuda")  # type: ignore
-            wrapper1 = impl(ns[func.__name__])  # type: ignore
+            declared.impl("cuda")(ns[func.__name__])  # type: ignore
         else:
-            wrapper1 = impl(name)(ns[func.__name__])  # type: ignore
+            impl(name)(ns[func.__name__])  # type: ignore
 
-        def wrapper2(*args: Any):
-            storage.clear()
-            wrapped = wrap(args)
-            result = wrapper1(*wrapped)
-            return unwrap(result)
-
-        return wrapper2
+        outer_wrapper = ns["outer_wrapper"]
+        return outer_wrapper
 
     return make_wrapper(func)
