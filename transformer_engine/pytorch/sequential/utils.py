@@ -1,4 +1,5 @@
 from __future__ import annotations
+from enum import Enum
 from typing import (
     Any,
     Callable,
@@ -149,6 +150,14 @@ def get_arg_types(f: Callable[..., Any]) -> list[type]:
     return arg_types
 
 
+def get_arg_names(f: Callable[..., Any]) -> list[str]:
+    import typing
+
+    annotations = typing.get_type_hints(f)
+    annotations.pop("return", None)
+    return list(annotations.keys())
+
+
 def get_return_type(f: Callable[..., T]) -> type[T]:
     import typing
     import ast
@@ -181,6 +190,24 @@ def set_name(name: str) -> Callable[..., Any]:
     return decorator
 
 
+def recursive_apply(
+    func: Callable[[Any], Any],
+    x: Any,
+    pred: Callable[[Any], bool],
+    on_false: Callable[[Any], Any] = lambda x: x,
+) -> Any:
+    if pred(x):
+        return func(x)
+    elif isinstance(x, list):
+        return [func(y) for y in x]  # type: ignore
+    elif isinstance(x, tuple):
+        return tuple(func(y) for y in x)  # type: ignore
+    elif isinstance(x, dict):
+        return {k: func(v) for k, v in x.items()}  # type: ignore
+    else:
+        return on_false(x)
+
+
 def torch_op(func: Callable[..., Any]):
     import torch
     from . import cpp_extensions
@@ -206,43 +233,64 @@ def torch_op(func: Callable[..., Any]):
     name = f"nvte::{func.__name__}"
 
     def make_wrapper(func: Callable[..., Any]):
-        storage: dict[int, cpp_extensions.Tensor] = {}
+        storage: dict[int, Any] = {}
 
         def wrap(x: Any) -> Any:
-            if isinstance(x, cpp_extensions.Tensor):
-                result = (x.data, x.amax, x.scale, x.scale_inv)
+            def _(x: cpp_extensions.Tensor | Enum):
+                if isinstance(x, cpp_extensions.Tensor):
+                    result = (x.data, x.amax, x.scale, x.scale_inv)
+                else:
+                    result = x.value
                 storage[id(result)] = x
                 return result
-            elif isinstance(x, list):
-                return [wrap(y) for y in x]  # type: ignore
-            elif isinstance(x, tuple):
-                return tuple(wrap(y) for y in x)  # type: ignore
-            elif isinstance(x, dict):
-                return {k: wrap(v) for k, v in x.items()}  # type: ignore
-            else:
-                return x
+
+            return recursive_apply(
+                _,
+                x,
+                lambda x: isinstance(
+                    x,
+                    cpp_extensions.Tensor
+                    | cpp_extensions.DType
+                    | cpp_extensions.BiasType
+                    | cpp_extensions.FusedAttnBackend
+                    | cpp_extensions.QKVLayout
+                    | cpp_extensions.MaskType,
+                ),
+            )
+
+        def wrap_type(x: Any) -> str:
+            return recursive_apply(
+                lambda _: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
+                x,
+                lambda x: isinstance(x, cpp_extensions.Tensor),
+                lambda x: x.__name__,
+            )
 
         def unwrap(x: Any) -> Any:
-            if isinstance(x, tuple):
-                if len(x) == 4 and all(isinstance(y, torch.Tensor) for y in x):  # type: ignore
-                    return storage[id(x)]  # type: ignore
-                else:
-                    return tuple(unwrap(y) for y in x)  # type: ignore
-            elif isinstance(x, list):
-                return [unwrap(y) for y in x]  # type: ignore
-            elif isinstance(x, dict):
-                return {k: unwrap(v) for k, v in x.items()}  # type: ignore
-            else:
-                return x
+            return recursive_apply(
+                lambda x: storage[id(x)],
+                x,
+                lambda x: id(x) in storage,  # type: ignore
+            )
 
-        @dec(name)
-        @set_name(func.__name__)
-        def wrapper1(*args: Any):
-            unwrapped = unwrap(args)
-            result = func(*unwrapped)
-            return wrap(result)
+        arg_types = get_arg_types(func)
+        return_type = get_return_type(func)
+
+        wrapped_arg_types = [wrap_type(t) for t in arg_types]
+
+        template = f"""\
+def {func.__name__}({",".join(f"{arg_name}: '{arg_type_name}'" for arg_name, arg_type_name in zip(get_arg_names(func), wrapped_arg_types))}) -> {wrap_type(return_type)}:
+    unwrapped = unwrap(({",".join(f"{arg_name}" for arg_name in get_arg_names(func))}))
+    result = func(*unwrapped)
+    return wrap(result)
+"""
+
+        ns = dict(func=func, wrap=wrap, unwrap=unwrap)
+        exec(template, ns)
+        wrapper1 = dec(name)(ns[func.__name__])
 
         def wrapper2(*args: Any):
+            storage.clear()
             wrapped = wrap(args)
             result = wrapper1(*wrapped)
             return unwrap(result)
