@@ -13,6 +13,7 @@
 #include <exception>
 #include <memory>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <stdexcept>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
