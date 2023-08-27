@@ -336,7 +336,7 @@ def outer_wrapper{outer_sig}:
                 impl(name)(ns[func.__name__])  # type: ignore
         except Exception as e:
             raise RuntimeError(
-                f"Failed to compile wrapper for {func.__name__}. Generated code: \n{source}"
+                f"Failed to compile wrapper for {func.__name__}. Generated code: \n```\n{source}```"
             ) from e
 
         outer_wrapper = ns["outer_wrapper"]
