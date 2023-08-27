@@ -45,7 +45,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
     bool flag_m512 = false;
     bool flag_arb = false;
-    if ((sm_arch_ >= 80)
+    if ((sm_arch_ == 80 || sm_arch_ == 90)
             && (head_dim == 64)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
@@ -56,7 +56,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED))) {
       flag_m512 = true;
     }
-    if ((sm_arch_ >= 80)
+    if (
+#if (CUDNN_VERSION >= 8903)
+        (sm_arch_ >= 80)
+#else
+        (sm_arch_ == 80 || sm_arch_ == 90)
+#endif
             && (max_seqlen_q == max_seqlen_kv)
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)

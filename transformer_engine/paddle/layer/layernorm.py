@@ -31,7 +31,7 @@ class _LayerNorm(paddle.autograd.PyLayer):
         zero_centered_gamma: bool,
     ) -> paddle.Tensor:
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
+        in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
         inputmat = inp.reshape((-1, in_features))
 
