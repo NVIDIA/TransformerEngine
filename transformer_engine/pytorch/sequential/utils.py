@@ -173,6 +173,14 @@ def cast(x: Any, _: type[T], /) -> T:
     return x
 
 
+def qual_name_set(qualname: str) -> Callable[..., Any]:
+    def decorator(func: Callable[..., Any]):
+        func.__qualname__ = qualname
+        return func
+
+    return decorator
+
+
 def torch_op(func: Callable[..., Any]):
     import torch
     from . import cpp_extensions
@@ -227,13 +235,12 @@ def torch_op(func: Callable[..., Any]):
             else:
                 return x
 
+        @qual_name_set(func.__qualname__)
         @dec(name)
         def wrapper1(*args: Any):
             unwrapped = unwrap(args)
             result = func(*unwrapped)
             return wrap(result)
-
-        wrapper1.__qualname__ = func.__qualname__
 
         def wrapper2(*args: Any):
             wrapped = wrap(args)
