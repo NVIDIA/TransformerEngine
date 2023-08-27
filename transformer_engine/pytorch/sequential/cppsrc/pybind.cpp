@@ -75,7 +75,10 @@ public:
   Tensor &operator=(Tensor &&other) = default;
   operator NVTETensor() const { return tensor.get(); }
   NVTEDType dtype() const { return nvte_tensor_type(tensor.get()); }
-  NVTEShape shape() const { return nvte_tensor_shape(tensor.get()); }
+  NVTEShape shape() const {
+    const auto shape_ = nvte_tensor_shape(tensor.get());
+    return std::vector<size_t>(shape_.data, shape_.data + shape_.ndim);
+  }
   size_t data_ptr() const {
     return reinterpret_cast<size_t>(nvte_tensor_data(tensor.get()));
   }
