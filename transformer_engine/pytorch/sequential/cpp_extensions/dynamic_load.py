@@ -5,6 +5,7 @@ from typing import Any, Callable, TypeVar
 from ..utils import import_file_as_module, get_arg_types
 import torch
 import re
+import ast
 import transformer_engine_cuda  # type: ignore
 
 _T1 = TypeVar("_T1")
@@ -30,6 +31,11 @@ def _this_module():
 
 
 def _name_resolution(name: str) -> Any:
+    try:
+        return ast.literal_eval(name)
+    except ValueError:
+        pass
+
     namespaces = name.split(".")
     result = _this_module()
     for name in namespaces:
