@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
+import nvtx
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -733,6 +734,7 @@ class FlashAttention(torch.nn.Module):
         print('xxxxxxx FA, qkv layout ',qkv_layout, qkv_format)
 
         if qkv_format == 'sbhd':
+            print('xxxxxxxx FA old check',_check_qkv_layout(query_layer, key_layer, value_layer))
             # For now just 128, will make it more general in the future
             if (query_layer.shape[-1] == 128 and
                 query_layer.shape[0] * query_layer.shape[1] >= 512 and
@@ -957,6 +959,8 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
                 q, k, v, qkv_dtype, qkvso_strides, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend):
+        torch.cuda.synchronize()
+        range_fused = nvtx.start_range("fused-apply-fwd")
         out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype, qkvso_strides, fused_attention_backend, attn_bias,
@@ -976,12 +980,18 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        torch.cuda.synchronize()
+        nvtx.end_range(range_fused)
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
+        torch.cuda.synchronize()
+        range_fused = nvtx.start_range("fused-apply-bwd")
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides = ctx.saved_tensors
+        torch.cuda.synchronize()
+        range_fused1 = nvtx.start_range("fused-apply-bwd1")
         dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
             ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, out, d_out,
@@ -990,13 +1000,24 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             None, None, None, None, None, None, None, None, None,
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
             ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+        torch.cuda.synchronize()
+        nvtx.end_range(range_fused1)
+        nvtx.end_range(range_fused)
 
         #print('q_k_v backward:',dv[0,1,:,:])
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
-            return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
+            torch.cuda.synchronize()
+            range_fused2 = nvtx.start_range("fused-apply-bwd2")
+            ret = (None, None, None, None, None, dq, dk, dv, None, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
+            torch.cuda.synchronize()
+            nvtx.end_range(range_fused2)
+            return ret
+            #return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
+            #        None, None, None, None, None, None,
+            #        None, None, None, None, None, None)
         # else, return (dqkv, dbias)
         return (None, None, None, None, None, dq, dk, dv, None, None, rest[0], None,
                 None, None, None, None, None, None,

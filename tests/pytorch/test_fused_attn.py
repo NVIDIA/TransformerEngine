@@ -88,17 +88,21 @@ def test_dpa_qkv_layout(dtype, bs, model):
 
     for qkv_layout in qkv_layouts:
 
+        torch.cuda.synchronize()
         range_flash = nvtx.start_range(f"{qkv_layout}-flash")
         flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FlashAttention", qkv_layout)
+        torch.cuda.synchronize()
         nvtx.end_range(range_flash)
         range_fused = nvtx.start_range(f"{qkv_layout}-fused")
         fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FusedAttention", qkv_layout)
+        torch.cuda.synchronize()
         nvtx.end_range(range_fused)
         range_unfused = nvtx.start_range(f"{qkv_layout}-unfused")
         unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
+        torch.cuda.synchronize()
         nvtx.end_range(range_unfused)
 
         atol, rtol = (5e-1, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
@@ -210,6 +214,9 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     for i in range(3):
         torch.save(inp[i], 'flash_inp_'+str(i)+'.pt')
     torch.save(op_grad, 'flash_op_grad.pt')
+
+    torch.cuda.synchronize()
+    range_core = nvtx.start_range("core")
     if qkv_format != 'thd':
         op = block(inp[0], inp[1], inp[2], qkv_format=qkv_format)
     else:
@@ -230,6 +237,8 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
                 cu_seqlens_q = cu_seqlens_q,
                 cu_seqlens_kv = cu_seqlens_kv)
     op.backward(op_grad)
+    torch.cuda.synchronize()
+    nvtx.end_range(range_core)
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)
 
