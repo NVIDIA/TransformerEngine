@@ -80,9 +80,7 @@ scale_inv={self.scale_inv.item() if self.scale_inv.numel() else None}\
 def te_to_torch_dtype(dtype: DType):
     match dtype:
         case DType.Byte:
-            assert (
-                False
-            ), "Byte is only used internally for cublas workspace, this shouldn't get called"
+            return torch.int8
         case DType.Int32:
             return torch.int32
         case DType.Int64:
@@ -114,6 +112,9 @@ def torch_to_te_dtype(dtype: torch.dtype):
         case torch.bfloat16:
             return DType.BFloat16
         case torch.int8:
+            # We assume that this is not a workspace (Byte)
+            # tensor, as these shouldn't be exposed outside
+            # of basic operations.
             return DType.Float8E4M3
         case torch.uint8:
             return DType.Float8E5M2
