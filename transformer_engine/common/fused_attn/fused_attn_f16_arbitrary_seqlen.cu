@@ -14,6 +14,7 @@
 
 #include "../common.h"
 #include "utils.h"
+#include "../util/cuda_runtime.h"
 
 #if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
@@ -571,7 +572,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 d,           scaling_factor,
                                 is_training, dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
+                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
+	                        false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
@@ -698,7 +700,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                            // int64_t* devPtrStrides, 
 			    void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                             cudnnDataType_t tensorType, void *workspace, size_t *workspace_size,
-                            cudaStream_t stream, cudnnHandle_t handle) {
+                            cudaStream_t stream, cudnnHandle_t handle, bool use_workspace_opt) {
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
@@ -707,7 +709,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 d,           scaling_factor,
                                 true,        dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType};
+                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
+	                        use_workspace_opt};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_bprop_cache;
@@ -1071,7 +1074,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             ops.push_back(std::move(reshape_op2));
 
             /*******************************************************************************
-             *                          dP @ K -> dqAccumTensor                           */
+	     *                          dP @ K -> dqAccumTensor / dqTensor                */
 
             auto dqAccumTensor = cudnn_frontend::TensorBuilder()
                 .setDim(4, dqAccum_dim)
@@ -1088,15 +1091,27 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             auto matmul_3_Desc = cudnn_frontend::MatMulDescBuilder()
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .build();
-            auto matmul_op3 = cudnn_frontend::OperationBuilder(
-                                CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
-                                .setaMatDesc(dPScaledTensor)
-                                .setbMatDesc(kTensor)
-                                .setcMatDesc(dqAccumTensor)
-                                .setmatmulDesc(matmul_3_Desc)
-                                .build();
+	    if (!use_workspace_opt) {
+                auto matmul_op3 = cudnn_frontend::OperationBuilder(
+                                    CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
+                                    .setaMatDesc(dPScaledTensor)
+                                    .setbMatDesc(kTensor)
+                                    .setcMatDesc(dqAccumTensor)
+                                    .setmatmulDesc(matmul_3_Desc)
+                                    .build();
 
-            ops.push_back(std::move(matmul_op3));
+                ops.push_back(std::move(matmul_op3));
+            } else {
+                auto matmul_op3 = cudnn_frontend::OperationBuilder(
+                                    CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
+                                    .setaMatDesc(dPScaledTensor)
+                                    .setbMatDesc(kTensor)
+                                    .setcMatDesc(dQTensor)
+                                    .setmatmulDesc(matmul_3_Desc)
+                                    .build();
+
+                ops.push_back(std::move(matmul_op3));
+            }
 
             /*******************************************************************************
              *                          dP.T @ Q -> dK                                    */
@@ -1127,9 +1142,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             /*******************************************************************************
              *                          dqAccumTensor @ identity -> dqTensor              */
 
-            auto identityDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_IDENTITY);
-            auto identity_op = unary_pw_op_create(dqAccumTensor, dQTensor, identityDesc);
-            ops.push_back(std::move(identity_op));
+	    if (!use_workspace_opt) {
+                auto identityDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_IDENTITY);
+                auto identity_op = unary_pw_op_create(dqAccumTensor, dQTensor, identityDesc);
+                ops.push_back(std::move(identity_op));
+            }
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
@@ -1168,22 +1185,32 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         size_t softmaxSum_workspace_size = b * h * s_q * sizeof(float);
         size_t dqAccum_workspace_size = b * s_q * h * d * sizeof(float);
         if (workspace == nullptr) {
-            *workspace_size = plan_workspace_size + softmaxSum_workspace_size
-                              + dqAccum_workspace_size;
+	    if (use_workspace_opt) {
+                *workspace_size = plan_workspace_size + softmaxSum_workspace_size;
+            } else {
+                *workspace_size = plan_workspace_size + softmaxSum_workspace_size
+                                  + dqAccum_workspace_size;
+            }
             return;
         }
 
         void *devPtrSoftmaxSum = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        void *devPtrdQAccumulator = static_cast<int8_t *>(devPtrSoftmaxSum)
-                                    + softmaxSum_workspace_size;
-        NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrdQAccumulator, 0, dqAccum_workspace_size, stream));
+	void *devPtrdQAccumulator = nullptr;
+        if (!use_workspace_opt) {
+            devPtrdQAccumulator = static_cast<int8_t *>(devPtrSoftmaxSum)
+                                        + softmaxSum_workspace_size;
+            NVTE_CHECK_CUDA(cudaMemsetAsync(
+                                  devPtrdQAccumulator, 0, dqAccum_workspace_size, stream));
+        }
 
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
         float negInfinity = -1.0E+10f;
         float scale_dropout = 1.0f/(1.0f - dropout_probability);
         data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ID, devPtrdQ));
-        data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ACCUM_ID, devPtrdQAccumulator));
+        if (!use_workspace_opt) {
+            data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ACCUM_ID, devPtrdQAccumulator));
+        }
         data_ptrs.insert(std::pair<uint64_t, void*>(dK_ID, devPtrdK));
         data_ptrs.insert(std::pair<uint64_t, void*>(dV_ID, devPtrdV));
 
@@ -1330,13 +1357,32 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
+    bool use_workspace_opt = false;
+#if (CUDNN_VERSION >= 8905)
+    const int device_id = cuda::current_device();
+    const int sm_arch_ = cuda::sm_arch(device_id);
+    if (sm_arch_ >= 90) {
+        // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
+        size_t free_byte;
+        size_t total_byte;
+        NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
+        size_t max_seqlen_div_up = ((max_seqlen + 64 - 1) / 64) * 64;
+        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up * head_dim * 2
+                        + 2 * batch * num_head * max_seqlen_div_up * sizeof(float)
+                        + batch * num_head * max_seqlen_div_up * max_seqlen_div_up * 2;
+        size_t max_allowed = 1024 * 1024 * 1024;
+
+        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
+    }
+#endif
+
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
-                                get_cudnn_dtype(qkv_type),
-                                workspace->data.dptr, &workspace_size, stream, handle);
+                                get_cudnn_dtype(qkv_type), workspace->data.dptr,
+				&workspace_size, stream, handle, use_workspace_opt);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1502,14 +1548,34 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
 
     size_t workspace_size = 0;
 
+    bool use_workspace_opt = false;
+#if (CUDNN_VERSION >= 8905)
+    const int device_id = cuda::current_device();
+    const int sm_arch_ = cuda::sm_arch(device_id);
+    if (sm_arch_ >= 90) {
+        // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
+        size_t free_byte;
+        size_t total_byte;
+        NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
+        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up_q * head_dim * 2
+                        + 2 * batch * num_head * max_seqlen_div_up_q * sizeof(float)
+                        + batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2;
+        size_t max_allowed = 1024 * 1024 * 1024;
+
+        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
+    }
+#endif
+
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 //devPtrStrides, 
 				devPtrDropoutSeed, devPtrDropoutOffset,
-                                get_cudnn_dtype(QKV_type),
-                                workspace->data.dptr, &workspace_size, stream, handle);
+                                get_cudnn_dtype(QKV_type), workspace->data.dptr,
+				&workspace_size, stream, handle, use_workspace_opt);
     //cudaDeviceSynchronize();
     //cudaMemcpy(sm.hostW, sm.devPtrW, (size_t)(sizeof(sm.hostW[0]) * Wsize), cudaMemcpyDeviceToHost);
 
