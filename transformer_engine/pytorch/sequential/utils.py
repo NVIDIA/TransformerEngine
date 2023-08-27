@@ -189,7 +189,7 @@ def torch_op(func: Callable[..., Any]):
             pass
 
     if dec is None:
-        if not torch_op.warned:  # type: ignore
+        if not hasattr(torch_op, "warned"):  # type: ignore
             torch_op.warned = True  # type: ignore
             warnings.warn("Unable to find custom_op, torch_op decorator has no effect")
         return func
