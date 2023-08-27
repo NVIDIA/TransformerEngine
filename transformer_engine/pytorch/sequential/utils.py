@@ -253,7 +253,7 @@ def torch_op(func: Callable[..., Any]):
                 w = f"{arg_name}_ = {arg_name}\n"
                 u = f"{arg_name} = {arg_name}_\n"
             else:
-                raise NotImplementedError()
+                raise NotImplementedError(arg_type_name)
             return (w, u)
 
         def wrap_type(arg_type: type):
@@ -266,7 +266,7 @@ def torch_op(func: Callable[..., Any]):
             elif arg_type in [int, float, bool, str]:
                 return arg_type
             else:
-                raise NotImplementedError()
+                raise NotImplementedError(arg_type_name)
 
         arg_types = get_arg_types(func)
         arg_names = get_arg_names(func)
