@@ -5,13 +5,13 @@ from .dtype import is_fp8
 from .empty import empty, multi_empty_share_metadata
 
 
-def cast(t: _nvte.Tensor, dtype: _nvte.DType):
-    assert t.dtype != dtype
+def cast(t: _nvte.Tensor, out_dtype: _nvte.DType):
+    assert t.dtype != out_dtype
     if is_fp8(t):
-        assert not is_fp8(dtype)
+        assert not is_fp8(out_dtype)
 
-    output = empty(t.shape, dtype)
-    if is_fp8(dtype):
+    output = empty(t.shape, out_dtype)
+    if is_fp8(out_dtype):
         _nvte.fp8_quantize(t, output)
     elif is_fp8(t):
         _nvte.fp8_dequantize(t, output)
@@ -21,11 +21,11 @@ def cast(t: _nvte.Tensor, dtype: _nvte.DType):
     return output
 
 
-def cast_checked(t: _nvte.Tensor, dtype: _nvte.DType | None):
-    if dtype is None or t.dtype == dtype:
+def cast_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
+    if out_dtype is None or t.dtype == out_dtype:
         return t
     else:
-        return cast(t, dtype)
+        return cast(t, out_dtype)
 
 
 def transpose(t: _nvte.Tensor):
@@ -34,24 +34,24 @@ def transpose(t: _nvte.Tensor):
     return output
 
 
-def cast_transpose(t: _nvte.Tensor, dtype: _nvte.DType):
-    assert t.dtype != dtype
+def cast_transpose(t: _nvte.Tensor, out_dtype: _nvte.DType):
+    assert t.dtype != out_dtype
     if is_fp8(t):
-        assert not is_fp8(dtype)
+        assert not is_fp8(out_dtype)
 
     out_cast, out_transpose = multi_empty_share_metadata(
-        (t.shape, dtype), (t.shape[::-1], dtype)
+        (t.shape, out_dtype), (t.shape[::-1], out_dtype)
     )
 
     _nvte.cast_transpose(t, out_cast, out_transpose)
     return out_cast, out_transpose
 
 
-def cast_transpose_checked(t: _nvte.Tensor, dtype: _nvte.DType | None):
-    if dtype is None or t.dtype == dtype:
+def cast_transpose_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
+    if out_dtype is None or t.dtype == out_dtype:
         return t, transpose(t)
     else:
-        return cast_transpose(t, dtype)
+        return cast_transpose(t, out_dtype)
 
 
 def multi_cast_transpose(*desc: tuple[_nvte.Tensor, _nvte.DType]):

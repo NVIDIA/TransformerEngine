@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 from enum import Enum
-from typing import Sequence
+from typing import Sequence, TYPE_CHECKING
 
 class QKVLayout(Enum):
     NOT_INTERLEAVED = 0
@@ -43,15 +43,24 @@ class RawTensor:
     def scale_inv_ptr(self) -> int: ...
     def __init__(self, data_ptr: int, shape: Sequence[int], dtype: DType, amax_ptr: int, scale_ptr: int, scale_inv_ptr: int) -> None: ...
 
-class Tensor:
-    dtype: DType
-    shape: Sequence[int]
-    data: torch.Tensor
-    amax: torch.Tensor
-    scale: torch.Tensor
-    scale_inv: torch.Tensor
-    def data_ptr(self) -> int: ...
-    def __init__(self, dtype: DType, data: torch.Tensor, amax: torch.Tensor, scale: torch.Tensor, scale_inv: torch.Tensor) -> None: ...
+# Expose names defined in real __init__.py
+# Which are not to be imported from transformer_engine_cuda
+if TYPE_CHECKING:
+    class Tensor:
+        dtype: DType
+        shape: Sequence[int]
+        data: torch.Tensor
+        amax: torch.Tensor
+        scale: torch.Tensor
+        scale_inv: torch.Tensor
+        def data_ptr(self) -> int: ...
+        def __init__(self, data: torch.Tensor, amax: torch.Tensor, scale: torch.Tensor, scale_inv: torch.Tensor, *, dtype_override: DType | None = None,) -> None: ...
+
+
+    def te_to_torch_dtype(dtype: DType) -> torch.dtype: ...
+    def torch_to_te_dtype(dtype: torch.dtype) -> DType: ...
+    def bit_width(dtype: DType) -> int: ...
+    def dtype_name(dtype: DType) -> str: ...
 
 def gelu(input: Tensor, output: Tensor) -> None: ...
 def dgelu(grad: Tensor, input: Tensor, output: Tensor) -> None: ...
@@ -92,4 +101,4 @@ def dgeglu_cast_transpose(input: Tensor, geglu_input: Tensor, cast_output: Tenso
 def multi_cast_transpose(input_list: Sequence[Tensor], cast_output_list: Sequence[Tensor], transposed_output_list: Sequence[Tensor]) -> None: ...
 
 # Don't export these names (this stub file gets loaded as a real python module)
-del annotations, torch, Enum, Sequence # type: ignore
+del annotations, torch, Enum, Sequence, TYPE_CHECKING # type: ignore

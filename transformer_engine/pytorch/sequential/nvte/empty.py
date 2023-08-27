@@ -6,8 +6,8 @@ from .dtype import te_to_torch_dtype, is_fp8
 from . import execution_state
 
 
-def empty(shape: Sequence[int] = (), dtype: _nvte.DType = _nvte.DType.Float32):
-    return multi_empty_share_metadata((shape, dtype))[0]
+def empty(shape: Sequence[int] = (), out_dtype: _nvte.DType = _nvte.DType.Float32):
+    return multi_empty_share_metadata((shape, out_dtype))[0]
 
 
 def empty_like(t: _nvte.Tensor):

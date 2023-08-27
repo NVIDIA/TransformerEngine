@@ -177,37 +177,15 @@ class Decorator(Protocol):
         ...
 
 
-def cast(x: Any, _: type[T], /) -> T:
+def cast(x: Any, t: type[T] | GenericAlias, /) -> T:
+    if not isinstance(t, GenericAlias):
+        assert isinstance(x, t)
+    else:
+        assert isinstance(x, t.__origin__)
     return x
 
 
-def set_name(name: str) -> Callable[..., Any]:
-    def decorator(func: Callable[..., Any]):
-        func.__name__ = name
-        return func
-
-    return decorator
-
-
-def recursive_apply(
-    func: Callable[[Any], Any],
-    x: Any,
-    pred: Callable[[Any], bool],
-    on_false: Callable[[Any], Any] = lambda x: x,
-) -> Any:
-    if pred(x):
-        return func(x)
-    elif isinstance(x, list):
-        return [func(y) for y in x]  # type: ignore
-    elif isinstance(x, tuple):
-        return tuple(func(y) for y in x)  # type: ignore
-    elif isinstance(x, dict):
-        return {k: func(v) for k, v in x.items()}  # type: ignore
-    else:
-        return on_false(x)
-
-
-def torch_op(func: Callable[..., Any]):
+def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     import torch
     from . import cpp_extensions
 
@@ -267,9 +245,7 @@ def torch_op(func: Callable[..., Any]):
 
         def wrap_type(arg_type: type):
             if arg_type is cpp_extensions.Tensor:
-                return tuple[
-                    int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-                ]
+                return tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
             elif issubclass(arg_type, Enum):
                 return int
             elif arg_type in [int, float, bool, str, torch.Tensor]:
@@ -330,17 +306,19 @@ def outer_wrapper{outer_sig}:
         ns = dict(func=func, __name__=__name__)
         try:
             exec(source, ns)
-            declared = decl(name)(ns[func.__name__])
+            extracted = cast(ns[func.__name__], Callable[..., Any])
+
+            declared = decl(name)(extracted)
             if version1:
-                declared.impl("cuda")(ns[func.__name__])  # type: ignore
+                declared.impl("cuda")(extracted)  # type: ignore
             else:
-                impl(name)(ns[func.__name__])  # type: ignore
+                impl(name)(extracted)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to compile wrapper for {func.__name__}. Generated code: \n```\n{source}```"
             ) from e
 
-        outer_wrapper = ns["outer_wrapper"]
+        outer_wrapper = cast(ns["outer_wrapper"], Callable[PS, T])
         return outer_wrapper
 
     return make_wrapper(func)

@@ -20,12 +20,17 @@ class Tensor:
 
     def __init__(
         self,
-        dtype: DType,
         data: torch.Tensor,
         amax: torch.Tensor,
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
+        *,
+        dtype_override: DType | None = None,
     ):
+        if dtype_override is not None:
+            dtype = dtype_override
+        else:
+            dtype = torch_to_te_dtype(data.dtype)
         self._raw = RawTensor(
             data.data_ptr(),
             list(data.shape),
@@ -65,8 +70,92 @@ class Tensor:
         data_repr = "T" + data_repr[1:]
         return f"""\
 {data_repr},
-    dtype={self.dtype.name},\
+    dtype={dtype_name(self.dtype)},\
 amax={self.amax[0].item() if self.amax.numel() else None},\
 scale={self.scale.item() if self.scale.numel() else None},\
 scale_inv={self.scale_inv.item() if self.scale_inv.numel() else None}\
 )"""
+
+
+def te_to_torch_dtype(dtype: DType):
+    match dtype:
+        case DType.Byte:
+            assert (
+                False
+            ), "Byte is only used internally for cublas workspace, this shouldn't get called"
+        case DType.Int32:
+            return torch.int32
+        case DType.Int64:
+            return torch.int64
+        case DType.Float32:
+            return torch.float32
+        case DType.Float16:
+            return torch.float16
+        case DType.BFloat16:
+            return torch.bfloat16
+        # Using different types for fp8e4m3 and fp8e5m2
+        # allows for a type conversion in the other way
+        case DType.Float8E4M3:
+            return torch.int8
+        case DType.Float8E5M2:
+            return torch.uint8
+
+
+def torch_to_te_dtype(dtype: torch.dtype):
+    match dtype:
+        case torch.int32:
+            return DType.Int32
+        case torch.int64:
+            return DType.Int64
+        case torch.float32:
+            return DType.Float32
+        case torch.float16:
+            return DType.Float16
+        case torch.bfloat16:
+            return DType.BFloat16
+        case torch.int8:
+            return DType.Float8E4M3
+        case torch.uint8:
+            return DType.Float8E5M2
+        case _:
+            raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+def bit_width(dtype: DType):
+    match dtype:
+        case DType.Byte:
+            return 8
+        case DType.Int32:
+            return 32
+        case DType.Int64:
+            return 64
+        case DType.Float32:
+            return 32
+        case DType.Float16:
+            return 16
+        case DType.BFloat16:
+            return 16
+        case DType.Float8E4M3:
+            return 8
+        case DType.Float8E5M2:
+            return 8
+
+
+def dtype_name(dtype: DType):
+    match dtype:
+        case DType.Byte:
+            return "byte"
+        case DType.Int32:
+            return "int32"
+        case DType.Int64:
+            return "int64"
+        case DType.Float32:
+            return "fp32"
+        case DType.Float16:
+            return "fp16"
+        case DType.BFloat16:
+            return "bf16"
+        case DType.Float8E4M3:
+            return "fp8e4m3"
+        case DType.Float8E5M2:
+            return "fp8e5m2"
