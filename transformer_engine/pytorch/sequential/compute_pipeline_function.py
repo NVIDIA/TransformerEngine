@@ -11,13 +11,29 @@ from .compute_pipeline import ComputePipeline
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-class ForwardArgs(NamedTuple):
+class ForwardArgs:
     nvte_x: nvte.Tensor
     is_exposed_x_squished_now: bool
     upcoming_backward: BackwardComm | None
     op: Final[Op]
     meta_tensor_provider_fwd: Final[Persistent[FP8Meta]]
     meta_tensor_provider_bwd: Final[Persistent[FP8Meta]]
+
+    def __init__(
+        self,
+        nvte_x: nvte.Tensor,
+        is_exposed_x_squished_now: bool,
+        upcoming_backward: BackwardComm | None,
+        op: Op,
+        meta_tensor_provider_fwd: Persistent[FP8Meta],
+        meta_tensor_provider_bwd: Persistent[FP8Meta],
+    ):
+        self.nvte_x = nvte_x
+        self.is_exposed_x_squished_now = is_exposed_x_squished_now
+        self.upcoming_backward = upcoming_backward
+        self.op = op
+        self.meta_tensor_provider_fwd = meta_tensor_provider_fwd
+        self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
 class BackwardComm:
