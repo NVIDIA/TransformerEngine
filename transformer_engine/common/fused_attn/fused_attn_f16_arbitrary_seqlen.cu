@@ -1375,8 +1375,8 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
     std::cout << "fwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
-    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
-		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+//    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
+//		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
     std::cout << "fwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
     //devPtrQ = static_cast<void *>(devPtrQ);
     //devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + stride);
@@ -1462,8 +1462,8 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
     std::cout << "bwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
-    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
-		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+//    get_qkv_offset(&devPtrQ, &devPtrK, &devPtrV,
+//		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
     std::cout << "bwd devPtrQ " << devPtrQ << " " << devPtrK << " " << devPtrV << std::endl;
     //devPtrQ = static_cast<void *>(devPtrQ);
     //devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQ) + stride);
@@ -1481,8 +1481,8 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     void *devPtrdK = output_dK->data.dptr;
     void *devPtrdV = output_dV->data.dptr;
     std::cout << "bwd devPtrdQ " << devPtrdQ << " " << devPtrdK << " " << devPtrdV << std::endl;
-    get_qkv_offset(&devPtrdQ, &devPtrdK, &devPtrdV,
-		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
+//    get_qkv_offset(&devPtrdQ, &devPtrdK, &devPtrdV,
+//		    num_head, head_dim, qkv_layout, static_cast<NVTEDType>(QKV_type)); 
     std::cout << "bwd devPtrdQ " << devPtrdQ << " " << devPtrdK << " " << devPtrdV << std::endl;
     //devPtrdQ = static_cast<void *>(devPtrdQ);
     //devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQ) + stride);

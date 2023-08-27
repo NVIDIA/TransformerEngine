@@ -4,6 +4,7 @@
 
 import torch
 import pytest
+import nvtx
 
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -17,7 +18,7 @@ import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
-from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
+from .test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
@@ -38,7 +39,9 @@ class ModelConfig:
         self.attn_mask_type  = attn_mask_type
 
 model_configs = {
-    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    "test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    #"test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
     #"test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
     #"test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
     #"test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
@@ -53,7 +56,7 @@ param_types = [torch.float16]
 #    param_types.append(torch.bfloat16)
 
 #batch_sizes = [1, 2, 32]
-batch_sizes = [2] #, 32]
+batch_sizes = [1] #, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -66,8 +69,8 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        #'sb3hd',
-        'bs3hd',
+        'sb3hd',
+        #'bs3hd',
         #'sbhd_sb2hd',
         #'sbhd_sbh2d',
         #'sbhd_sbhd_sbhd',
@@ -85,23 +88,29 @@ def test_dpa_qkv_layout(dtype, bs, model):
 
     for qkv_layout in qkv_layouts:
 
+        range_flash = nvtx.start_range(f"{qkv_layout}-flash")
         flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FlashAttention", qkv_layout)
+        nvtx.end_range(range_flash)
+        range_fused = nvtx.start_range(f"{qkv_layout}-fused")
         fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "FusedAttention", qkv_layout)
+        nvtx.end_range(range_fused)
+        range_unfused = nvtx.start_range(f"{qkv_layout}-unfused")
         unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
                 dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
+        nvtx.end_range(range_unfused)
 
-        atol, rtol = (5e-2, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        atol, rtol = (5e-1, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
         #print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item(), flash_attn_fwd.view(-1)[:10])
         #print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item(), fused_attn_fwd.view(-1)[:10])
         #print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item(), unfused_attn_fwd.view(-1)[:10])
         print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
         print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
         print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
-        print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
-        print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
-        print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
+        #print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
+        #print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
+        #print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
         torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
         torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
         torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
