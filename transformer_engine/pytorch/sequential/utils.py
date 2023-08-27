@@ -211,24 +211,27 @@ def torch_op(func: Callable[..., Any]):
     import torch
     from . import cpp_extensions
 
-    dec = None
+    custom_ops = None
     try:
-        dec = torch._custom_ops.custom_op  # type: ignore
+        custom_ops = torch._custom_ops  # type: ignore
     except AttributeError:
         pass
-    if dec is None:
+    if custom_ops is None:
         try:
-            dec = torch._custom_op.impl.custom_op  # type: ignore
+            custom_ops = torch._custom_op.impl  # type: ignore
         except AttributeError:
             pass
 
-    if dec is None:
+    if custom_ops is None:
         if not hasattr(torch_op, "warned"):  # type: ignore
             torch_op.warned = True  # type: ignore
             warnings.warn("Unable to find custom_op, torch_op decorator has no effect")
         return func
 
-    dec = cast(dec, Callable[[str], Decorator])  # type: ignore
+    decl = custom_ops.custom_op  # type: ignore
+    impl = custom_ops.impl  # type: ignore
+    decl = cast(decl, Callable[[str], Decorator])  # type: ignore
+    impl = cast(impl, Callable[[str], Decorator])  # type: ignore
     name = f"nvte::{func.__name__}"
 
     def make_wrapper(func: Callable[..., Any]):
@@ -289,7 +292,8 @@ def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_t
 
         ns = dict(func=func, wrap=wrap, unwrap=unwrap)
         exec(template, ns)
-        wrapper1 = dec(name)(ns[func.__name__])
+        _ = decl(name)(ns[func.__name__])
+        wrapper1 = impl(name)(ns[func.__name__])
 
         def wrapper2(*args: Any):
             storage.clear()
