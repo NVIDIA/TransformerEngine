@@ -1,5 +1,14 @@
 from __future__ import annotations
-from typing import Any, Callable, Generic, Generator, Literal, TypeVar, overload
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Generator,
+    Literal,
+    Protocol,
+    TypeVar,
+    overload,
+)
 from types import TracebackType, ModuleType
 from typing_extensions import ParamSpec
 
@@ -152,3 +161,65 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
     )
 
     return return_type  # type: ignore
+
+
+class Decorator(Protocol):
+    def __call__(self, f: Callable[PS, T]) -> Callable[PS, T]:
+        ...
+
+
+def cast(x: Any, _: type[T], /) -> T:
+    return x
+
+
+def torch_op(func: Callable[..., Any]):
+    import torch
+    import cpp_extensions
+
+    dec = cast(torch._custom_ops.custom_op, Callable[[str], Decorator])  # type: ignore
+    name = f"nvte::{func.__name__}"
+
+    def make_wrapper(func: Callable[..., Any]):
+        storage: dict[int, cpp_extensions.Tensor] = {}
+
+        def wrap(x: Any) -> Any:
+            if isinstance(x, cpp_extensions.Tensor):
+                result = (x.data, x.amax, x.scale, x.scale_inv)
+                storage[id(result)] = x
+                return result
+            elif isinstance(x, list):
+                return [wrap(y) for y in x]  # type: ignore
+            elif isinstance(x, tuple):
+                return tuple(wrap(y) for y in x)  # type: ignore
+            elif isinstance(x, dict):
+                return {k: wrap(v) for k, v in x.items()}  # type: ignore
+            else:
+                return x
+
+        def unwrap(x: Any) -> Any:
+            if isinstance(x, tuple):
+                if len(x) == 4 and all(isinstance(y, torch.Tensor) for y in x):  # type: ignore
+                    return storage[id(x)]  # type: ignore
+                else:
+                    return tuple(unwrap(y) for y in x)  # type: ignore
+            elif isinstance(x, list):
+                return [unwrap(y) for y in x]  # type: ignore
+            elif isinstance(x, dict):
+                return {k: unwrap(v) for k, v in x.items()}  # type: ignore
+            else:
+                return x
+
+        @dec(name)
+        def wrapper1(*args: Any):
+            unwrapped = unwrap(args)
+            result = func(*unwrapped)
+            return wrap(result)
+
+        def wrapper2(*args: Any):
+            wrapped = wrap(args)
+            result = wrapper1(*wrapped)
+            return unwrap(result)
+
+        return wrapper2
+
+    return make_wrapper(func)
