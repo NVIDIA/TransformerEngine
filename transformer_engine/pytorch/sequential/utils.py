@@ -252,7 +252,7 @@ def torch_op(func: Callable[..., Any]):
 
         def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
             if arg_type is cpp_extensions.Tensor:
-                w = f"{arg_name}_ = ({arg_name}.dtype, {arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
+                w = f"{arg_name}_ = ({arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
                 u = f"{arg_name} = {arg_type_name}(*{arg_name}_)\n"
             elif issubclass(arg_type, Enum):
                 w = f"{arg_name}_ = {arg_name}.value\n"
@@ -329,16 +329,15 @@ def outer_wrapper{outer_sig}:
         ns = dict(func=func, __name__=__name__)
         try:
             exec(source, ns)
+            declared = decl(name)(ns[func.__name__])
+            if version1:
+                declared.impl("cuda")(ns[func.__name__])  # type: ignore
+            else:
+                impl(name)(ns[func.__name__])  # type: ignore
         except Exception as e:
             raise RuntimeError(
                 f"Failed to compile wrapper for {func.__name__}. Generated code: \n{source}"
             ) from e
-
-        declared = decl(name)(ns[func.__name__])
-        if version1:
-            declared.impl("cuda")(ns[func.__name__])  # type: ignore
-        else:
-            impl(name)(ns[func.__name__])  # type: ignore
 
         outer_wrapper = ns["outer_wrapper"]
         return outer_wrapper
