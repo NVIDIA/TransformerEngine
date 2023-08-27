@@ -1039,9 +1039,9 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   //  dK.fill_(0);
   //  dV.fill_(0);
   //}
-  dQ.fill_(0);
-  dK.fill_(0);
-  dV.fill_(0);
+  //dQ.fill_(0);
+  //dK.fill_(0);
+  //dV.fill_(0);
   //auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   at::Tensor dBias;
   TensorWrapper te_dBias;

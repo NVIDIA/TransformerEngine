@@ -1141,7 +1141,7 @@ class FusedAttention(torch.nn.Module):
                 fast_zero_fill,
                 qkv_layout,
                 core_attention_bias_type,
-                self.attn_mask_type,
+                attn_mask_type,
                 None, # rng_gen
                 fused_attention_backend,
             )
