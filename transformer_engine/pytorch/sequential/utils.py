@@ -1,4 +1,3 @@
-from __future__ import annotations
 from enum import Enum
 from typing import (
     Any,
@@ -279,7 +278,6 @@ def torch_op(func: Callable[..., Any]):
         wrapped_arg_types = [wrap_type(t) for t in arg_types]
 
         template = f"""\
-import torch
 def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_type_name in zip(get_arg_names(func), wrapped_arg_types))}) -> {wrap_type(return_type)}:
     unwrapped = unwrap(({",".join(f"{arg_name}" for arg_name in get_arg_names(func))}))
     result = func(*unwrapped)
