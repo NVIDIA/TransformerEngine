@@ -184,7 +184,7 @@ def torch_op(func: Callable[..., Any]):
         pass
     if dec is None:
         try:
-            torch._custom_op.impl.custom_op  # type: ignore
+            dec = torch._custom_op.impl.custom_op  # type: ignore
         except AttributeError:
             pass
 
