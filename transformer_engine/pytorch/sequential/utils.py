@@ -214,11 +214,15 @@ def torch_op(func: Callable[..., Any]):
     custom_ops = None
     try:
         custom_ops = torch._custom_ops  # type: ignore
+        decl = custom_ops.custom_op  # type: ignore
+        impl = custom_ops.impl  # type: ignore
     except AttributeError:
         pass
     if custom_ops is None:
         try:
             custom_ops = torch._custom_op.impl  # type: ignore
+            decl = custom_ops.custom_op  # type: ignore
+            impl = custom_ops.CustomOp.impl  # type: ignore
         except AttributeError:
             pass
 
@@ -228,8 +232,6 @@ def torch_op(func: Callable[..., Any]):
             warnings.warn("Unable to find custom_op, torch_op decorator has no effect")
         return func
 
-    decl = custom_ops.custom_op  # type: ignore
-    impl = custom_ops.impl  # type: ignore
     decl = cast(decl, Callable[[str], Decorator])  # type: ignore
     impl = cast(impl, Callable[[str], Decorator])  # type: ignore
     name = f"nvte::{func.__name__}"
