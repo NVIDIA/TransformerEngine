@@ -11,6 +11,7 @@ from typing import (
 )
 from types import TracebackType, ModuleType
 from typing_extensions import ParamSpec
+import warnings
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
@@ -176,7 +177,24 @@ def torch_op(func: Callable[..., Any]):
     import torch
     from . import cpp_extensions
 
-    dec = cast(torch._custom_ops.custom_op, Callable[[str], Decorator])  # type: ignore
+    dec = None
+    try:
+        dec = torch._custom_ops.custom_op  # type: ignore
+    except AttributeError:
+        pass
+    if dec is None:
+        try:
+            torch._custom_op.impl.custom_op  # type: ignore
+        except AttributeError:
+            pass
+
+    if dec is None:
+        if not torch_op.warned:  # type: ignore
+            torch_op.warned = True  # type: ignore
+            warnings.warn("Unable to find custom_op, torch_op decorator has no effect")
+        return func
+
+    dec = cast(dec, Callable[[str], Decorator])  # type: ignore
     name = f"nvte::{func.__name__}"
 
     def make_wrapper(func: Callable[..., Any]):
