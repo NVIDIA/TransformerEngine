@@ -19,7 +19,6 @@ def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]
         amax, scale, scale_inv = execution_state.meta_tensor_provider()
     return tuple(
         _nvte.Tensor(
-            dtype,
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda")
             if shape != ()
             else torch.Tensor().cuda(),
