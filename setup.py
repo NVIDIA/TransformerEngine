@@ -484,7 +484,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -551,7 +551,7 @@ def setup_sequential_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -622,7 +622,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
