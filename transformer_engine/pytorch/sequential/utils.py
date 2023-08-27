@@ -321,7 +321,11 @@ def outer_wrapper{outer_sig}:
 
 """
         ns = dict(func=func, __name__=__name__)
-        exec(source, ns)
+        try:
+            exec(source, ns)
+        except Exception:
+            print(source)
+            raise
 
         declared = decl(name)(ns[func.__name__])
         if version1:
