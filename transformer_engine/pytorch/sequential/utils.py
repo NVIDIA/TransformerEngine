@@ -9,7 +9,7 @@ from typing import (
     TypeVar,
     overload,
 )
-from types import TracebackType, ModuleType
+from types import GenericAlias, TracebackType, ModuleType
 from typing_extensions import ParamSpec
 import warnings
 
@@ -241,7 +241,10 @@ def torch_op(func: Callable[..., Any]):
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
             if t.__module__ == "builtins":
-                return t.__name__
+                if isinstance(t, GenericAlias):
+                    return str(t)
+                else:
+                    return t.__name__
             elif t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions":
                 return f"cpp_extensions.{t.__name__}"
             else:
