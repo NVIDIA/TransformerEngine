@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <exception>
 #include <memory>
+#include <pybind11/pybind11.h>
 #include <stdexcept>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
@@ -52,11 +53,12 @@ class Tensor {
   NVTETensor tensor;
 
 public:
+  Tensor() : tensor{nullptr} {}
   Tensor(void *data, const NVTEShape &shape, NVTEDType dtype, float *amax,
          float *scale, float *scale_inv)
-      : tensor{nvte_tensor_create(data, shape, dtype, amax, scale, scale_inv)} {
+      : tensor{nvte_create_tensor(data, shape, dtype, amax, scale, scale_inv)} {
   }
-  Tensor(NVTETensor &&tensor_) : tensor{std::exchange{tensor_, nullptr}} {}
+  Tensor(NVTETensor &&tensor_) : tensor{std::exchange(tensor_, nullptr)} {}
   Tensor(Tensor &&other) noexcept
       : tensor{std::exchange(other.tensor, nullptr)} {}
   Tensor(const Tensor &) = delete;
@@ -64,7 +66,7 @@ public:
   Tensor &operator=(Tensor &&) = delete;
   ~Tensor() {
     if (tensor)
-      nvte_tensor_destroy(tensor);
+      nvte_destroy_tensor(tensor);
   }
   operator NVTETensor() const { return tensor; }
   NVTEDType dtype() const { return nvte_tensor_type(tensor); }
@@ -86,13 +88,6 @@ struct TensorPack : NVTETensorPack {
       tensors[i] = static_cast<NVTETensor>(tensors_[i]);
     }
     nvte_tensor_pack_create(this);
-  }
-  operator std::vector<Tensor>() const {
-    std::vector<Tensor> tensors_(size);
-    for (size_t i = 0; i < size; ++i) {
-      tensors_[i] = static_cast<Tensor>(tensors[i]);
-    }
-    return tensors_;
   }
   operator NVTETensorPack *() { return this; }
   operator const NVTETensorPack *() const { return this; }
