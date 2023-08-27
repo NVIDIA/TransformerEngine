@@ -240,7 +240,12 @@ def torch_op(func: Callable[..., Any]):
 
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
-            return f"{t.__module__}.{t.__name__}"
+            if t.__module__ == "builtins":
+                return t.__name__
+            elif t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions":
+                return f"cpp_extensions.{t.__name__}"
+            else:
+                return f"{t.__module__}.{t.__name__}"
 
         def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
             if arg_type is cpp_extensions.Tensor:
@@ -303,9 +308,8 @@ def torch_op(func: Callable[..., Any]):
         unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
 
         source = f"""\
-import builtins
 import torch
-import transformer_engine.pytorch.sequential.cpp_extensions
+from . import cpp_extensions
 
 def {func.__name__}{inner_sig}:
     {arg_unwrapping_code}
@@ -318,14 +322,14 @@ def outer_wrapper{outer_sig}:
     result_ = {func.__name__}({wrapped_args})
     {result_unwrapping_code}
     return result
-
 """
         ns = dict(func=func, __name__=__name__)
         try:
             exec(source, ns)
-        except Exception:
-            print(source)
-            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to compile wrapper for {func.__name__}. Generated code: \n{source}"
+            ) from e
 
         declared = decl(name)(ns[func.__name__])
         if version1:
