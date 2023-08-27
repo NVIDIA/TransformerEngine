@@ -299,7 +299,7 @@ def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_t
         exec(template, ns)
         declared = decl(name)(ns[func.__name__])
         if version1:
-            impl = declared.impl(device_type="cuda")  # type: ignore
+            impl = declared.impl("cuda")  # type: ignore
 
         wrapper1 = impl(name)(ns[func.__name__])  # type: ignore
 
