@@ -258,7 +258,9 @@ def torch_op(func: Callable[..., Any]):
 
         def wrap_type(arg_type: type):
             if arg_type is cpp_extensions.Tensor:
-                return tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+                return tuple[
+                    int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+                ]
             elif issubclass(arg_type, Enum):
                 return int
             elif arg_type in [int, float, bool, str]:
@@ -268,34 +270,37 @@ def torch_op(func: Callable[..., Any]):
 
         arg_types = get_arg_types(func)
         arg_names = get_arg_names(func)
-        arg_type_names =  list(map(type_name, arg_types))
+        arg_type_names = list(map(type_name, arg_types))
         return_type = get_return_type(func)
         return_type_name = type_name(return_type)
-        outer_sig = f"({ ','.join(
+        outer_sig = f"""({ ','.join(
             f'{arg_name}: {arg_type_name}'
             for arg_name, arg_type_name in zip(arg_names, arg_type_names)
-        ) }) -> {return_type_name}"
+        ) }) -> {return_type_name}"""
         arg_wrapping_code = ""
         arg_unwrapping_code = ""
-        for arg_name, arg_type, arg_type_name in zip(arg_names, arg_types, arg_type_names):
+        for arg_name, arg_type, arg_type_name in zip(
+            arg_names, arg_types, arg_type_names
+        ):
             w, u = wrap_unwrap_code(arg_name, arg_type, arg_type_name)
             arg_wrapping_code += w
             arg_unwrapping_code += u
-        wrapped_args = ','.join(f'{arg_name}_' for arg_name in arg_names)
+        wrapped_args = ",".join(f"{arg_name}_" for arg_name in arg_names)
 
-        result_wrapping_code, result_unwrapping_code = wrap_unwrap_code("result", return_type, return_type_name)
+        result_wrapping_code, result_unwrapping_code = wrap_unwrap_code(
+            "result", return_type, return_type_name
+        )
 
         wrapped_arg_names = [f"{arg_name}_" for arg_name in arg_names]
         wrapped_arg_types = [wrap_type(t) for t in arg_types]
         wrapped_arg_type_names = [type_name(t) for t in wrapped_arg_types]
         wrapped_return_type = wrap_type(return_type)
         wrapped_return_type_name = type_name(wrapped_return_type)
-        inner_sig = f"({ ','.join(
+        inner_sig = f"""({ ','.join(
             f'{arg_name}_: {arg_type_name}'
             for arg_name, arg_type_name in zip(wrapped_arg_names, wrapped_arg_type_names)
-        ) }) -> {wrapped_return_type_name}"
-        unwrapped_args = ','.join(f'{arg_name}' for arg_name in arg_names)
-
+        ) }) -> {wrapped_return_type_name}"""
+        unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
 
         source = f"""\
 import torch
