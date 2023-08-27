@@ -262,7 +262,7 @@ def torch_op(func: Callable[..., Any]):
             return recursive_apply(
                 lambda _: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
                 x,
-                lambda x: isinstance(x, cpp_extensions.Tensor),
+                lambda x: x is cpp_extensions.Tensor,
                 lambda x: f"{x.__module__}.{x.__name__}",
             )
 
@@ -279,7 +279,7 @@ def torch_op(func: Callable[..., Any]):
         wrapped_arg_types = [wrap_type(t) for t in arg_types]
 
         template = f"""\
-def {func.__name__}({",".join(f"{arg_name}: " + arg_type_name[1:-1] for arg_name, arg_type_name in zip(get_arg_names(func), wrapped_arg_types))}) -> {wrap_type(return_type)}:
+def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_type_name in zip(get_arg_names(func), wrapped_arg_types))}) -> {wrap_type(return_type)}:
     unwrapped = unwrap(({",".join(f"{arg_name}" for arg_name in get_arg_names(func))}))
     result = func(*unwrapped)
     return wrap(result)
