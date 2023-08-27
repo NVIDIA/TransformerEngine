@@ -17,36 +17,6 @@
 extern "C" {
 #endif
 
-///*! \enum NVTE_QKV_Layout
-// *  \brief QKV matrix layouts
-// */
-//enum NVTE_QKV_Layout1 {
-//    NVTE_SB3HD = 0,
-//    NVTE_SBH3D = 1,
-//    NVTE_SBHD_SB2HD = 2,
-//    NVTE_SBHD_SBH2D = 3,
-//    NVTE_SBHD_SBHD_SBHD = 4,
-//    NVTE_BS3HD = 5,
-//    NVTE_BSH3D = 6,
-//    NVTE_BSHD_BS2HD = 7,
-//    NVTE_BSHD_BSH2D = 8,
-//    NVTE_BSHD_BSHD_BSHD = 9,
-//    NVTE_T3HD = 10,
-//    NVTE_TH3D = 11,
-//    NVTE_THD_T2HD = 12,
-//    NVTE_THD_TH2D = 13,
-//    NVTE_THD_THD_THD = 14,
-//};
-
-///*! \enum NVTE_QKV_Format
-// *  \brief QKV matrix formats 
-// */
-//enum NVTE_QKV_Format {
-//    NVTE_SBHD = 0,
-//    NVTE_BSHD = 1,
-//    NVTE_THD = 2,
-//};
-
 /*! \enum NVTE_QKV_Layout
  *  \brief QKV matrix layouts
  */
@@ -436,7 +406,7 @@ void nvte_fused_attn_fwd_q_k_v(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor qkvso_strides,
+            //const NVTETensor qkvso_strides,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -496,7 +466,7 @@ void nvte_fused_attn_bwd_q_k_v(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor qkvso_strides,
+            //const NVTETensor qkvso_strides,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,

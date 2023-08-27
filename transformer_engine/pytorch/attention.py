@@ -24,7 +24,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_q_k_v,
     fused_attn_bwd_q_k_v,
     QKVLayout,
-#    QKVLayout1,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
@@ -952,23 +951,26 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None, None, None, None, None, None)
 
 class FusedAttnFunc_q_k_v(torch.autograd.Function):
-    """Function for FusedAttention with packed KV input"""
+    """Function for FusedAttention with separate QKV input"""
 
     @staticmethod
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-                q, k, v, qkv_dtype, qkvso_strides, attn_bias, attn_scale, dropout_p, fast_zero_fill,
+                #q, k, v, qkv_dtype, qkvso_strides, attn_bias, attn_scale, dropout_p, fast_zero_fill,
+                q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend):
         torch.cuda.synchronize()
         range_fused = nvtx.start_range("fused-apply-fwd")
         out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-            q, k, v, qkv_dtype, qkvso_strides, fused_attention_backend, attn_bias,
+            #q, k, v, qkv_dtype, qkvso_strides, fused_attention_backend, attn_bias,
+            q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
             None, None, None, None, None,
             attn_scale, dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
             rng_gen)
 
-        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides)
+        #ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides)
+        ctx.save_for_backward(q, k, v, out, cu_seqlens_q, cu_seqlens_kv)
         ctx.aux_ctx_tensors = aux_ctx_tensors
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -989,13 +991,15 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
     def backward(ctx, d_out):
         torch.cuda.synchronize()
         range_fused = nvtx.start_range("fused-apply-bwd")
-        q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides = ctx.saved_tensors
+        #q, k, v, out, cu_seqlens_q, cu_seqlens_kv, qkvso_strides = ctx.saved_tensors
+        q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
         torch.cuda.synchronize()
         range_fused1 = nvtx.start_range("fused-apply-bwd1")
         dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
             ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, out, d_out,
-            ctx.qkv_dtype, qkvso_strides, ctx.aux_ctx_tensors,
+            #ctx.qkv_dtype, qkvso_strides, ctx.aux_ctx_tensors,
+            ctx.qkv_dtype, ctx.aux_ctx_tensors,
             ctx.fused_attention_backend,
             None, None, None, None, None, None, None, None, None,
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
@@ -1119,13 +1123,13 @@ class FusedAttention(torch.nn.Module):
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
 
-        qkvso_strides = _get_qkvso_strides(query_layer,
-            key_layer,
-            value_layer,
-            qkv_format = qkv_format,
-            batch_size = batch_size,
-            max_seqlen_q = max_seqlen_q,
-            max_seqlen_kv = max_seqlen_kv)
+        #qkvso_strides = _get_qkvso_strides(query_layer,
+        #    key_layer,
+        #    value_layer,
+        #    qkv_format = qkv_format,
+        #    batch_size = batch_size,
+        #    max_seqlen_q = max_seqlen_q,
+        #    max_seqlen_kv = max_seqlen_kv)
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
@@ -1135,7 +1139,7 @@ class FusedAttention(torch.nn.Module):
                 max_seqlen_q, max_seqlen_kv,
                 cu_seqlens_q, cu_seqlens_kv,
                 query_layer, key_layer, value_layer,
-                qkv_dtype, qkvso_strides,
+                qkv_dtype, #qkvso_strides,
                 core_attention_bias,
                 1.0/self.norm_factor,
                 self.attention_dropout if self.training else 0.0,

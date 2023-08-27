@@ -719,7 +719,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                 const at::Tensor K,
                 const at::Tensor V,
                 const transformer_engine::DType qkv_type,
-                const at::Tensor qkvso_strides,
+                //const at::Tensor qkvso_strides,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
@@ -750,7 +750,8 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias;
-  TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv, te_qkvso_strides;
+  //TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv, te_qkvso_strides;
+  TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
@@ -795,14 +796,14 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
   std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
-  auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
-  std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
+  //auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
+  //std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
   te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-  te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-                    DType::kInt64, nullptr, nullptr, nullptr);
+  //te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
+  //                  DType::kInt64, nullptr, nullptr, nullptr);
 
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -833,7 +834,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                   &nvte_aux_tensor_pack,
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  te_qkvso_strides.data(),
+                  //te_qkvso_strides.data(),
                   te_rng_state.data(),
                   max_seqlen_q, max_seqlen_kv,
                   is_training, attn_scale, p_dropout,
@@ -869,7 +870,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                   &nvte_aux_tensor_pack,
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  te_qkvso_strides.data(),
+                  //te_qkvso_strides.data(),
                   te_rng_state.data(),
                   max_seqlen_q, max_seqlen_kv,
                   is_training, attn_scale, p_dropout,
@@ -900,7 +901,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
-                const at::Tensor qkvso_strides,
+                //const at::Tensor qkvso_strides,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
@@ -1112,15 +1113,15 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
   std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
-  auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
-  std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
+  //auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
+  //std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv, te_qkvso_strides;
   te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-  te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-                    DType::kInt64, nullptr, nullptr, nullptr);
+  //te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
+  //                  DType::kInt64, nullptr, nullptr, nullptr);
 
   // convert auxiliary tensors from forward to NVTETensors
   NVTETensorPack nvte_aux_tensor_pack;
@@ -1153,7 +1154,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                   te_dBias.data(),
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  te_qkvso_strides.data(),
+                  //te_qkvso_strides.data(),
                   max_seqlen_q, max_seqlen_kv,
                   attn_scale, p_dropout,
                   qkv_layout, bias_type, attn_mask_type,
@@ -1182,7 +1183,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                   te_dBias.data(),
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  te_qkvso_strides.data(),
+                  //te_qkvso_strides.data(),
                   max_seqlen_q, max_seqlen_kv,
                   attn_scale, p_dropout,
                   qkv_layout, bias_type, attn_mask_type,

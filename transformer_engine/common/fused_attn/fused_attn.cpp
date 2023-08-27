@@ -449,7 +449,7 @@ void nvte_fused_attn_fwd_q_k_v(
             NVTETensorPack* Aux_CTX_Tensors,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor qkvso_strides,
+            //const NVTETensor qkvso_strides,
             const NVTETensor rng_state,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             bool is_training, float attn_scale, float dropout,
@@ -461,7 +461,7 @@ void nvte_fused_attn_fwd_q_k_v(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_qkvso_strides = reinterpret_cast<const Tensor*>(qkvso_strides);
+  //const Tensor *input_qkvso_strides = reinterpret_cast<const Tensor*>(qkvso_strides);
   const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(rng_state);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
@@ -506,7 +506,7 @@ void nvte_fused_attn_fwd_q_k_v(
           is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_Bias, output_O,
           Aux_CTX_Tensors,
-          input_cu_seqlens_q, input_cu_seqlens_kv, input_qkvso_strides,
+          input_cu_seqlens_q, input_cu_seqlens_kv, //input_qkvso_strides,
           input_rng_state,
           wkspace, stream, handle);
 #else
@@ -546,7 +546,7 @@ void nvte_fused_attn_bwd_q_k_v(
             NVTETensor dBias,
             const NVTETensor cu_seqlens_q,
             const NVTETensor cu_seqlens_kv,
-            const NVTETensor qkvso_strides,
+            //const NVTETensor qkvso_strides,
             size_t max_seqlen_q, size_t max_seqlen_kv,
             float attn_scale, float dropout,
             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -557,7 +557,7 @@ void nvte_fused_attn_bwd_q_k_v(
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
-  const Tensor *input_qkvso_strides = reinterpret_cast<const Tensor*>(qkvso_strides);
+//  const Tensor *input_qkvso_strides = reinterpret_cast<const Tensor*>(qkvso_strides);
   const Tensor *input_Q = reinterpret_cast<const Tensor*>(Q);
   const Tensor *input_K = reinterpret_cast<const Tensor*>(K);
   const Tensor *input_V = reinterpret_cast<const Tensor*>(V);
@@ -610,7 +610,7 @@ void nvte_fused_attn_bwd_q_k_v(
           input_Q, input_K, input_V, input_O, input_dO,
           output_S,
           output_dQ, output_dK, output_dV, output_dBias,
-          input_cu_seqlens_q, input_cu_seqlens_kv, input_qkvso_strides,
+          input_cu_seqlens_q, input_cu_seqlens_kv, //input_qkvso_strides,
           input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =

@@ -42,20 +42,20 @@
 
 #define VIRTUAL_ID 30
 
-#define Q_STRIDES_INDEX 0
-#define K_STRIDES_INDEX 1
-#define V_STRIDES_INDEX 2
-#define KT_STRIDES_INDEX 3
-#define VT_STRIDES_INDEX 4
-#define S_STRIDES_INDEX 5
-#define O_STRIDES_INDEX 6
+//#define Q_STRIDES_INDEX 0
+//#define K_STRIDES_INDEX 1
+//#define V_STRIDES_INDEX 2
+//#define KT_STRIDES_INDEX 3
+//#define VT_STRIDES_INDEX 4
+//#define S_STRIDES_INDEX 5
+//#define O_STRIDES_INDEX 6
 
 namespace transformer_engine {
 namespace fused_attn {
 
 static cudnn_frontend::Tensor
 createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-            int64_t* devPtrStrides, cudnnDataType_t tensorType,
+            NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
             const cudnn_frontend::Tensor& sTensor,
             std::vector<cudnn_frontend::Operation>* ops) {
     // scale
@@ -63,10 +63,10 @@ createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     int64_t scale_stride[4] = {1, 1, 1, 1};
 
     int64_t s_dim[4] =  {b, h, s_q, s_kv};
-    //int64_t s_stride[4];
-    int64_t* s_stride = &devPtrStrides[4*S_STRIDES_INDEX];
+    //int64_t* s_stride = &devPtrStrides[4*S_STRIDES_INDEX];
+    int64_t s_stride[4];
+    generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
     std::cout << "s stride " << s_stride[0] << " " << s_stride[1] << " " << s_stride[2] << " " << s_stride[3] << " " << std::endl;
-    //generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
     auto scaleTensor = tensor_create(
                        tensorType, S_CONST_ID, scale_dim,
@@ -87,24 +87,24 @@ createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
 static cudnn_frontend::Tensor
 createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-           int64_t* devPtrStrides, cudnnDataType_t tensorType,
+           NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops) {
     // Creates the necessary tensor descriptors
     int64_t q_dim[4] = {b, h, s_q, d};
-    //int64_t q_stride[4];
-    int64_t* q_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
-    //generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+    //int64_t* q_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
+    int64_t q_stride[4];
+    generateMatrixStrides(b, h, s_q, s_kv, d, q_stride, layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
     int64_t k_dim[4] =  {b, h, d, s_kv};
-    //int64_t k_stride[4];
-    int64_t* k_stride = &devPtrStrides[4*K_STRIDES_INDEX];
-    //generateMatrixStrides(
-    //        b, h, s_q, s_kv, d, k_stride, layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
+    //int64_t* k_stride = &devPtrStrides[4*K_STRIDES_INDEX];
+    int64_t k_stride[4];
+    generateMatrixStrides(
+            b, h, s_q, s_kv, d, k_stride, layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
     int64_t s_dim[4] = {b, h, s_q, s_kv};
-    //int64_t s_stride[4];
-    int64_t* s_stride = &devPtrStrides[4*S_STRIDES_INDEX];
-    //generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
+    //int64_t* s_stride = &devPtrStrides[4*S_STRIDES_INDEX];
+    int64_t s_stride[4];
+    generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
     auto qTensor = tensor_create(tensorType, Q_ID, q_dim, q_stride, false, false);
     auto kTransposeTensor = tensor_create(
@@ -133,7 +133,7 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
 static cudnn_frontend::Tensor
 createCausalMask(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-           int64_t* devPtrStrides, cudnnDataType_t tensorType,
+           NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops,
            const cudnn_frontend::Tensor& prevBlockOutputTensor) {
     CUDNN_FRONTEND_UNUSED(d);
@@ -513,20 +513,20 @@ createDropoutBackward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d
 
 static void
 createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-           int64_t* devPtrStrides, cudnnDataType_t tensorType,
+           NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops,
            cudnn_frontend::Tensor const &afterScaleDropoutTensor) {
     NVTE_CHECK(ops->size() != 0, "BMM2 op constructed incorrectly as the first one");
 
     int64_t v_dim[4] =  {b, h, s_kv, d};
-    //int64_t v_stride[4];
-    int64_t* v_stride = &devPtrStrides[4*V_STRIDES_INDEX];
-    //generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+    //int64_t* v_stride = &devPtrStrides[4*V_STRIDES_INDEX];
+    int64_t v_stride[4];
+    generateMatrixStrides(b, h, s_q, s_kv, d, v_stride, layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
     int64_t o_dim[4] =  {b, h, s_q, d};
-    //int64_t o_stride[4];
-    int64_t* o_stride = &devPtrStrides[4*O_STRIDES_INDEX];
-    //generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+    //int64_t* o_stride = &devPtrStrides[4*O_STRIDES_INDEX];
+    int64_t o_stride[4];
+    generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
     auto vTensor = tensor_create(tensorType, V_ID, v_dim, v_stride, false, false);
     // second GEMM output
@@ -554,7 +554,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 NVTE_QKV_Layout layout,
                                 void *devPtrQ, void *devPtrK, void *devPtrV,
                                 void *devPtrSoftmaxStats, void *devPtrO,
-                                int64_t* devPtrStrides, void* devPtrDropoutSeed,
+                               // int64_t* devPtrStrides, 
+				void* devPtrDropoutSeed,
                                 void* devPtrDropoutOffset, cudnnDataType_t tensorType,
                                 void *workspace, size_t *workspace_size,
                                 cudaStream_t stream, cudnnHandle_t handle) {
@@ -589,18 +590,18 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             std::vector<cudnn_frontend::Operation> ops;
 
             // Q * K^T
-            //auto sTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, &ops);
-            auto sTensor = createQKBMM(b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops);
+            auto sTensor = createQKBMM(b, h, s_q, s_kv, d, layout, tensorType, &ops);
+            //auto sTensor = createQKBMM(b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops);
 
             // Q * K^T * bmmScale
             auto sScaleTensor = createScale(
-                                b, h, s_q, s_kv, d, devPtrStrides, CUDNN_DATA_FLOAT, sTensor, &ops);
-                                //b, h, s_q, s_kv, d, layout, CUDNN_DATA_FLOAT, sTensor, &ops);
+                                //b, h, s_q, s_kv, d, devPtrStrides, CUDNN_DATA_FLOAT, sTensor, &ops);
+                                b, h, s_q, s_kv, d, layout, CUDNN_DATA_FLOAT, sTensor, &ops);
 
             // Causual mask
             auto sAfterMaskTensor = createCausalMask(
-                                b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, sScaleTensor);
-                                //b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
+                                //b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, sScaleTensor);
+                                b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
             NVTE_CHECK(dropout_probability != 1.0f,
                                 "Dropout probability cannot be 1.0");
@@ -612,8 +613,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto dropout_output = createDropoutForward(
                                 b, h, s_q, s_kv, d,
                                 dropout_probability, tensorType, &ops, softmax_output);
-            //createSVBMM(b, h, s_q, s_kv, d, layout, tensorType, &ops, dropout_output);
-            createSVBMM(b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, dropout_output);
+            createSVBMM(b, h, s_q, s_kv, d, layout, tensorType, &ops, dropout_output);
+            //createSVBMM(b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, dropout_output);
 
             for (unsigned int i = 0; i < ops.size(); i++) {
                 all_ops.push_back(&ops[i]);
@@ -694,7 +695,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             void* devPtrQ, void* devPtrKTranspose, void* devPtrVTranspose,
                             void* devPtrO, void* devPtrSoftmaxStats,
                             void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO,
-                            int64_t* devPtrStrides, void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+                           // int64_t* devPtrStrides, 
+			    void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                             cudnnDataType_t tensorType, void *workspace, size_t *workspace_size,
                             cudaStream_t stream, cudnnHandle_t handle) {
     try {
@@ -721,32 +723,32 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             // Creates the necessary tensor descriptors
             int64_t q_dim[4] = {b, h, s_q, d};
-            //int64_t q_stride[4];
-            int64_t* q_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, q_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            //int64_t* q_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
+            int64_t q_stride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, q_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
             int64_t k_transpose_dim[4] =  {b, h, d, s_kv};
-            //int64_t k_transpose_stride[4];
-            int64_t* k_transpose_stride = &devPtrStrides[4*KT_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, k_transpose_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
+            //int64_t* k_transpose_stride = &devPtrStrides[4*KT_STRIDES_INDEX];
+            int64_t k_transpose_stride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, k_transpose_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose);
 
             int64_t v_transpose_dim[4] =  {b, h, d, s_kv};
-            //int64_t v_transpose_stride[4];
-            int64_t* v_transpose_stride = &devPtrStrides[4*VT_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, v_transpose_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose);
+            //int64_t* v_transpose_stride = &devPtrStrides[4*VT_STRIDES_INDEX];
+            int64_t v_transpose_stride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, v_transpose_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose);
 
             int64_t p_dim[4] = {b, h, s_q, s_kv};
-            //int64_t p_stride[4];
-            int64_t* p_stride = &devPtrStrides[4*S_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, p_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
+            //int64_t* p_stride = &devPtrStrides[4*S_STRIDES_INDEX];
+            int64_t p_stride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, p_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
             int64_t p_transpose_dim[4] = {b, h, s_kv, s_q};
             int64_t p_transpose_stride[4];
@@ -756,17 +758,17 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             p_transpose_stride[3] = p_stride[2];
 
             int64_t o_dim[4] =  {b, h, s_q, d};
-            //int64_t o_stride[4];
-            int64_t* o_stride = &devPtrStrides[4*O_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, o_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            //int64_t* o_stride = &devPtrStrides[4*O_STRIDES_INDEX];
+            int64_t o_stride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, o_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
             int64_t dqAccum_dim[4] =  {b, h, s_q, d};
-            //int64_t dqAccum_stride[4];
-            int64_t* dqAccum_stride = &devPtrStrides[4*O_STRIDES_INDEX];
-            //generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
+            //int64_t* dqAccum_stride = &devPtrStrides[4*O_STRIDES_INDEX];
+            int64_t dqAccum_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
             int64_t scale_dim[4] = {1, 1, 1, 1};
             int64_t scale_stride[4] = {1, 1, 1, 1};
@@ -873,8 +875,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
              *                          Causal masking -> pAfterMaskTensor                */
 
             auto pAfterMaskTensor = createCausalMask(
-                            b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, pAfterScaleTensor);
-                            //b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
+                            //b, h, s_q, s_kv, d, devPtrStrides, tensorType, &ops, pAfterScaleTensor);
+                            b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
 
             /*******************************************************************************
              *                          pAfterMaskTensor - softmaxStats -> pAfterSubtract */
@@ -927,22 +929,22 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             // Outputs of bprop
             int64_t dq_dim[4] = {b, h, s_q, d};
-            //int64_t dq_stride[4];
-            int64_t* dq_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
-            //generateMatrixStrides(b, h, s_q, s_kv, d, dq_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+            //int64_t* dq_stride = &devPtrStrides[4*Q_STRIDES_INDEX];
+            int64_t dq_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dq_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
 
             int64_t dk_dim[4] = {b, h, s_kv, d};
-            //int64_t dk_stride[4];
-            int64_t* dk_stride = &devPtrStrides[4*K_STRIDES_INDEX];
-            //generateMatrixStrides(b, h, s_q, s_kv, d, dk_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            //int64_t* dk_stride = &devPtrStrides[4*K_STRIDES_INDEX];
+            int64_t dk_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dk_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
 
             int64_t dv_dim[4] = {b, h, s_kv, d};
-            //int64_t dv_stride[4];
-            int64_t* dv_stride = &devPtrStrides[4*V_STRIDES_INDEX];
-            //generateMatrixStrides(b, h, s_q, s_kv, d, dv_stride,
-            //                layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
+            //int64_t* dv_stride = &devPtrStrides[4*V_STRIDES_INDEX];
+            int64_t dv_stride[4];
+            generateMatrixStrides(b, h, s_q, s_kv, d, dv_stride,
+                            layout, NVTE_QKV_Matrix::NVTE_V_Matrix);
 
             // Outputs of backprop
             auto dQTensor = tensor_create(tensorType, dQ_ID, dq_dim, dq_stride, false, false);
@@ -1053,11 +1055,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
              *                          K.T -> K                                          */
 
             int64_t kDim[4] = {b, h, s_kv, d};
-            //int64_t kStride[4];
-            int64_t* kStride = &devPtrStrides[4*K_STRIDES_INDEX];
-            //generateMatrixStrides(
-            //                b, h, s_q, s_kv, d, kStride,
-            //                layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
+            //int64_t* kStride = &devPtrStrides[4*K_STRIDES_INDEX];
+            int64_t kStride[4];
+            generateMatrixStrides(
+                            b, h, s_q, s_kv, d, kStride,
+                            layout, NVTE_QKV_Matrix::NVTE_K_Matrix);
             auto kTensor = tensor_create(
                             tensorType, VIRTUAL_ID + 13, kDim,
                             kStride, true, false);  // is virtual
@@ -1265,12 +1267,12 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     const DType QKV_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    //fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
-    //                            is_training, attn_scale, p_dropout, qkv_layout,
-    //                            devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
-    //                            devPtrDropoutSeed, devPtrDropoutOffset,
-    //                            get_cudnn_dtype(QKV_type),
-    //                            workspace->data.dptr, &workspace_size, stream, handle);
+    fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
+                                is_training, attn_scale, p_dropout, qkv_layout,
+                                devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
+                                devPtrDropoutSeed, devPtrDropoutOffset,
+                                get_cudnn_dtype(QKV_type),
+                                workspace->data.dptr, &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1328,13 +1330,13 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    //fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
-    //                            attn_scale, p_dropout, qkv_layout,
-    //                            devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
-    //                            devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-    //                            devPtrDropoutSeed, devPtrDropoutOffset,
-    //                            get_cudnn_dtype(qkv_type),
-    //                            workspace->data.dptr, &workspace_size, stream, handle);
+    fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
+                                attn_scale, p_dropout, qkv_layout,
+                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
+                                devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+                                devPtrDropoutSeed, devPtrDropoutOffset,
+                                get_cudnn_dtype(qkv_type),
+                                workspace->data.dptr, &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1356,7 +1358,8 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-    const Tensor *qkvso_strides, const Tensor *rng_state,
+   // const Tensor *qkvso_strides, 
+    const Tensor *rng_state,
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
@@ -1405,7 +1408,7 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
 
-    int64_t* devPtrStrides = reinterpret_cast<int64_t*>(qkvso_strides->data.dptr);
+//    int64_t* devPtrStrides = reinterpret_cast<int64_t*>(qkvso_strides->data.dptr);
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
@@ -1415,7 +1418,8 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
                                 is_training, attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
-                                devPtrStrides, devPtrDropoutSeed, devPtrDropoutOffset,
+                                //devPtrStrides, 
+				devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
 
@@ -1443,7 +1447,7 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                   const Tensor *input_dO, Tensor *output_S,
                                   Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
                                   Tensor *output_dBias, const Tensor *cu_seqlens_q,
-                                  const Tensor *cu_seqlens_kv, const Tensor *qkvso_strides,
+                                  const Tensor *cu_seqlens_kv, //const Tensor *qkvso_strides,
                                   const Tensor *rng_state, Tensor *workspace,
                                   cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
@@ -1491,7 +1495,7 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     void *devPtrSoftmaxStats = nullptr;
     devPtrSoftmaxStats = output_S->data.dptr;
 
-    int64_t* devPtrStrides = reinterpret_cast<int64_t*>(qkvso_strides->data.dptr);
+    //int64_t* devPtrStrides = reinterpret_cast<int64_t*>(qkvso_strides->data.dptr);
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
@@ -1502,7 +1506,8 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                 attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-                                devPtrStrides, devPtrDropoutSeed, devPtrDropoutOffset,
+                                //devPtrStrides, 
+				devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
     //cudaDeviceSynchronize();
