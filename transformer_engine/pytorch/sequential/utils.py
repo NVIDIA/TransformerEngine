@@ -174,7 +174,7 @@ def cast(x: Any, _: type[T], /) -> T:
 
 def torch_op(func: Callable[..., Any]):
     import torch
-    import cpp_extensions
+    from . import cpp_extensions
 
     dec = cast(torch._custom_ops.custom_op, Callable[[str], Decorator])  # type: ignore
     name = f"nvte::{func.__name__}"
