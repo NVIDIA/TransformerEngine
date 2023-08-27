@@ -1,11 +1,8 @@
 import functools
 import inspect
-from types import ModuleType
 from typing import Any, Callable, TypeVar
-from ..utils import import_file_as_module, get_arg_types
+from ..utils import import_file_as_module
 import torch
-import re
-import ast
 import transformer_engine_cuda  # type: ignore
 
 _T1 = TypeVar("_T1")
@@ -17,7 +14,7 @@ def _to_dict(l: list[tuple[_T1, _T2]], /) -> dict[_T1, _T2]:
 
 
 def _wrap_function(real_func: Callable[..., Any]):
-    Tensor = transformer_engine_cuda.Tensor  # type: ignore
+    Tensor = transformer_engine_cuda.RawTensor  # type: ignore
 
     @functools.wraps(real_func)
     def wrapper(*args: Any):
