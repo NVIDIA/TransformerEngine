@@ -5,6 +5,7 @@ from typing import Any, Callable, TypeVar
 from ..utils import import_file_as_module, get_arg_types
 import torch
 import re
+import transformer_engine_cuda  # type: ignore
 
 _T1 = TypeVar("_T1")
 _T2 = TypeVar("_T2")
@@ -19,8 +20,6 @@ def _get_stub_module():
 
 
 def _get_real_module() -> ModuleType:
-    import transformer_engine_cuda  # type: ignore
-
     return transformer_engine_cuda
 
 
