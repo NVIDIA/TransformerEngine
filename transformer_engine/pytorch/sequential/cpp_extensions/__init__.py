@@ -28,7 +28,7 @@ class Tensor:
     ):
         self.__raw = RawTensor(
             data.data_ptr(),
-            data.shape,
+            list(data.shape),
             dtype,
             amax.data_ptr(),
             scale.data_ptr(),
