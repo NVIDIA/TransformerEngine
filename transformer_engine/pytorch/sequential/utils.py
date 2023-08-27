@@ -236,7 +236,7 @@ def torch_op(func: Callable[..., Any]):
                 return x
 
         @dec(name)
-        @qual_name_set(func.__qualname__)
+        @qual_name_set(func.__name__)
         def wrapper1(*args: Any):
             unwrapped = unwrap(args)
             result = func(*unwrapped)
