@@ -28,14 +28,15 @@ class BaseModule(nn.Module, ABC):
         return self._run(x)
 
     def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
-        assert x.is_cuda
-        assert x.is_contiguous()
-        if seq_lens is None:
-            seq_lens = BaseModule._create_seq_lens_tensor(x)
-        assert seq_lens.is_cuda
-        assert seq_lens.is_contiguous()
+        with torch.no_grad():
+            assert x.is_cuda
+            assert x.is_contiguous()
+            if seq_lens is None:
+                seq_lens = BaseModule._create_seq_lens_tensor(x)
+            assert seq_lens.is_cuda
+            assert seq_lens.is_contiguous()
 
-        self._setup_pipeline(x, seq_lens)
+            self._setup_pipeline(x, seq_lens)
 
         return self._run
 
