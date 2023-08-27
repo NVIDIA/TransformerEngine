@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class Tensor:
-    __raw: RawTensor
+    _raw: RawTensor
     data: torch.Tensor
     amax: torch.Tensor
     scale: torch.Tensor
@@ -26,7 +26,7 @@ class Tensor:
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
     ):
-        self.__raw = RawTensor(
+        self._raw = RawTensor(
             data.data_ptr(),
             list(data.shape),
             dtype,
@@ -44,11 +44,11 @@ class Tensor:
 
     @property
     def dtype(self):
-        return self.__raw.dtype
+        return self._raw.dtype
 
     @property
     def shape(self):
-        return self.__raw.shape
+        return self._raw.shape
 
     def __repr__(self):
         if self.dtype == DType.Float8E4M3 or DType.Float8E5M2:
