@@ -92,4 +92,4 @@ def dgeglu_cast_transpose(input: Tensor, geglu_input: Tensor, cast_output: Tenso
 def multi_cast_transpose(input_list: Sequence[Tensor], cast_output_list: Sequence[Tensor], transposed_output_list: Sequence[Tensor]) -> None: ...
 
 # Don't export these names (this stub file gets loaded as a real python module)
-del __future__, annotations, torch, enum, Enum, typing, equence # type: ignore
+del annotations, torch, enum, Enum, typing, equence # type: ignore
