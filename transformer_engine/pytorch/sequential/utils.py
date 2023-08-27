@@ -249,7 +249,7 @@ def torch_op(func: Callable[..., Any]):
             elif issubclass(arg_type, Enum):
                 w = f"{arg_name}_ = {arg_name}.value\n"
                 u = f"{arg_name} = {arg_type_name}({arg_name}_)\n"
-            elif arg_type in [int, float, bool, str]:
+            elif arg_type in [int, float, bool, str, torch.Tensor]:
                 w = f"{arg_name}_ = {arg_name}\n"
                 u = f"{arg_name} = {arg_name}_\n"
             else:
@@ -263,7 +263,7 @@ def torch_op(func: Callable[..., Any]):
                 ]
             elif issubclass(arg_type, Enum):
                 return int
-            elif arg_type in [int, float, bool, str]:
+            elif arg_type in [int, float, bool, str, torch.Tensor]:
                 return arg_type
             else:
                 raise NotImplementedError(arg_type_name)
