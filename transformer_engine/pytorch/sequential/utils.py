@@ -300,8 +300,9 @@ def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_t
         declared = decl(name)(ns[func.__name__])
         if version1:
             impl = declared.impl("cuda")  # type: ignore
-
-        wrapper1 = impl(name)(ns[func.__name__])  # type: ignore
+            wrapper1 = impl(ns[func.__name__])  # type: ignore
+        else:
+            wrapper1 = impl(name)(ns[func.__name__])  # type: ignore
 
         def wrapper2(*args: Any):
             storage.clear()
