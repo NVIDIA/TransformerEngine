@@ -16,7 +16,9 @@ def _to_dict(l: list[tuple[_T1, _T2]], /) -> dict[_T1, _T2]:
 def _wrap_function(real_func: Callable[..., Any]):
     @functools.wraps(real_func)
     def wrapper(*args: Any):
-        real_args = [arg if not arg.__name__ == "Tensor" else arg.__raw for arg in args]
+        real_args = [
+            arg if not arg.__class__.__name__ == "Tensor" else arg.__raw for arg in args
+        ]
         return real_func(*real_args, torch.cuda.current_stream().cuda_stream)
 
     return wrapper
