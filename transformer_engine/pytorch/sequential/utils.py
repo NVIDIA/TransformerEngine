@@ -233,6 +233,8 @@ def torch_op(func: Callable[..., Any]):
             result = func(*unwrapped)
             return wrap(result)
 
+        wrapper1.__qualname__ = func.__qualname__
+
         def wrapper2(*args: Any):
             wrapped = wrap(args)
             result = wrapper1(*wrapped)
