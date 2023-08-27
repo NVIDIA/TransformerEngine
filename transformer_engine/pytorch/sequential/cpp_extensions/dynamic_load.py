@@ -45,8 +45,10 @@ def inject_real(namespace: dict[str, Any]):
     real_types = _to_dict(inspect.getmembers(real, inspect.isclass))
 
     for type_name, _ in stub_types.items():
-        if type_name == "Tensor":
+        if type_name == "RawTensor":
             namespace["RawTensor"] = real_types["Tensor"]
+        if type_name == "Tensor":
+            continue
         else:
             if type_name not in real_types:
                 raise RuntimeError(
