@@ -285,9 +285,9 @@ def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_t
     return wrap(result)
 """
 
-        ns = dict(func=func, wrap=wrap, unwrap=unwrap)
+        ns = dict(func=func, wrap=wrap, unwrap=unwrap, torch=torch)
         exec(template, ns)
-        wrapper1 = dec(name)(ns[func.__name__])
+        wrapper1 = dec(name)(ns[func.__name__])  # type: ignore
 
         def wrapper2(*args: Any):
             storage.clear()
