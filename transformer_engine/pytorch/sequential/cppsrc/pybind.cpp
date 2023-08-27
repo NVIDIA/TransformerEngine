@@ -50,31 +50,42 @@ void cuda_check() {
 }
 
 class Tensor {
-  NVTETensor tensor;
+  static_assert(std::is_same_v<NVTETensor, void *>);
+  std::shared_ptr<void> tensor;
 
-public:
-  Tensor() : tensor{nullptr} {}
-  Tensor(void *data, const NVTEShape &shape, NVTEDType dtype, float *amax,
-         float *scale, float *scale_inv)
-      : tensor{nvte_create_tensor(data, shape, dtype, amax, scale, scale_inv)} {
-  }
-  Tensor(NVTETensor &&tensor_) : tensor{std::exchange(tensor_, nullptr)} {}
-  Tensor(Tensor &&other) noexcept
-      : tensor{std::exchange(other.tensor, nullptr)} {}
-  Tensor(const Tensor &) = delete;
-  Tensor &operator=(const Tensor &) = delete;
-  Tensor &operator=(Tensor &&) = delete;
-  ~Tensor() {
+  static void destroy(void *tensor) {
     if (tensor)
       nvte_destroy_tensor(tensor);
   }
-  operator NVTETensor() const { return tensor; }
-  NVTEDType dtype() const { return nvte_tensor_type(tensor); }
-  NVTEShape shape() const { return nvte_tensor_shape(tensor); }
-  void *data() const { return nvte_tensor_data(tensor); }
-  float *amax() const { return nvte_tensor_amax(tensor); }
-  float *scale() const { return nvte_tensor_scale(tensor); }
-  float *scale_inv() const { return nvte_tensor_scale_inv(tensor); }
+
+public:
+  Tensor() : tensor{nullptr, destroy} {}
+  Tensor(size_t data, const NVTEShape &shape, NVTEDType dtype, size_t amax,
+         size_t scale, size_t scale_inv)
+      : tensor{nvte_create_tensor(reinterpret_cast<void *>(data), shape, dtype,
+                                  reinterpret_cast<float *>(amax),
+                                  reinterpret_cast<float *>(scale),
+                                  reinterpret_cast<float *>(scale_inv)),
+               destroy} {}
+  Tensor(const Tensor &other) = default;
+  Tensor(Tensor &&other) = default;
+  Tensor &operator=(const Tensor &other) = default;
+  Tensor &operator=(Tensor &&other) = default;
+  operator NVTETensor() const { return tensor.get(); }
+  NVTEDType dtype() const { return nvte_tensor_type(tensor.get()); }
+  NVTEShape shape() const { return nvte_tensor_shape(tensor.get()); }
+  size_t data_ptr() const {
+    return reinterpret_cast<size_t>(nvte_tensor_data(tensor.get()));
+  }
+  size_t amax_ptr() const {
+    return reinterpret_cast<size_t>(nvte_tensor_amax(tensor.get()));
+  }
+  size_t scale_ptr() const {
+    return reinterpret_cast<size_t>(nvte_tensor_scale(tensor.get()));
+  }
+  size_t scale_inv_ptr() const {
+    return reinterpret_cast<size_t>(nvte_tensor_scale_inv(tensor.get()));
+  }
 };
 
 // ----------- Wrapper for NVTETensorPack -----------
@@ -153,14 +164,16 @@ constexpr auto cuda_stream_arg_helper(Ret(func)(Args...),
                                       type_list<SuffixArgs...>) noexcept {
   return [func](wrapped_t<PrefixArgs>... prefixArgs,
                 wrapped_t<SuffixArgs>... suffixArgs,
-                cudaStream_t stream) -> wrapped_t<Ret> {
+                size_t stream) -> wrapped_t<Ret> {
     at_scope_exit _{cuda_check};
     if constexpr (!std::is_same_v<Ret, void>) {
       return wrapped<Ret>::wrap(
-          func(wrapped<PrefixArgs>::unwrap(prefixArgs)..., stream,
+          func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
+               static_cast<cudaStream_t>(stream),
                wrapped<SuffixArgs>::unwrap(suffixArgs)...));
     } else {
-      return func(wrapped<PrefixArgs>::unwrap(prefixArgs)..., stream,
+      return func(wrapped<PrefixArgs>::unwrap(prefixArgs)...,
+                  static_cast<cudaStream_t>(stream),
                   wrapped<SuffixArgs>::unwrap(suffixArgs)...);
     }
   };
@@ -190,14 +203,19 @@ constexpr auto wrap(Ret(func)(Args...)) noexcept {
 void multi_cast_transpose(const std::vector<Tensor> &inputs,
                           const std::vector<Tensor> &cast_outs,
                           const std::vector<Tensor> &transposed_outs,
-                          cudaStream_t stream) {
-  auto inputs_ = *reinterpret_cast<const std::vector<NVTETensor> *>(&inputs);
-  auto cast_outs_ =
-      *reinterpret_cast<const std::vector<NVTETensor> *>(&cast_outs);
-  auto transposed_outs_ =
-      *reinterpret_cast<const std::vector<NVTETensor> *>(&transposed_outs);
-  nvte_multi_cast_transpose(inputs_.size(), inputs_.data(), cast_outs_.data(),
-                            transposed_outs_.data(), stream);
+                          size_t stream) {
+  auto count = inputs.size();
+  std::vector<NVTETensor> inputs_(count);
+  std::vector<NVTETensor> cast_outs_(count);
+  std::vector<NVTETensor> transposed_outs_(count);
+  for (int i = 0; i < inputs.size(); ++i) {
+    inputs_[i] = static_cast<NVTETensor>(inputs[i]);
+    cast_outs_[i] = static_cast<NVTETensor>(cast_outs[i]);
+    transposed_outs_[i] = static_cast<NVTETensor>(transposed_outs[i]);
+  }
+  nvte_multi_cast_transpose(count, inputs_.data(), cast_outs_.data(),
+                            transposed_outs_.data(),
+                            static_cast<cudaStream_t>(stream));
 
   cuda_check();
 }
@@ -236,14 +254,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
 
   py::class_<Tensor>(m, "Tensor", py::module_local())
-      .def(py::init<void *, const NVTEShape &, NVTEDType, float *, float *,
-                    float *>())
+      .def(py::init<size_t, const NVTEShape &, NVTEDType, size_t, size_t,
+                    size_t>())
       .def_property_readonly("dtype", &Tensor::dtype)
       .def_property_readonly("shape", &Tensor::shape)
-      .def_property_readonly("data", &Tensor::data)
-      .def_property_readonly("amax", &Tensor::amax)
-      .def_property_readonly("scale", &Tensor::scale)
-      .def_property_readonly("scale_inv", &Tensor::scale_inv);
+      .def_property_readonly("data_ptr", &Tensor::data_ptr)
+      .def_property_readonly("amax_ptr", &Tensor::amax_ptr)
+      .def_property_readonly("scale_ptr", &Tensor::scale_ptr)
+      .def_property_readonly("scale_inv_ptr", &Tensor::scale_inv_ptr);
 
   m.def("gelu", wrap(nvte_gelu));
   m.def("dgelu", wrap(nvte_dgelu));
