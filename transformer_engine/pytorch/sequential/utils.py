@@ -251,15 +251,16 @@ def torch_op(func: Callable[..., Any]):
                 return f"{t.__module__}.{t.__name__}"
 
         def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
+            wrapped_arg_type_name = type_name(wrap_type(arg_type))
             if arg_type is cpp_extensions.Tensor:
-                w = f"{arg_name}_ = ({arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
-                u = f"{arg_name} = {arg_type_name}(*{arg_name}_)\n"
+                w = f"{arg_name}_: {wrapped_arg_type_name} = ({arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
+                u = f"{arg_name}: {arg_type_name} = {arg_type_name}(*{arg_name}_)\n"
             elif issubclass(arg_type, Enum):
-                w = f"{arg_name}_ = {arg_name}.value\n"
-                u = f"{arg_name} = {arg_type_name}({arg_name}_)\n"
+                w = f"{arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
+                u = f"{arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
             elif arg_type in [int, float, bool, str, torch.Tensor]:
-                w = f"{arg_name}_ = {arg_name}\n"
-                u = f"{arg_name} = {arg_name}_\n"
+                w = f"{arg_name}_: {wrapped_arg_type_name} = {arg_name}\n"
+                u = f"{arg_name}: {arg_type_name} = {arg_name}_\n"
             else:
                 raise NotImplementedError(arg_type_name)
             return (w, u)
@@ -316,13 +317,13 @@ from . import cpp_extensions
 
 def {func.__name__}{inner_sig}:
     {arg_unwrapping_code}
-    result = func({unwrapped_args})
+    result: {return_type_name} = func({unwrapped_args})
     {result_wrapping_code}
     return result_
 
 def outer_wrapper{outer_sig}:
     {arg_wrapping_code}
-    result_ = {func.__name__}({wrapped_args})
+    result_: {wrapped_return_type_name} = {func.__name__}({wrapped_args})
     {result_unwrapping_code}
     return result
 """
