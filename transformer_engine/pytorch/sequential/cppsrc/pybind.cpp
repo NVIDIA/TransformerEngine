@@ -60,9 +60,10 @@ class Tensor {
 
 public:
   Tensor() : tensor{nullptr, destroy} {}
-  Tensor(size_t data, const NVTEShape &shape, NVTEDType dtype, size_t amax,
-         size_t scale, size_t scale_inv)
-      : tensor{nvte_create_tensor(reinterpret_cast<void *>(data), shape, dtype,
+  Tensor(size_t data, const std::vector<size_t> &shape, NVTEDType dtype,
+         size_t amax, size_t scale, size_t scale_inv)
+      : tensor{nvte_create_tensor(reinterpret_cast<void *>(data),
+                                  NVTEShape{shape.data(), shape.size()}, dtype,
                                   reinterpret_cast<float *>(amax),
                                   reinterpret_cast<float *>(scale),
                                   reinterpret_cast<float *>(scale_inv)),
@@ -253,9 +254,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("PADDING_MASK", NVTE_PADDING_MASK)
       .value("CAUSAL_MASK", NVTE_CAUSAL_MASK);
 
-  py::class_<Tensor>(m, "Tensor", py::module_local())
-      .def(py::init<size_t, const NVTEShape &, NVTEDType, size_t, size_t,
-                    size_t>())
+  py::class_<Tensor>(m, "RawTensor", py::module_local())
+      .def(py::init<size_t, const std::vector<size_t> &, NVTEDType, size_t,
+                    size_t, size_t>())
       .def_property_readonly("dtype", &Tensor::dtype)
       .def_property_readonly("shape", &Tensor::shape)
       .def("data_ptr", &Tensor::data_ptr)
