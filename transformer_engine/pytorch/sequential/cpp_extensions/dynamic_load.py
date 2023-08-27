@@ -63,7 +63,7 @@ def inject_real(namespace: dict[str, Any]):
     real = _get_real_module()
 
     stub_functions = _to_dict(inspect.getmembers(stub, inspect.isfunction))
-    real_functions = _to_dict(inspect.getmembers(real, inspect.isfunction))
+    real_functions = _to_dict(inspect.getmembers(real, inspect.isroutine))
 
     for func_name, func_obj in stub_functions.items():
         if func_name not in real_functions:
