@@ -6,7 +6,7 @@ from ..utils import torch_op
 
 
 @torch_op
-def make_nvte_tensor(t: torch.Tensor):
+def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
     return _nvte.Tensor(
         torch_to_te_dtype(t.dtype),
         t.data,
