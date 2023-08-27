@@ -235,11 +235,13 @@ def torch_op(func: Callable[..., Any]):
         storage: dict[int, Any] = {}
 
         def wrap(x: Any) -> Any:
-            def _(x: cpp_extensions.Tensor | Enum):
+            def _(x: cpp_extensions.Tensor | Enum | Any):
                 if isinstance(x, cpp_extensions.Tensor):
                     result = (x.data, x.amax, x.scale, x.scale_inv)
-                else:
+                elif isinstance(x, Enum):
                     result = x.value
+                else:
+                    result = x
                 storage[id(result)] = x
                 return result
 
