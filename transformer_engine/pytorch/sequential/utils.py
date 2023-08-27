@@ -303,6 +303,7 @@ def torch_op(func: Callable[..., Any]):
         unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
 
         source = f"""\
+import builtins
 import torch
 from . import cpp_extensions
 
