@@ -297,7 +297,7 @@ def torch_op(func: Callable[..., Any]):
         wrapped_return_type = wrap_type(return_type)
         wrapped_return_type_name = type_name(wrapped_return_type)
         inner_sig = f"""({ ','.join(
-            f'{arg_name}_: {arg_type_name}'
+            f'{arg_name}: {arg_type_name}'
             for arg_name, arg_type_name in zip(wrapped_arg_names, wrapped_arg_type_names)
         ) }) -> {wrapped_return_type_name}"""
         unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
@@ -305,7 +305,7 @@ def torch_op(func: Callable[..., Any]):
         source = f"""\
 import builtins
 import torch
-from . import cpp_extensions
+import transformer_engine.pytorch.sequential.cpp_extensions
 
 def {func.__name__}{inner_sig}:
     {arg_unwrapping_code}
