@@ -211,11 +211,13 @@ def torch_op(func: Callable[..., Any]):
     import torch
     from . import cpp_extensions
 
+    version1: bool
     custom_ops = None
     try:
         custom_ops = torch._custom_ops  # type: ignore
         decl = custom_ops.custom_op  # type: ignore
         impl = custom_ops.impl  # type: ignore
+        version1 = False
     except AttributeError:
         pass
     if custom_ops is None:
@@ -223,6 +225,7 @@ def torch_op(func: Callable[..., Any]):
             custom_ops = torch._custom_op.impl  # type: ignore
             decl = custom_ops.custom_op  # type: ignore
             impl = custom_ops.CustomOp.impl  # type: ignore
+            version1 = True
         except AttributeError:
             pass
 
@@ -294,8 +297,11 @@ def {func.__name__}({",".join(f"{arg_name}: {arg_type_name}" for arg_name, arg_t
 
         ns = dict(func=func, wrap=wrap, unwrap=unwrap)
         exec(template, ns)
-        _ = decl(name)(ns[func.__name__])
-        wrapper1 = impl(name)(ns[func.__name__])
+        declared = decl(name)(ns[func.__name__])
+        if version1:
+            impl = declared.impl(device_type="cuda")  # type: ignore
+
+        wrapper1 = impl(name)(ns[func.__name__])  # type: ignore
 
         def wrapper2(*args: Any):
             storage.clear()
