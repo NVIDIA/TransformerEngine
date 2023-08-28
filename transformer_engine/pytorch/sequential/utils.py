@@ -322,6 +322,7 @@ def outer_wrapper{outer_sig}:
             exec(source, ns)
             op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
             outer_wrapper = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
+            del ns
             # Create op abstract implementation
             ns = dict(func=abstract_impl, __name__=__name__)
             exec(source, ns)
