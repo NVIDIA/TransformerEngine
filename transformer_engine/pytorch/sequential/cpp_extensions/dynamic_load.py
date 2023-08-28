@@ -23,6 +23,8 @@ def _wrap_function(real_func: Callable[..., Any]):
                 real_args.append(arg._raw)
             elif isinstance(arg, Enum):
                 real_args.append(getattr(type(arg), "__orig_type__")(arg.value))
+            else:
+                real_args.append(arg)
         return real_func(*real_args, torch.cuda.current_stream().cuda_stream)
 
     return wrapper
