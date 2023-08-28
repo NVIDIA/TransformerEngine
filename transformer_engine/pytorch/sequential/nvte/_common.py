@@ -243,9 +243,12 @@ def {func.__name__}_wrap{outer_sig}:
                 def __getattr__(self, attr_name: str) -> Any:
                     if attr_name == "Tensor":
                         return namedtuple("Tensor", ["data", "amax", "scale", "scale_inv"])  # type: ignore
+
                     else:
                         attr = getattr(_nvte, attr_name)
-                        if callable(attr):
+                        if isinstance(attr, type) and issubclass(attr, Enum):
+                            return attr
+                        elif callable(attr):
                             return lambda *args, **kwargs: None  # type: ignore
                         else:
                             return attr
