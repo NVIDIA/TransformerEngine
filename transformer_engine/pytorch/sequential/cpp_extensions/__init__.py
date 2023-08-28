@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 import torch
 from .dynamic_load import inject_real
 
@@ -20,15 +20,52 @@ class Tensor:
     scale: torch.Tensor
     scale_inv: torch.Tensor
 
+    @overload
+    def __init__(
+        self,
+        _raw: RawTensor,
+        data: torch.Tensor,
+        amax: torch.Tensor,
+        scale: torch.Tensor,
+        scale_inv: torch.Tensor,
+        /,
+    ) -> None:
+        ...
+
+    @overload
     def __init__(
         self,
         data: torch.Tensor,
         amax: torch.Tensor,
         scale: torch.Tensor,
         scale_inv: torch.Tensor,
+        /,
+        *,
+        dtype_override: DType | None = None,
+    ) -> None:
+        ...
+
+    def __init__(
+        self,
+        arg0: torch.Tensor | RawTensor,
+        arg1: torch.Tensor,
+        arg2: torch.Tensor,
+        arg3: torch.Tensor,
+        arg4: torch.Tensor = torch.Tensor(),
         *,
         dtype_override: DType | None = None,
     ):
+        if isinstance(arg0, RawTensor):
+            self._raw = arg0
+            self.dtype = self._raw.dtype
+            self.shape = list(self._raw.shape)
+            self.data = arg1
+            self.amax = arg2
+            self.scale = arg3
+            self.scale_inv = arg4
+            return
+        data, amax, scale, scale_inv = arg0, arg1, arg2, arg3
+
         if dtype_override is not None:
             self.dtype = dtype_override
         else:
