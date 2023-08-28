@@ -4,6 +4,7 @@ from typing import Any, Callable, Sequence
 import warnings
 from enum import Enum
 from types import GenericAlias
+from typing import _SpecialGenericAlias  # type: ignore
 import torch
 from .. import cpp_extensions as _nvte
 from ..utils import (
@@ -20,7 +21,7 @@ from ..utils import (
 def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
-            if isinstance(t, GenericAlias):
+            if isinstance(t, GenericAlias | _SpecialGenericAlias):
                 return str(t)
             if t.__module__ == "builtins":
                 return t.__name__
@@ -135,7 +136,7 @@ def te_to_torch_tensor(t: cpp_extensions.Tensor):
     raw_handles.append(t._raw)
     return (t.data, t.amax, t.scale, t.scale_inv)
 
-def torch_to_te_tensor(t: Sequence[torch.Tensor]):
+def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]):
     _raw = raw_handles.pop(0)
     return cpp_extensions.Tensor(_raw, *t)
 
