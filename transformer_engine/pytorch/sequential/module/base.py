@@ -1,11 +1,13 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+from functools import partial
 import torch
 from torch import nn
 from ..ops import Op
 from ..recipe import Recipe
 from ..compute_pipeline import ComputePipeline
 from ..compute_pipeline_function import apply
+from .. import nvte
 
 
 class BaseModule(nn.Module, ABC):
@@ -25,7 +27,7 @@ class BaseModule(nn.Module, ABC):
         self, x: torch.Tensor, seq_lens: torch.Tensor | None = None
     ) -> torch.Tensor:
         self.precompiled_for(x, seq_lens)
-        return self._run(x)
+        return self._run(nvte.make_nvte_tensor(x), x)
 
     def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
         with torch.no_grad():
@@ -38,11 +40,11 @@ class BaseModule(nn.Module, ABC):
 
             self._setup_pipeline(x, seq_lens)
 
-        return self._run
+        return partial(self._run, nvte.make_nvte_tensor(x))
 
-    def _run(self, x: torch.Tensor):
+    def _run(self, nvte_x: nvte.Tensor, x: torch.Tensor):
         assert self.pipeline is not None
-        return apply(x, self.pipeline, self.training)
+        return apply(x, nvte_x, self.pipeline, self.training)
 
     @staticmethod
     def _create_seq_lens_tensor(x: torch.Tensor):
