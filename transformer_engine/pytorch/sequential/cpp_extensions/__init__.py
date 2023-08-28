@@ -85,7 +85,7 @@ class Tensor:
         self.scale_inv = scale_inv
 
     def query_shape_dtype(self):
-        self.dtype = self._raw.dtype
+        self.dtype = getattr(DType, "__orig_type__")(self._raw.dtype.value)
         self.shape = list(self._raw.shape)
         return self
 
