@@ -232,8 +232,7 @@ def apply(
                 pipeline.meta_fwd,
                 pipeline.meta_bwd,
             )
-            global _args
-            _args = args
+            globals()["_args"] = args
             x = ComputePipelineFunction.apply(x, *exposed_tensors)  # type: ignore
             nvte_x, is_exposed_x_squished_now, upcoming_backward = (
                 args.nvte_x,
