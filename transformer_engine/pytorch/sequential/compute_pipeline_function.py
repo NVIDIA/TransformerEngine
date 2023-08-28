@@ -41,19 +41,21 @@ class BackwardComm:
 
 
 class ComputePipelineFunction(autograd.Function):
+    args: ForwardArgs
+
     @staticmethod
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *exposed_args: torch.Tensor | ForwardArgs,
+        *exposed_tensors: torch.Tensor,
     ):
         """
         exposed_x is used only to let autograd construct the computation graph
         real input and output is in list, as nvte.Tensor is immutable
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
-        exposed_tensors, args = exposed_args[:-1], exposed_args[-1]
         del exposed_tensors
+        args = ComputePipelineFunction.args
         assert isinstance(args, ForwardArgs)
 
         nvte_x = args.nvte_x
@@ -229,7 +231,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 pipeline.meta_fwd,
                 pipeline.meta_bwd,
             )
-            x = ComputePipelineFunction.apply(x, *exposed_tensors, args)  # type: ignore
+            ComputePipelineFunction.args = args
+            x = ComputePipelineFunction.apply(x, *exposed_tensors)  # type: ignore
             nvte_x, is_exposed_x_squished_now, upcoming_backward = (
                 args.nvte_x,
                 args.is_exposed_x_squished_now,
