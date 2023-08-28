@@ -67,7 +67,7 @@ class ComputePipelineFunction(autograd.Function):
         y, to_save = args.op.forward(nvte_x)
 
         # Expose backward context for tracing
-        bwd_ctx = list[torch.Tensor]()
+        bwd_ctx: list[torch.Tensor] = []
         for _, tensor in to_save.items():
             bwd_ctx.append(tensor.data)
             if tensor.amax.numel():
