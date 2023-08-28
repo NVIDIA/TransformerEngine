@@ -1,7 +1,8 @@
 from __future__ import annotations
 import torch
 from enum import Enum
-from typing import Self, Sequence, TYPE_CHECKING
+from typing import Sequence, TYPE_CHECKING
+from typing_extensions import Self
 
 class QKVLayout(Enum):
     NOT_INTERLEAVED = 0
