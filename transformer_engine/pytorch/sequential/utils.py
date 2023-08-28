@@ -172,6 +172,12 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
     return return_type  # type: ignore
 
 
+def exec_saving_source(source: str, globals: dict[str, Any]):
+    import ast
+
+    exec(compile(ast.parse(source), filename="<exec>", mode="exec"), globals)
+
+
 class Decorator(Protocol):
     def __call__(self, f: Callable[PS, T]) -> Callable[PS, T]:
         ...
@@ -319,13 +325,13 @@ def outer_wrapper{outer_sig}:
 
             # Create op implementation
             ns = dict(func=func, __name__=__name__)
-            exec(source, ns)
+            exec_saving_source(source, ns)
             op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
             outer_wrapper = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
             del ns
             # Create op abstract implementation
             ns = dict(func=abstract_impl, __name__=__name__)
-            exec(source, ns)
+            exec_saving_source(source, ns)
             op_aimp = reinterpret_cast(ns[func.__name__], Callable[..., Any])
             # Register inner wrapper as torch op
             register_op(op_impl, op_aimp)
