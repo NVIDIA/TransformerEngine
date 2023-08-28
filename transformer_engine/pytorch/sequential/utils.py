@@ -177,7 +177,7 @@ class Decorator(Protocol):
         ...
 
 
-def reinterpret_cast(x: Any, _: type[T], /) -> T:
+def reinterpret_cast(x: Any, t: type[T], /) -> T:
     return x
 
 
