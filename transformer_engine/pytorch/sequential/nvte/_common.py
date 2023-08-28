@@ -30,7 +30,7 @@ def _type_name(t: type) -> str:
         result.replace("builtins.", "")
         .replace("transformer_engine.pytorch.sequential.", "")
         .replace("collections.abc", "typing")
-        .replace("__init__.pyi", "cpp_extensions.")
+        .replace("__init__.pyi", "cpp_extensions")
     )
 
 
