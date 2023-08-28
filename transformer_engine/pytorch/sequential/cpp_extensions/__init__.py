@@ -57,9 +57,9 @@ class Tensor:
     ):
         if isinstance(arg0, RawTensor):
             self._raw = arg0
-            self.dtype = self._raw.dtype
             self.shape = list(self._raw.shape)
             self.data = arg1
+            self.dtype = torch_to_te_dtype(self.data.dtype)
             self.amax = arg2
             self.scale = arg3
             self.scale_inv = arg4
@@ -85,7 +85,7 @@ class Tensor:
         self.scale_inv = scale_inv
 
     def query_shape_dtype(self):
-        self.dtype = getattr(DType, "__orig_type__")(self._raw.dtype.value)
+        self.dtype = DType(self._raw.dtype.value)
         self.shape = list(self._raw.shape)
         return self
 
