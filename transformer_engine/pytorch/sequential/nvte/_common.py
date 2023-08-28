@@ -25,7 +25,10 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
                     return str(t)
                 else:
                     return t.__name__
-            elif t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions":
+            elif (
+                t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions"
+                or t.__module__ == "__init__.pyi"
+            ):
                 return f"cpp_extensions.{t.__name__}"
             else:
                 return f"{t.__module__}.{t.__name__}"
