@@ -315,6 +315,14 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
 import torch
 from . import cpp_extensions
 
+def abstract_impl{inner_sig}:
+    {arg_unwrapping_code}
+    func.__globals__["_nvte"] = impostor
+    result: {return_type_name} = func({unwrapped_args})
+    func.__globals__["_nvte"] = cpp_extensions
+    {result_wrapping_code}
+    return result_
+
 def {func.__name__}{inner_sig}:
     {arg_unwrapping_code}
     result: {return_type_name} = func({unwrapped_args})
@@ -328,9 +336,6 @@ def outer_wrapper{outer_sig}:
     return result
 """
         try:
-            # Create abstract implementation
-            abstract_impl = deepcopy(func)
-
             # Swap real cpp_extensions (_nvte) for impostor that does nothing
             # This is needed so the abstract implementation is traceable by PyTorch Dynamo
             class NVTEImpostor:
@@ -341,22 +346,15 @@ def outer_wrapper{outer_sig}:
                     else:
                         return attr
 
-            abstract_impl.__globals__["_nvte"] = NVTEImpostor()
-
-            # Create op implementation
-            ns = dict(func=func, __name__=__name__)
+            # Create op
+            ns = dict(func=func, __name__=__name__, impostor=NVTEImpostor())
             exec_saving_source(source, ns)
             op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
-            outer_wrapper = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
-            del ns
-            # Create op abstract implementation
-            ns = dict(func=abstract_impl, __name__=__name__)
-            exec_saving_source(source, ns)
-            op_aimp = reinterpret_cast(ns[func.__name__], Callable[..., Any])
-            # Register inner wrapper as torch op
+            op_wrap = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
+            op_aimp = reinterpret_cast(ns["abstract_impl"], Callable[..., Any])
             register_op(op_impl, op_aimp)
 
-            return outer_wrapper
+            return op_wrap
         except Exception as e:
             raise RuntimeError(
                 f"Failed to compile wrapper for {func.__name__}. Generated code: \n```\n{source}```"
