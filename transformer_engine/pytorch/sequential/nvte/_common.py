@@ -24,7 +24,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
             if is_generic(t):
-                return str(t)
+                return str(t).replace("collections.abc", "typing")
             if t.__module__ == "builtins":
                 return t.__name__
             elif (
@@ -42,6 +42,8 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             if is_generic(arg_type_):
                 arg_type_ = reinterpret_cast(arg_type_, GenericAlias)
                 origin = arg_type_.__origin__
+                while hasattr(origin, "__origin__"):
+                    origin = getattr(origin, "__origin__")
                 args: tuple[type | GenericAlias, ...] = typing.get_args(arg_type_)
                 new_args = [wrap_type(type_wrap_func, arg) for arg in args]
                 return origin.__class_getitem__(new_args)  # type: ignore
