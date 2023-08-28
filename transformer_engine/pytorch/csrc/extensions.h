@@ -253,10 +253,12 @@ at::Tensor dswiglu(at::Tensor grad,
  **************************************************************************************************/
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
+                                      const at::Tensor &z,
                                       const at::Tensor &x,
-                                      const at::Tensor &mu,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
+                                      const at::Tensor &beta,
+                                      const float eps,
                                       const int sm_margin,
                                       const bool zero_centered_gamma
 );
@@ -328,8 +330,10 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input,
 
 std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
                                     const at::Tensor &x,
+                                    const at::Tensor &z,
                                     const at::Tensor &rsigma,
                                     const at::Tensor &gamma,
+                                    const float eps,
                                     const int sm_margin,
                                     const bool zero_centered_gamma
 );
