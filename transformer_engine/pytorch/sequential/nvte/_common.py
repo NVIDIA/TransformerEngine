@@ -44,7 +44,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
                 origin = arg_type_.__origin__
                 args: tuple[type | GenericAlias, ...] = typing.get_args(arg_type_)
                 new_args = [wrap_type(type_wrap_func, arg) for arg in args]
-                return origin[*new_args]  # type: ignore
+                return origin.__class_getitem__(new_args)  # type: ignore
             else:
                 arg_type_ = reinterpret_cast(arg_type_, type)
                 return type_wrap_func(arg_type)
