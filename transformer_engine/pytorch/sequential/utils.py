@@ -207,7 +207,9 @@ def reinterpret_cast(x: Any, t: type[T], /) -> T:
 def recursive_apply(
     func: Callable[[Any], Any],
     x: Any,
-    pred: Callable[[Any], bool] = lambda _: True,
+    pred: Callable[[Any], bool] = lambda x: not (
+        isinstance(x, list) or isinstance(x, tuple) or isinstance(x, dict)
+    ),
     on_false: Callable[[Any], Any] = lambda x: x,
 ) -> Any:
     if pred(x):
