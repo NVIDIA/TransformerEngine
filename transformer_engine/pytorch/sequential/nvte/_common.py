@@ -5,6 +5,8 @@ import warnings
 from enum import Enum
 from types import GenericAlias
 import torch
+from torch import autograd
+from torch.autograd.function import FunctionCtx
 from .. import cpp_extensions as _nvte
 from ..utils import (
     PS,
@@ -172,11 +174,37 @@ def outer_wrapper{outer_sig}:
     return make_wrapper(func)
 
 
+# _make_nvte_tensor is special
+# as it is called outside of the
+# main autograd ComputePipelineFunction
+# so it needs its own (identity) autograd function
+
+
 @torch_op
-def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
+def _make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
     return _nvte.Tensor(
         t.data,
         torch.Tensor().cuda(),
         torch.Tensor().cuda(),
         torch.Tensor().cuda(),
     )
+
+
+class MakeNVTETensor(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[arg-type]
+        ctx: FunctionCtx,
+        t: torch.Tensor,
+    ):
+        return _make_nvte_tensor(t)
+
+    @staticmethod
+    def backward(  # type: ignore[arg-type]
+        ctx: FunctionCtx,
+        grad: torch.Tensor,
+    ):
+        return grad
+
+
+def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
+    return MakeNVTETensor.apply(t)  # type: ignore
