@@ -48,8 +48,10 @@ class SelfContainedOp(Op):
         return dy, full_grads
 
     def require_grad(self):
-        start: list[nvte.Tensor] = []  # needed to be separate because of torch dynamo
-        return list(sum((op.require_grad() for op in self.fwds), start))
+        list_: list[nvte.Tensor] = []
+        for op in self.fwds:
+            list_.extend(op.require_grad())
+        return list_
 
 
 def force_use_precision(ops: list[Op], allowed: nvte.DType):
