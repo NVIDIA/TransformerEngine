@@ -207,7 +207,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
-        nvte_x = nvte.make_nvte_tensor(x)
+        with torch.no_grad():
+            nvte_x = nvte.make_nvte_tensor(x)
         is_exposed_x_squished_now = False
         upcoming_backward = None
         for contained_op in pipeline.functions:
