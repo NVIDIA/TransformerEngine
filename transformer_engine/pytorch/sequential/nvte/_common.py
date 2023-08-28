@@ -44,7 +44,7 @@ def _wrap_type(
         while hasattr(origin, "__origin__"):
             origin = getattr(origin, "__origin__")
         args: tuple[type | GenericAlias, ...] = typing.get_args(arg_type_)
-        new_args = [_wrap_type(type_wrap_func, arg) for arg in args]
+        new_args = tuple(_wrap_type(type_wrap_func, arg) for arg in args)
         return origin.__class_getitem__(new_args)  # type: ignore
     else:
         arg_type_ = reinterpret_cast(arg_type_, type)
@@ -81,7 +81,6 @@ def _wrap_result_type(result_type: type | GenericAlias) -> Any:
 
     # Flatten tuple of tuples of tensors
     if is_generic_tuple(wrapped_type):
-        breakpoint()
         arg_types = typing.get_args(wrapped_type)
         if any(is_generic_tuple(arg_type) for arg_type in arg_types):
             assert all(
