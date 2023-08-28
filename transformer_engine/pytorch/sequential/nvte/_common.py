@@ -117,10 +117,10 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         ) }) -> {wrapped_return_type_name}"""
         unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
 
-        arg_unwrapping_code.lstrip()
-        arg_wrapping_code.lstrip()
-        result_wrapping_code.lstrip()
-        result_unwrapping_code.lstrip()
+        arg_unwrapping_code = arg_unwrapping_code.lstrip()
+        arg_wrapping_code = arg_wrapping_code.lstrip()
+        result_wrapping_code = result_wrapping_code.lstrip()
+        result_unwrapping_code = result_unwrapping_code.lstrip()
 
         source = f"""\
 import torch
