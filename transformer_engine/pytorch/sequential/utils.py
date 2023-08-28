@@ -181,16 +181,16 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
         old_getlines = linecache.getlines
         sources = list[str]()
 
-        def patched_getlines(filename: str):
+        def patched_getlines(filename: str, module_globals: Any = None):
             if filename.startswith("<exec#") and filename.endswith(">"):
                 index = int(filename[len("<exec#") : -1])
                 return sources[index].splitlines(True)
             else:
-                return old_getlines(filename)
+                return old_getlines(filename, module_globals)
 
         linecache.getlines = patched_getlines
         setattr(exec_saving_source, "sources", sources)
-    sources = getattr(exec_saving_source, "sources")
+    sources = reinterpret_cast(getattr(exec_saving_source, "sources"), list[str])
     exec(
         compile(ast.parse(source), filename=f"<exec#{len(sources)}>", mode="exec"),
         globals,
