@@ -113,8 +113,8 @@ def layernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
+            workspace = empty_like(workspace.query_shape_dtype())
+            barrier = empty_like(barrier.query_shape_dtype())
 
     return out, mu, rsigma
 
@@ -162,10 +162,10 @@ def dlayernorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
-            dgamma_part = empty_like(dgamma_part)
-            dbeta_part = empty_like(dbeta_part)
+            workspace = empty_like(workspace.query_shape_dtype())
+            barrier = empty_like(barrier.query_shape_dtype())
+            dgamma_part = empty_like(dgamma_part.query_shape_dtype())
+            dbeta_part = empty_like(dbeta_part.query_shape_dtype())
 
     return dx, dgamma, dbeta
 
@@ -204,8 +204,8 @@ def rmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
+            workspace = empty_like(workspace.query_shape_dtype())
+            barrier = empty_like(barrier.query_shape_dtype())
 
     return out, rsigma
 
@@ -246,8 +246,8 @@ def drmsnorm(
                 workspace,
                 barrier,
             )
-            workspace = empty_like(workspace)
-            barrier = empty_like(barrier)
-            dgamma_part = empty_like(dgamma_part)
+            workspace = empty_like(workspace.query_shape_dtype())
+            barrier = empty_like(barrier.query_shape_dtype())
+            dgamma_part = empty_like(dgamma_part.query_shape_dtype())
 
     return dx, dgamma

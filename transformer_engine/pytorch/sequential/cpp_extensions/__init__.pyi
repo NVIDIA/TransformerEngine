@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 from enum import Enum
-from typing import Sequence, TYPE_CHECKING
+from typing import Self, Sequence, TYPE_CHECKING
 
 class QKVLayout(Enum):
     NOT_INTERLEAVED = 0
@@ -53,8 +53,9 @@ if TYPE_CHECKING:
         amax: torch.Tensor
         scale: torch.Tensor
         scale_inv: torch.Tensor
-        def data_ptr(self) -> int: ...
         def __init__(self, data: torch.Tensor, amax: torch.Tensor, scale: torch.Tensor, scale_inv: torch.Tensor, *, dtype_override: DType | None = None,) -> None: ...
+        def data_ptr(self) -> int: ...
+        def query_shape_dtype(self) -> Self: ...
 
 
     def te_to_torch_dtype(dtype: DType) -> torch.dtype: ...
@@ -101,4 +102,4 @@ def dgeglu_cast_transpose(input: Tensor, geglu_input: Tensor, cast_output: Tenso
 def multi_cast_transpose(input_list: Sequence[Tensor], cast_output_list: Sequence[Tensor], transposed_output_list: Sequence[Tensor]) -> None: ...
 
 # Don't export these names (this stub file gets loaded as a real python module)
-del annotations, torch, Enum, Sequence, TYPE_CHECKING # type: ignore
+del annotations, torch, Enum, Sequence, TYPE_CHECKING, Self # type: ignore

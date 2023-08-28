@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 class Tensor:
     _raw: RawTensor
+    dtype: DType
+    shape: list[int]
     data: torch.Tensor
     amax: torch.Tensor
     scale: torch.Tensor
@@ -28,13 +30,14 @@ class Tensor:
         dtype_override: DType | None = None,
     ):
         if dtype_override is not None:
-            dtype = dtype_override
+            self.dtype = dtype_override
         else:
-            dtype = torch_to_te_dtype(data.dtype)
+            self.dtype = torch_to_te_dtype(data.dtype)
+        self.shape = list(data.shape)
         self._raw = RawTensor(
             data.data_ptr(),
-            list(data.shape),
-            dtype,
+            self.shape,
+            self.dtype,
             amax.data_ptr(),
             scale.data_ptr(),
             scale_inv.data_ptr(),
@@ -44,16 +47,13 @@ class Tensor:
         self.scale = scale
         self.scale_inv = scale_inv
 
+    def query_shape_dtype(self):
+        self.dtype = self._raw.dtype
+        self.shape = list(self._raw.shape)
+        return self
+
     def data_ptr(self):
         return self.data.data_ptr()
-
-    @property
-    def dtype(self):
-        return self._raw.dtype
-
-    @property
-    def shape(self):
-        return self._raw.shape
 
     def __repr__(self):
         if self.dtype == DType.Float8E4M3 or DType.Float8E5M2:
