@@ -2,9 +2,24 @@ from __future__ import annotations
 
 from ..utils import reinterpret_cast
 from .. import cpp_extensions as _nvte
+from ._common import torch_op
 
 from .dtype import is_fp8
 from .empty import empty, multi_empty_share_metadata
+
+
+@torch_op
+def _fp8_quantize(t: _nvte.Tensor, out_dtype: _nvte.DType) -> _nvte.Tensor:
+    output = empty(t.shape, out_dtype)
+    _nvte.fp8_quantize(t, output)
+    return output
+
+
+@torch_op
+def _fp8_dequantize(t: _nvte.Tensor, out_dtype: _nvte.DType) -> _nvte.Tensor:
+    output = empty(t.shape, out_dtype)
+    _nvte.fp8_dequantize(t, output)
+    return output
 
 
 def cast(t: _nvte.Tensor, out_dtype: _nvte.DType):
@@ -12,15 +27,14 @@ def cast(t: _nvte.Tensor, out_dtype: _nvte.DType):
     if is_fp8(t):
         assert not is_fp8(out_dtype)
 
-    output = empty(t.shape, out_dtype)
     if is_fp8(out_dtype):
-        _nvte.fp8_quantize(t, output)
+        return _fp8_quantize(t, out_dtype)
     elif is_fp8(t):
-        _nvte.fp8_dequantize(t, output)
+        return _fp8_dequantize(t, out_dtype)
     else:
+        output = empty(t.shape, out_dtype)
         output.data.copy_(t.data)
-
-    return output
+        return output
 
 
 def cast_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
@@ -30,13 +44,17 @@ def cast_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
         return cast(t, out_dtype)
 
 
-def transpose(t: _nvte.Tensor):
+@torch_op
+def transpose(t: _nvte.Tensor) -> _nvte.Tensor:
     output = empty(t.shape[::-1], t.dtype)
     _nvte.transpose(t, output)
     return output
 
 
-def cast_transpose(t: _nvte.Tensor, out_dtype: _nvte.DType):
+@torch_op
+def cast_transpose(
+    t: _nvte.Tensor, out_dtype: _nvte.DType
+) -> tuple[_nvte.Tensor, _nvte.Tensor]:
     assert t.dtype != out_dtype
     if is_fp8(t):
         assert not is_fp8(out_dtype)
@@ -56,7 +74,10 @@ def cast_transpose_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
         return cast_transpose(t, out_dtype)
 
 
-def multi_cast_transpose(*desc: tuple[_nvte.Tensor, _nvte.DType]):
+@torch_op
+def multi_cast_transpose(
+    *desc: tuple[_nvte.Tensor, _nvte.DType]
+) -> list[tuple[_nvte.Tensor, ...]]:
     outs = [
         multi_empty_share_metadata((t.shape, dtype), (t.shape[::-1], dtype))
         for t, dtype in desc

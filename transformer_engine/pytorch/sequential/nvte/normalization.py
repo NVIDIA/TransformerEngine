@@ -1,8 +1,9 @@
 from __future__ import annotations
 import os
 import torch
-from ..utils import contextmanager, cache
 from .. import cpp_extensions as _nvte
+from ..utils import contextmanager, cache
+from ._common import torch_op
 from . import execution_state
 from .dtype import dtype_name
 from .empty import empty, empty_like
@@ -76,6 +77,7 @@ def _handle_unsupported_config(
             raise
 
 
+@torch_op
 def layernorm(
     x: _nvte.Tensor,
     eps: float,
@@ -83,7 +85,7 @@ def layernorm(
     gamma: _nvte.Tensor,
     beta: _nvte.Tensor,
     out_dtype: _nvte.DType,
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor, _nvte.Tensor]:
     "returns (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta, mu (for bwd), rsigma (for bwd)"
 
     assert len(x.shape) == 2
@@ -119,6 +121,7 @@ def layernorm(
     return out, mu, rsigma
 
 
+@torch_op
 def dlayernorm(
     grad: _nvte.Tensor,
     zero_centered_gamma: bool,
@@ -129,7 +132,7 @@ def dlayernorm(
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
     dbeta_dtype: _nvte.DType,
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor, _nvte.Tensor]:
     "returns dx, dgamma, dbeta"
 
     dx = empty(x.shape, dx_dtype)
@@ -170,13 +173,14 @@ def dlayernorm(
     return dx, dgamma, dbeta
 
 
+@torch_op
 def rmsnorm(
     x: _nvte.Tensor,
     eps: float,
     zero_centered_gamma: bool,
     gamma: _nvte.Tensor,
     out_dtype: _nvte.DType,
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor]:
     "returns x / sqrt(var(x) + eps) * gamma, rsigma (for bwd)"
 
     assert len(x.shape) == 2
@@ -210,6 +214,7 @@ def rmsnorm(
     return out, rsigma
 
 
+@torch_op
 def drmsnorm(
     grad: _nvte.Tensor,
     zero_centered_gamma: bool,
@@ -218,7 +223,7 @@ def drmsnorm(
     rsigma: _nvte.Tensor,
     dx_dtype: _nvte.DType,
     dgamma_dtype: _nvte.DType,
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor]:
     "returns dx, dgamma"
 
     dx = empty(x.shape, dx_dtype)

@@ -33,8 +33,8 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
             wrapped_arg_type_name = type_name(wrap_type(arg_type))
             if arg_type is _nvte.Tensor:
-                w = f"{arg_name}_: {wrapped_arg_type_name} = ({arg_name}.data, {arg_name}.amax, {arg_name}.scale, {arg_name}.scale_inv)\n"
-                u = f"{arg_name}: {arg_type_name} = {arg_type_name}(*{arg_name}_)\n"
+                w = f"{arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
+                u = f"{arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
             elif issubclass(arg_type, Enum):
                 w = f"{arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
                 u = f"{arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
@@ -120,6 +120,16 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         source = f"""\
 import torch
 from .. import cpp_extensions
+
+raw_handles: list[cpp_extensions.RawTensor] = []
+
+def te_to_torch_tensor(t: cpp_extensions.Tensor):
+    raw_handles.append(t._raw)
+    return (t.data, t.amax, t.scale, t.scale_inv)
+
+def torch_to_te_tensor(t: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]):
+    _raw = raw_handles.pop(0)
+    return cpp_extensions.Tensor(_raw, *t)
 
 def {func.__name__}_aimp{inner_sig}:
     {arg_unwrapping_code}

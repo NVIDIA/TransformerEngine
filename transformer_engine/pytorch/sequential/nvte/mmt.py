@@ -1,8 +1,9 @@
 from __future__ import annotations
 import subprocess
-from ..utils import cache
-import torch
 from .. import cpp_extensions as _nvte
+from ..utils import cache
+from ._common import torch_op
+import torch
 from .empty import empty
 from . import execution_state
 
@@ -51,9 +52,10 @@ def matmul_transpose_gelu_add(mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.T
     return matmul_transpose_add_gelu_add(mat, mul, empty(), add)
 
 
+@torch_op
 def matmul_transpose_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor, out_dtype: _nvte.DType
-):
+) -> _nvte.Tensor:
     "returns mat @ mul^T + add"
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
@@ -74,9 +76,10 @@ def matmul_transpose_add(
     return out
 
 
+@torch_op
 def matmul_transpose_add_gelu(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add: _nvte.Tensor, out_dtype: _nvte.DType
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor]:
     "returns mat @ mul^T + add, GELU(mat @ mul^T + add)"
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     out = empty((b.shape[0], a.shape[0]), out_dtype)
@@ -98,9 +101,10 @@ def matmul_transpose_add_gelu(
     return pre_gelu, out
 
 
+@torch_op
 def matmul_transpose_add_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add1: _nvte.Tensor, add2: _nvte.Tensor
-):
+) -> _nvte.Tensor:
     "returns mat @ mul^T + add1 + add2"
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     _nvte.cublas_gemm(
@@ -120,9 +124,10 @@ def matmul_transpose_add_add(
     return add2
 
 
+@torch_op
 def matmul_transpose_add_gelu_add(
     mat: _nvte.Tensor, mul: _nvte.Tensor, add1: _nvte.Tensor, add2: _nvte.Tensor
-):
+) -> tuple[_nvte.Tensor, _nvte.Tensor]:
     "returns mat @ mul^T + add1, GELU(mat @ mul^T + add1) + add2"
     a, b, trans_a, trans_b = _to_cublas_args(mat, mul, False, True)
     pre_gelu = empty(add2.shape, add1.dtype)
