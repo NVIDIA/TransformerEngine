@@ -2,6 +2,7 @@ from enum import Enum
 from typing import (
     Any,
     Callable,
+    ClassVar,
     Generic,
     Generator,
     Literal,
@@ -174,8 +175,27 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
 
 def exec_saving_source(source: str, globals: dict[str, Any]):
     import ast
+    import linecache
 
-    exec(compile(ast.parse(source), filename="<exec>", mode="exec"), globals)
+    if not hasattr(exec_saving_source, "sources"):
+        old_getlines = linecache.getlines
+        sources = list[str]()
+
+        def patched_getlines(filename: str):
+            if filename.startswith("<exec#") and filename.endswith(">"):
+                index = int(filename[len("<exec#") : -1])
+                return sources[index].splitlines(True)
+            else:
+                return old_getlines(filename)
+
+        linecache.getlines = patched_getlines
+        setattr(exec_saving_source, "sources", sources)
+    sources = getattr(exec_saving_source, "sources")
+    exec(
+        compile(ast.parse(source), filename=f"<exec#{len(sources)}>", mode="exec"),
+        globals,
+    )
+    sources.append(source)
 
 
 class Decorator(Protocol):
