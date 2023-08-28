@@ -23,7 +23,7 @@ class SelfContainedOp(Op):
             if not isinstance(op, FusedOp):
                 op_name = getattr(op, "name")
                 ctx = {op_name + name: tensor for name, tensor in ctx.items()}
-            full_ctx |= ctx
+            full_ctx.update(ctx)
         return x, full_ctx
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
