@@ -16,7 +16,7 @@ class PersistentFP8Meta(Persistent[FP8Meta]):
             if self._is_new_iteration():
                 # Allocate first iteration metatensors
                 self._one = torch.ones(1, device="cuda")
-                self._first_iteration_amaxes = list[torch.Tensor]()
+                self._first_iteration_amaxes: list[torch.Tensor] = []
             amax = torch.zeros(1, device="cuda")
             self._first_iteration_amaxes.append(amax)
             self._index_within_iteration()  # increment tensor index

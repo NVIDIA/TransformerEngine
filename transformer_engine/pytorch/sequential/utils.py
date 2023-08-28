@@ -176,7 +176,7 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
 
     if not hasattr(exec_saving_source, "sources"):
         old_getlines = linecache.getlines
-        sources = list[str]()
+        sources: list[str] = []
 
         def patched_getlines(filename: str, module_globals: Any = None):
             if "<exec#" in filename:

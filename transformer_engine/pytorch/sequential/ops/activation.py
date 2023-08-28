@@ -34,8 +34,8 @@ class Activation(Op, ABC):
 
         return dx, Grads()
 
-    def require_grad(self):
-        return list[nvte.Tensor]()
+    def require_grad(self) -> list[nvte.Tensor]:
+        return []
 
     _forward: Callable[[nvte.Tensor, nvte.DType], nvte.Tensor]
     _backward: Callable[[nvte.Tensor, nvte.Tensor, nvte.DType], nvte.Tensor]

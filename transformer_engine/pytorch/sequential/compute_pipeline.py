@@ -86,14 +86,14 @@ def name_ops(ops: list[Op]):
 
 
 def split_into_self_contained(fwds: list[Op], bwds: list[Op]):
-    functions = list[SelfContainedOp]()
+    functions: list[SelfContainedOp] = []
     while fwds or bwds:
         fwd = fwds.pop(0)
         unmatched_fwd_ops: set[Op] = {
             *reduce(operator.iadd, [fwd.ops if isinstance(fwd, FusedOp) else [fwd]], [])
         }
         used_forwards = [fwd]
-        used_backwards = list[Op]()
+        used_backwards: list[Op] = []
         unmatched_bwd_ops: set[Op] = set()
         while unmatched_fwd_ops or unmatched_bwd_ops:
             while unmatched_fwd_ops:

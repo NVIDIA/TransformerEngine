@@ -52,7 +52,7 @@ class Persistent(Generic[T], ABC):
     __user_set_iteration: int = 0
     __derived_seen_iteration: int = 0
     if __debug__:
-        __values = list[T]()
+        __values: list[T] = []
 
     def __is_new_iteration(self, update: bool):
         if self.__derived_seen_iteration == self._iteration() - 1:

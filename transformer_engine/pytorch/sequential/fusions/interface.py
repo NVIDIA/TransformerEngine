@@ -37,12 +37,12 @@ class FusedOp(Op):
         for op, ctx in zip(self.ops, ctxs):
             op_name = getattr(op, "name")
             ctx: Context = {op_name + name: tensor for name, tensor in ctx.items()}
-            full_ctx |= ctx
+            full_ctx.update(ctx)
         return y, full_ctx
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
         assert self.backward_ is not None
-        ctxs = list[Context]()
+        ctxs: list[Context] = []
         for op in self.ops:
             op_name = getattr(op, "name")
             ctxs.append(
@@ -58,7 +58,10 @@ class FusedOp(Op):
         return dx, grads_total
 
     def require_grad(self):
-        return list(sum((op.require_grad() for op in self.ops), list[nvte.Tensor]()))
+        list_: list[nvte.Tensor] = []
+        for op in self.ops:
+            list_.extend(op.require_grad())
+        return list_
 
     def __repr__(self):
         return f"""FusedOp{self.ops}"""
