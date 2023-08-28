@@ -81,6 +81,7 @@ def _wrap_result_type(result_type: type | GenericAlias) -> Any:
 
     # Flatten tuple of tuples of tensors
     if is_generic_tuple(wrapped_type):
+        breakpoint()
         arg_types = typing.get_args(wrapped_type)
         if any(is_generic_tuple(arg_type) for arg_type in arg_types):
             assert all(
@@ -90,7 +91,7 @@ def _wrap_result_type(result_type: type | GenericAlias) -> Any:
                 for arg_type in arg_types
             )
             tensors = len(arg_types)
-            types = (torch.Tensor,) * 4 * tensors
+            types = (torch.Tensor,) * (4 * tensors)
             return tuple.__class_getitem__(types)
     return wrapped_type  # type: ignore
 
