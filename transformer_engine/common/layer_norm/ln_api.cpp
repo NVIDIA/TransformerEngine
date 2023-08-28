@@ -251,15 +251,17 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
 }
 
 void layernorm_bwd(const Tensor& dz,
+                   const Tensor& z,
                    const Tensor& x,
-                   const Tensor& mu,
                    const Tensor& rsigma,
                    const Tensor& gamma,
+                   const Tensor& beta,
                    Tensor* dx,
                    Tensor* dgamma,
                    Tensor* dbeta,
                    Tensor* dgamma_part,
                    Tensor* dbeta_part,
+                   const float epsilon,
                    cudaStream_t stream,
                    const int multiprocessorCount,
                    Tensor* workspace,
@@ -270,42 +272,41 @@ void layernorm_bwd(const Tensor& dz,
 
     auto itype = x.data.dtype;
     auto wtype = gamma.data.dtype;
-    auto otype = wtype;
+    auto otype = z.data.dtype;
     auto ctype = DType::kFloat32;
 
     CheckInputTensor(dz, "dz");
-    CheckInputTensor(x, "x");
-    CheckInputTensor(mu, "mu");
+    CheckInputTensor(z, "z");
     CheckInputTensor(rsigma, "rsigma");
     CheckInputTensor(gamma, "gamma");
+    CheckInputTensor(beta, "beta");
     CheckOutputTensor(*dx, "dx");
     CheckOutputTensor(*dgamma, "dgamma");
     CheckOutputTensor(*dbeta, "dbeta");
 
     NVTE_CHECK(dz.data.dtype == otype);
-    NVTE_CHECK(mu.data.dtype == ctype);
     NVTE_CHECK(rsigma.data.dtype == ctype);
 
-    NVTE_CHECK(x.data.shape.size() == 2);
-    NVTE_CHECK(dz.data.shape == x.data.shape);
-    auto rows = x.data.shape[0];
-    auto cols = x.data.shape[1];
+    NVTE_CHECK(z.data.shape.size() == 2);
+    NVTE_CHECK(dz.data.shape == z.data.shape);
+    auto rows = z.data.shape[0];
+    auto cols = z.data.shape[1];
 
     auto hidden_size = gamma.data.shape[0];
 
-    NVTE_CHECK(mu.data.shape[0] == rows);
-    NVTE_CHECK(mu.data.shape == rsigma.data.shape);
-
     NVTE_CHECK(gamma.data.shape[0] == cols);
+    NVTE_CHECK(beta.data.shape[0] == cols);
 
-    NVTE_CHECK(dx->data.shape == x.data.shape);
+    NVTE_CHECK(dx->data.shape == z.data.shape);
     NVTE_CHECK(dx->data.dtype == x.data.dtype);
 
     NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
     NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
 
-    NVTE_CHECK(dbeta->data.shape == gamma.data.shape);
-    NVTE_CHECK(dbeta->data.dtype == gamma.data.dtype);
+    NVTE_CHECK(dbeta->data.shape == beta.data.shape);
+    NVTE_CHECK(dbeta->data.dtype == beta.data.dtype);
+
+    NVTE_CHECK(epsilon >= 0.f);
 
     layer_norm::LaunchParams<layer_norm::BwdParams> launch_params;
     launch_params.stream = stream;
@@ -318,10 +319,10 @@ void layernorm_bwd(const Tensor& dz,
     layer_norm::BwdParams &params = launch_params.params;
     params.rows = rows;
     params.cols = cols;
-    params.x = x.data.dptr;
-    params.mu = mu.data.dptr;
+    params.z = z.data.dptr;
     params.rs = rsigma.data.dptr;
     params.gamma = gamma.data.dptr;
+    params.beta = beta.data.dptr;
     params.dz = dz.data.dptr;
     params.dx = dx->data.dptr;
     params.dbeta = dbeta->data.dptr;
@@ -329,6 +330,7 @@ void layernorm_bwd(const Tensor& dz,
     params.dbeta_part = dbeta_part->data.dptr;
     params.dgamma_part = dgamma_part->data.dptr;
     params.zero_centered_gamma = zero_centered_gamma;
+    params.epsilon = epsilon;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -395,15 +397,17 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
 }
 
 void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
-                        const NVTETensor x,        // BxSxhidden_size
-                        const NVTETensor mu,       // BxS, FP32!
+                        const NVTETensor z,        // BxSxhidden_size
+                        const NVTETensor x,        // Only needed for dtype
                         const NVTETensor rsigma,   // BxS, FP32!
                         const NVTETensor gamma,    // hidden_size
+                        const NVTETensor beta,     // hidden_size
                         NVTETensor dx,
                         NVTETensor dgamma,
                         NVTETensor dbeta,
                         NVTETensor dgamma_part,
                         NVTETensor dbeta_part,
+                        const float epsilon,
                         cudaStream_t stream,
                         const int multiprocessorCount,
                         NVTETensor workspace,
@@ -411,15 +415,17 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
   NVTE_API_CALL(nvte_layernorm_bwd);
   using namespace transformer_engine;
   layernorm_bwd(*reinterpret_cast<const Tensor*>(dz),
+                *reinterpret_cast<const Tensor*>(z),
                 *reinterpret_cast<const Tensor*>(x),
-                *reinterpret_cast<const Tensor*>(mu),
                 *reinterpret_cast<const Tensor*>(rsigma),
                 *reinterpret_cast<const Tensor*>(gamma),
+                *reinterpret_cast<const Tensor*>(beta),
                 reinterpret_cast<Tensor*>(dx),
                 reinterpret_cast<Tensor*>(dgamma),
                 reinterpret_cast<Tensor*>(dbeta),
                 reinterpret_cast<Tensor*>(dgamma_part),
                 reinterpret_cast<Tensor*>(dbeta_part),
+                epsilon,
                 stream,
                 multiprocessorCount,
                 reinterpret_cast<Tensor*>(workspace),
@@ -455,15 +461,17 @@ void nvte_layernorm1p_fwd(const NVTETensor x,       // BxSxhidden_size
 }
 
 void nvte_layernorm1p_bwd(const NVTETensor dz,       // BxSxhidden_size
-                          const NVTETensor x,        // BxSxhidden_size
-                          const NVTETensor mu,       // BxS, FP32!
+                          const NVTETensor z,        // BxSxhidden_size
+                          const NVTETensor x,        // Only needed for dtype
                           const NVTETensor rsigma,   // BxS, FP32!
                           const NVTETensor gamma,    // hidden_size
+                          const NVTETensor beta,     // hidden_size
                           NVTETensor dx,
                           NVTETensor dgamma,
                           NVTETensor dbeta,
                           NVTETensor dgamma_part,
                           NVTETensor dbeta_part,
+                          const float epsilon,
                           cudaStream_t stream,
                           const int multiprocessorCount,
                           NVTETensor workspace,
@@ -471,15 +479,17 @@ void nvte_layernorm1p_bwd(const NVTETensor dz,       // BxSxhidden_size
   NVTE_API_CALL(nvte_layernorm1p_bwd);
   using namespace transformer_engine;
   layernorm_bwd(*reinterpret_cast<const Tensor*>(dz),
+                *reinterpret_cast<const Tensor*>(z),
                 *reinterpret_cast<const Tensor*>(x),
-                *reinterpret_cast<const Tensor*>(mu),
                 *reinterpret_cast<const Tensor*>(rsigma),
                 *reinterpret_cast<const Tensor*>(gamma),
+                *reinterpret_cast<const Tensor*>(beta),
                 reinterpret_cast<Tensor*>(dx),
                 reinterpret_cast<Tensor*>(dgamma),
                 reinterpret_cast<Tensor*>(dbeta),
                 reinterpret_cast<Tensor*>(dgamma_part),
                 reinterpret_cast<Tensor*>(dbeta_part),
+                epsilon,
                 stream,
                 multiprocessorCount,
                 reinterpret_cast<Tensor*>(workspace),

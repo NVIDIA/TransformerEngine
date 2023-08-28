@@ -51,25 +51,29 @@ void nvte_rmsnorm_fwd(const NVTETensor x,
  * of these tensors to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     z                   Forward output tensor of shape [N, H].
+ *  \param[in]     x                   Tensor that shares the same type as the forward input tensor.
  *  \param[in]     rsigma              Reciprocal of the root mean square of the input
  *                                     calculated over the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
  *  \param[out]    dx                  Output gradient of shape [N, H].
  *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
  *  \param[out]    dgamma_part         Storage for partial gamma gradient.
+ *  \param[in]     epsilon             Small constant to avoid numerical instability when dividing
  *  \param[in]     stream              CUDA stream used for the operation.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
 void nvte_rmsnorm_bwd(const NVTETensor dz,
+                      const NVTETensor z,
                       const NVTETensor x,
                       const NVTETensor rsigma,
                       const NVTETensor gamma,
                       NVTETensor dx,
                       NVTETensor dgamma,
                       NVTETensor dgamma_part,
+                      const float epsilon,
                       cudaStream_t stream,
                       const int multiprocessorCount,
                       NVTETensor workspace,
