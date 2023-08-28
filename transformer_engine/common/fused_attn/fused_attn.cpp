@@ -33,7 +33,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           && (head_dim == 64)
           && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
           && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-          && (qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)) {
+          && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
+              || (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD))) {
 #if (CUDNN_VERSION >= 8900)
     backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
 #else
@@ -52,7 +53,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED))) {
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
+	            || ((int)qkv_layout < 10))) { // temporary fix
       flag_m512 = true;
     }
     if (

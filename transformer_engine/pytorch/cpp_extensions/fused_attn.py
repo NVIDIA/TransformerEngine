@@ -501,7 +501,7 @@ def fused_attn_fwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "kv_interleaved",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     rng_gen: torch.Generator = None,
@@ -556,7 +556,7 @@ def fused_attn_fwd_kvpacked(
     fast_zero_fill: bool, default = True
                 if True, initializes the output tensor O to zero using the fast filling method;
                 if False, uses PyTorch's .fill_() method
-    qkv_layout: str, default = "qkv_interleaved"
+    qkv_layout: str, default = "kv_interleaved"
                 layout of QKV; {"qkv_interleaved", "kv_interleaved", "not_interleaved"}
     attn_bias_type: str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias"}
@@ -680,7 +680,7 @@ def fused_attn_bwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "kv_interleaved",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -746,7 +746,7 @@ def fused_attn_bwd_kvpacked(
     fast_zero_fill: bool, default = True
                 if True, initializes the output tensor O to zero using the fast filling method;
                 if False, uses PyTorch's .fill_() method
-    qkv_layout: str, default = "qkv_interleaved"
+    qkv_layout: str, default = "kv_interleaved"
                 layout of QKV; {"qkv_interleaved", "kv_interleaved", "not_interleaved"}
     attn_bias_type: str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias"}
@@ -970,6 +970,7 @@ def fused_attn_fwd_q_k_v(
     check_cu_seqlens(cu_seqlens_kv)
     assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
             ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
+    h = q.shape[-2]
 
     qkv_type = TORCH_DType[qkv_dtype]
 
@@ -979,7 +980,7 @@ def fused_attn_fwd_q_k_v(
     if attn_bias_type != "no_bias":
         assert (attn_bias is not None
                 ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias."
-        assert (attn_bias.shape == [1, h, max_seqlen_q, max_seqlen_kv]
+        assert (attn_bias.shape == torch.Size([1, h, max_seqlen_q, max_seqlen_kv])
                 ), "attn_bias tensor must be in [1, h, max_seqlen_q, max_seqlen_kv] shape."
         assert (attn_bias.dtype == q.dtype
                 ), "attn_bias tensor must be in the same dtype as q and kv."
@@ -1201,8 +1202,4 @@ def fused_attn_bwd_q_k_v(
     torch.cuda.synchronize()
     nvtx.end_range(range_fused)
 
-    if attn_bias_type == "no_bias":
-        # return (d_q, d_k, d_v) when attn_bias_type is no_bias
-        return output_tensors
-    # otherwise return (d_q, d_k, d_v), d_bias
-    return output_tensors[:3], output_tensors[3]
+    return tuple(output_tensors)

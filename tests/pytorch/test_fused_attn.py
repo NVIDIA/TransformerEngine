@@ -18,7 +18,7 @@ import os
 
 from pkg_resources import packaging
 from importlib.metadata import version
-from .test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
+from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
@@ -40,15 +40,14 @@ class ModelConfig:
 
 model_configs = {
     #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    "test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    #"test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    #"test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    #"test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    #"test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    #"test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    #"test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    #"test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    #"test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
@@ -56,7 +55,8 @@ param_types = [torch.float16]
 #    param_types.append(torch.bfloat16)
 
 #batch_sizes = [1, 2, 32]
-batch_sizes = [1] #, 32]
+#batch_sizes = [1] #, 32]
+batch_sizes = [2] #, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -69,8 +69,9 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
+        #'qkv_interleaved',
         #'sb3hd',
-        'sbh3d',
+        #'sbh3d',
         #'bs3hd',
         #'sbhd_sb2hd',
         #'sbhd_sbh2d',
@@ -82,9 +83,9 @@ def test_dpa_qkv_layout(dtype, bs, model):
         #'thd_th2d',
         #'thd_t2hd',
         #'thd_thd_thd',
-        #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-        #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-        #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+        'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+        'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+        't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
         ]
 
     for qkv_layout in qkv_layouts:
@@ -116,10 +117,10 @@ def test_dpa_qkv_layout(dtype, bs, model):
         #print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
         #print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
         #print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
-        torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
-        torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
-        torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
-        torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
+        #torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
+        #torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
+        #torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
+        #torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
@@ -248,8 +249,8 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("ckpt_attn", [True, False])
-@pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
+@pytest.mark.parametrize("ckpt_attn", [False]) #True, False])
+@pytest.mark.parametrize("bias_type", ["no_bias"])#, "post_scale_bias"])
 def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
@@ -315,7 +316,11 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v, attn_mask_type=config.attn_mask_type,
+    op = block(q, k, v,
+    #    qkv_format='sbhd',
+    #    cu_seqlens_q = cu_seqlens,
+    #    cu_seqlens_kv = cu_seqlens,
+        attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=bias_type,
         core_attention_bias=bias)

@@ -763,7 +763,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
         if ctx.attn_bias_type == "no_bias":
             torch.cuda.synchronize()
             range_fused2 = nvtx.start_range("fused-apply-bwd2")
-            ret = (None, None, None, None, None, dq, dk, dv, None, None, None, None,
+            ret = (None, None, None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
             torch.cuda.synchronize()
@@ -773,7 +773,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             #        None, None, None, None, None, None,
             #        None, None, None, None, None, None)
         # else, return (dqkv, dbias)
-        return (None, None, None, None, None, dq, dk, dv, None, None, rest[0], None,
+        return (None, None, None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 

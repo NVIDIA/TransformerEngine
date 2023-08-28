@@ -967,6 +967,10 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}
               ).squeeze(tmp_shape.size() - 2);
+          //printf("mod 1-4, insert: size %d\n",tmp_shape.size());
+          //dQ = torch::zeros_like(O);
+          //dK = torch::zeros_like(O);
+          //dV = torch::zeros_like(O);
           break;
       case 2: // 2HD
           dQ = torch::zeros_like(Q);
@@ -1004,7 +1008,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           dK = torch::zeros_like(K);
           dV = torch::zeros_like(V);
           break;
-          default:
+      default:
           NVTE_ERROR("QKV layout not supported!");
     }
 
