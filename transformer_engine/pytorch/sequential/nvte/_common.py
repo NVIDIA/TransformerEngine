@@ -206,15 +206,11 @@ import torch
 from .. import cpp_extensions
 import typing
 
-raw_handles: list[cpp_extensions.RawTensor] = []
-
 def te_to_torch_tensor(t: cpp_extensions.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    globals()["raw_handles"].append(t._raw)
     return (t.data, t.amax, t.scale, t.scale_inv)
 
 def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tensor:
-    _raw = globals()["raw_handles"].pop(0)
-    return cpp_extensions.Tensor(_raw, *t)
+    return cpp_extensions.Tensor(*t)
 
 def {func.__name__}_aimp{inner_sig}:
     {arg_unwrapping_code}

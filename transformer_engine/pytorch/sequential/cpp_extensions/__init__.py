@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class Tensor:
-    _raw: RawTensor
+    __raw: RawTensor | None
     dtype: DType
     shape: list[int]
     data: torch.Tensor
@@ -20,19 +20,6 @@ class Tensor:
     scale: torch.Tensor
     scale_inv: torch.Tensor
 
-    @overload
-    def __init__(
-        self,
-        _raw: RawTensor,
-        data: torch.Tensor,
-        amax: torch.Tensor,
-        scale: torch.Tensor,
-        scale_inv: torch.Tensor,
-        /,
-    ) -> None:
-        ...
-
-    @overload
     def __init__(
         self,
         data: torch.Tensor,
@@ -43,46 +30,29 @@ class Tensor:
         *,
         dtype_override: DType | None = None,
     ) -> None:
-        ...
-
-    def __init__(
-        self,
-        arg0: torch.Tensor | RawTensor,
-        arg1: torch.Tensor,
-        arg2: torch.Tensor,
-        arg3: torch.Tensor,
-        arg4: torch.Tensor = torch.Tensor(),
-        *,
-        dtype_override: DType | None = None,
-    ):
-        if isinstance(arg0, RawTensor):
-            self._raw = arg0
-            self.shape = list(self._raw.shape)
-            self.data = arg1
-            self.dtype = torch_to_te_dtype(self.data.dtype)
-            self.amax = arg2
-            self.scale = arg3
-            self.scale_inv = arg4
-            return
-        data, amax, scale, scale_inv = arg0, arg1, arg2, arg3
-
         if dtype_override is not None:
             self.dtype = dtype_override
         else:
             self.dtype = torch_to_te_dtype(data.dtype)
         self.shape = list(data.shape)
-        self._raw = RawTensor(
-            data.data_ptr(),
-            self.shape,
-            getattr(DType, "__orig_type__")(self.dtype.value),
-            amax.data_ptr(),
-            scale.data_ptr(),
-            scale_inv.data_ptr(),
-        )
+        self.__raw = None
         self.data = data
         self.amax = amax
         self.scale = scale
         self.scale_inv = scale_inv
+
+    @property
+    def _raw(self) -> RawTensor:
+        if self.__raw is None:
+            self.__raw = RawTensor(
+                self.data.data_ptr(),
+                self.shape,
+                getattr(DType, "__orig_type__")(self.dtype.value),
+                self.amax.data_ptr(),
+                self.scale.data_ptr(),
+                self.scale_inv.data_ptr(),
+            )
+        return self.__raw
 
     def query_shape_dtype(self):
         self.dtype = DType(self._raw.dtype.value)
