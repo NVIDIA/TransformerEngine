@@ -89,11 +89,9 @@ def _wrap_unwrap_code(
     elif issubclass(arg_type, Enum):
         w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
         u = f"    {arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
-    elif arg_type in [int, float, bool, str, torch.Tensor]:
+    else:
         w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}\n"
         u = f"    {arg_name}: {arg_type_name} = {arg_name}_\n"
-    else:
-        raise NotImplementedError(arg_type_name)
     return (w, u)
 
 
