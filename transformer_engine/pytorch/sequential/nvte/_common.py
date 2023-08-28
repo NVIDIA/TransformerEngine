@@ -88,6 +88,7 @@ def _wrap_result_type(result_type: type | GenericAlias) -> Any:
             tensors = len(arg_types)
             types = (torch.Tensor,) * 4 * tensors
             return tuple.__class_getitem__(types)
+    return wrapped_type  # type: ignore
 
 
 def _wrap_unwrap_code(
