@@ -15,6 +15,7 @@ from ..utils import (
     get_return_type,
     exec_saving_source,
     reinterpret_cast,
+    recursive_apply,
 )
 
 
@@ -34,14 +35,17 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
                 return f"{t.__module__}.{t.__name__}"
 
         def wrap_arg_type(arg_type: type):
-            if arg_type is _nvte.Tensor:
-                return Sequence[torch.Tensor]
-            elif issubclass(arg_type, Enum):
-                return int
-            elif arg_type in [int, float, bool, str, torch.Tensor]:
-                return arg_type
-            else:
-                raise NotImplementedError(arg_type)
+            def wrap_single(arg_type: type):
+                if arg_type is _nvte.Tensor:
+                    return Sequence[torch.Tensor]
+                elif issubclass(arg_type, Enum):
+                    return int
+                elif arg_type in [int, float, bool, str, torch.Tensor]:
+                    return arg_type
+                else:
+                    raise NotImplementedError(arg_type)
+
+            return recursive_apply(wrap_single, arg_type)
 
         def wrap_result_type(result_type: type):
             if result_type is _nvte.Tensor:

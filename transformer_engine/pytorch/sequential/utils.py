@@ -1,8 +1,6 @@
-from enum import Enum
 from typing import (
     Any,
     Callable,
-    ClassVar,
     Generic,
     Generator,
     Literal,
@@ -10,9 +8,8 @@ from typing import (
     TypeVar,
     overload,
 )
-from types import GenericAlias, TracebackType, ModuleType
+from types import TracebackType, ModuleType
 from typing_extensions import ParamSpec
-import warnings
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
@@ -205,3 +202,21 @@ class Decorator(Protocol):
 
 def reinterpret_cast(x: Any, t: type[T], /) -> T:
     return x
+
+
+def recursive_apply(
+    func: Callable[[Any], Any],
+    x: Any,
+    pred: Callable[[Any], bool] = lambda _: True,
+    on_false: Callable[[Any], Any] = lambda x: x,
+) -> Any:
+    if pred(x):
+        return func(x)
+    elif isinstance(x, list):
+        return [func(y) for y in x]  # type: ignore
+    elif isinstance(x, tuple):
+        return tuple(func(y) for y in x)  # type: ignore
+    elif isinstance(x, dict):
+        return {k: func(v) for k, v in x.items()}  # type: ignore
+    else:
+        return on_false(x)
