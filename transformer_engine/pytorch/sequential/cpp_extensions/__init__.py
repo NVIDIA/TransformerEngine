@@ -37,7 +37,7 @@ class Tensor:
         self._raw = RawTensor(
             data.data_ptr(),
             self.shape,
-            self.dtype,
+            getattr(DType, "__orig_type__")(self.dtype.value),
             amax.data_ptr(),
             scale.data_ptr(),
             scale_inv.data_ptr(),
