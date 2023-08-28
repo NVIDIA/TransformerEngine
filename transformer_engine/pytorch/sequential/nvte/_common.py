@@ -33,14 +33,14 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
             wrapped_arg_type_name = type_name(wrap_type(arg_type))
             if arg_type is _nvte.Tensor:
-                w = f"{arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
-                u = f"{arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
+                w = f"    {arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
+                u = f"    {arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
             elif issubclass(arg_type, Enum):
-                w = f"{arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
-                u = f"{arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
+                w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
+                u = f"    {arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
             elif arg_type in [int, float, bool, str, torch.Tensor]:
-                w = f"{arg_name}_: {wrapped_arg_type_name} = {arg_name}\n"
-                u = f"{arg_name}: {arg_type_name} = {arg_name}_\n"
+                w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}\n"
+                u = f"    {arg_name}: {arg_type_name} = {arg_name}_\n"
             else:
                 raise NotImplementedError(arg_type_name)
             return (w, u)
@@ -116,6 +116,9 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             for arg_name, arg_type_name in zip(wrapped_arg_names, wrapped_arg_type_names)
         ) }) -> {wrapped_return_type_name}"""
         unwrapped_args = ",".join(f"{arg_name}" for arg_name in arg_names)
+
+        arg_unwrapping_code.lstrip()
+        arg_wrapping_code.lstrip()
 
         source = f"""\
 import torch
