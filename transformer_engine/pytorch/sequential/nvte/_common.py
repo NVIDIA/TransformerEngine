@@ -41,7 +41,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             elif arg_type in [int, float, bool, str, torch.Tensor]:
                 return arg_type
             else:
-                raise NotImplementedError(arg_type_name)
+                raise NotImplementedError(arg_type)
 
         def wrap_result_type(result_type: type):
             if result_type is _nvte.Tensor:
