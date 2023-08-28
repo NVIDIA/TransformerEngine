@@ -183,6 +183,7 @@ def reinterpret_cast(x: Any, t: type[T], /) -> T:
 
 def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     import torch
+    from copy import deepcopy
     from . import cpp_extensions
 
     def make_wrapper(func: Callable[..., Any]):
@@ -222,20 +223,26 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             else:
                 raise NotImplementedError(arg_type_name)
 
-        def register_op(func: Callable[..., Any]):
+        def register_op(func: Callable[..., Any], abstract_impl: Callable[..., Any]):
             name = f"nvte::{func.__name__}"
             # Different versions of PyTorch have different ways of registering custom ops
             try:
-                decl, impl = (torch._custom_ops.custom_op, torch._custom_ops.impl)  # type: ignore
+                decl, impl, aimp = (  # type: ignore
+                    torch._custom_ops.custom_op,  # type: ignore
+                    torch._custom_ops.impl,  # type: ignore
+                    torch._custom_ops.impl_abstract,  # type: ignore
+                )
                 decl(name)(func)
                 impl(name)(func)
+                aimp(name)(abstract_impl)
                 return
             except AttributeError:
                 pass
             try:
-                decl, impl = (torch._custom_op.impl.custom_op, torch._custom_op.impl.CustomOp.impl)  # type: ignore
+                decl = torch._custom_op.impl.custom_op  # type: ignore
                 declared = decl(name)(func)  # type: ignore
                 declared.impl("cuda")(func)  # type: ignore
+                declared.impl_abstract(abstract_impl)  # type: ignore
                 return
             except AttributeError:
                 pass
@@ -295,11 +302,33 @@ def outer_wrapper{outer_sig}:
     return result
 """
         try:
+            # Create abstract implementation
+            abstract_impl = deepcopy(func)
+
+            # Swap real cpp_extensions (_nvte) for impostor that does nothing
+            # This is needed so the abstract implementation is traceable by PyTorch Dynamo
+            class NVTEImpostor:
+                def __getattr__(self, attr_name: str) -> Any:
+                    attr = getattr(cpp_extensions, attr_name)
+                    if callable(attr):
+                        return lambda *args, **kwargs: None  # type: ignore
+                    else:
+                        return attr
+
+            abstract_impl.__globals__["_nvte"] = NVTEImpostor()
+
+            # Create op implementation
             ns = dict(func=func, __name__=__name__)
             exec(source, ns)
-            extracted = reinterpret_cast(ns[func.__name__], Callable[..., Any])
-            register_op(extracted)
+            op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
             outer_wrapper = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
+            # Create op abstract implementation
+            ns = dict(func=abstract_impl, __name__=__name__)
+            exec(source, ns)
+            op_aimp = reinterpret_cast(ns[func.__name__], Callable[..., Any])
+            # Register inner wrapper as torch op
+            register_op(op_impl, op_aimp)
+
             return outer_wrapper
         except Exception as e:
             raise RuntimeError(
