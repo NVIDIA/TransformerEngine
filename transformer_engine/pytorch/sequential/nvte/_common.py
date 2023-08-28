@@ -8,6 +8,7 @@ from enum import Enum
 
 import torch
 from .. import cpp_extensions as _nvte
+from .. import cpp_extensions
 from ..utils import (
     PS,
     T,
