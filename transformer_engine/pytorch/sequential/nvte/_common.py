@@ -75,12 +75,16 @@ def _result_type_wrap_func(result_type: type):
 
 def _wrap_result_type(result_type: type | GenericAlias) -> Any:
     wrapped_type = _wrap_type(_result_type_wrap_func, result_type)
+
+    def is_generic_tuple(t: type) -> bool:
+        return is_generic(t) and (reinterpret_cast(t, GenericAlias).__origin__ is tuple)
+
     # Flatten tuple of tuples of tensors
-    if issubclass(wrapped_type, tuple):
+    if is_generic_tuple(wrapped_type):
         arg_types = typing.get_args(wrapped_type)
-        if any(issubclass(arg_type, tuple) for arg_type in arg_types):
+        if any(is_generic_tuple(arg_type) for arg_type in arg_types):
             assert all(
-                issubclass(arg_type, tuple)
+                is_generic_tuple(arg_type)
                 and typing.get_args(arg_type)
                 == (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor)
                 for arg_type in arg_types
