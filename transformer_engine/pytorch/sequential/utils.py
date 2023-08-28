@@ -8,7 +8,7 @@ from typing import (
     TypeVar,
     overload,
 )
-from types import TracebackType, ModuleType
+from types import TracebackType, ModuleType, GenericAlias
 from typing_extensions import ParamSpec
 
 PS = ParamSpec("PS")
@@ -204,21 +204,18 @@ def reinterpret_cast(x: Any, t: type[T], /) -> T:
     return x
 
 
-def recursive_apply(
-    func: Callable[[Any], Any],
-    x: Any,
-    pred: Callable[[Any], bool] = lambda x: not (
-        isinstance(x, list) or isinstance(x, tuple) or isinstance(x, dict)
-    ),
-    on_false: Callable[[Any], Any] = lambda x: x,
-) -> Any:
-    if pred(x):
-        return func(x)
-    elif isinstance(x, list):
-        return [func(y) for y in x]  # type: ignore
-    elif isinstance(x, tuple):
-        return tuple(func(y) for y in x)  # type: ignore
-    elif isinstance(x, dict):
-        return {k: func(v) for k, v in x.items()}  # type: ignore
-    else:
-        return on_false(x)
+@overload
+def is_generic(t: type) -> Literal[False]:
+    ...
+
+
+@overload
+def is_generic(t: GenericAlias) -> Literal[True]:
+    ...
+
+
+def is_generic(t: type | GenericAlias):
+    from types import GenericAlias
+    from typing import _SpecialGenericAlias, _GenericAlias  # type: ignore
+
+    return isinstance(t, GenericAlias | _SpecialGenericAlias | _GenericAlias)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 from collections import namedtuple
 from typing import Any, Callable, Sequence
+from types import GenericAlias
+import typing
 import warnings
 from enum import Enum
-from types import GenericAlias
-from typing import _SpecialGenericAlias, _GenericAlias  # type: ignore
+
 import torch
 from .. import cpp_extensions as _nvte
 from ..utils import (
@@ -15,14 +16,14 @@ from ..utils import (
     get_return_type,
     exec_saving_source,
     reinterpret_cast,
-    recursive_apply,
+    is_generic,
 )
 
 
 def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
-            if isinstance(t, GenericAlias | _SpecialGenericAlias | _GenericAlias):
+            if is_generic(t):
                 return str(t)
             if t.__module__ == "builtins":
                 return t.__name__
@@ -34,24 +35,41 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             else:
                 return f"{t.__module__}.{t.__name__}"
 
-        def wrap_arg_type(arg_type: type):
-            def wrap_single(arg_type: type):
-                if arg_type is _nvte.Tensor:
-                    return Sequence[torch.Tensor]
-                elif issubclass(arg_type, Enum):
-                    return int
-                elif arg_type in [int, float, bool, str, torch.Tensor]:
-                    return arg_type
-                else:
-                    raise NotImplementedError(arg_type)
+        def wrap_type(
+            type_wrap_func: Callable[[type], type],
+            arg_type_: type | GenericAlias,
+        ) -> Any:
+            if is_generic(arg_type_):
+                arg_type_ = reinterpret_cast(arg_type_, GenericAlias)
+                origin = arg_type_.__origin__
+                args: tuple[type | GenericAlias, ...] = typing.get_args(arg_type_)
+                new_args = [wrap_type(type_wrap_func, arg) for arg in args]
+                return origin[*new_args]  # type: ignore
+            else:
+                arg_type_ = reinterpret_cast(arg_type_, type)
+                return type_wrap_func(arg_type)
 
-            return recursive_apply(wrap_single, arg_type)
+        def arg_type_wrap_func(arg_type: type):
+            if arg_type is _nvte.Tensor:
+                return Sequence[torch.Tensor]
+            elif issubclass(arg_type, Enum):
+                return int
+            elif arg_type in [int, float, bool, str, torch.Tensor]:
+                return arg_type
+            else:
+                raise NotImplementedError(arg_type)
 
-        def wrap_result_type(result_type: type):
+        def wrap_arg_type(arg_type: type | GenericAlias) -> Any:
+            return wrap_type(arg_type_wrap_func, arg_type)
+
+        def result_type_wrap_func(result_type: type):
             if result_type is _nvte.Tensor:
                 return tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
             else:
-                return wrap_arg_type(result_type)
+                return arg_type_wrap_func(result_type)
+
+        def wrap_result_type(result_type: type | GenericAlias) -> Any:
+            return wrap_type(result_type_wrap_func, result_type)
 
         def wrap_unwrap_code(
             arg_name: str,
