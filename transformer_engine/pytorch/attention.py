@@ -1271,7 +1271,6 @@ class DotProductAttention(torch.nn.Module):
                 )
 
         if use_flash_attention:
-            print('--------- flash')
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
@@ -1288,7 +1287,6 @@ class DotProductAttention(torch.nn.Module):
                                                             attn_mask_type = attn_mask_type)
 
         if use_fused_attention:
-            print('--------- fused', int(fused_attention_backend))
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                               query_layer,
@@ -1312,7 +1310,6 @@ class DotProductAttention(torch.nn.Module):
                               core_attention_bias = core_attention_bias,
                               fast_zero_fill = fast_zero_fill)
 
-        print('--------- unfused')
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
                 self.unfused_attention,

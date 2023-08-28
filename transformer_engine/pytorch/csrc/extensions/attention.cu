@@ -935,9 +935,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   switch (layout_mod) {
       case 0: // 3HD
           tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
-          printf("mod 0, insert: size %d\n",tmp_shape.size());
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
-          printf("mod 0, insert: size %d\n",tmp_shape.size());
           dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
           dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1),
@@ -954,9 +952,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           break;
       case 1: // H3D
           tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
-          printf("mod 1, insert: size %d\n",tmp_shape.size());
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
-          printf("mod 1, insert: size %d\n",tmp_shape.size());
           dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
           dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}
@@ -967,17 +963,11 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}
               ).squeeze(tmp_shape.size() - 2);
-          //printf("mod 1-4, insert: size %d\n",tmp_shape.size());
-          //dQ = torch::zeros_like(O);
-          //dK = torch::zeros_like(O);
-          //dV = torch::zeros_like(O);
           break;
       case 2: // 2HD
           dQ = torch::zeros_like(Q);
           tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
-          printf("mod 2, insert: size %d\n",tmp_shape.size());
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
-          printf("mod 2, insert: size %d\n",tmp_shape.size());
           dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
           dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1),
@@ -991,9 +981,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
       case 3: // H2D
           dQ = torch::zeros_like(Q);
           tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
-          printf("mod 3, insert: size %d\n",tmp_shape.size());
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
-          printf("mod 3, insert: size %d\n",tmp_shape.size());
           dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
           dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}
@@ -1003,7 +991,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
               ).squeeze(tmp_shape.size() - 2);
           break;
       case 4: // HD
-          printf("mod 4, insert: size \n");//%d\n",qkv_shape.size());
           dQ = torch::zeros_like(Q);
           dK = torch::zeros_like(K);
           dV = torch::zeros_like(V);
