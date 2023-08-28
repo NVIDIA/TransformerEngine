@@ -56,7 +56,7 @@ def _arg_type_wrap_func(arg_type: type):
         return Sequence[torch.Tensor]
     elif issubclass(arg_type, Enum):
         return int
-    elif arg_type in [int, float, bool, str, torch.Tensor]:
+    elif issubclass(arg_type, (int, float, bool, str, torch.Tensor)):
         return arg_type
     else:
         raise NotImplementedError(arg_type)
@@ -74,7 +74,20 @@ def _result_type_wrap_func(result_type: type):
 
 
 def _wrap_result_type(result_type: type | GenericAlias) -> Any:
-    return _wrap_type(_result_type_wrap_func, result_type)
+    wrapped_type = _wrap_type(_result_type_wrap_func, result_type)
+    # Flatten tuple of tuples of tensors
+    if issubclass(wrapped_type, tuple):
+        arg_types = typing.get_args(wrapped_type)
+        if any(arg_type is tuple for arg_type in arg_types):
+            assert all(
+                issubclass(arg_type, tuple)
+                and typing.get_args(arg_type)
+                == (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor)
+                for arg_type in arg_types
+            )
+            tensors = len(arg_types)
+            types = (torch.Tensor,) * 4 * tensors
+            return tuple.__class_getitem__(types)
 
 
 def _wrap_unwrap_code(
@@ -86,6 +99,11 @@ def _wrap_unwrap_code(
     if arg_type is _nvte.Tensor:
         w = f"    {arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
         u = f"    {arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
+    elif issubclass(arg_type, tuple) and all(
+        sub_type is _nvte.Tensor for sub_type in typing.get_args(arg_type)
+    ):
+        w = f"    {arg_name}_: {wrapped_arg_type_name} = tuple(t for tensor in {arg_name} for t in te_to_torch_tensor(tensor))\n"
+        u = f"    {arg_name}: {arg_type_name} = tuple(torch_to_te_tensor(*({arg_name}_[j] for j in range(i, i + 4, 1))) for i in range(0, len({arg_name}_), 4))\n"
     elif issubclass(arg_type, Enum):
         w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
         u = f"    {arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
