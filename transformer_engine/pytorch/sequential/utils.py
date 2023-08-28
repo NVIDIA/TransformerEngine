@@ -182,8 +182,8 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
         sources = list[str]()
 
         def patched_getlines(filename: str, module_globals: Any = None):
-            if filename.startswith("<exec#") and filename.endswith(">"):
-                index = int(filename[len("<exec#") : -1])
+            if "<exec#" in filename:
+                index = int(filename.split("#")[1].split(">")[0])
                 return sources[index].splitlines(True)
             else:
                 return old_getlines(filename, module_globals)
