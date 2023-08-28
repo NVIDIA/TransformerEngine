@@ -293,8 +293,6 @@ transpose_dbias_kernel_notaligned(const Param param,
       }
     }
     OVec out_trans[nvec_in];  // NOLINT(*)
-    const bool valid_store = my_place < tile_length &&
-                             warp_id_in_tile * n_iterations + i < tile_height;
     transpose_regs_partial_dbias(
                     in[current_in ^ 1],
                     out_trans,
