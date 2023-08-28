@@ -78,7 +78,7 @@ def _wrap_result_type(result_type: type | GenericAlias) -> Any:
     # Flatten tuple of tuples of tensors
     if issubclass(wrapped_type, tuple):
         arg_types = typing.get_args(wrapped_type)
-        if any(arg_type is tuple for arg_type in arg_types):
+        if any(issubclass(arg_type, tuple) for arg_type in arg_types):
             assert all(
                 issubclass(arg_type, tuple)
                 and typing.get_args(arg_type)
