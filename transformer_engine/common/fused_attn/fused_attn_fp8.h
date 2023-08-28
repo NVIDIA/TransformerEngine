@@ -46,6 +46,7 @@ void fused_attn_fp8_bwd_qkvpacked(
             Tensor *workspace,
             cudaStream_t stream,
             cudnnHandle_t handle);
+
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd_q_k_v(
             size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,

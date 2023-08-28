@@ -1403,20 +1403,6 @@ void fused_attn_max_512_fwd_q_k_v(size_t batch, size_t q_max_seqlen, size_t kv_m
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    //NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-    //           "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
-    //NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
-    //               bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
-    //           "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512.");
-
-    //// Q shape is [b, s, h, d]
-    //void *devPtrQ = input_Q->data.dptr;
-
-    //// KV shape is [b, s, 2, h, d]
-    //const auto stride = 2 * num_head * head_dim;
-    //void *devPtrK = input_KV->data.dptr;
-    //void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrK) + stride);
-
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
@@ -1615,25 +1601,15 @@ void fused_attn_max_512_bwd_q_k_v(size_t batch, size_t q_max_seqlen, size_t kv_m
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    //NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-    //           "qkv_layout must be NVTE_KV_INTERLEAVED.");
-
-    // Q shape is [b, s, h, d]
-    // KV shape is [b, s, 2, h, d]
-    //auto stride = 2 * num_head * head_dim;
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
-    //void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrK) + stride);
 
     void *devPtrdO = input_dO->data.dptr;
 
-    // dQ shape is [b, s, h, d]
-    // dKV shape is [b, s, 2, h, d]
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdK = output_dK->data.dptr;
     void *devPtrdV = output_dV->data.dptr;
-    //void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdK) + stride);
 
     void *devPtrdBias = output_dBias->data.dptr;
 

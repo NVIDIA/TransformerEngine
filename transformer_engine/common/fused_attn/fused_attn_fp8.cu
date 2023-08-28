@@ -2067,13 +2067,9 @@ void fused_attn_fp8_fwd_q_k_v(
             cudaStream_t stream,
             cudnnHandle_t handle) {
   using namespace transformer_engine;
-  // QKV shape is [total_seqs, 3, h, d]
   void* devPtrQ = input_Q->data.dptr;
   void* devPtrK = input_K->data.dptr;
   void* devPtrV = input_V->data.dptr;
-  //void* devPtrQ = reinterpret_cast<void *>(devPtrQKV);
-  //void* devPtrK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + h * d);
-  //void* devPtrV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + 2 * h * d);
   void* devPtrDescaleQ = input_Q->scale_inv.dptr;
   void* devPtrDescaleK = input_Q->scale_inv.dptr;
   void* devPtrDescaleV = input_Q->scale_inv.dptr;
@@ -2178,9 +2174,6 @@ void fused_attn_fp8_bwd_q_k_v(
   void* devPtrQ = input_Q->data.dptr;
   void* devPtrK = input_K->data.dptr;
   void* devPtrV = input_V->data.dptr;
-  //void* devPtrQ = reinterpret_cast<void *>(devPtrQKV);
-  //void* devPtrK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + h * d);
-  //void* devPtrV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrQKV) + 2 * h * d);
   void* devPtrDescaleQ = input_Q->scale_inv.dptr;
   void* devPtrDescaleK = input_Q->scale_inv.dptr;
   void* devPtrDescaleV = input_Q->scale_inv.dptr;
@@ -2199,13 +2192,9 @@ void fused_attn_fp8_bwd_q_k_v(
   void* devPtrScaledS = input_output_dP->scale.dptr;
   void* devPtrDescaledS = input_output_dP->scale_inv.dptr;
 
-  // dQKV shape is [total_seqs, 3, h, d]
   void* devPtrdQ = output_dQ->data.dptr;
   void* devPtrdK = output_dK->data.dptr;
   void* devPtrdV = output_dV->data.dptr;
-  //void* devPtrdQ = reinterpret_cast<void *>(devPtrdQKV);
-  //void* devPtrdK = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrdQKV) + h * d);
-  //void* devPtrdV = reinterpret_cast<void *>(reinterpret_cast<int8_t*>(devPtrdQKV) + 2 * h * d);
   void* devPtrAmaxdQ = output_dQ->amax.dptr;
   void* devPtrAmaxdK = output_dQ->amax.dptr;
   void* devPtrAmaxdV = output_dQ->amax.dptr;

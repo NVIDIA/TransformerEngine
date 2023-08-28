@@ -719,10 +719,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
 
 // fused attention FWD with separate Q, K and V tensors
 std::vector<at::Tensor> fused_attn_fwd_q_k_v(
-                //size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t max_seqlen_q, size_t max_seqlen_kv,
-                //size_t total_seqs_q, size_t total_seqs_kv,
-                //size_t h, size_t d,
                 bool is_training, float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens_q,
@@ -731,7 +728,6 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                 const at::Tensor K,
                 const at::Tensor V,
                 const transformer_engine::DType qkv_type,
-                //const at::Tensor qkvso_strides,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> scale_S,
                 const c10::optional<at::Tensor> scale_O,
@@ -748,6 +744,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   std::vector<size_t> k_shape{k_sizes.begin(), k_sizes.end()};
   auto v_sizes = V.sizes().vec();
   std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
+
   // create output tensor O
   auto O = torch::zeros_like(Q);
   //auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
@@ -762,7 +759,6 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias;
-  //TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv, te_qkvso_strides;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
@@ -808,14 +804,10 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
   std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
-  //auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
-  //std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
   te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-  //te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-  //                  DType::kInt64, nullptr, nullptr, nullptr);
 
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -846,7 +838,6 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                   &nvte_aux_tensor_pack,
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  //te_qkvso_strides.data(),
                   te_rng_state.data(),
                   max_seqlen_q, max_seqlen_kv,
                   is_training, attn_scale, p_dropout,
@@ -866,7 +857,13 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     auto tensor = reinterpret_cast<transformer_engine::Tensor*>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
-    auto output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    at::Tensor output_tensor;
+    if (nvte_aux_tensor_pack.size >= 2) {
+        output_tensor = (i < nvte_aux_tensor_pack.size-1)
+            ? allocateSpace(tensor->data.shape, tensor->data.dtype, false) : rng_state;
+    } else {
+        output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+    }
     output_tensors.push_back(output_tensor);
     tensor->data.dptr = output_tensor.data_ptr();
   }
@@ -882,7 +879,6 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                   &nvte_aux_tensor_pack,
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  //te_qkvso_strides.data(),
                   te_rng_state.data(),
                   max_seqlen_q, max_seqlen_kv,
                   is_training, attn_scale, p_dropout,
@@ -899,10 +895,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
 
 // fused attention BWD with separate Q, K and V
 std::vector<at::Tensor> fused_attn_bwd_q_k_v(
-                //size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t max_seqlen_q, size_t max_seqlen_kv,
-                //size_t total_seqs_q, size_t total_seqs_kv,
-                //size_t h, size_t d,
                 float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                 const at::Tensor cu_seqlens_q,
@@ -913,7 +906,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
-                //const at::Tensor qkvso_strides,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
@@ -941,79 +933,79 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   int layout_mod = (int)qkv_layout % 5;
   std::vector<int64_t> tmp_shape;
   switch (layout_mod) {
-	  case 0: //3HD
-                  tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
-		  printf("mod 0, insert: size %d\n",tmp_shape.size());
-		  tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
-		  printf("mod 0, insert: size %d\n",tmp_shape.size());
-		  dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
-                  dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 3);
-                  dK = dQKV.index({"...", torch::indexing::Slice(1, 2, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 3);
-                  dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 3);
-		  break;
-	  case 1: // H3D
-                  tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
-		  printf("mod 1, insert: size %d\n",tmp_shape.size());
-		  tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
-		  printf("mod 1, insert: size %d\n",tmp_shape.size());
-		  dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
-                  dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 2);
-                  dK = dQKV.index({"...", torch::indexing::Slice(1, 2, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 2);
-                  dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 2);
-		  break;
-	  case 2: // 2HD
-                  dQ = torch::zeros_like(Q);
-                  tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
-		  printf("mod 2, insert: size %d\n",tmp_shape.size());
-		  tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
-		  printf("mod 2, insert: size %d\n",tmp_shape.size());
-		  dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
-                  dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 3);
-                  dV = dKV.index({"...", torch::indexing::Slice(1, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 3);
-		  break;
-	  case 3: // H2D
-                  dQ = torch::zeros_like(Q);
-                  tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
-		  printf("mod 3, insert: size %d\n",tmp_shape.size());
-		  tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
-		  printf("mod 3, insert: size %d\n",tmp_shape.size());
-		  dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
-                  dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 2);
-                  dV = dKV.index({"...", torch::indexing::Slice(1, torch::indexing::None, 1),
-				  torch::indexing::Slice(0, torch::indexing::None, 1)}
-				  ).squeeze(tmp_shape.size() - 2);
-		  break;
-	  case 4: // HD
-		  printf("mod 4, insert: size \n");//%d\n",qkv_shape.size());
-                  dQ = torch::zeros_like(Q);
-                  dK = torch::zeros_like(K);
-                  dV = torch::zeros_like(V);
-		  break;
+      case 0: // 3HD
+          tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
+          printf("mod 0, insert: size %d\n",tmp_shape.size());
+          tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
+          printf("mod 0, insert: size %d\n",tmp_shape.size());
+          dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
+          dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 3);
+          dK = dQKV.index({"...", torch::indexing::Slice(1, 2, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 3);
+          dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 3);
+          break;
+      case 1: // H3D
+          tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
+          printf("mod 1, insert: size %d\n",tmp_shape.size());
+          tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
+          printf("mod 1, insert: size %d\n",tmp_shape.size());
+          dQKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
+          dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 2);
+          dK = dQKV.index({"...", torch::indexing::Slice(1, 2, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 2);
+          dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 2);
+          break;
+      case 2: // 2HD
+          dQ = torch::zeros_like(Q);
+          tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
+          printf("mod 2, insert: size %d\n",tmp_shape.size());
+          tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
+          printf("mod 2, insert: size %d\n",tmp_shape.size());
+          dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
+          dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 3);
+          dV = dKV.index({"...", torch::indexing::Slice(1, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 3);
+          break;
+      case 3: // H2D
+          dQ = torch::zeros_like(Q);
+          tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
+          printf("mod 3, insert: size %d\n",tmp_shape.size());
+          tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
+          printf("mod 3, insert: size %d\n",tmp_shape.size());
+          dKV = torch::zeros(c10::IntArrayRef(tmp_shape), options);
+          dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 2);
+          dV = dKV.index({"...", torch::indexing::Slice(1, torch::indexing::None, 1),
+              torch::indexing::Slice(0, torch::indexing::None, 1)}
+              ).squeeze(tmp_shape.size() - 2);
+          break;
+      case 4: // HD
+          printf("mod 4, insert: size \n");//%d\n",qkv_shape.size());
+          dQ = torch::zeros_like(Q);
+          dK = torch::zeros_like(K);
+          dV = torch::zeros_like(V);
+          break;
           default:
-		  NVTE_ERROR("QKV layout not supported!");
+          NVTE_ERROR("QKV layout not supported!");
     }
 
 //  // create output tensors dQ and dKV
@@ -1053,12 +1045,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
     te_dBias = makeTransformerEngineTensor(dBias);
   }
 
-//  auto q_sizes = Q.sizes().vec();
-//  std::vector<size_t> q_shape{q_sizes.begin(), q_sizes.end()};
-//  auto k_sizes = K.sizes().vec();
-//  std::vector<size_t> k_shape{k_sizes.begin(), k_sizes.end()};
-//  auto v_sizes = V.sizes().vec();
-//  std::vector<size_t> v_shape{v_sizes.begin(), v_sizes.end()};
   // construct NVTE tensors
   TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
@@ -1125,15 +1111,11 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
   std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
-  //auto qkvso_strides_sizes = qkvso_strides.sizes().vec();
-  //std::vector<size_t> qkvso_strides_shape{qkvso_strides_sizes.begin(), qkvso_strides_sizes.end()};
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv, te_qkvso_strides;
   te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
   te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
                     DType::kInt32, nullptr, nullptr, nullptr);
-  //te_qkvso_strides = makeTransformerEngineTensor(qkvso_strides.data_ptr(), qkvso_strides_shape,
-  //                  DType::kInt64, nullptr, nullptr, nullptr);
 
   // convert auxiliary tensors from forward to NVTETensors
   NVTETensorPack nvte_aux_tensor_pack;
@@ -1166,7 +1148,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                   te_dBias.data(),
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  //te_qkvso_strides.data(),
                   max_seqlen_q, max_seqlen_kv,
                   attn_scale, p_dropout,
                   qkv_layout, bias_type, attn_mask_type,
@@ -1195,7 +1176,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                   te_dBias.data(),
                   te_cu_seqlens_q.data(),
                   te_cu_seqlens_kv.data(),
-                  //te_qkvso_strides.data(),
                   max_seqlen_q, max_seqlen_kv,
                   attn_scale, p_dropout,
                   qkv_layout, bias_type, attn_mask_type,

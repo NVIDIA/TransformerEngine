@@ -846,7 +846,6 @@ def fused_attn_fwd_q_k_v(
     k: torch.Tensor,
     v: torch.Tensor,
     qkv_dtype: tex.DType,
-    #qkvso_strides: torch.Tensor,
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     attn_bias: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
@@ -862,7 +861,7 @@ def fused_attn_fwd_q_k_v(
     attn_mask_type: str = "padding",
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
-    """Fused Attention FWD for packed KV input.
+    """Fused Attention FWD for separate QKV input.
 
     Parameters
     ----------
@@ -873,7 +872,7 @@ def fused_attn_fwd_q_k_v(
                 max sequence length for Q, used for padding; may be larger than max(seqlens_q),
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     max_seqlen_kv: int
-                max sequence length for KV, used for padding; may be larger than max(seqlens_kv),
+                max sequence length for K and V, used for padding; may be larger than max(seqlens_kv),
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     cu_seqlens_q: torch.Tensor
                 cumulative sequence lengths for Q; shape [batch_size + 1]
@@ -881,7 +880,8 @@ def fused_attn_fwd_q_k_v(
                 cumulative sequence lengths for K and V; shape [batch_size + 1]
     q: torch.Tensor
                 input tensor Q;
-                shape [total_seqs_q, num_heads, head_dim], where total_seqs_q = cu_seqlens_q[-1],
+                shape [total_seqs_q, num_heads, head_dim],
+                where total_seqs_q = cu_seqlens_q[-1],
                 or [batch_size, seqlen_q, num_heads, head_dim],
                 or [seqlen_q, batch_size, num_heads, head_dim]
     k: torch.Tensor
@@ -898,8 +898,6 @@ def fused_attn_fwd_q_k_v(
                 or [seqlen_kv, batch_size, num_heads, head_dim]
     qkv_dtype: tex.DType
                 data type of Q, K and V; in tex.DType, not torch.dtype
-    #qkvso_strides: torch.Tensor 
-    #            strides for Q, K, V, K', V', S and O, shape [7, 4]
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
     attn_bias: torch.Tensor, default = None
@@ -968,14 +966,12 @@ def fused_attn_fwd_q_k_v(
                     [seed, offset], dtype uint64
     """
 
-    #check_cu_seqlens(cu_seqlens_q)
-    #check_cu_seqlens(cu_seqlens_kv)
-    #assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
-    #        ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
-    #b = cu_seqlens_q.numel() - 1
+    check_cu_seqlens(cu_seqlens_q)
+    check_cu_seqlens(cu_seqlens_kv)
+    assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
+            ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
+
     qkv_type = TORCH_DType[qkv_dtype]
-    #h = q.size(1)
-    #d = q.size(2)
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
@@ -1009,12 +1005,9 @@ def fused_attn_fwd_q_k_v(
     range_fused = nvtx.start_range("fused-fwd-cppext")
     # execute kernel
     output_tensors = tex.fused_attn_fwd_q_k_v(
-            #b, max_seqlen_q, max_seqlen_kv, total_seqs_q, total_seqs_kv, h, d,
-            max_seqlen_q, max_seqlen_kv,
-            is_training, attn_scale, dropout, fast_zero_fill,
+            max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            #cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype, qkvso_strides,
-            cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype, #qkvso_strides,
+            cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
             d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
@@ -1036,7 +1029,6 @@ def fused_attn_bwd_q_k_v(
     o: torch.Tensor,
     d_o: torch.Tensor,
     qkv_dtype: tex.DType,
-    #qkvso_strides: torch.Tensor,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     d_scale_qkv: torch.Tensor = None,
@@ -1063,7 +1055,8 @@ def fused_attn_bwd_q_k_v(
                 max sequence length for Q, used for padding; may be larger than max(seqlens_q),
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     max_seqlen_kv: int
-                max sequence length for KV, used for padding; may be larger than max(seqlens_kv),
+                max sequence length for K and V, used for padding;
+                may be larger than max(seqlens_kv),
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     cu_seqlens_q: torch.Tensor
                 cumulative sequence lengths for Q; shape [batch_size + 1]
@@ -1071,7 +1064,8 @@ def fused_attn_bwd_q_k_v(
                 cumulative sequence lengths for K and V; shape [batch_size + 1]
     q: torch.Tensor
                 input tensor Q;
-                shape [total_seqs_q, num_heads, head_dim], where total_seqs_q = cu_seqlens_q[-1],
+                shape [total_seqs_q, num_heads, head_dim],
+                where total_seqs_q = cu_seqlens_q[-1],
                 or [batch_size, seqlen_q, num_heads, head_dim],
                 or [seqlen_q, batch_size, num_heads, head_dim]
     k: torch.Tensor
@@ -1093,9 +1087,7 @@ def fused_attn_bwd_q_k_v(
                 input tensor dO (gradient of O); same data type as Q, K and V;
                 same shape as Q
     qkv_dtype: tex.DType
-                data type of QKV; in tex.DType, not torch.dtype
-    #qkvso_strides: torch.Tensor 
-    #            strides for Q, K, V, K', V', S and O, shape [7, 4]
+                data type of Q, K and V; in tex.DType, not torch.dtype
     aux_ctx_tensors: List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -1152,26 +1144,12 @@ def fused_attn_bwd_q_k_v(
                 or "post_scale_bias"; same data type and shape as Bias
     """
 
-    #check_cu_seqlens(cu_seqlens_q)
-    #check_cu_seqlens(cu_seqlens_kv)
-    #assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
-    #        ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
-    b = cu_seqlens_q.numel() - 1
-    qkv_type = TORCH_DType[qkv_dtype]
-    #check_q(q, qkv_type)
-    #check_q(k, qkv_type)
-    #check_q(v, qkv_type)
-    #check_kv(kv, qkv_type)
-    #check_o(o, qkv_type)
-    #check_o(d_o, qkv_type)
+    check_cu_seqlens(cu_seqlens_q)
+    check_cu_seqlens(cu_seqlens_kv)
+    assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
+            ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
 
-    #assert (q.size(1) == kv.size(2)
-    #        and q.size(2) == kv.size(3)
-    #        ), "Q and K and V must have the same num_heads and head_dim."
-    #total_seqs_q = q.size(0)
-    #total_seqs_kv = q.size(0)
-    h = q.size(1)
-    #d = q.size(2)
+    qkv_type = TORCH_DType[qkv_dtype]
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
@@ -1214,11 +1192,8 @@ def fused_attn_bwd_q_k_v(
     range_fused = nvtx.start_range("fused-bwd-cppext")
     # execute kernel
     output_tensors = tex.fused_attn_bwd_q_k_v(
-            #b, max_seqlen_q, max_seqlen_kv, total_seqs_q, total_seqs_kv, h, d,
-            max_seqlen_q, max_seqlen_kv,
-            attn_scale, dropout, fast_zero_fill,
+            max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
-            #cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, qkvso_strides, aux_ctx_tensors,
             cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, aux_ctx_tensors,
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
@@ -1226,10 +1201,6 @@ def fused_attn_bwd_q_k_v(
     torch.cuda.synchronize()
     nvtx.end_range(range_fused)
 
-    #print('cpp_ext: q_k_v backward:',output_tensors[2][0,1,:,:])
-    print('cpp_ext: q_k_v backward:',output_tensors[0].shape)#[0,1,:,:])
-    print('cpp_ext: q_k_v backward:',output_tensors[1].shape)#[0,1,:,:])
-    print('cpp_ext: q_k_v backward:',output_tensors[2].shape)#[0,1,:,:])
     if attn_bias_type == "no_bias":
         # return (d_q, d_k, d_v) when attn_bias_type is no_bias
         return output_tensors

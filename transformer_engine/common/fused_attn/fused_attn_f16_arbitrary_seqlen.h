@@ -46,8 +46,7 @@ void fused_attn_arbitrary_seqlen_fwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                       const Tensor *input_V, const Tensor *input_Bias,
                                       Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
                                       const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-                                     // const Tensor *qkvso_strides, 
-				      const Tensor *rng_state,
+                                      const Tensor *rng_state,
                                       Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -60,8 +59,7 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                                       Tensor *output_dQ, Tensor *output_dK,
                                       Tensor *output_dV, Tensor *output_dBias,
                                       const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-                                     // const Tensor *qkvso_strides, 
-				      const Tensor *rng_state,
+                                      const Tensor *rng_state,
                                       Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
 #endif  // CUDNN_VERSION >= 8900

@@ -107,11 +107,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 c10::optional<at::Tensor> amax_dQKV);
 
 std::vector<at::Tensor> fused_attn_fwd_q_k_v(
-                //size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
-                size_t max_seqlen_q, size_t max_seqlen_kv,
-                //size_t total_seqs_q, size_t total_seqs_kv,
-                //size_t h, size_t d, 
-                bool is_training,
+                size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                 float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout,
                 NVTE_Bias_Type bias_type,
@@ -133,12 +129,8 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                 size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_q_k_v(
-                //size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t max_seqlen_q, size_t max_seqlen_kv,
-                //size_t total_seqs_q, size_t total_seqs_kv,
-                //size_t h, size_t d, 
-                float attn_scale,
-                float p_dropout, bool set_zero,
+                float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout,
                 NVTE_Bias_Type bias_type,
                 NVTE_Mask_Type attn_mask_type,
@@ -150,7 +142,6 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                 const at::Tensor O,
                 const at::Tensor dO,
                 const transformer_engine::DType qkv_type,
-                //const at::Tensor qkvso_strides,
                 const std::vector<at::Tensor> Aux_CTX_Tensors,
                 const c10::optional<at::Tensor> descale_QKV,
                 const c10::optional<at::Tensor> descale_S,
