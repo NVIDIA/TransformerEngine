@@ -39,11 +39,9 @@ def _wrap_type(
     arg_type_: type | GenericAlias,
 ) -> Any:
     if is_generic(arg_type_):
-        if TYPE_CHECKING:
-            assert isinstance(arg_type_, GenericAlias)
-        origin = arg_type_.__origin__
-        while hasattr(origin, "__origin__"):
-            origin = getattr(origin, "__origin__")
+        origin = arg_type_.__origin__  # type: ignore
+        while hasattr(origin, "__origin__"):  # type: ignore
+            origin = getattr(origin, "__origin__")  # type: ignore
         args: tuple[type | GenericAlias, ...] = typing.get_args(arg_type_)
         new_args = tuple(_wrap_type(type_wrap_func, arg) for arg in args)
         return origin.__class_getitem__(new_args)  # type: ignore
