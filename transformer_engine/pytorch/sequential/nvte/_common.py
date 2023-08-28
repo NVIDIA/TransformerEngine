@@ -33,8 +33,28 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             else:
                 return f"{t.__module__}.{t.__name__}"
 
-        def wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
-            wrapped_arg_type_name = type_name(wrap_type(arg_type))
+        def wrap_arg_type(arg_type: type):
+            if arg_type is _nvte.Tensor:
+                return Sequence[torch.Tensor]
+            elif issubclass(arg_type, Enum):
+                return int
+            elif arg_type in [int, float, bool, str, torch.Tensor]:
+                return arg_type
+            else:
+                raise NotImplementedError(arg_type_name)
+
+        def wrap_result_type(result_type: type):
+            if result_type is _nvte.Tensor:
+                return tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            else:
+                return wrap_arg_type(result_type)
+
+        def wrap_unwrap_code(
+            arg_name: str,
+            arg_type: type,
+            arg_type_name: str,
+            wrapped_arg_type_name: str,
+        ):
             if arg_type is _nvte.Tensor:
                 w = f"    {arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
                 u = f"    {arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
@@ -48,15 +68,17 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
                 raise NotImplementedError(arg_type_name)
             return (w, u)
 
-        def wrap_type(arg_type: type):
-            if arg_type is _nvte.Tensor:
-                return Sequence[torch.Tensor]
-            elif issubclass(arg_type, Enum):
-                return int
-            elif arg_type in [int, float, bool, str, torch.Tensor]:
-                return arg_type
-            else:
-                raise NotImplementedError(arg_type_name)
+        def arg_wrap_unwrap_code(arg_name: str, arg_type: type, arg_type_name: str):
+            wrapped_arg_type_name = type_name(wrap_arg_type(arg_type))
+            return wrap_unwrap_code(
+                arg_name, arg_type, arg_type_name, wrapped_arg_type_name
+            )
+
+        def result_wrap_unwrap_code(result_type: type, result_type_name: str):
+            wrapped_result_type_name = type_name(wrap_result_type(result_type))
+            return wrap_unwrap_code(
+                "result", result_type, result_type_name, wrapped_result_type_name
+            )
 
         def register_op(func: Callable[..., Any], abstract_impl: Callable[..., Any]):
             name = f"nvte::{func.__name__}"
@@ -100,19 +122,19 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         for arg_name, arg_type, arg_type_name in zip(
             arg_names, arg_types, arg_type_names
         ):
-            w, u = wrap_unwrap_code(arg_name, arg_type, arg_type_name)
+            w, u = arg_wrap_unwrap_code(arg_name, arg_type, arg_type_name)
             arg_wrapping_code += w
             arg_unwrapping_code += u
         wrapped_args = ",".join(f"{arg_name}_" for arg_name in arg_names)
 
-        result_wrapping_code, result_unwrapping_code = wrap_unwrap_code(
-            "result", return_type, return_type_name
+        result_wrapping_code, result_unwrapping_code = result_wrap_unwrap_code(
+            return_type, return_type_name
         )
 
         wrapped_arg_names = [f"{arg_name}_" for arg_name in arg_names]
-        wrapped_arg_types = [wrap_type(t) for t in arg_types]
+        wrapped_arg_types = [wrap_arg_type(t) for t in arg_types]
         wrapped_arg_type_names = [type_name(t) for t in wrapped_arg_types]
-        wrapped_return_type = wrap_type(return_type)
+        wrapped_return_type = wrap_result_type(return_type)
         wrapped_return_type_name = type_name(wrapped_return_type)
         inner_sig = f"""({ ','.join(
             f'{arg_name}: {arg_type_name}'
