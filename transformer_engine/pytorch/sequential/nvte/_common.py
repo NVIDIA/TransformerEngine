@@ -121,7 +121,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
 import torch
 from .. import cpp_extensions
 
-def abstract_impl{inner_sig}:
+def {func.__name__}_aimp{inner_sig}:
     {arg_unwrapping_code}
     func.__globals__["_nvte"] = impostor
     result: {return_type_name} = func({unwrapped_args})
@@ -135,7 +135,7 @@ def {func.__name__}{inner_sig}:
     {result_wrapping_code}
     return result_
 
-def outer_wrapper{outer_sig}:
+def {func.__name__}_wrap{outer_sig}:
     {arg_wrapping_code}
     result_: {wrapped_return_type_name} = torch.ops.nvte.{func.__name__}({wrapped_args})
     {result_unwrapping_code}
@@ -159,8 +159,8 @@ def outer_wrapper{outer_sig}:
             ns = dict(func=func, __name__=__name__, impostor=NVTEImpostor())
             exec_saving_source(source, ns)
             op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
-            op_wrap = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
-            op_aimp = reinterpret_cast(ns["abstract_impl"], Callable[..., Any])
+            op_wrap = reinterpret_cast(ns[f"{func.__name__}_wrap"], Callable[PS, T])
+            op_aimp = reinterpret_cast(ns[f"{func.__name__}_aimp"], Callable[..., Any])
             register_op(op_impl, op_aimp)
 
             return op_wrap
