@@ -74,10 +74,9 @@ def cast_transpose_checked(t: _nvte.Tensor, out_dtype: _nvte.DType | None):
         return cast_transpose(t, out_dtype)
 
 
-@torch_op
 def multi_cast_transpose(
     *desc: tuple[_nvte.Tensor, _nvte.DType]
-) -> list[tuple[_nvte.Tensor, ...]]:
+) -> list[tuple[_nvte.Tensor, _nvte.Tensor]]:
     outs = [
         multi_empty_share_metadata((t.shape, dtype), (t.shape[::-1], dtype))
         for t, dtype in desc
