@@ -137,7 +137,7 @@ def {func.__name__}{inner_sig}:
 
 def outer_wrapper{outer_sig}:
     {arg_wrapping_code}
-    result_: {wrapped_return_type_name} = {func.__name__}({wrapped_args})
+    result_: {wrapped_return_type_name} = torch.ops.nvte.{func.__name__}({wrapped_args})
     {result_unwrapping_code}
     return result
 """
