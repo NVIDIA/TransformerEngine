@@ -119,6 +119,8 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
 
         arg_unwrapping_code.lstrip()
         arg_wrapping_code.lstrip()
+        result_wrapping_code.lstrip()
+        result_unwrapping_code.lstrip()
 
         source = f"""\
 import torch
