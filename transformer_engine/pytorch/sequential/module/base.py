@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from functools import partial
+from typing import Callable
 import torch
 from torch import nn
 from ..ops import Op
@@ -40,7 +40,10 @@ class BaseModule(nn.Module, ABC):
 
             self._setup_pipeline(x, seq_lens)
 
-        return partial(self._run, nvte.make_nvte_tensor(x))
+        f: Callable[[torch.Tensor], torch.Tensor] = lambda x: self._run(
+            nvte.make_nvte_tensor(x), x
+        )
+        return f
 
     def _run(self, nvte_x: nvte.Tensor, x: torch.Tensor):
         assert self.pipeline is not None
