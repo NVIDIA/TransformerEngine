@@ -25,7 +25,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         def type_name(t: type) -> str:
             if is_generic(t):
                 return str(t).replace("collections.abc", "typing")
-            if t.__module__ == "builtins":
+            elif t.__module__ == "builtins":
                 return t.__name__
             elif (
                 t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions"
