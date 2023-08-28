@@ -119,7 +119,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
 
         source = f"""\
 import torch
-from . import cpp_extensions
+from .. import cpp_extensions
 
 def abstract_impl{inner_sig}:
     {arg_unwrapping_code}
