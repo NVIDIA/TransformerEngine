@@ -17,7 +17,7 @@ class SelfContainedOp(Op):
         raise AssertionError("Not used for inference")
 
     def forward(self, x: nvte.Tensor):
-        full_ctx = Context()
+        full_ctx: Context = {}
         for op in self.fwds:
             x, ctx = op.forward(x)
             if not isinstance(op, FusedOp):
@@ -27,7 +27,7 @@ class SelfContainedOp(Op):
         return x, full_ctx
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
-        ctxs = list[Context]()
+        ctxs: list[Context] = []
         for op in self.bwds:
             if isinstance(op, FusedOp):
                 ctxs.append(ctx)
