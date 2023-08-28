@@ -242,7 +242,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
                 decl = torch._custom_op.impl.custom_op  # type: ignore
                 declared = decl(name)(func)  # type: ignore
                 declared.impl("cuda")(func)  # type: ignore
-                declared.impl_abstract(abstract_impl)  # type: ignore
+                declared.impl_abstract()(abstract_impl)  # type: ignore
                 return
             except AttributeError:
                 pass
