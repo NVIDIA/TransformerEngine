@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from ..utils import reinterpret_cast
 from .. import cpp_extensions as _nvte
 from ._common import torch_op
 
@@ -83,8 +82,9 @@ def multi_cast_transpose(
     ]
     out_cast_list, out_transpose_list = zip(*outs)
     input_list, _ = zip(*desc)
-    input_list = reinterpret_cast(input_list, tuple[_nvte.Tensor, ...])
-    _nvte.multi_cast_transpose(input_list, out_cast_list, out_transpose_list)
+    _nvte.multi_cast_transpose(
+        input_list, out_cast_list, out_transpose_list  # type: ignore
+    )
     return outs
 
 

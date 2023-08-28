@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections import namedtuple
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 from types import GenericAlias
 import typing
 import warnings
@@ -15,7 +15,6 @@ from ..utils import (
     get_arg_types,
     get_return_type,
     exec_saving_source,
-    reinterpret_cast,
     is_generic,
 )
 
@@ -39,7 +38,8 @@ def _wrap_type(
     arg_type_: type | GenericAlias,
 ) -> Any:
     if is_generic(arg_type_):
-        arg_type_ = reinterpret_cast(arg_type_, GenericAlias)
+        if TYPE_CHECKING:
+            assert isinstance(arg_type_, GenericAlias)
         origin = arg_type_.__origin__
         while hasattr(origin, "__origin__"):
             origin = getattr(origin, "__origin__")
@@ -47,7 +47,8 @@ def _wrap_type(
         new_args = tuple(_wrap_type(type_wrap_func, arg) for arg in args)
         return origin.__class_getitem__(new_args)  # type: ignore
     else:
-        arg_type_ = reinterpret_cast(arg_type_, type)
+        if TYPE_CHECKING:
+            assert isinstance(arg_type_, type)
         return type_wrap_func(arg_type_)
 
 
@@ -74,7 +75,7 @@ def _result_type_wrap_func(result_type: type):
 
 
 def _is_generic_tuple(t: type) -> bool:
-    return is_generic(t) and (reinterpret_cast(t, GenericAlias).__origin__ is tuple)
+    return is_generic(t) and (t.__origin__ is tuple)  # type: ignore
 
 
 def _wrap_result_type(result_type: type | GenericAlias) -> Any:
@@ -252,9 +253,9 @@ def {func.__name__}_wrap{outer_sig}:
             # Create op
             ns = dict(func=func, __name__=__name__, impostor=NVTEImpostor())
             exec_saving_source(source, ns)
-            op_impl = reinterpret_cast(ns[func.__name__], Callable[..., Any])
-            op_wrap = reinterpret_cast(ns[f"{func.__name__}_wrap"], Callable[PS, T])
-            op_aimp = reinterpret_cast(ns[f"{func.__name__}_aimp"], Callable[..., Any])
+            op_impl: Callable[..., Any] = ns[func.__name__]  # type: ignore
+            op_wrap: Callable[PS, T] = ns[f"{func.__name__}_wrap"]  # type: ignore
+            op_aimp: Callable[..., Any] = ns[f"{func.__name__}_aimp"]  # type: ignore
             _register_op(op_impl, op_aimp)
 
             return op_wrap

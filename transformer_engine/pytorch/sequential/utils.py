@@ -187,7 +187,7 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
 
         linecache.getlines = patched_getlines
         setattr(exec_saving_source, "sources", sources)
-    sources = reinterpret_cast(getattr(exec_saving_source, "sources"), list[str])
+    sources: list[str] = getattr(exec_saving_source, "sources")
     exec(
         compile(ast.parse(source), filename=f"<exec#{len(sources)}>", mode="exec"),
         globals,
@@ -198,10 +198,6 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
 class Decorator(Protocol):
     def __call__(self, f: Callable[PS, T]) -> Callable[PS, T]:
         ...
-
-
-def reinterpret_cast(x: Any, t: type[T], /) -> T:
-    return x
 
 
 @overload
