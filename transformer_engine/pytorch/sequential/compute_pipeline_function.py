@@ -36,6 +36,9 @@ class ForwardArgs:
         self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
+_args: ForwardArgs
+
+
 class BackwardComm:
     nvte_grad_output: nvte.Tensor | None = None
 
@@ -55,7 +58,7 @@ class ComputePipelineFunction(autograd.Function):
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
         del exposed_tensors
-        args = ComputePipelineFunction.args
+        args = _args
         assert isinstance(args, ForwardArgs)
 
         nvte_x = args.nvte_x
@@ -231,7 +234,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 pipeline.meta_fwd,
                 pipeline.meta_bwd,
             )
-            ComputePipelineFunction.args = args
+            global _args
+            _args = args
             x = ComputePipelineFunction.apply(x, *exposed_tensors)  # type: ignore
             nvte_x, is_exposed_x_squished_now, upcoming_backward = (
                 args.nvte_x,
