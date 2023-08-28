@@ -22,16 +22,16 @@ from ..utils import (
 
 def _type_name(t: type) -> str:
     if is_generic(t):
-        return str(t).replace("collections.abc", "typing")
-    elif t.__module__ == "builtins":
-        return t.__name__
-    elif (
-        t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions"
-        or t.__module__ == "__init__.pyi"
-    ):
-        return f"cpp_extensions.{t.__name__}"
+        result = str(t)
     else:
-        return f"{t.__module__}.{t.__name__}"
+        result = f"{t.__module__}.{t.__name__}"
+
+    return (
+        result.replace("builtins.", "")
+        .replace("transformer_engine.pytorch.sequential.", "")
+        .replace("collections.abc", "typing")
+        .replace("__init__.pyi", "cpp_extensions.")
+    )
 
 
 def _wrap_type(
