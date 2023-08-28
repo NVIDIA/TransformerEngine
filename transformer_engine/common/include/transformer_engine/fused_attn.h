@@ -23,7 +23,8 @@ extern "C" {
     and the head size. `SBHD` and `BSHD` based layouts are used when sequences in a batch
     are of equal length or padded to the same length, while `THD` based layouts are
     used when sequences in a batch have different lengths. `T` is the total number
-    of sequences in the batch, `t = sum(s_i) for i = 0...b-1`.
+    of sequences in the batch, `t = sum(s_i) for i = 0...b-1`. `QKV_INTERLEAVED`,
+    `KV_INTERLEAVED` and `NOT_INTERLEAVED` are to be deprecated soon.
  */
 enum NVTE_QKV_Layout {
     NVTE_SB3HD = 0,
