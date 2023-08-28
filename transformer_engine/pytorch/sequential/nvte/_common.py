@@ -73,18 +73,19 @@ def _result_type_wrap_func(result_type: type):
         return _arg_type_wrap_func(result_type)
 
 
+def _is_generic_tuple(t: type) -> bool:
+    return is_generic(t) and (reinterpret_cast(t, GenericAlias).__origin__ is tuple)
+
+
 def _wrap_result_type(result_type: type | GenericAlias) -> Any:
     wrapped_type = _wrap_type(_result_type_wrap_func, result_type)
 
-    def is_generic_tuple(t: type) -> bool:
-        return is_generic(t) and (reinterpret_cast(t, GenericAlias).__origin__ is tuple)
-
     # Flatten tuple of tuples of tensors
-    if is_generic_tuple(wrapped_type):
+    if _is_generic_tuple(wrapped_type):
         arg_types = typing.get_args(wrapped_type)
-        if any(is_generic_tuple(arg_type) for arg_type in arg_types):
+        if any(_is_generic_tuple(arg_type) for arg_type in arg_types):
             assert all(
-                is_generic_tuple(arg_type)
+                _is_generic_tuple(arg_type)
                 and typing.get_args(arg_type)
                 == (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor)
                 for arg_type in arg_types
@@ -104,7 +105,7 @@ def _wrap_unwrap_code(
     if arg_type is _nvte.Tensor:
         w = f"    {arg_name}_: {wrapped_arg_type_name} = te_to_torch_tensor({arg_name})\n"
         u = f"    {arg_name}: {arg_type_name} = torch_to_te_tensor({arg_name}_)\n"
-    elif issubclass(arg_type, tuple) and all(
+    elif _is_generic_tuple(arg_type) and all(
         sub_type is _nvte.Tensor for sub_type in typing.get_args(arg_type)
     ):
         w = f"    {arg_name}_: {wrapped_arg_type_name} = tuple(t for tensor in {arg_name} for t in te_to_torch_tensor(tensor))\n"
