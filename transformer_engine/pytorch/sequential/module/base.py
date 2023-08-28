@@ -40,9 +40,8 @@ class BaseModule(nn.Module, ABC):
 
             self._setup_pipeline(x, seq_lens)
 
-        f: Callable[[torch.Tensor], torch.Tensor] = lambda x: self._run(
-            nvte.make_nvte_tensor(x), x
-        )
+        nvte_x = nvte.make_nvte_tensor(x)
+        f: Callable[[torch.Tensor], torch.Tensor] = lambda _: self._run(nvte_x, x)
         return f
 
     def _run(self, nvte_x: nvte.Tensor, x: torch.Tensor):
