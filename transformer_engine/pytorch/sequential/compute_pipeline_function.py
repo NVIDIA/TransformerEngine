@@ -2,7 +2,7 @@ from __future__ import annotations
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-from typing import Final, NamedTuple
+from typing import Final
 from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
@@ -12,7 +12,7 @@ FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class ForwardArgs:
-    nvte_x: nvte.Tensor
+    nvte_x: nvte.Tensor | None
     is_exposed_x_squished_now: bool
     upcoming_backward: BackwardComm | None
     op: Final[Op]
@@ -21,7 +21,7 @@ class ForwardArgs:
 
     def __init__(
         self,
-        nvte_x: nvte.Tensor,
+        nvte_x: nvte.Tensor | None,
         is_exposed_x_squished_now: bool,
         upcoming_backward: BackwardComm | None,
         op: Op,
@@ -57,6 +57,9 @@ class ComputePipelineFunction(autograd.Function):
         assert isinstance(args, ForwardArgs)
 
         nvte_x = args.nvte_x
+        if nvte_x is None:
+            # First forward in the compute pipeline
+            nvte_x = nvte.make_nvte_tensor(exposed_x)
 
         nvte.set_execution_state("forward", args.meta_tensor_provider_fwd)
         y, to_save = args.op.forward(nvte_x)
@@ -207,10 +210,9 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
-        with torch.no_grad():
-            nvte_x = nvte.make_nvte_tensor(x)
         is_exposed_x_squished_now = False
         upcoming_backward = None
+        nvte_x = None
         for contained_op in pipeline.functions:
             nvte_tensors = contained_op.require_grad()
             exposed_tensors = list[torch.Tensor]()

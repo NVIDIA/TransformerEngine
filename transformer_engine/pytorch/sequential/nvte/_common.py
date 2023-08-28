@@ -172,7 +172,6 @@ def {func.__name__}_wrap{outer_sig}:
     return make_wrapper(func)
 
 
-@torch_op
 def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
     return _nvte.Tensor(
         t.data,
