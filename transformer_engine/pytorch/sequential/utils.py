@@ -177,40 +177,13 @@ class Decorator(Protocol):
         ...
 
 
-def cast(x: Any, t: type[T] | GenericAlias, /) -> T:
+def reinterpret_cast(x: Any, _: type[T], /) -> T:
     return x
 
 
 def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     import torch
     from . import cpp_extensions
-
-    version1: bool
-    custom_ops = None
-    try:
-        custom_ops = torch._custom_ops  # type: ignore
-        decl = custom_ops.custom_op  # type: ignore
-        impl = custom_ops.impl  # type: ignore
-        version1 = False
-    except AttributeError:
-        pass
-    if custom_ops is None:
-        try:
-            custom_ops = torch._custom_op.impl  # type: ignore
-            decl = custom_ops.custom_op  # type: ignore
-            impl = custom_ops.CustomOp.impl  # type: ignore
-            version1 = True
-        except AttributeError:
-            pass
-    if custom_ops is None:
-        if not hasattr(torch_op, "warned"):  # type: ignore
-            torch_op.warned = True  # type: ignore
-            warnings.warn("Unable to find custom_op, torch_op decorator has no effect")
-        return func
-
-    decl = cast(decl, Callable[[str], Decorator])  # type: ignore
-    impl = cast(impl, Callable[[str], Decorator])  # type: ignore
-    name = f"nvte::{func.__name__}"
 
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
@@ -249,6 +222,28 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
             else:
                 raise NotImplementedError(arg_type_name)
 
+        def register_op(func: Callable[..., Any]):
+            name = f"nvte::{func.__name__}"
+            # Different versions of PyTorch have different ways of registering custom ops
+            try:
+                decl, impl = (torch._custom_ops.custom_op, torch._custom_ops.impl)  # type: ignore
+                decl(name)(func)
+                impl(name)(func)
+                return
+            except AttributeError:
+                pass
+            try:
+                decl, impl = (torch._custom_op.impl.custom_op, torch._custom_op.impl.CustomOp.impl)  # type: ignore
+                declared = decl(name)(func)  # type: ignore
+                declared.impl("cuda")(func)  # type: ignore
+                return
+            except AttributeError:
+                pass
+            if not hasattr(register_op, "warned"):  # type: ignore
+                register_op.warned = True  # type: ignore
+                warnings.warn("Unable to find custom_op, decorator has no effect")
+
+        # Dynamically generate code of the wrappers
         arg_types = get_arg_types(func)
         arg_names = get_arg_names(func)
         arg_type_names = list(map(type_name, arg_types))
@@ -299,22 +294,16 @@ def outer_wrapper{outer_sig}:
     {result_unwrapping_code}
     return result
 """
-        ns = dict(func=func, __name__=__name__)
         try:
+            ns = dict(func=func, __name__=__name__)
             exec(source, ns)
-            extracted = cast(ns[func.__name__], Callable[..., Any])
-
-            declared = decl(name)(extracted)
-            if version1:
-                declared.impl("cuda")(extracted)  # type: ignore
-            else:
-                impl(name)(extracted)
+            extracted = reinterpret_cast(ns[func.__name__], Callable[..., Any])
+            register_op(extracted)
+            outer_wrapper = reinterpret_cast(ns["outer_wrapper"], Callable[PS, T])
+            return outer_wrapper
         except Exception as e:
             raise RuntimeError(
                 f"Failed to compile wrapper for {func.__name__}. Generated code: \n```\n{source}```"
             ) from e
-
-        outer_wrapper = cast(ns["outer_wrapper"], Callable[PS, T])
-        return outer_wrapper
 
     return make_wrapper(func)

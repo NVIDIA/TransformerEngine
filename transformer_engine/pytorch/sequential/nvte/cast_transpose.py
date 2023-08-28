@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from ..utils import reinterpret_cast
 from .. import cpp_extensions as _nvte
 
 from .dtype import is_fp8
@@ -61,7 +63,8 @@ def multi_cast_transpose(*desc: tuple[_nvte.Tensor, _nvte.DType]):
     ]
     out_cast_list, out_transpose_list = zip(*outs)
     input_list, _ = zip(*desc)
-    _nvte.multi_cast_transpose(input_list, out_cast_list, out_transpose_list)  # type: ignore
+    input_list = reinterpret_cast(input_list, tuple[_nvte.Tensor, ...])
+    _nvte.multi_cast_transpose(input_list, out_cast_list, out_transpose_list)
     return outs
 
 

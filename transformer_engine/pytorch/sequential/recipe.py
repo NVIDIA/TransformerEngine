@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable, TypeVar, ClassVar, NamedTuple
+from typing import Callable, TypeVar, NamedTuple
 from types import TracebackType
 from .cpp_extensions import DType
 import torch

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import OrderedDict, overload
-from torch import nn
+
+from ..utils import reinterpret_cast
 from .base import BaseModule
 
 
@@ -36,8 +37,8 @@ class Sequential(BaseModule):
         if len(args) == 1 and isinstance(args[0], OrderedDict):
             modules = list(args[0].items())
         else:
-            args1: tuple[BaseModule, ...] = args  # type: ignore
-            modules = list(map(lambda p: (f"{p[0]}", p[1]), enumerate(args1)))
+            args = reinterpret_cast(args, tuple[BaseModule, ...])
+            modules = list(map(lambda p: (f"{p[0]}", p[1]), enumerate(args)))
 
         for name, module in modules:
             submodules: list[tuple[str, BaseModule]]
