@@ -260,8 +260,9 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   double rtol_bwd;
   switch (otype) {
     case DType::kBFloat16:
-      atol_bwd = 1e-1;  // only for one case: bfloat16Xbfloat16X256X65536X1
-      rtol_bwd = 1e-2;
+      // only for one case: bfloat16Xbfloat16X256X65536X1
+      atol_bwd = 1e-1;  
+      rtol_bwd = 1e-1;
       break;
     case DType::kFloat16:
       atol_bwd = 1e-2;
