@@ -1,3 +1,4 @@
+from enum import Enum
 import functools
 import inspect
 from typing import Any, Callable, TypeVar
@@ -16,9 +17,12 @@ def _to_dict(l: list[tuple[_T1, _T2]], /) -> dict[_T1, _T2]:
 def _wrap_function(real_func: Callable[..., Any]):
     @functools.wraps(real_func)
     def wrapper(*args: Any):
-        real_args = [
-            arg if not arg.__class__.__name__ == "Tensor" else arg._raw for arg in args
-        ]
+        real_args: list[Any] = []
+        for arg in args:
+            if arg.__class__.__name__ == "Tensor":
+                real_args.append(arg._raw)
+            elif isinstance(arg, Enum):
+                real_args.append(getattr(type(arg), "__orig_type__")(arg.value))
         return real_func(*real_args, torch.cuda.current_stream().cuda_stream)
 
     return wrapper
@@ -41,9 +45,13 @@ def inject_real(namespace: dict[str, Any]):
     stub_types = _to_dict(inspect.getmembers(stub, inspect.isclass))
     real_types = _to_dict(inspect.getmembers(real, inspect.isclass))
 
-    for type_name, _ in stub_types.items():
+    for type_name, type_obj in stub_types.items():
         if type_name not in real_types:
             raise RuntimeError(
                 f"Type {type_name} declared in {stub} not found in {real}"
             )
-        namespace[type_name] = real_types[type_name]
+        if issubclass(type_obj, Enum):
+            setattr(type_obj, "__orig_type__", real_types[type_name])
+            namespace[type_name] = type_obj
+        else:
+            namespace[type_name] = real_types[type_name]
