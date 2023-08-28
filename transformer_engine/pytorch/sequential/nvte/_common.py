@@ -109,7 +109,7 @@ def _wrap_unwrap_code(
         sub_type is _nvte.Tensor for sub_type in typing.get_args(arg_type)
     ):
         w = f"    {arg_name}_: {wrapped_arg_type_name} = tuple(t for tensor in {arg_name} for t in te_to_torch_tensor(tensor))\n"
-        u = f"    {arg_name}: {arg_type_name} = tuple(torch_to_te_tensor(*({arg_name}_[j] for j in range(i, i + 4, 1))) for i in range(0, len({arg_name}_), 4))\n"
+        u = f"    {arg_name}: {arg_type_name} = tuple(torch_to_te_tensor(tuple({arg_name}_[j] for j in range(i, i + 4, 1))) for i in range(0, len({arg_name}_), 4))\n"
     elif issubclass(arg_type, Enum):
         w = f"    {arg_name}_: {wrapped_arg_type_name} = {arg_name}.value\n"
         u = f"    {arg_name}: {arg_type_name} = {arg_type_name}({arg_name}_)\n"
