@@ -178,11 +178,11 @@ import typing
 
 raw_handles: list[cpp_extensions.RawTensor] = []
 
-def te_to_torch_tensor(t: cpp_extensions.Tensor):
+def te_to_torch_tensor(t: cpp_extensions.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     raw_handles.append(t._raw)
     return (t.data, t.amax, t.scale, t.scale_inv)
 
-def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]):
+def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tensor:
     _raw = raw_handles.pop(0)
     return cpp_extensions.Tensor(_raw, *t)
 
