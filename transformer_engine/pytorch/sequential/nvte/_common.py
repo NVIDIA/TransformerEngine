@@ -20,11 +20,10 @@ from ..utils import (
 def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
     def make_wrapper(func: Callable[..., Any]):
         def type_name(t: type) -> str:
+            if isinstance(t, GenericAlias):
+                return str(t)
             if t.__module__ == "builtins":
-                if isinstance(t, GenericAlias):
-                    return str(t)
-                else:
-                    return t.__name__
+                return t.__name__
             elif (
                 t.__module__ == "transformer_engine.pytorch.sequential.cpp_extensions"
                 or t.__module__ == "__init__.pyi"
@@ -128,7 +127,7 @@ def torch_op(func: Callable[PS, T]) -> Callable[PS, T]:
         source = f"""\
 import torch
 from .. import cpp_extensions
-from typing import Sequence
+import typing
 
 raw_handles: list[cpp_extensions.RawTensor] = []
 
