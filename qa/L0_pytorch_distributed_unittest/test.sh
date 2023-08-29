@@ -9,4 +9,5 @@ set -e
 git clone https://github.com/NVIDIA/Megatron-LM.git
 cd Megatron-LM
 git checkout f24fac4ed0dcf0522056521a93445d9a82f501a9 
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_sanity.py
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_convergence.py
+python $TE_PATH/tests/pytorch/distributed/print_logs.py

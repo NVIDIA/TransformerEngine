@@ -28,7 +28,7 @@ done
 : ${MAX_POSITION_EMBEDDINGS:="2048"}
 : ${MBS:="8"}
 : ${GBS:="32"}
-: ${STEPS:="500"}
+: ${STEPS:="400"}
 : ${LR:="6.0e-4"}
 : ${MIN_LR:="6.0e-5"}
 : ${SAVE_INTERVAL:="1000"}
@@ -43,6 +43,8 @@ done
 : ${WGRAD_FUSION:="True"}
 : ${FP8:="False"}
 : ${FP8_AMAX_HISTORY_LEN:="32"}
+: ${TRANSFORMER_IMPL:="transformer_engine"}
+: ${FILENAME:="log.txt"}
 
 # Logging.
 DIR=`pwd`
@@ -89,7 +91,7 @@ options=" \
     --log-num-zeros-in-grad \
     --no-query-key-layer-scaling \
     --DDP-impl local \
-    --transformer-impl transformer_engine \
+    --transformer-impl ${TRANSFORMER_IMPL} \
     --tensorboard-dir ${TENSORBOARD_DIR} \
     --fp8-margin 0 \
     --fp8-interval 1 \
@@ -113,7 +115,7 @@ if [[ "$DTYPE" != "fp32" ]]; then
 fi
 
 # Run GPT3.
-NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=4 ${DIR}/pretrain_gpt.py ${options}
+NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=4 ${DIR}/pretrain_gpt.py ${options} 2>&1 | tee $FILENAME
 
 # Remove checkpoints.
 rm -rf ${CHECKPOINT_DIR}/*

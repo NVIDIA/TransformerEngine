@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import List
+from typing import List, Union
 import pytest
 import subprocess
 import os
@@ -47,34 +47,53 @@ fp8_recipes = [False, "hybrid"]
 
 all_boolean = [True, False]
 
+te_path = os.getenv("TE_PATH", "/opt/transformerengine")
+ci_logs_dir = os.path.join(te_path, "ci_logs")
 
-def get_bash_arguments(**kwargs) -> List[str]:
+
+def get_filename(
+    model: str, tp: str, pp: str, sp: bool, use_te: bool, fp8_recipe: Union[bool, str]
+) -> str:
+    dp = 4 // (tp * pp)
+    sp = tp if sp else 1
+    config = f"gpt3_{model}_dp{dp}_tp{tp}_pp{pp}_sp{sp}"
+    config_dir = os.path.join(ci_logs_dir, config)
+    os.makedirs(config_dir, exist_ok=True)
+    fname = f"{'te' if use_te else 'megatron'}" + (f"_fp8_{fp8_recipe}" if fp8_recipe else "") + ".txt"
+    return os.path.join(config_dir, fname)
+
+
+def get_bash_arguments(filename: str, **kwargs) -> List[str]:
     args = []
-    script_path = os.path.join(
-        os.getenv("TE_PATH", "/opt/transformerengine"),
-        "tests/pytorch/distributed/run_megatron_lm_gpt.sh")
+    script_path = os.path.join(te_path, "tests/pytorch/distributed/run_megatron_lm_gpt.sh")
     args.append(script_path)
 
     for k, v in kwargs.items():
         args.append(f"{k}={str(v)}")
+    args.append(f"FILENAME={filename}")
     return args
 
 
 @pytest.mark.parametrize("sp", all_boolean)
+@pytest.mark.parametrize("use_te", all_boolean)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("tp, pp", parallel_configs)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_distributed(dtype, fp8_recipe, tp, pp, sp, model):
+def test_distributed(dtype, fp8_recipe, tp, pp, sp, use_te, model):
     if sp and tp == 1:
         pytest.skip("No tensor parallel.")
+    if fp8_recipe and not use_te:
+        pytest.skip("TransformerEngine needed for FP8.")
     subprocess.run(
         get_bash_arguments(
+            get_filename(model, tp, pp, sp, use_te, fp8_recipe),
             DTYPE=dtype,
             FP8=fp8_recipe,
             SP=sp,
             TP_SIZE=tp,
             PP_SIZE=pp,
+            TRANSFORMER_IMPL="transformer_engine" if use_te else "local",
             **asdict(model_configs[model]),
         ),
         check=True)
