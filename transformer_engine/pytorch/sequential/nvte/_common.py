@@ -247,6 +247,26 @@ def {func.__name__}_wrap{outer_sig}:
     return inner, outer
 
 
+def _run_full_code(*codes: str, **namespace: Any):
+    source = f"""\
+import torch
+from .. import cpp_extensions
+import typing
+
+def te_to_torch_tensor(t: cpp_extensions.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (t.data, t.amax, t.scale, t.scale_inv)
+
+def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tensor:
+    return cpp_extensions.Tensor(*t)
+"""
+    for code in codes:
+        source += code + "\n"
+    while "\n" * 3 in source:
+        source = source.replace("\n" * 3, "\n" * 2)
+    exec_saving_source(source, namespace)
+    return namespace
+
+
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 Ts = TypeVarTuple("Ts")
@@ -277,27 +297,6 @@ def _make_wrapper(
         save_for_backward_code = ""
         backward_code = ""
 
-    source = f"""\
-import torch
-from .. import cpp_extensions
-import typing
-
-def te_to_torch_tensor(t: cpp_extensions.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return (t.data, t.amax, t.scale, t.scale_inv)
-
-def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tensor:
-    return cpp_extensions.Tensor(*t)
-
-{aimp_code}
-
-{impl_code}
-
-{wrap_code}
-
-{save_for_backward_code}
-
-{backward_code}
-"""
     try:
         # Swap real cpp_extensions (_nvte) for impostor that does nothing
         # This is needed so the abstract implementation is traceable by PyTorch Dynamo
@@ -305,7 +304,6 @@ def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tenso
             def __getattr__(self, attr_name: str) -> Any:
                 if attr_name == "Tensor":
                     return namedtuple("Tensor", ["data", "amax", "scale", "scale_inv"])  # type: ignore
-
                 else:
                     attr = getattr(_nvte, attr_name)
                     if isinstance(attr, type) and issubclass(attr, Enum):
@@ -316,14 +314,34 @@ def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tenso
                         return attr
 
         # Create op
-        ns = dict(func=func, __name__=__name__, impostor=NVTEImpostor())
-        exec_saving_source(source, ns)
+        ns = _run_full_code(
+            impl_code,
+            wrap_code,
+            func=func,
+            __name__=__name__,
+        )
         op_impl: Callable[..., Any] = ns[func.__name__]  # type: ignore
         op_wrap: Callable[[Unpack[Ts]], T1] = ns[f"{func.__name__}_wrap"]  # type: ignore
+        ns = _run_full_code(
+            aimp_code,
+            func=func,
+            __name__=__name__,
+            impostor=NVTEImpostor(),
+        )
         op_aimp: Callable[..., Any] = ns[f"{func.__name__}_aimp"]  # type: ignore
 
         if save_for_backward is not None:
+            ns = _run_full_code(
+                save_for_backward_code,
+                func=save_for_backward,
+                __name__=__name__,
+            )
             op_save_for_backward = ns[f"{save_for_backward.__name__}"]  # type: ignore
+            ns = _run_full_code(
+                backward_code,
+                func=save_for_backward,
+                __name__=__name__,
+            )
             op_backward = ns[f"{backward.__name__}"]  # type: ignore
         else:
             op_save_for_backward = None
@@ -333,9 +351,7 @@ def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tenso
 
         return op_wrap
     except Exception as e:
-        raise RuntimeError(
-            f"Failed to compile wrapper for {func.__name__}. Generated code: \n```\n{source}```"
-        ) from e
+        raise RuntimeError(f"Failed to compile wrapper for {func.__name__}.") from e
 
 
 @overload
@@ -348,7 +364,7 @@ def torch_op(
 @overload
 def torch_op(
     *,
-    save_for_backward: Callable[[Unpack[Ts], T1], T2],
+    save_for_backward: Callable[[tuple[Unpack[Ts]], T1], T2],
     backward: Callable[[FunctionCtx, T2, Unpack[tuple[Any, ...]]], Any],
 ) -> Callable[[Callable[[Unpack[Ts]], T1]], Callable[[Unpack[Ts]], T1]]:
     ...
@@ -357,7 +373,7 @@ def torch_op(
 def torch_op(
     func: Callable[[Unpack[Ts]], T1] | None = None,
     *,
-    save_for_backward: Callable[[Unpack[Ts], T1], T2] | None = None,
+    save_for_backward: Callable[[tuple[Unpack[Ts]], T1], T2] | None = None,
     backward: Callable[[FunctionCtx, T2, Unpack[tuple[Any, ...]]], Any] | None = None,
 ) -> (
     Callable[[Unpack[Ts]], T1]
