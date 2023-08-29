@@ -252,11 +252,13 @@ def _make_wrapper(
     # Dynamically generate code of the wrappers
 
     impl_code, wrap_code = _generate_wrapping_unwrapping_code(func, "", "")
+    func.__name__ = func.__name__ + "_aimp"
     aimp_code, _________ = _generate_wrapping_unwrapping_code(
         func,
         'func.__globals__["_nvte"] = impostor',
         'func.__globals__["_nvte"] = cpp_extensions',
     )
+    func.__name__ = func.__name__[:-5]
     if save_for_backward is not None or backward is not None:
         assert save_for_backward is not None and backward is not None
         (
