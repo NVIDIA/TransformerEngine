@@ -48,15 +48,13 @@ def get_exposed_y_save_for_backward(
     return None
 
 
-def get_exposed_y_backward(
-    ctx: FunctionCtx, saved: None, *grads: torch.Tensor
-) -> torch.Tensor:
+def get_exposed_y_backward(ctx: FunctionCtx, *grads: torch.Tensor) -> torch.Tensor:
     return grads[0]
 
 
 @nvte.torch_op(
     save_for_backward=get_exposed_y_save_for_backward,
-    backward=get_exposed_y_backward,
+    backward=get_exposed_y_backward,  # type: ignore[none-argument-type]
 )
 def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
     x_data = exposed_x.data
