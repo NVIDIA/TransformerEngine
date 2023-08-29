@@ -58,7 +58,9 @@ def _arg_type_wrap_func(arg_type: type):
         return Sequence[torch.Tensor]
     elif issubclass(arg_type, Enum):
         return int
-    elif issubclass(arg_type, (int, float, bool, str, torch.Tensor, NoneType)):
+    elif issubclass(
+        arg_type, (int, float, bool, str, torch.Tensor, NoneType, FunctionCtx)
+    ):
         return arg_type
     else:
         raise NotImplementedError(arg_type)
