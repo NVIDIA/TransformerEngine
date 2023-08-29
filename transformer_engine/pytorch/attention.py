@@ -1589,16 +1589,16 @@ class DotProductAttention(torch.nn.Module):
                                                             key_layer,
                                                             value_layer,
                                                             attn_mask_type=attn_mask_type,
-                                                            self.cp_group,
-                                                            self.cp_global_ranks,
-                                                            self.cp_stream)
+                                                            cp_group=self.cp_group,
+                                                            cp_global_ranks=self.cp_global_ranks,
+                                                            cp_stream=self.cp_stream)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
                                         attn_mask_type=attn_mask_type,
-                                        self.cp_group,
-                                        self.cp_global_ranks,
-                                        self.cp_stream)
+                                        cp_group=self.cp_group,
+                                        cp_global_ranks=self.cp_global_ranks,
+                                        cp_stream=self.cp_stream)
 
         assert (
             self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
