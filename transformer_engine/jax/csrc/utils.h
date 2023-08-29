@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 
@@ -26,24 +27,48 @@ void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
 
-class cublasLtMetaManager {
+class WorkspaceManager {
  public:
-    static cublasLtMetaManager &Instance() {
-        static thread_local cublasLtMetaManager instance;
+    static WorkspaceManager &Instance() {
+        static thread_local WorkspaceManager instance;
         return instance;
     }
 
-    cublasLtMetaManager() {}
-    ~cublasLtMetaManager() { Clear_(); }
+    WorkspaceManager() {}
+    ~WorkspaceManager() { Clear_(); }
 
     void *GetWorkspace(size_t size = 4194304) {
         ReallocateIfNeed_(size);
         return workspace_;
     }
 
+    std::vector<void *> GetWorkspace(std::vector<size_t> sizes) {
+        size_t total_size = 0;
+        for (int i = 0; i < sizes.size(); i++) {
+            sizes[i] = PadSize_(sizes[i]);
+            total_size += sizes[i];
+        }
+
+        ReallocateIfNeed_(total_size);
+        std::vector<void *> ptrs(sizes.size(), workspace_);
+
+        size_t accumulated = 0;
+        for (int i = 0; i < ptrs.size(); i++) {
+            ptrs[i] = static_cast<char *>(workspace_) + accumulated;
+            accumulated += sizes[i];
+        }
+
+        return ptrs;
+    }
+
  private:
     void *workspace_ = nullptr;
     size_t size_ = 0;
+
+    size_t PadSize_(size_t size) {
+        constexpr size_t alignment = 128;
+        return ((size + alignment - 1) / alignment) * alignment;
+    }
 
     void Clear_() {
         if (workspace_ != nullptr) {
@@ -54,6 +79,7 @@ class cublasLtMetaManager {
     }
 
     void Allocate_(size_t new_size) {
+        new_size = PadSize_(new_size);
         NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
         size_ = new_size;
     }
