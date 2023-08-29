@@ -56,7 +56,7 @@ def get_exposed_y_backward(
 
 @nvte.torch_op(
     save_for_backward=get_exposed_y_save_for_backward,
-    backward=lambda ctx, saved, *grads: grads[0],
+    backward=get_exposed_y_backward,
 )
 def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
     x_data = exposed_x.data
