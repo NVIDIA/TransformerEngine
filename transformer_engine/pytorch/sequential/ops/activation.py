@@ -26,13 +26,13 @@ class Activation(Op, ABC):
 
         return y, {"x": x}
 
-    def backward(self, ctx: Context, dy: nvte.Tensor):
+    def backward(self, ctx: Context, dy: nvte.Tensor) -> tuple[nvte.Tensor, Grads]:
         x = ctx["x"]
         dy = nvte.cast_checked(dy, self.dy_dtype)
 
         dx = type(self)._backward(dy, x, self.dx_dtype or dy.dtype)
 
-        return dx, Grads()
+        return dx, []
 
     def require_grad(self) -> list[nvte.Tensor]:
         return []
