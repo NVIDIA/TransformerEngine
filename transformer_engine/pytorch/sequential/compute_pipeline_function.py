@@ -43,18 +43,20 @@ _args: ForwardArgs
 
 
 def get_exposed_y_save_for_backward(
-    exposed_x: torch.Tensor, nvte_y: nvte.Tensor, output: torch.Tensor
+    inputs: tuple[torch.Tensor, nvte.Tensor], output: torch.Tensor
 ) -> None:
     return None
 
 
-def get_exposed_y_backward(ctx: FunctionCtx, *grads: torch.Tensor) -> torch.Tensor:
+def get_exposed_y_backward(
+    ctx: FunctionCtx, _: None, *grads: torch.Tensor
+) -> torch.Tensor:
     return grads[0]
 
 
 @nvte.torch_op(
     save_for_backward=get_exposed_y_save_for_backward,
-    backward=get_exposed_y_backward,  # type: ignore[none-argument-type]
+    backward=get_exposed_y_backward,
 )
 def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
     x_data = exposed_x.data
@@ -123,8 +125,7 @@ class ComputePipelineFunction(autograd.Function):
             setattr(ctx, "nvte_squish_outgoing_dgrad", False)
 
         # Expose result for Pytorch
-        exposed_y = get_exposed_y(exposed_x, nvte_y)  # type: ignore
-        assert isinstance(exposed_y, torch.Tensor)
+        exposed_y = get_exposed_y(exposed_x, nvte_y)
 
         # Squish y if fp8:
         if exposed_y.data.dtype == torch.int8:
