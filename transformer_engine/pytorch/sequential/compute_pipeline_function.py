@@ -39,7 +39,7 @@ class ForwardArgs:
         self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
-_args: ForwardArgs
+_args: ForwardArgs | None = None
 
 
 def get_exposed_y_saving_nvte_y_save_for_backward(
@@ -91,6 +91,7 @@ class ComputePipelineFunction(autograd.Function):
         del tensor_mess
 
         global _args
+        assert _args is not None
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
         with torch.no_grad():
             nvte_y, to_save = _args.op.forward(nvte_x)
