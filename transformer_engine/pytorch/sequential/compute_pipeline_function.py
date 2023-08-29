@@ -49,12 +49,10 @@ class ComputePipelineFunction(autograd.Function):
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        exposed_tensors: Sequence[torch.Tensor],
-        x: Sequence[torch.Tensor],
+        *tensor_mess: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        del exposed_tensors
-        assert len(x) == 4
-        nvte_x = nvte.Tensor(*x)
+        nvte_x = nvte.Tensor(*tensor_mess[-4:])
+        del tensor_mess
 
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
         nvte_y, to_save = _args.op.forward(nvte_x)
@@ -223,8 +221,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
 
             (x, nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = ComputePipelineFunction.apply(  # type: ignore
                 x,
-                exposed_tensors,
-                (nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
+                *exposed_tensors,
+                *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
             )
             assert isinstance(x, torch.Tensor)
             nvte_x = nvte.Tensor(nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv)  # type: ignore
