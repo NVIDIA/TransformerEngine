@@ -1367,7 +1367,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     }
 }
 void fused_attn_arbitrary_seqlen_fwd_q_k_v(
-    size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv, size_t num_head, size_t head_dim, bool is_training,
+    size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
+    size_t num_head, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,

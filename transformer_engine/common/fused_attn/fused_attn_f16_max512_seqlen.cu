@@ -648,7 +648,7 @@ void fused_attn_max_512_fwd_impl(
                                 is_training, dropout_probability,
                                 layout,      bias_type,
                                 mask_type,   tensorType,
-	                        false};
+                                false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;

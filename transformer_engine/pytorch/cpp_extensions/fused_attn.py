@@ -869,10 +869,12 @@ def fused_attn_fwd_q_k_v(
                 if True, runs training and produces auxiliary tensors aux_ctx_tensors
                 for the backward; if False, runs inference and doesn't produce aux_ctx_tensors
     max_seqlen_q: int
-                max sequence length for Q, used for padding; may be larger than max(seqlens_q),
+                max sequence length for Q, used for padding;
+                may be larger than max(seqlens_q),
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     max_seqlen_kv: int
-                max sequence length for K and V, used for padding; may be larger than max(seqlens_kv),
+                max sequence length for K and V, used for padding;
+                may be larger than max(seqlens_kv),
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     cu_seqlens_q: torch.Tensor
                 cumulative sequence lengths for Q; shape [batch_size + 1]
@@ -971,8 +973,7 @@ def fused_attn_fwd_q_k_v(
     assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
             ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
     h = q.shape[-2]
-
-    qkv_type = TORCH_DType[qkv_dtype]
+    d = q.shape[-1]
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
@@ -1149,8 +1150,9 @@ def fused_attn_bwd_q_k_v(
     check_cu_seqlens(cu_seqlens_kv)
     assert (cu_seqlens_q.numel() == cu_seqlens_kv.numel()
             ), "cu_seqlens_q and cu_seqlens_kv must have the same length."
-
-    qkv_type = TORCH_DType[qkv_dtype]
+    b = cu_seqlens_q.numel() - 1
+    h = q.shape[-2]
+    d = q.shape[-1]
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)

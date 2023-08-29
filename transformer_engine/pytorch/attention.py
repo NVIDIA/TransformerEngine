@@ -166,8 +166,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         qkv_layout: str = "sb3hd",
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
+        cu_seqlens_kv: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
         attn_mask_type: str = "causal",
         attention_mask: Optional[torch.Tensor] = None,
         core_attention_bias_type: str = "no_bias",
@@ -316,8 +316,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # [sq, b, np, hn] --> [sq, b, hp]
             context_layer = context_layer.view(seqlen, batch_size, -1)
 
-            return context_layer
-
         if qkv_format == 'bshd':
             # [b, np, sq, hn] --> [b, sq, np, hn]
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
@@ -325,7 +323,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # [b, sq, np, hn] --> [b, sq, hp]
             context_layer = context_layer.view(batch_size, seqlen, -1)
 
-            return context_layer
+        return context_layer
 
 
 class _PrepareQKVForFA(torch.autograd.Function):
@@ -508,13 +506,13 @@ class FlashAttention(torch.nn.Module):
                                                                              value_layer)
             else:
                 query_layer, key_layer, value_layer = [x.contiguous()
-                               for x in (query_layer, key_layer, value_layer)]
+                    for x in (query_layer, key_layer, value_layer)]
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-                               for x in (query_layer, key_layer, value_layer)]
+                    for x in (query_layer, key_layer, value_layer)]
 
         if qkv_format == 'bshd':
-                query_layer, key_layer, value_layer = [x.contiguous()
-                               for x in (query_layer, key_layer, value_layer)]
+            query_layer, key_layer, value_layer = [x.contiguous()
+                for x in (query_layer, key_layer, value_layer)]
 
         # qkv layout at this point is all bshd_bshd_bshd
         if qkv_format in ['sbhd', 'bshd']:
@@ -567,10 +565,11 @@ class FlashAttention(torch.nn.Module):
 
         if qkv_format == 'sbhd':
             # bshd -> bs(hd) -> sb(hd)
-            return output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
+            output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
         if qkv_format == 'bshd':
             # bshd -> bs(hd)
-            return output.view(batch_size, max_seqlen_q, -1).contiguous()
+            output = output.view(batch_size, max_seqlen_q, -1).contiguous()
+        return output
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
@@ -1121,9 +1120,10 @@ class DotProductAttention(torch.nn.Module):
                    {`sbhd`, `bshd`, `thd`}. `s` is the sequence length dimension,
                    `b` the batch size, `h` the number of heads, `d` the head size,
                    and `t` the total number of sequences in a batch, `t = sum(s_i) for i = 0...b-1`.
-                   `sbhd` and `bshd` are used for cases where sequences in a batch are of equal length
-                   or padded to the same length, and `thd` is used for when sequence lengths in a batch
-                   are different. These formats do not describe how `query_layer`, `key_layer` and `value_layer`
+                   `sbhd` and `bshd` are used for cases where sequences in a batch are
+                   of equal length or padded to the same length, and `thd` is used for when
+                   sequence lengths in a batch are different. These formats do not describe
+                   how `query_layer`, `key_layer` and `value_layer`
                    are laid out in memory, for which, please see `_get_qkv_layout`.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths in a batch for `query_layer`,
