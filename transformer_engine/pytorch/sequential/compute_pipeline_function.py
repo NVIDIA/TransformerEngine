@@ -16,12 +16,12 @@ class BackwardComm:
 
 
 class ForwardArgs:
-    is_exposed_x_squished_now: Final[bool]
-    upcoming_backward: Final[BackwardComm | None]
-    next_upcoming_backward: Final[BackwardComm]
-    op: Final[Op]
-    meta_tensor_provider_fwd: Final[Persistent[FP8Meta]]
-    meta_tensor_provider_bwd: Final[Persistent[FP8Meta]]
+    is_exposed_x_squished_now: bool
+    upcoming_backward: BackwardComm | None
+    next_upcoming_backward: BackwardComm
+    op: Op
+    meta_tensor_provider_fwd: Persistent[FP8Meta]
+    meta_tensor_provider_bwd: Persistent[FP8Meta]
 
     def __init__(
         self,
@@ -239,13 +239,11 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                     pipeline.meta_bwd,
                 )
             else:
-                _args = ForwardArgs(
-                    x.dtype != nvte_x.data.dtype,
-                    _args.next_upcoming_backward,
-                    contained_op,
-                    pipeline.meta_fwd,
-                    pipeline.meta_bwd,
-                )
+                assert _args is not None
+                _args.is_exposed_x_squished_now = x.dtype != nvte_x.data.dtype
+                _args.upcoming_backward = _args.next_upcoming_backward
+                _args.next_upcoming_backward = BackwardComm()
+                _args.op = contained_op
 
             nvte_tensors = contained_op.require_grad()
             exposed_tensors: list[torch.Tensor] = []
