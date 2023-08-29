@@ -648,6 +648,8 @@ from typing import Union, Dict, Any, Tuple, List
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
+    fused_attn_fwd_q_k_v,
+    fused_attn_bwd_q_k_v,
     FusedAttnBackend)
 
 _CUBLASLT_WORKSPACE_SIZE_BYTES = 33_554_432  # 32MiB
@@ -735,11 +737,17 @@ class _dpa_fp8(torch.autograd.Function):
         torch.save(qkv_out_fp16, 'qkv.pt')
 
         # FMHA
-        context_, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
+        #context_, aux_ctx_tensors, *rest = fused_attn_fwd_qkvpacked(
+        context_, aux_ctx_tensors, *rest = fused_attn_fwd_q_k_v(
                 is_training,
                 max_s,
+                max_s,
                 cu_seqlens,
-                qkv_out,
+                cu_seqlens,
+                #qkv_out,
+                qkv_out[:,0,:,:],
+                qkv_out[:,1,:,:],
+                qkv_out[:,2,:,:],
                 fp8_dtype_forward,
                 FusedAttnBackend["FP8"],
                 None,
@@ -751,7 +759,8 @@ class _dpa_fp8(torch.autograd.Function):
                 attn_scale=None,
                 dropout=p_dropout,
                 fast_zero_fill=fast_zero_fill,
-                qkv_layout="qkv_interleaved",
+                #qkv_layout="qkv_interleaved",
+                qkv_layout="bs3hd",
                 attn_bias_type="no_bias",
                 attn_mask_type="padding",
                 rng_gen=None,
@@ -810,10 +819,16 @@ class _dpa_fp8(torch.autograd.Function):
                 grad_output, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
             )
 
-            dqkv, *rest = fused_attn_bwd_qkvpacked(
+            #dqkv, *rest = fused_attn_bwd_qkvpacked(
+            dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
+                    ctx.max_s,
                     ctx.max_s,
                     ctx.cu_seqlens,
-                    qkv_out,
+                    ctx.cu_seqlens,
+                    #qkv_out,
+                    qkv_out[:,0,:,:],
+                    qkv_out[:,1,:,:],
+                    qkv_out[:,2,:,:],
                     context,
                     proj_dgrad.view_as(context),
                     fp8_dtype_forward,
@@ -831,10 +846,12 @@ class _dpa_fp8(torch.autograd.Function):
                     None,
                     ctx.p_dropout,
                     ctx.fast_zero_fill,
-                    "qkv_interleaved",
+                    #"qkv_interleaved",
+                    "bs3hd",
                     "no_bias",
                     "padding",
                     )
+            dqkv = torch.cat([dq.unsqueeze(1), dk.unsqueeze(1), dv.unsqueeze(1)], dim=1)
 
             dqkv_grad_output_c = dqkv.view(-1, 3*ctx.hidden_size)
             dqkv_grad_output_c_fp16 = ext.cast_from_fp8(dqkv_grad_output_c,
