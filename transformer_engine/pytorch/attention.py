@@ -151,6 +151,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         # Flash Attn inputs
         q_inputs = [None, None]
         kv_inputs = [None, None]
+        k_padded, v_padded = [None, None], [None, None]
         # Flash Attn outputs
         out_per_step = [None for _ in range(cp_size)]
         softmax_lse_per_step = [None for _ in range(cp_size)]
@@ -211,7 +212,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                             if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
+                                _, _, k_padded[i%2], v_padded[i%2], out_per_step[i], \
                                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                     cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
@@ -231,7 +232,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                             if _flash_attn_2_available:
-                                _, _, k_padded, v_padded, out_per_step[i], \
+                                _, _, k_padded[i%2], v_padded[i%2], out_per_step[i], \
                                 softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                     cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
