@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
@@ -75,20 +76,19 @@ def get_nvte_y(
     return _saved.data, _saved.amax, _saved.scale, _saved.scale_inv
 
 
-class ComputePipelineFunction(autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[arg-type]
-        ctx: FunctionCtx,
-        exposed_x: torch.Tensor,
-        *tensor_mess: torch.Tensor,
-    ) -> torch.Tensor:
-        ...
+class ComputePipelineFunction:
+    forward: Any
+    backward: Any
 
-    @staticmethod
-    def backward(
-        ctx: FunctionCtx, *grad_outputs: torch.Tensor
-    ) -> tuple[Unpack[tuple[torch.Tensor, ...]], None, None, None]:
-        ...
+    def __init__(self, forward: Any, backward: Any):
+        self.forward = forward
+        self.backward = backward
+
+    def __getattribute__(self, __name: str) -> Any:
+        if __name == "forward" or __name == "backward":
+            return self.__getattr__(__name)
+        else:
+            return getattr(autograd.Function, __name)
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
@@ -275,10 +275,9 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
 
                 return (*torch_grads, None, None, None)
 
-            ComputePipelineFunction.forward = forward
-            ComputePipelineFunction.backward = backward
+            Function = ComputePipelineFunction(forward, backward)
 
-            x = ComputePipelineFunction.apply(  # type: ignore
+            x = Function.apply(  # type: ignore
                 x,
                 *exposed_tensors,
                 *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
