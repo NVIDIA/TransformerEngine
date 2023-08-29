@@ -46,3 +46,7 @@ AttnMaskTypes = ("causal", "padding", "no_mask")
 AttnTypes = ("self", "cross")
 
 LayerTypes = ("encoder", "decoder")
+
+GemmParallelModes = ("row", "column", None)
+
+dist_group_type = paddle.distributed.collective.Group
