@@ -210,38 +210,38 @@ pytorch-py3-base:
       variables:
         - $BUILD_PYTORCH == "0"
 
-# jax-py3-base:
-#     stage: build base
-#     variables:
-#       FROM_IMAGE_NAME: $JAX_IMAGE
-#       FRAMEWORK: jax
-#     extends:
-#     - .base_template
-#     except:
-#       variables:
-#         - $BUILD_JAX == "0"
+jax-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_IMAGE
+      FRAMEWORK: jax
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
-# tensorflow-py3-base:
-#     stage: build base
-#     variables:
-#       FROM_IMAGE_NAME: $TENSORFLOW_IMAGE
-#       FRAMEWORK: tensorflow
-#     extends:
-#     - .base_template
-#     except:
-#       variables:
-#         - $BUILD_TENSORFLOW == "0"
+tensorflow-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $TENSORFLOW_IMAGE
+      FRAMEWORK: tensorflow
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
-# paddle-py3-base:
-#     stage: build base
-#     variables:
-#       FROM_IMAGE_NAME: $PADDLE_IMAGE
-#       FRAMEWORK: paddle
-#     extends:
-#     - .base_template
-#     except:
-#       variables:
-#         - $BUILD_PADDLE == "0"
+paddle-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PADDLE_IMAGE
+      FRAMEWORK: paddle
+    extends:
+    - .base_template
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 .devel_template:
     variables:
@@ -268,29 +268,29 @@ pytorch-py3-devel:
     extends:
     - .devel_template
 
-# jax-py3-devel:
-#     stage: build devel
-#     variables:
-#       FRAMEWORK: jax
-#     needs: [ jax-py3-base ]
-#     extends:
-#     - .devel_template
+jax-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-base ]
+    extends:
+    - .devel_template
 
-# tensorflow-py3-devel:
-#     stage: build devel
-#     variables:
-#       FRAMEWORK: tensorflow
-#     needs: [ tensorflow-py3-base ]
-#     extends:
-#     - .devel_template
+tensorflow-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-base ]
+    extends:
+    - .devel_template
 
-# paddle-py3-devel:
-#     stage: build devel
-#     variables:
-#       FRAMEWORK: paddle
-#     needs: [ paddle-py3-base ]
-#     extends:
-#     - .devel_template
+paddle-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-base ]
+    extends:
+    - .devel_template
 
 .stage_template : &STAGE
     environment: staging
@@ -643,11 +643,11 @@ upload_logs:
 ##
 ######################################################
 
-# L0_license:
-#     extends:
-#     - .L0_test
-#     tags:
-#     - 1GPU
+L0_license:
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
 
 L0_lint:
     variables:
@@ -658,64 +658,64 @@ L0_lint:
     tags:
     - 1GPU
 
-# L0_jax_lint:
-#     variables:
-#       FRAMEWORK: jax
-#     needs: [ jax-py3-devel ]
-#     extends:
-#     - .L0_test
-#     tags:
-#     - 1GPU
+L0_jax_lint:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
 
-# L0_tensorflow_lint:
-#     variables:
-#       FRAMEWORK: tensorflow
-#     needs: [ tensorflow-py3-devel ]
-#     extends:
-#     - .L0_test
-#     tags:
-#     - 1GPU
+L0_tensorflow_lint:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
 
-# L0_paddle_lint:
-#     variables:
-#       FRAMEWORK: paddle
-#     needs: [ paddle-py3-devel ]
-#     extends:
-#     - .L0_test
-#     tags:
-#     - 1GPU
+L0_paddle_lint:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
 
-# L0_unittest--V100_1GPU:
-#     variables:
-#       FRAMEWORK: pytorch
-#     needs: [ pytorch-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .V100_1GPU
+L0_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
-# L0_unittest--A100_1GPU:
-#     variables:
-#       FRAMEWORK: pytorch
-#     needs: [ pytorch-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .A100_1GPU
+L0_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
-# L0_unittest--TU102_R445_1GPU:
-#     variables:
-#       FRAMEWORK: pytorch
-#     needs: [ pytorch-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .TU102_R445_1GPU
+L0_unittest--TU102_R445_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .TU102_R445_1GPU
 
-# L0_unittest--H100_1GPU:
-#     variables:
-#       FRAMEWORK: pytorch
-#     needs: [ pytorch-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .H100_1GPU
+L0_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
 
 L0_pytorch_distributed_unittest--H100_4GPU:
     variables:
@@ -725,92 +725,92 @@ L0_pytorch_distributed_unittest--H100_4GPU:
     - .L1_test
     - .H100_4GPU
 
-# L0_jax_unittest--V100_1GPU:
-#     variables:
-#       FRAMEWORK: jax
-#     needs: [ jax-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .V100_1GPU
+L0_jax_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
-# L0_jax_unittest--A100_1GPU:
-#     variables:
-#       FRAMEWORK: jax
-#     needs: [ jax-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .A100_1GPU
+L0_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
-# L0_jax_unittest--H100_1GPU:
-#     variables:
-#       FRAMEWORK: jax
-#     needs: [ jax-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .H100_1GPU
+L0_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
 
-# L0_tensorflow_unittest--V100_1GPU:
-#     variables:
-#       FRAMEWORK: tensorflow
-#     needs: [ tensorflow-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .V100_1GPU
+L0_tensorflow_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
-# L0_tensorflow_unittest--A100_1GPU:
-#     variables:
-#       FRAMEWORK: tensorflow
-#     needs: [ tensorflow-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .A100_1GPU
+L0_tensorflow_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
-# L0_tensorflow_unittest--H100_1GPU:
-#     variables:
-#       FRAMEWORK: tensorflow
-#     needs: [ tensorflow-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .H100_1GPU
+L0_tensorflow_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: tensorflow
+    needs: [ tensorflow-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
 
-# L0_paddle_unittest--V100_1GPU:
-#     variables:
-#       FRAMEWORK: paddle
-#     needs: [ paddle-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .V100_1GPU
+L0_paddle_unittest--V100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
-# L0_paddle_unittest--A100_1GPU:
-#     variables:
-#       FRAMEWORK: paddle
-#     needs: [ paddle-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .A100_1GPU
+L0_paddle_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
-# L0_paddle_unittest--H100_1GPU:
-#     variables:
-#       FRAMEWORK: paddle
-#     needs: [ paddle-py3-devel ]
-#     extends:
-#     - .L0_test
-#     - .H100_1GPU
+L0_paddle_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
 
-# L0_cppunittest--V100_1GPU:
-#     extends:
-#     - .L0_test
-#     - .V100_1GPU
+L0_cppunittest--V100_1GPU:
+    extends:
+    - .L0_test
+    - .V100_1GPU
 
-# L0_cppunittest--A100_1GPU:
-#     extends:
-#     - .L0_test
-#     - .A100_1GPU
+L0_cppunittest--A100_1GPU:
+    extends:
+    - .L0_test
+    - .A100_1GPU
 
-# L0_cppunittest--H100_1GPU:
-#     extends:
-#     - .L0_test
-#     - .H100_1GPU
+L0_cppunittest--H100_1GPU:
+    extends:
+    - .L0_test
+    - .H100_1GPU
 
 docs:
     <<: *DOCS_BUILD
