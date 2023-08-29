@@ -393,7 +393,7 @@ def torch_op(
 
 def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
     return _nvte.Tensor(
-        t.data,
+        t,
         torch.Tensor().cuda(),
         torch.Tensor().cuda(),
         torch.Tensor().cuda(),
