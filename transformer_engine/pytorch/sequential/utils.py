@@ -6,11 +6,10 @@ from typing import (
     Literal,
     Protocol,
     TypeVar,
-    Unpack,
     overload,
 )
 from types import TracebackType, ModuleType, GenericAlias
-from typing_extensions import ParamSpec, TypeVarTuple
+from typing_extensions import ParamSpec, TypeVarTuple, Unpack
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
