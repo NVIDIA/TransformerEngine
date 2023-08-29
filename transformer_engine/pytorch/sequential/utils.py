@@ -6,10 +6,11 @@ from typing import (
     Literal,
     Protocol,
     TypeVar,
+    Unpack,
     overload,
 )
 from types import TracebackType, ModuleType, GenericAlias
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, TypeVarTuple
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
@@ -195,8 +196,11 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
     sources.append(source)
 
 
-class Decorator(Protocol):
-    def __call__(self, f: Callable[PS, T]) -> Callable[PS, T]:
+Ts = TypeVarTuple("Ts")
+
+
+class Decorator(Protocol[Unpack[Ts], T]):
+    def __call__(self, f: Callable[[Unpack[Ts]], T]) -> Callable[[Unpack[Ts]], T]:
         ...
 
 

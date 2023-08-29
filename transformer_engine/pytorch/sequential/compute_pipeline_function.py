@@ -42,7 +42,20 @@ class ForwardArgs:
 _args: ForwardArgs
 
 
-@nvte.torch_op
+def get_exposed_y_save_for_backward(
+    exposed_x: torch.Tensor, nvte_y: nvte.Tensor, output: torch.Tensor
+):
+    return None
+
+
+def get_exposed_y_backward(ctx: FunctionCtx, saved: None, *grads: torch.Tensor):
+    return grads[0]
+
+
+@nvte.torch_op(
+    save_for_backward=get_exposed_y_save_for_backward,
+    backward=lambda ctx, saved, *grads: grads[0],
+)
 def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
     x_data = exposed_x.data
     exposed_x.data = torch.Tensor().cuda()  # avoid copy
@@ -110,7 +123,8 @@ class ComputePipelineFunction(autograd.Function):
             setattr(ctx, "nvte_squish_outgoing_dgrad", False)
 
         # Expose result for Pytorch
-        exposed_y = get_exposed_y(exposed_x, nvte_y)
+        exposed_y = get_exposed_y(exposed_x, nvte_y)  # type: ignore
+        assert isinstance(exposed_y, torch.Tensor)
 
         # Squish y if fp8:
         if exposed_y.data.dtype == torch.int8:
