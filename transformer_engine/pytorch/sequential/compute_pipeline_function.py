@@ -44,11 +44,13 @@ _args: ForwardArgs
 
 def get_exposed_y_save_for_backward(
     exposed_x: torch.Tensor, nvte_y: nvte.Tensor, output: torch.Tensor
-):
+) -> None:
     return None
 
 
-def get_exposed_y_backward(ctx: FunctionCtx, saved: None, *grads: torch.Tensor):
+def get_exposed_y_backward(
+    ctx: FunctionCtx, saved: None, *grads: torch.Tensor
+) -> torch.Tensor:
     return grads[0]
 
 

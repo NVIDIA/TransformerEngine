@@ -181,10 +181,15 @@ def _generate_wrapping_unwrapping_code(
     inner_additional_setup_code: str,
     innder_additional_teardown_code: str,
 ):
-    arg_types = get_arg_types(func)
+    try:
+        arg_types = get_arg_types(func)
+        return_type = get_return_type(func)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to get argument and return types for {func.__name__}. Make sure the function is annotated with types."
+        ) from e
     arg_names = get_arg_names(func)
     arg_type_names = list(map(_type_name, arg_types))
-    return_type = get_return_type(func)
     return_type_name = _type_name(return_type)
     outer_sig = f"""({ ','.join(
             f'{arg_name}: {arg_type_name}'
