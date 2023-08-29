@@ -71,12 +71,6 @@ def get_exposed_y_saving_nvte_y(
     return exposed_y
 
 
-@torch._dynamo.allow_in_graph  # type: ignore
-def get_args() -> ForwardArgs:
-    assert _args is not None
-    return _args
-
-
 @nvte.torch_op
 def get_nvte_y(
     _: torch.Tensor,
@@ -272,6 +266,12 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                     nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
                 )
         return x
+
+
+@torch._dynamo.allow_in_graph  # type: ignore
+def get_args() -> ForwardArgs:
+    assert _args is not None
+    return _args
 
 
 # The squish needs to be invertible and
