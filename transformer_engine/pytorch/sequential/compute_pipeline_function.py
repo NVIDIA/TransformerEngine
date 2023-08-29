@@ -275,7 +275,7 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
             ComputePipelineFunction.forward = forward
             ComputePipelineFunction.backward = backward
 
-            x = Function.apply(  # type: ignore
+            x = ComputePipelineFunction.apply(  # type: ignore
                 x,
                 *exposed_tensors,
                 *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
