@@ -91,7 +91,8 @@ class ComputePipelineFunction(autograd.Function):
         del tensor_mess
 
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
-        nvte_y, to_save = _args.op.forward(nvte_x)
+        with torch.no_grad():
+            nvte_y, to_save = _args.op.forward(nvte_x)
 
         # Expose backward context for tracing
         bwd_ctx: list[torch.Tensor] = []
