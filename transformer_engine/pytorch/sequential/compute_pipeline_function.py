@@ -83,13 +83,7 @@ class Empty:
 
 ComputePipelineFunction = Empty()
 for attr in dir(autograd.Function):
-    if (
-        attr == "__class__"
-        or attr == "__name__"
-        or attr == "__qualname__"
-        or attr == "__module__"
-        or attr == "__dict__"
-    ):
+    if attr.startswith("_"):
         continue
     setattr(ComputePipelineFunction, attr, getattr(autograd.Function, attr))
 
