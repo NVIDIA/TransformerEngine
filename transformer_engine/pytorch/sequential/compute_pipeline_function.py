@@ -84,6 +84,9 @@ class ComputePipelineFunction:
             return getattr(autograd.Function, __name)
 
 
+Function = ComputePipelineFunction()
+
+
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
     nvte_x = nvte.make_nvte_tensor(x)
     if not training:
@@ -268,7 +271,6 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
 
                 return (*torch_grads, None, None, None)
 
-            Function = ComputePipelineFunction()
             Function.forward = forward
             Function.backward = backward
 
