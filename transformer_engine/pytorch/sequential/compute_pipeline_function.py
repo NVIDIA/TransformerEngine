@@ -77,9 +77,6 @@ def get_nvte_y(
 
 
 class ComputePipelineFunction:
-    forward: Any
-    backward: Any
-
     def __getattribute__(self, __name: str) -> Any:
         if __name == "forward" or __name == "backward":
             return self.__getattr__(__name)
