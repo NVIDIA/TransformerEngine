@@ -182,7 +182,7 @@ def _register_op(
 def _generate_wrapping_unwrapping_code(
     func: Callable[..., Any],
     inner_additional_setup_code: str,
-    innder_additional_teardown_code: str,
+    inner_additional_teardown_code: str,
 ):
     try:
         arg_types = get_arg_types(func)
@@ -226,14 +226,14 @@ def _generate_wrapping_unwrapping_code(
     result_wrapping_code = result_wrapping_code.lstrip()
     result_unwrapping_code = result_unwrapping_code.lstrip()
     inner_additional_setup_code = inner_additional_setup_code.lstrip()
-    innder_additional_teardown_code = innder_additional_teardown_code.lstrip()
+    inner_additional_teardown_code = inner_additional_teardown_code.lstrip()
 
     inner = f"""\
 def {func.__name__}{inner_sig}:
     {arg_unwrapping_code}
     {inner_additional_setup_code}
     result: {return_type_name} = func({unwrapped_args})
-    {innder_additional_teardown_code}
+    {inner_additional_teardown_code}
     {result_wrapping_code}
     return result_
 """
@@ -269,18 +269,13 @@ def _make_wrapper(
     func.__name__ = func.__name__[:-5]
     if save_for_backward is not None or backward is not None:
         assert save_for_backward is not None and backward is not None
-        (
-            save_for_backward_code,
-            save_for_backward_code_wrapping,
-        ) = _generate_wrapping_unwrapping_code(save_for_backward, "", "")
-        backward_code, backward_wrapping_code = _generate_wrapping_unwrapping_code(
-            backward, "", ""
+        save_for_backward_code, _ = _generate_wrapping_unwrapping_code(
+            save_for_backward, "", ""
         )
+        backward_code, _ = _generate_wrapping_unwrapping_code(backward, "", "")
     else:
         save_for_backward_code = ""
-        save_for_backward_code_wrapping = ""
         backward_code = ""
-        backward_wrapping_code = ""
 
     source = f"""\
 import torch
@@ -302,10 +297,6 @@ def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tenso
 {save_for_backward_code}
 
 {backward_code}
-
-{save_for_backward_code_wrapping}
-
-{backward_wrapping_code}
 """
     try:
         # Swap real cpp_extensions (_nvte) for impostor that does nothing
@@ -332,8 +323,8 @@ def torch_to_te_tensor(t: typing.Sequence[torch.Tensor]) -> cpp_extensions.Tenso
         op_aimp: Callable[..., Any] = ns[f"{func.__name__}_aimp"]  # type: ignore
 
         if save_for_backward is not None:
-            op_save_for_backward = ns[f"{save_for_backward.__name__}_wrap"]  # type: ignore
-            op_backward = ns[f"{backward.__name__}_wrap"]  # type: ignore
+            op_save_for_backward = ns[f"{save_for_backward.__name__}"]  # type: ignore
+            op_backward = ns[f"{backward.__name__}"]  # type: ignore
         else:
             op_save_for_backward = None
             op_backward = None
