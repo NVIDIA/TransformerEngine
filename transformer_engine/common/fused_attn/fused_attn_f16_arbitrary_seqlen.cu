@@ -42,6 +42,9 @@
 #define K_TRANSPOSE_ID 22
 #define dQ_ACCUM_ID 23
 
+#define FWD_VAR 1
+#define BWD_VAR 1
+
 #define VIRTUAL_ID 30
 
 namespace transformer_engine {
@@ -95,6 +98,9 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     int64_t s_stride[4];
     generateMatrixStrides(b, h, s_q, s_kv, d, s_stride, layout, NVTE_QKV_Matrix::NVTE_S_Matrix);
 
+    int64_t seqlen_dim[4]    = {b, 1, 1, 1};
+    int64_t seqlen_stride[4] = {1, 1, 1, 1};
+
     auto qTensor = tensor_create(tensorType, Q_ID, q_dim, q_stride, false, false);
     auto kTransposeTensor = tensor_create(
                             tensorType, K_ID, k_dim, k_stride, false, false);  // is virtual
@@ -107,17 +113,138 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                             .setComputeType(CUDNN_DATA_FLOAT)
                             .build();
 
+    auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+    auto seqlenKTensor = tensor_create(CUDNN_DATA_INT32, K_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+
     // Create a matmul 1 node
     auto matmul_op1 = cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
                             .setaMatDesc(qTensor)
                             .setbMatDesc(kTransposeTensor)
                             .setcMatDesc(sTensor)
+#ifdef FWD_VAR
+                            .setmOverrideDesc(seqlenQTensor)
+                            .setnOverrideDesc(seqlenKTensor)
+#endif
                             .setmatmulDesc(matmul_1_Desc)
                             .build();
 
     ops->push_back(std::move(matmul_op1));
 
     return sTensor;
+}
+
+static cudnn_frontend::Tensor
+createPaddingMask(int64_t b,
+                 int64_t h,
+                 int64_t s_q,
+                 int64_t s_kv,
+                 int64_t d,
+                 NVTE_QKV_Layout layout,
+                 cudnnDataType_t tensorType,
+                 std::vector<cudnn_frontend::Operation>& ops,
+                 cudnn_frontend::Tensor& prevBlockOutputTensor) {
+    CUDNN_FRONTEND_UNUSED(d);
+    CUDNN_FRONTEND_UNUSED(layout);
+    CUDNN_FRONTEND_UNUSED(tensorType);
+
+    cudnn_frontend::throw_if(
+        ops.size() == 0, "Padding Mask constructed incorrectly as the first one", CUDNN_STATUS_BAD_PARAM);
+
+    // subtraction output
+    int64_t afterBMM1_dim[4]    = {b, h, s_q, s_kv};
+    int64_t afterBMM1_stride[4] = {h * s_q * s_kv, s_q * s_kv, s_kv, 1};
+
+    int64_t maskVal_dim[4]    = {1, 1, 1, 1};
+    int64_t maskVal_stride[4] = {1, 1, 1, 1};
+
+    int64_t seqlen_dim[4]    = {b, 1, 1, 1};
+    int64_t seqlen_stride[4] = {1, 1, 1, 1};
+
+    // mask value to put in the masked pixels
+    auto maskValTensor =
+        tensor_create(CUDNN_DATA_FLOAT, MASK_VAL_ID, maskVal_dim, maskVal_stride, false, true);  // is by value
+    auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+    auto seqlenKTensor = tensor_create(CUDNN_DATA_INT32, K_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+
+    // gen index row output
+    auto rowIndexTensor =
+        tensor_create(CUDNN_DATA_FLOAT, VIRTUAL_ID + 300, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+    // gen index column output
+    auto columnIndexTensor =
+        tensor_create(CUDNN_DATA_FLOAT, VIRTUAL_ID + 301, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+    // less than row output
+    auto lessThanRowTensor = tensor_create(
+        CUDNN_DATA_BOOLEAN, VIRTUAL_ID + 302, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+    // less than column output
+    auto lessThanColTensor = tensor_create(
+        CUDNN_DATA_BOOLEAN, VIRTUAL_ID + 303, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+    // padding mask (lessthanRow && lessthanCol)
+    auto paddingMaskTensor = tensor_create(
+        CUDNN_DATA_BOOLEAN, VIRTUAL_ID + 304, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+
+    // output after masking
+    auto maskOutputTensor =
+        tensor_create(CUDNN_DATA_FLOAT, VIRTUAL_ID + 305, afterBMM1_dim, afterBMM1_stride, true, false);  // is virtual
+
+    // Define the gen index for row descriptor
+    auto genIndexRowDesc = cudnn_frontend::PointWiseDescBuilder()
+                               .setMode(CUDNN_POINTWISE_GEN_INDEX)
+                               .setAxis(2)
+                               .setComputeType(CUDNN_DATA_FLOAT)
+                               .build();
+    // std::cout << genIndexRowDesc.describe() << std::endl;
+
+    // Create a gen index Node.
+    auto genIndexRow_op = unary_pw_op_create(prevBlockOutputTensor, rowIndexTensor, genIndexRowDesc);
+    // std::cout << genIndexRow_op.describe() << std::endl;
+
+    // Define the gen index for row descriptor
+    auto genIndexColumnDesc = cudnn_frontend::PointWiseDescBuilder()
+                                  .setMode(CUDNN_POINTWISE_GEN_INDEX)
+                                  .setAxis(3)
+                                  .setComputeType(CUDNN_DATA_FLOAT)
+                                  .build();
+    // std::cout << genIndexColumnDesc.describe() << std::endl;
+
+    // Create a gen index Node.
+    auto genIndexColumn_op = unary_pw_op_create(prevBlockOutputTensor, columnIndexTensor, genIndexColumnDesc);
+
+    // Define the less than comparison for row descriptor
+    auto lessThanRowDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_CMP_LT);
+
+    // Create a less than comparison for row Node.
+    auto lessThanRow_op = binary_pw_op_create(rowIndexTensor, seqlenQTensor, lessThanRowTensor, lessThanRowDesc);
+
+    // Define the less than comparison for column descriptor
+    auto lessThanColDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_CMP_LT);
+
+    // Create a less than comparison for col Node.
+    auto lessThanCol_op = binary_pw_op_create(columnIndexTensor, seqlenKTensor, lessThanColTensor, lessThanColDesc);
+
+     // Define the less than comparison for column descriptor
+    auto paddingMaskAndDesc = pw_desc_create(CUDNN_DATA_BOOLEAN, CUDNN_POINTWISE_LOGICAL_AND);
+
+    // Create a and node for combining lessThanRow and lessThanCol
+    auto paddingMaskAnd_op =
+        binary_pw_op_create(lessThanRowTensor, lessThanColTensor, paddingMaskTensor, paddingMaskAndDesc);
+
+    /////////////////// Apply the mask //////////////////////////
+
+    // Define the binary select to perform masking descriptor
+    auto maskDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_BINARY_SELECT);
+
+    // Create a binary select Node.
+    auto mask_op =
+        ternary_pw_op_create(prevBlockOutputTensor, maskValTensor, paddingMaskTensor, maskOutputTensor, maskDesc);
+
+    ops.push_back(std::move(genIndexRow_op));
+    ops.push_back(std::move(genIndexColumn_op));
+    ops.push_back(std::move(lessThanRow_op));
+    ops.push_back(std::move(lessThanCol_op));
+    ops.push_back(std::move(paddingMaskAnd_op));
+    ops.push_back(std::move(mask_op));
+
+    return maskOutputTensor;
 }
 
 static cudnn_frontend::Tensor
@@ -515,6 +642,12 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     int64_t o_stride[4];
     generateMatrixStrides(b, h, s_q, s_kv, d, o_stride, layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
+    int64_t seqlen_dim[4]    = {b, 1, 1, 1};
+    int64_t seqlen_stride[4] = {1, 1, 1, 1};
+
+    auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+    auto seqlenKTensor = tensor_create(CUDNN_DATA_INT32, K_SEQLEN_ID, seqlen_dim, seqlen_stride, false, false);
+
     auto vTensor = tensor_create(tensorType, V_ID, v_dim, v_stride, false, false);
     // second GEMM output
     auto oTensor = tensor_create(tensorType, O_ID, o_dim, o_stride, false, false);
@@ -522,6 +655,7 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
     // Define the matmul 2 desc
     auto matmul_2_Desc = cudnn_frontend::MatMulDescBuilder()
                             .setComputeType(CUDNN_DATA_FLOAT)
+                            .setPaddingValue(0.0f)
                             .build();
 
     // Create a matmul 2 node
@@ -529,6 +663,10 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                             .setaMatDesc(afterScaleDropoutTensor)
                             .setbMatDesc(vTensor)
                             .setcMatDesc(oTensor)
+#ifdef FWD_VAR
+                            .setmOverrideDesc(seqlenQTensor)
+                            .setkOverrideDesc(seqlenKTensor)
+#endif
                             .setmatmulDesc(matmul_2_Desc)
                             .build();
 
@@ -541,6 +679,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 NVTE_QKV_Layout layout,
                                 void *devPtrQ, void *devPtrK, void *devPtrV,
                                 void *devPtrSoftmaxStats, void *devPtrO,
+                                void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
                                 void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                                 cudnnDataType_t tensorType,
                                 void *workspace, size_t *workspace_size,
@@ -587,11 +726,20 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto sAfterMaskTensor = createCausalMask(
                                 b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
+            // std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
+            // softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(sAfterMaskTensor));
+
+            // constexpr bool variable_sequence_length = true;
+            // if (variable_sequence_length) {
+            auto sAfterPaddingMaskTensor = createPaddingMask(b, h, s_q, s_kv, d, layout, tensorType, ops, sAfterMaskTensor);
+            auto softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(sAfterPaddingMaskTensor));
+            // }
+
             NVTE_CHECK(dropout_probability != 1.0f,
                                 "Dropout probability cannot be 1.0");
 
             auto softmax_output = createSoftmaxForward(
-                                b, h, s_q, s_kv, is_training, &ops, sAfterMaskTensor);
+                                b, h, s_q, s_kv, is_training, &ops, *softmaxInput.get());
 
             // Dropout(softmax)
             auto dropout_output = createDropoutForward(
@@ -636,9 +784,22 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
         // Exit to request upper level API to allocate memory if needed
         if (workspace == nullptr) {
-            *workspace_size = plan_workspace_size;
+            size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
             return;
         }
+
+        // Prepare actual seqlen
+        constexpr size_t nthreads_per_block = 128;
+        const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ),
+            static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         std::set<std::pair<uint64_t, void*>> data_ptrs;
         // Add all the data pointers to be used in the variant pack
@@ -654,6 +815,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_SEED_ID, devPtrDropoutSeed));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_CONST_ID, &scale_dropout));
+#ifdef FWD_VAR
+        data_ptrs.insert(std::pair<uint64_t, void*>(Q_SEQLEN_ID, devActualSeqlenQ));
+        data_ptrs.insert(std::pair<uint64_t, void*>(K_SEQLEN_ID, devActualSeqlenK));
+#endif
 
         // If training mode, we write out softmax stats
         if (is_training) {
@@ -678,6 +843,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             void* devPtrQ, void* devPtrKTranspose, void* devPtrVTranspose,
                             void* devPtrO, void* devPtrSoftmaxStats,
                             void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO,
+                            void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
                             void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                             cudnnDataType_t tensorType, void *workspace, size_t *workspace_size,
                             cudaStream_t stream, cudnnHandle_t handle, bool use_workspace_opt) {
@@ -747,8 +913,18 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             generateMatrixStrides(b, h, s_q, s_kv, d, dqAccum_stride,
                             layout, NVTE_QKV_Matrix::NVTE_O_Matrix);
 
+            int64_t seqlen_dim[4] = {b, 1, 1, 1};
+            int64_t seqlen_stride[4] = {1, 1, 1, 1};
+
             int64_t scale_dim[4] = {1, 1, 1, 1};
             int64_t scale_stride[4] = {1, 1, 1, 1};
+
+#ifdef BWD_VAR
+            auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim,
+                                               seqlen_stride, false, false);
+            auto seqlenKTensor = tensor_create(CUDNN_DATA_INT32, K_SEQLEN_ID, seqlen_dim,
+                                               seqlen_stride, false, false);
+#endif
 
             /*******************************************************************************
              *                          Dot product dO * O                                */ 
@@ -823,6 +999,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             // matmul to calculate dvTensor
             auto matmul_0_Desc = cudnn_frontend::MatMulDescBuilder()
                             .setComputeType(CUDNN_DATA_FLOAT)
+                            .setPaddingValue(0.0f)
                             .build();
 
             auto matmul_op0 = cudnn_frontend::OperationBuilder(
@@ -830,6 +1007,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(qTensor)
                             .setbMatDesc(kTransposeTensor)
                             .setcMatDesc(pTensor)
+#ifdef BWD_VAR
+                            .setmOverrideDesc(seqlenQTensor)
+                            .setnOverrideDesc(seqlenKTensor)
+#endif
                             .setmatmulDesc(matmul_0_Desc)
                             .build();
 
@@ -851,8 +1032,17 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             /*******************************************************************************
              *                          Causal masking -> pAfterMaskTensor                */
 
+            // std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
             auto pAfterMaskTensor = createCausalMask(
                             b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
+
+            // softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(pAfterMaskTensor));
+
+            // constexpr bool variable_sequence_length = true;
+            // if (variable_sequence_length) {
+            auto pAfterPaddingMaskTensor = createPaddingMask(b, h, s_q, s_kv, d, layout, tensorType, ops, pAfterMaskTensor);
+            auto softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(pAfterPaddingMaskTensor));
+            // }
 
             /*******************************************************************************
              *                          pAfterMaskTensor - softmaxStats -> pAfterSubtract */
@@ -865,7 +1055,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             reduction_stride, false, false);  // not virtual
             auto subtractDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
             auto subtract_op = binary_pw_op_create(
-                            pAfterMaskTensor, softmaxStatsTensor,
+                            *softmaxInput.get(), softmaxStatsTensor,
                             pAfterSubtractTensor, subtractDesc);
             ops.push_back(std::move(subtract_op));
 
@@ -930,6 +1120,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             auto matmul_1_Desc = cudnn_frontend::MatMulDescBuilder()
                             .setComputeType(CUDNN_DATA_FLOAT)
+                            .setPaddingValue(0.0f)
                             .build();
 
             auto matmul_op1 = cudnn_frontend::OperationBuilder(
@@ -937,6 +1128,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(sTransposeTensor)
                             .setbMatDesc(dOTensor)
                             .setcMatDesc(dVTensor)
+#ifdef BWD_VAR
+                            .setmOverrideDesc(seqlenKTensor)
+                            .setkOverrideDesc(seqlenQTensor)
+#endif
                             .setmatmulDesc(matmul_1_Desc)
                             .build();
 
@@ -954,6 +1149,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             auto matmul_2_Desc = cudnn_frontend::MatMulDescBuilder()
                             .setComputeType(CUDNN_DATA_FLOAT)
+                            .setPaddingValue(0.0f)
                             .build();
 
             auto matmul_op2 = cudnn_frontend::OperationBuilder(
@@ -961,6 +1157,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(dOTensor)
                             .setbMatDesc(vTransposeTensor)
                             .setcMatDesc(dSTensor)
+#ifdef BWD_VAR
+                            .setmOverrideDesc(seqlenQTensor)
+                            .setnOverrideDesc(seqlenKTensor)
+#endif
                             .setmatmulDesc(matmul_2_Desc)
                             .build();
 
@@ -1059,6 +1259,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             auto matmul_3_Desc = cudnn_frontend::MatMulDescBuilder()
                                 .setComputeType(CUDNN_DATA_FLOAT)
+                                .setPaddingValue(0.0f)
                                 .build();
 
             if (!use_workspace_opt) {
@@ -1067,6 +1268,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                     .setaMatDesc(dPScaledTensor)
                                     .setbMatDesc(kTensor)
                                     .setcMatDesc(dqAccumTensor)
+#ifdef BWD_VAR
+                                    .setmOverrideDesc(seqlenQTensor)
+                                    .setkOverrideDesc(seqlenKTensor)
+#endif
                                     .setmatmulDesc(matmul_3_Desc)
                                     .build();
 
@@ -1077,6 +1282,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                     .setaMatDesc(dPScaledTensor)
                                     .setbMatDesc(kTensor)
                                     .setcMatDesc(dQTensor)
+#ifdef BWD_VAR
+                                    .setmOverrideDesc(seqlenQTensor)
+                                    .setkOverrideDesc(seqlenKTensor)
+#endif
                                     .setmatmulDesc(matmul_3_Desc)
                                     .build();
 
@@ -1098,12 +1307,18 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
             auto matmul_4_Desc = cudnn_frontend::MatMulDescBuilder()
                                 .setComputeType(CUDNN_DATA_FLOAT)
+                                .setPaddingValue(0.0f)
                                 .build();
+
             auto matmul_op4 = cudnn_frontend::OperationBuilder(
                                 CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
                                 .setaMatDesc(dPTransposeTensor)
                                 .setbMatDesc(qTensor)
                                 .setcMatDesc(dKTensor)
+#ifdef BWD_VAR
+                                .setmOverrideDesc(seqlenKTensor)
+                                .setkOverrideDesc(seqlenQTensor)
+#endif
                                 .setmatmulDesc(matmul_4_Desc)
                                 .build();
 
@@ -1153,29 +1368,35 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
         // Exit to request upper level API to allocate memory if needed
         size_t softmaxSum_workspace_size = b * h * s_q * sizeof(float);
-        size_t dqAccum_workspace_size = b * s_q * h * d * sizeof(float);
+        size_t dqAccum_workspace_size = use_workspace_opt ? 0 : b * s_q * h * d * sizeof(float);
+        size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
         if (workspace == nullptr) {
-            if (use_workspace_opt) {
-                *workspace_size = plan_workspace_size + softmaxSum_workspace_size;
-            } else {
-                *workspace_size = plan_workspace_size + softmaxSum_workspace_size
-                                  + dqAccum_workspace_size;
-            }
+            *workspace_size = plan_workspace_size + softmaxSum_workspace_size
+                              + dqAccum_workspace_size + actual_seqlen_workspace_size;
             return;
         }
 
         void *devPtrSoftmaxSum = static_cast<int8_t *>(workspace) + plan_workspace_size;
-        void *devPtrdQAccumulator = nullptr;
-        if (!use_workspace_opt) {
-            devPtrdQAccumulator = static_cast<int8_t *>(devPtrSoftmaxSum)
+        void *devPtrdQAccumulator = static_cast<int8_t *>(devPtrSoftmaxSum)
                                         + softmaxSum_workspace_size;
+        if (!use_workspace_opt) {
             NVTE_CHECK_CUDA(cudaMemsetAsync(
                                   devPtrdQAccumulator, 0, dqAccum_workspace_size, stream));
         }
 
+        constexpr size_t nthreads_per_block = 128;
+        const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        void *devActualSeqlenQ = static_cast<int8_t *>(devPtrdQAccumulator) + dqAccum_workspace_size;
+        void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+        cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+            b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+            static_cast<const int32_t *>(devPtrCuSeqlenKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenK));
+        NVTE_CHECK_CUDA(cudaGetLastError());
+
         std::set<std::pair<uint64_t, void *>> data_ptrs;
         // add all the data pointers to be used in the variant pack
-        float negInfinity = -1.0E+10f;
+        float negInfinity = -1.0E+20f;
         float scale_dropout = 1.0f/(1.0f - dropout_probability);
         data_ptrs.insert(std::pair<uint64_t, void*>(dQ_ID, devPtrdQ));
         if (!use_workspace_opt) {
@@ -1194,6 +1415,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_SEED_ID, devPtrDropoutSeed));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(MASK_VAL_ID, &negInfinity));
+#ifdef BWD_VAR
+        data_ptrs.insert(std::pair<uint64_t, void *>(Q_SEQLEN_ID, devActualSeqlenQ));
+        data_ptrs.insert(std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
+#endif
 
         float scaleProb = 1.0f - dropout_probability;
         data_ptrs.insert(std::pair<uint64_t, void*>(D_CONST_ID, &scale_dropout));
@@ -1254,6 +1479,8 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
 
+    void *devPtrCuSeqlens = cu_seqlens->data.dptr;
+
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
@@ -1264,6 +1491,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
                                 is_training, attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
+                                devPtrCuSeqlens, devPtrCuSeqlens,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
@@ -1318,6 +1546,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
+    void *devPtrCuSeqlens = cu_seqlens->data.dptr;
+
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
@@ -1352,6 +1582,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                 attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+                                devPtrCuSeqlens, devPtrCuSeqlens,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(qkv_type), workspace->data.dptr,
                                 &workspace_size, stream, handle, use_workspace_opt);
@@ -1412,11 +1643,15 @@ void fused_attn_arbitrary_seqlen_fwd(
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
+    void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
+    void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
+
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
                                 is_training, attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
+                                devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size, stream, handle);
@@ -1467,6 +1702,9 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
+    void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
+    void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
+
     size_t workspace_size = 0;
 
     bool use_workspace_opt = false;
@@ -1500,6 +1738,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
                                 attn_scale, p_dropout, qkv_layout,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+                                devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle, use_workspace_opt);
