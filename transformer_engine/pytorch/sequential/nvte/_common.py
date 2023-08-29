@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import namedtuple
 from typing import TYPE_CHECKING, Any, Callable, Sequence, TypeVar, overload
-from types import GenericAlias
+from types import GenericAlias, NoneType
 import typing
 from typing_extensions import TypeVarTuple, Unpack
 import warnings
@@ -58,7 +58,7 @@ def _arg_type_wrap_func(arg_type: type):
         return Sequence[torch.Tensor]
     elif issubclass(arg_type, Enum):
         return int
-    elif issubclass(arg_type, (int, float, bool, str, torch.Tensor)):
+    elif issubclass(arg_type, (int, float, bool, str, torch.Tensor, NoneType)):
         return arg_type
     else:
         raise NotImplementedError(arg_type)
