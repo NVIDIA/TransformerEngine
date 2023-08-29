@@ -193,7 +193,8 @@ class ComputePipelineFunction(autograd.Function):
             ctx, "nvte_meta_tensor_provider_bwd"
         )
         nvte.set_execution_state("backward", meta_tensor_provider)
-        data_grad, param_grads = op.backward(saved, nvte_grad)
+        with torch.no_grad():
+            data_grad, param_grads = op.backward(saved, nvte_grad)
 
         # Store real gradient for next backward in pipeline
         if upcoming_backward is None:
