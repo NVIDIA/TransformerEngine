@@ -90,6 +90,7 @@ class ComputePipelineFunction(autograd.Function):
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
+        global _args
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
         with torch.no_grad():
             nvte_y, to_save = _args.op.forward(nvte_x)
