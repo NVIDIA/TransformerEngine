@@ -99,12 +99,17 @@ class ComputePipelineFunction(autograd.Function):
         else:
             setattr(ctx, "nvte_squish_outgoing_dgrad", False)
 
+        @nvte.torch_op
+        def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
+            x_data = exposed_x.data
+            exposed_x.data = torch.Tensor().cuda()  # avoid copy
+            exposed_y = exposed_x.clone()  # copy history
+            exposed_x.data = x_data
+            exposed_y.data = nvte_y.data
+            return exposed_y
+
         # Expose result for Pytorch
-        x_data = exposed_x.data
-        exposed_x.data = torch.Tensor().cuda()  # avoid copy
-        exposed_y = exposed_x.clone()  # copy history
-        exposed_x.data = x_data
-        exposed_y.data = nvte_y.data
+        exposed_y = get_exposed_y(exposed_x, nvte_y)
 
         # Squish y if fp8:
         if exposed_y.data.dtype == torch.int8:

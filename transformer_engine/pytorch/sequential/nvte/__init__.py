@@ -1,4 +1,4 @@
-from ._common import make_nvte_tensor
+from ._common import make_nvte_tensor, torch_op
 from ..cpp_extensions import (
     QKVLayout,
     BiasType,
@@ -96,6 +96,7 @@ __all__ = [
     "swiglu",
     "te_to_torch_dtype",
     "Tensor",
+    "torch_op",
     "torch_to_te_dtype",
     "transpose",
 ]
