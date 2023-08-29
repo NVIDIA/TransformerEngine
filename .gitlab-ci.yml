@@ -649,14 +649,14 @@ upload_logs:
 #     tags:
 #     - 1GPU
 
-# L0_lint:
-#     variables:
-#       FRAMEWORK: pytorch
-#     needs: [ pytorch-py3-devel ]
-#     extends:
-#     - .L0_test
-#     tags:
-#     - 1GPU
+L0_lint:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
 
 # L0_jax_lint:
 #     variables:
@@ -722,7 +722,7 @@ L0_pytorch_distributed_unittest--H100_4GPU:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
     extends:
-    - .L0_test
+    - .L1_test
     - .H100_4GPU
 
 # L0_jax_unittest--V100_1GPU:
