@@ -1155,17 +1155,20 @@ def test_export_core_attention(
     # Set dimensions (these are arbitrary).
     seq_len, batch_size, num_attention_heads, kv_channels = (64, 4, 1, 64)
     qkv_size = (seq_len, batch_size, num_attention_heads, kv_channels)
+    qkv_format = "sbhd"
 
     query_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     key_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     value_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
-    input_names = ["query", "key", "value", "attention_mask", "attn_mask_type"]
+    input_names = ["query", "key", "value",
+        "qkv_format", "cu_seqlens_q", "cu_seqlens_kv",
+        "attention_mask", "attn_mask_type"]
     attention_mask = None
     if use_mask:
         # Generate a random mask with 50% probability for 0 or 1.
         probs = 0.5 * torch.ones(qkv_size[1], qkv_size[2], qkv_size[0], qkv_size[0], device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
-    inp = (query_layer, key_layer, value_layer, attention_mask, attn_mask_type)
+    inp = (query_layer, key_layer, value_layer, qkv_format, None, None, attention_mask, attn_mask_type)
 
     mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
