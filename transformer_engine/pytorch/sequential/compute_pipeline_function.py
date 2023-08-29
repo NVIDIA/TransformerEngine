@@ -71,6 +71,12 @@ def get_exposed_y_saving_nvte_y(
     return exposed_y
 
 
+@torch._dynamo.allow_in_graph  # type: ignore
+def get_args() -> ForwardArgs:
+    assert _args is not None
+    return _args
+
+
 @nvte.torch_op
 def get_nvte_y(
     _: torch.Tensor,
@@ -90,8 +96,7 @@ class ComputePipelineFunction(autograd.Function):
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
-        global _args
-        assert _args is not None
+        _args = get_args()
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
         with torch.no_grad():
             nvte_y, to_save = _args.op.forward(nvte_x)
