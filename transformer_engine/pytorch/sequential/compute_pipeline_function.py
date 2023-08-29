@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from typing import Any
 import torch
 from torch import autograd
@@ -77,14 +78,10 @@ def get_nvte_y(
 
 
 class ComputePipelineFunction:
-    def __getattribute__(self, __name: str) -> Any:
-        if __name == "forward" or __name == "backward":
-            return self.__getattr__(__name)
-        else:
-            return getattr(autograd.Function, __name)
+    pass
 
 
-Function = ComputePipelineFunction()
+ComputePipelineFunction = copy.deepcopy(autograd.Function)
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
@@ -271,8 +268,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
 
                 return (*torch_grads, None, None, None)
 
-            Function.forward = forward
-            Function.backward = backward
+            ComputePipelineFunction.forward = forward
+            ComputePipelineFunction.backward = backward
 
             x = Function.apply(  # type: ignore
                 x,
