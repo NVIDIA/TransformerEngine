@@ -79,8 +79,6 @@ def get_nvte_y(
 
 
 class ComputePipelineFunction(autograd.Function):
-    args: ForwardArgs
-
     @staticmethod
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
