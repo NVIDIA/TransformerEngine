@@ -221,7 +221,11 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
 
-            x, (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = ComputePipelineFunction.apply(x, *exposed_tensors)  # type: ignore
+            x, (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = ComputePipelineFunction.apply(  # type: ignore
+                x,
+                exposed_tensors,
+                (nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
+            )
             assert isinstance(x, torch.Tensor)
             nvte_x = nvte.Tensor(nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv)  # type: ignore
         return x
