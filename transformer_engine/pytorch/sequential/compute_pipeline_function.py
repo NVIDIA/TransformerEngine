@@ -77,11 +77,9 @@ def get_nvte_y(
     return _saved.data, _saved.amax, _saved.scale, _saved.scale_inv
 
 
-class ComputePipelineFunction:
-    pass
-
-
 ComputePipelineFunction = copy.deepcopy(autograd.Function)
+ComputePipelineFunction.__name__ = "ComputePipelineFunction"
+ComputePipelineFunction.__class__ = type("ComputePipelineFunction", (object,), {})
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
