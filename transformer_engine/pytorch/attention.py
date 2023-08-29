@@ -207,7 +207,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         elif i <= rank:
                             # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                             q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                            # [2, b, 2, sk//2, np, hn] -> [2, b*sk//2, np, hn]
+                            # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                             kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
                             kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                             if _flash_attn_2_available:
