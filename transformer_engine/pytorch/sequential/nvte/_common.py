@@ -33,6 +33,7 @@ def _type_name(t: type) -> str:
         .replace("transformer_engine.pytorch.sequential.", "")
         .replace("collections.abc", "typing")
         .replace("__init__.pyi", "cpp_extensions")
+        .replace("NoneType", "None")
     )
 
 
