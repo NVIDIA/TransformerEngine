@@ -80,10 +80,6 @@ class ComputePipelineFunction:
     forward: Any
     backward: Any
 
-    def __init__(self, forward: Any, backward: Any):
-        self.forward = forward
-        self.backward = backward
-
     def __getattribute__(self, __name: str) -> Any:
         if __name == "forward" or __name == "backward":
             return self.__getattr__(__name)
@@ -275,7 +271,9 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
 
                 return (*torch_grads, None, None, None)
 
-            Function = ComputePipelineFunction(forward, backward)
+            Function = ComputePipelineFunction()
+            Function.forward = forward
+            Function.backward = backward
 
             x = Function.apply(  # type: ignore
                 x,
