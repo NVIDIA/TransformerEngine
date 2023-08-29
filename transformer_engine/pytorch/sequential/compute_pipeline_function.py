@@ -42,29 +42,40 @@ class ForwardArgs:
 _args: ForwardArgs
 
 
-def get_exposed_y_save_for_backward(
+def get_exposed_y_saving_nvte_y_save_for_backward(
     inputs: tuple[torch.Tensor, nvte.Tensor], output: torch.Tensor
 ) -> None:
     return None
 
 
-def get_exposed_y_backward(
+def get_exposed_y_saving_nvte_y_backward(
     ctx: FunctionCtx, _: None, *grads: torch.Tensor
 ) -> torch.Tensor:
     return grads[0]
 
 
 @nvte.torch_op(
-    save_for_backward=get_exposed_y_save_for_backward,
-    backward=get_exposed_y_backward,
+    save_for_backward=get_exposed_y_saving_nvte_y_save_for_backward,
+    backward=get_exposed_y_saving_nvte_y_backward,
 )
-def get_exposed_y(exposed_x: torch.Tensor, nvte_y: nvte.Tensor) -> torch.Tensor:
+def get_exposed_y_saving_nvte_y(
+    exposed_x: torch.Tensor, nvte_y: nvte.Tensor
+) -> torch.Tensor:
+    global _saved
+    _saved = nvte_y
     x_data = exposed_x.data
     exposed_x.data = torch.Tensor().cuda()  # avoid copy
     exposed_y = exposed_x.clone()  # copy history
     exposed_x.data = x_data
     exposed_y.data = nvte_y.data
     return exposed_y
+
+
+@nvte.torch_op
+def get_nvte_y(
+    _: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _saved.data, _saved.amax, _saved.scale, _saved.scale_inv
 
 
 class ComputePipelineFunction(autograd.Function):
@@ -75,7 +86,7 @@ class ComputePipelineFunction(autograd.Function):
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
         *tensor_mess: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
@@ -125,7 +136,7 @@ class ComputePipelineFunction(autograd.Function):
             setattr(ctx, "nvte_squish_outgoing_dgrad", False)
 
         # Expose result for Pytorch
-        exposed_y = get_exposed_y(exposed_x, nvte_y)
+        exposed_y = get_exposed_y_saving_nvte_y(exposed_x, nvte_y)
 
         # Squish y if fp8:
         if exposed_y.data.dtype == torch.int8:
@@ -147,7 +158,7 @@ class ComputePipelineFunction(autograd.Function):
         setattr(ctx, "nvte_upcoming_backward_comm", _args.upcoming_backward)
         setattr(ctx, "nvte_preceding_backward_comm", _args.next_upcoming_backward)
 
-        return (exposed_y, nvte_y.data, nvte_y.amax, nvte_y.scale, nvte_y.scale_inv)
+        return exposed_y
 
     @staticmethod
     def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
@@ -240,13 +251,19 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
 
-            (x, nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = ComputePipelineFunction.apply(  # type: ignore
+            x = ComputePipelineFunction.apply(  # type: ignore
                 x,
                 *exposed_tensors,
                 *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
             )
             assert isinstance(x, torch.Tensor)
-            nvte_x = nvte.Tensor(nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv)  # type: ignore
+            with torch.no_grad():
+                (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(
+                    x
+                )
+                nvte_x = nvte.Tensor(
+                    nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
+                )
         return x
 
 
