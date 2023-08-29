@@ -89,6 +89,7 @@ for attr in dir(autograd.Function):
         or attr == "__qualname__"
         or attr == "__module__"
         or attr == "__dict__"
+        or attr == "__weakref__"
     ):
         continue
     setattr(ComputePipelineFunction, attr, getattr(autograd.Function, attr))
