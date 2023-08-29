@@ -27,7 +27,7 @@ class BaseModule(nn.Module, ABC):
         self, x: torch.Tensor, seq_lens: torch.Tensor | None = None
     ) -> torch.Tensor:
         self.precompiled_for(x, seq_lens)
-        return self._run(nvte.make_nvte_tensor(x), x)
+        return self._run(x)
 
     def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
         with torch.no_grad():
@@ -40,13 +40,11 @@ class BaseModule(nn.Module, ABC):
 
             self._setup_pipeline(x, seq_lens)
 
-        nvte_x = nvte.make_nvte_tensor(x)
-        f: Callable[[torch.Tensor], torch.Tensor] = lambda _: self._run(nvte_x, x)
-        return f
+        return self._run
 
-    def _run(self, nvte_x: nvte.Tensor, x: torch.Tensor):
+    def _run(self, x: torch.Tensor):
         assert self.pipeline is not None
-        return apply(x, nvte_x, self.pipeline, self.training)
+        return apply(x, self.pipeline, self.training)
 
     @staticmethod
     def _create_seq_lens_tensor(x: torch.Tensor):
