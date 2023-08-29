@@ -58,7 +58,7 @@ class ComputePipelineFunction(autograd.Function):
         exposed_tensors are exposed for the optimizer to later apply gradients
         """
         del exposed_tensors
-        args = _args
+        args = globals()["_args"]
         assert isinstance(args, ForwardArgs)
 
         nvte_x = args.nvte_x
