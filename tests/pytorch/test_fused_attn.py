@@ -70,7 +70,7 @@ def test_dpa_qkv_layout(dtype, bs, model):
 
     qkv_layouts = [
         #'qkv_interleaved',
-        #'sb3hd',
+        'sb3hd',
         #'sbh3d',
         #'bs3hd',
         #'sbhd_sb2hd',
@@ -83,9 +83,9 @@ def test_dpa_qkv_layout(dtype, bs, model):
         #'thd_th2d',
         #'thd_t2hd',
         #'thd_thd_thd',
-        'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-        'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-        't3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+        #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+        #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+        #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
         ]
 
     for qkv_layout in qkv_layouts:
@@ -164,7 +164,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
-        print('tensor shape ', i, tensor_shape)
+        #print('tensor shape ', i, tensor_shape)
         tensor = 0.1 * torch.randn(tensor_shape, dtype = dtype).cuda()
         tensor_count = 1
         split_dim = 0
@@ -181,7 +181,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
                 inp.append(tensors[j])
     for i in range(3):
         inp[i].requires_grad=True
-        print('xxx i', i, inp[i].shape)#, inp[i][0,0,0,:10])
+        #print('xxx i', i, inp[i].shape)#, inp[i][0,0,0,:10])
 
     seqlens = torch.empty(bs, dtype = torch.int32).cuda()
     seqlens.fill_(config.seq_len)

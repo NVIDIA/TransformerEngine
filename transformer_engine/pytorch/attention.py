@@ -522,23 +522,23 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             if cu_seqlens_q is None:
-                cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
-                #cu_seqlens_q = torch.arange(
-                #        0,
-                #        (batch_size + 1) * max_seqlen_q,
-                #        step=max_seqlen_q,
-                #        dtype=torch.int32,
-                #        device=query_layer.device)
+                #cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_q = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_q,
+                        step=max_seqlen_q,
+                        dtype=torch.int32,
+                        device=query_layer.device)
             if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
-                #cu_seqlens_kv = torch.arange(
-                #        0,
-                #        (batch_size + 1) * max_seqlen_kv,
-                #        step=max_seqlen_kv,
-                #        dtype=torch.int32,
-                #        device=key_layer.device)
+                #cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_kv = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_kv,
+                        step=max_seqlen_kv,
+                        dtype=torch.int32,
+                        device=key_layer.device)
             query_layer, key_layer, value_layer = [x.view(x.shape[0] * x.shape[1], *x.shape[2:])
                 for x in [query_layer, key_layer, value_layer]
             ]
@@ -858,23 +858,23 @@ class FusedAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is None:
-                cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
-                #cu_seqlens_q = torch.arange(
-                #        0,
-                #        (batch_size + 1) * max_seqlen_q,
-                #        step=max_seqlen_q,
-                #        dtype=torch.int32,
-                #        device=query_layer.device)
+                #cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_q = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_q,
+                        step=max_seqlen_q,
+                        dtype=torch.int32,
+                        device=query_layer.device)
             if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
-                        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
-                #cu_seqlens_kv = torch.arange(
-                #        0,
-                #        (batch_size + 1) * max_seqlen_kv,
-                #        step=max_seqlen_kv,
-                #        dtype=torch.int32,
-                #        device=key_layer.device)
+                #cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
+                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
+                cu_seqlens_kv = torch.arange(
+                        0,
+                        (batch_size + 1) * max_seqlen_kv,
+                        step=max_seqlen_kv,
+                        dtype=torch.int32,
+                        device=key_layer.device)
         if qkv_format == 'thd':
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
