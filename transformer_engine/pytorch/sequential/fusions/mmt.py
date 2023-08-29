@@ -25,7 +25,9 @@ def mmt_add_inf_fused(mmt: MMT, add: Add, x: nvte.Tensor):
 
 
 @register_fusion_forward
-def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
+def mmt_add_fwd_fused(
+    mmt: MMT, add: Add, x: nvte.Tensor
+) -> tuple[nvte.Tensor, tuple[Context, Context]]:
     (x, x_t), (weight, weight_t) = nvte.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
@@ -35,7 +37,7 @@ def mmt_add_fwd_fused(mmt: MMT, add: Add, x: nvte.Tensor):
         x, weight, bias, add.y_dtype or mmt.y_dtype or x.dtype
     )
 
-    return y, ({"x_t": x_t, "weight_t": weight_t}, Context())
+    return y, ({"x_t": x_t, "weight_t": weight_t}, {})
 
 
 @register_fusion_backward
@@ -73,7 +75,9 @@ def mmt_add_gelu_inf_fused(mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor):
 
 
 @register_fusion_forward
-def mmt_add_gelu_fwd_fused(mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor):
+def mmt_add_gelu_fwd_fused(
+    mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor
+) -> tuple[nvte.Tensor, tuple[Context, Context, Context]]:
     (x, x_t), (weight, weight_t) = nvte.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
@@ -83,7 +87,7 @@ def mmt_add_gelu_fwd_fused(mmt: MMT, add: Add, gelu: GELU, x: nvte.Tensor):
         x, weight, bias, gelu.y_dtype or add.y_dtype or mmt.y_dtype or x.dtype
     )
 
-    return y, ({"x_t": x_t, "weight_t": weight_t}, Context(), {"x": pre_gelu})
+    return y, ({"x_t": x_t, "weight_t": weight_t}, {}, {"x": pre_gelu})
 
 
 @register_fusion_backward
@@ -95,7 +99,7 @@ def mmt_add_gelu_bwd_fused(
     add_ctx: Context,
     gelu_ctx: Context,
     dy: nvte.Tensor,
-):
+) -> tuple[nvte.Tensor, tuple[Grads, Grads, Grads]]:
     del add_ctx
     x_t, weight_t, pre_gelu = mmt_ctx["x_t"], mmt_ctx["weight_t"], gelu_ctx["x"]
     dy, dy_t, dbias = nvte.cast_transpose_dbias_dgelu_checked(
@@ -107,7 +111,7 @@ def mmt_add_gelu_bwd_fused(
     )
     dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype or mmt.weight.dtype)
 
-    return dx, ([dweight], [dbias], Grads())
+    return dx, ([dweight], [dbias], [])
 
 
 # MMT, GELU
@@ -172,7 +176,9 @@ def mmt_add_add_inf_fused(mmt: MMT, add1: Add, add2: Add, x: nvte.Tensor):
 
 
 @register_fusion_forward
-def mmt_add_add_fwd_fused(mmt: MMT, add1: Add, add2: Add, x: nvte.Tensor):
+def mmt_add_add_fwd_fused(
+    mmt: MMT, add1: Add, add2: Add, x: nvte.Tensor
+) -> tuple[nvte.Tensor, tuple[Context, Context, Context]]:
     (x, x_t), (weight, weight_t) = nvte.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
@@ -181,7 +187,7 @@ def mmt_add_add_fwd_fused(mmt: MMT, add1: Add, add2: Add, x: nvte.Tensor):
 
     y = nvte.matmul_transpose_add_add(x, weight, bias1, bias2)
 
-    return y, ({"x_t": x_t, "weight_t": weight_t}, Context(), Context())
+    return y, ({"x_t": x_t, "weight_t": weight_t}, {}, {})
 
 
 # MMT, Add, GELU, Add
@@ -202,7 +208,7 @@ def mmt_add_gelu_add_inf_fused(
 @register_fusion_forward
 def mmt_add_gelu_add_fwd_fused(
     mmt: MMT, add1: Add, gelu: GELU, add2: Add, x: nvte.Tensor
-):
+) -> tuple[nvte.Tensor, tuple[Context, Context, Context, Context]]:
     (x, x_t), (weight, weight_t) = nvte.multi_cast_transpose_checked(
         (x, mmt.x_dtype), (mmt.weight, mmt.weight_dtype)
     )
@@ -213,9 +219,9 @@ def mmt_add_gelu_add_fwd_fused(
 
     return y, (
         {"x_t": x_t, "weight_t": weight_t},
-        Context(),
+        {},
         {"x": pre_gelu},
-        Context(),
+        {},
     )
 
 
@@ -223,14 +229,14 @@ def mmt_add_gelu_add_fwd_fused(
 @register_fusion_backward
 def mmt_geglu_bwd_fused(
     mmt: MMT, geglu: GeGLU, mmt_ctx: Context, geglu_ctx: Context, grad: nvte.Tensor
-):
+) -> tuple[nvte.Tensor, tuple[Grads, Grads]]:
     x_t, weight_t, pre_geglu = mmt_ctx["x_t"], mmt_ctx["weight_t"], geglu_ctx["x"]
     dy, dy_t = nvte.cast_transpose_dgeglu_checked(grad, pre_geglu, mmt.dy_dtype)
 
     dx = nvte.matmul_transpose(dy, weight_t, mmt.dx_dtype or geglu.dx_dtype or dy.dtype)
     dweight = nvte.matmul_transpose(x_t, dy_t, mmt.dweight_dtype or mmt.weight.dtype)
 
-    return dx, ([dweight], Grads())
+    return dx, ([dweight], [])
 
 
 # fusion function names (ex. mmt_add_bwd_fused) are for debugging only, as they are called from a dictionary like FUSIONS_FWD

@@ -23,13 +23,13 @@ class Add(Op):
         self._dx_dtype = dx_dtype
         self.dbias_dtype = dbias_dtype
 
-    def forward(self, x: nvte.Tensor):
+    def forward(self, x: nvte.Tensor) -> tuple[nvte.Tensor, Context]:
         x = nvte.cast_checked(x, self.x_dtype)
         bias = nvte.cast_checked(self.bias, self.bias_dtype)
 
         y = nvte.add(x, bias, self.y_dtype or x.dtype)
 
-        return y, Context()
+        return y, {}
 
     def backward(self, ctx: Context, dy: nvte.Tensor):
         del ctx

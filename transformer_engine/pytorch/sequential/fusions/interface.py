@@ -33,7 +33,7 @@ class FusedOp(Op):
     def forward(self, x: nvte.Tensor):
         assert self.forward_ is not None
         y, ctxs = self.forward_(x)
-        full_ctx = Context()
+        full_ctx: Context = {}
         for op, ctx in zip(self.ops, ctxs):
             op_name = getattr(op, "name")
             ctx: Context = {op_name + name: tensor for name, tensor in ctx.items()}

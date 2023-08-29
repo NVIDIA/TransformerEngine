@@ -41,7 +41,7 @@ class SelfContainedOp(Op):
                     }
                 )
 
-        full_grads = Grads()
+        full_grads: Grads = []
         for op, ctx in list(zip(self.bwds, ctxs))[::-1]:
             dy, grads = op.backward(ctx, dy)
             full_grads += grads
