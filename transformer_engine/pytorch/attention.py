@@ -1354,6 +1354,14 @@ class DotProductAttention(torch.nn.Module):
              tensor parallel world size.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
+    cp_group : ProcessGroup, default = `None`
+             context parallel process group.
+    cp_global_ranks: list of global rank IDs, default = `None`
+             global rank IDs of GPUs that are in cp_group.
+    cp_stream: CUDA stream, default = `None`
+              context parallelism splits flash attention into multiple steps for compute and communication
+              overlapping. To address the wave quantization issue of each split step, we add an additional
+              CUDA stream so that we can overlap two flash attention kernels.
     """
 
     def __init__(
