@@ -6,6 +6,7 @@
 #include <cuda_runtime_api.h>
 #include <cassert>
 
+#include "common/util/cuda_runtime.h"
 #include "utils.h"
 
 namespace transformer_engine {
@@ -17,20 +18,7 @@ int GetCudaRuntimeVersion() {
     return ver;
 }
 
-int GetDeviceComputeCapability(int gpu_id) {
-    int max_num_gpu = 0;
-    NVTE_CHECK_CUDA(cudaGetDeviceCount(&max_num_gpu));
-    assert(gpu_id < max_num_gpu);
-
-    int major = 0;
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, gpu_id));
-
-    int minor = 0;
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, gpu_id));
-
-    int gpu_arch = major * 10 + minor;
-    return gpu_arch;
-}
+int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 
 __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,
                                           int64_t offset) {
