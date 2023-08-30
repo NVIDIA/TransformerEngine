@@ -138,7 +138,7 @@ def infer_major_sharding_type() -> MajorShardingType:
     """
     gsr = global_shard_resource()
 
-    resources = [gsr.dp_resource, gsr.tp_resource]
+    resources = [gsr.dp_resource, gsr.tp_resource, gsr.fsdp_resource]
     for idx, rs in enumerate(resources):
         try:
             size, _ = _get_mesh_info(rs)
@@ -149,12 +149,15 @@ def infer_major_sharding_type() -> MajorShardingType:
 
     dp_resource = resources[0]
     tp_resource = resources[1]
+    fsdp_resource = resources[2]
 
-    if dp_resource is not None and \
-        tp_resource is not None :
+    def dp_enabled():
+        return (fsdp_resource is not None) or (dp_resource is not None)
+
+    if dp_enabled() and tp_resource is not None:
         return MajorShardingType.DPTP
 
-    if dp_resource is not None:
+    if dp_enabled():
         return MajorShardingType.DP
 
     if tp_resource is not None:

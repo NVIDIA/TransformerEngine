@@ -273,7 +273,7 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
     auto null_tensor = TensorWrapper(nullptr, std::vector<size_t>{0}, DType::kFloat32);
 
     size_t workspace_size = kCublasLtForwardWorkspaceSize;
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
     auto wk_tensor = TensorWrapper(workspace, std::vector<size_t>{workspace_size}, DType::kByte);
 
     nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), null_tensor.data(),
@@ -327,7 +327,7 @@ void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, flo
         dummy_workspace_tensor.shape().data[0] * typeToSize(dummy_workspace_tensor.dtype()) +
         dummy_barrier_tensor.shape().data[0] * typeToSize(dummy_barrier_tensor.dtype());
 
-    void *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+    void *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
     auto workspace_tensor =
         TensorWrapper(workspace, dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype());
@@ -412,13 +412,9 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
     size_t dgamma_part_size = dummy_dgamma_part_tensor.shape().data[0] *
                               dummy_dgamma_part_tensor.shape().data[1] *
                               typeToSize(dummy_dgamma_part_tensor.dtype());
-    size_t total_workspace_size =
-        (workspace_size + barrier_size + dgamma_part_size + dbeta_part_size);
 
-    void *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
-    void *barrier = static_cast<char *>(workspace) + workspace_size;
-    void *dgamma_part = static_cast<char *>(barrier) + barrier_size;
-    void *dbeta_part = static_cast<char *>(dgamma_part) + dgamma_part_size;
+    auto [workspace, dgamma_part, dbeta_part, barrier] = WorkspaceManager::Instance().GetWorkspace(
+        workspace_size, dgamma_part_size, dbeta_part_size, barrier_size);
 
     auto workspace_tensor =
         TensorWrapper(workspace, dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype());
@@ -811,7 +807,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     output_s->data.dptr = softmax_aux;
 
     auto workspace_size = query_workspace_tensor.shape().data[0];
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
 
@@ -894,7 +890,7 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
                                   query_workspace_tensor.data(), stream);
 
     size_t workspace_size = query_workspace_tensor.shape().data[0];
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
 
@@ -978,7 +974,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
     auto rng_workspace_size = 2 * sizeof(int64_t);
     auto total_workspace_size = plan_workspace_size + rng_workspace_size;
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(total_workspace_size);
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(total_workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
 
@@ -1074,7 +1070,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     size_t workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    auto *workspace = cublasLtMetaManager::Instance().GetWorkspace(workspace_size);
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
