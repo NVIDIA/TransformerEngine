@@ -13,6 +13,7 @@ from typing import (
 )
 from types import TracebackType, ModuleType, GenericAlias
 from typing_extensions import ParamSpec, TypeVarTuple, Unpack
+from .annotations import get_arg_names, get_arg_types, get_return_type
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
@@ -135,45 +136,6 @@ def import_file_as_module(
             os.chdir(old_cwd)
 
 
-def get_arg_types(f: Callable[..., Any]) -> list[type]:
-    import typing
-    import ast
-
-    annotations = typing.get_type_hints(f)
-    annotations.pop("return", None)
-    arg_type_annotations = tuple(annotations.values())
-
-    arg_types = [
-        ast.literal_eval(val) if isinstance(val, str) else val
-        for val in arg_type_annotations
-    ]
-
-    return arg_types
-
-
-def get_arg_names(f: Callable[..., Any]) -> list[str]:
-    import typing
-
-    annotations = typing.get_type_hints(f)
-    annotations.pop("return", None)
-    return list(annotations.keys())
-
-
-def get_return_type(f: Callable[..., T]) -> type[T]:
-    import typing
-    import ast
-
-    return_annotation = typing.get_type_hints(f)["return"]
-
-    return_type = (
-        ast.literal_eval(return_annotation)
-        if isinstance(return_annotation, str)
-        else return_annotation
-    )
-
-    return return_type  # type: ignore
-
-
 def exec_saving_source(source: str, globals: dict[str, Any]):
     import ast
     import linecache
@@ -259,3 +221,16 @@ def is_generic(t: type | GenericAlias):
     from typing import _SpecialGenericAlias, _GenericAlias  # type: ignore
 
     return isinstance(t, GenericAlias | _SpecialGenericAlias | _GenericAlias)
+
+
+__all__ = [
+    "contextmanager",
+    "cache",
+    "import_file_as_module",
+    "exec_saving_source",
+    "unrolled_for",
+    "is_generic",
+    "get_arg_names",
+    "get_arg_types",
+    "get_return_type",
+]
