@@ -2034,12 +2034,13 @@ kuserbuffers_pushsendrecv_atomic(int* send_id, int* send_flagptr,int4 *srcptr, i
 }
 
 __global__ void __launch_bounds__(MAX_THREADS)
-kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcptr, int4* dstptr, const int lines, int myrank, int peer, int *recv_id, int* recv_flagptr, int adder, void *counters, int nchunks, int send_stride) {
+kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcptr, int4* dstptr, const int lines, int myrank, int peer, int *recv_id, int* recv_flagptr, int adder, void *counters, int nchunks, int send_stride, int recv_stride, bool shuffle) {
 
-    for(int j = 0; j < nchunks-1; j++) {
-    int send_chunk = (nchunks + myrank - j) % nchunks;
-    int recv_chunk = (nchunks + myrank - j - 1) % nchunks;
-    int offset = (send_chunk*send_stride)/16;
+    for(int chunk_i = 0; chunk_i < nchunks-1; chunk_i++) {
+    int send_chunk_id = shuffle ? chunk_i : (nchunks + myrank - chunk_i) % nchunks;
+    int recv_chunk_id = shuffle ?  chunk_i+1 : (nchunks + myrank - chunk_i - 1) % nchunks;
+    int send_offset = (send_chunk_id*send_stride)/16;
+    int recv_offset = ((shuffle?recv_chunk_id:send_chunk_id)*recv_stride)/16;
 
     if(lines) {
         const int start_elem = threadIdx.x + blockDim.x*blockIdx.x;
@@ -2051,15 +2052,15 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
                 int4 val[UNROLLCOPY];
                 #pragma unroll
                 for(int i=0;i<UNROLLCOPY;i++) {
-                    val[i] = srcptr[offset+line+i*blockDim.x*gridDim.x];
+                    val[i] = srcptr[send_offset+line+i*blockDim.x*gridDim.x];
                 }
                 #pragma unroll
                 for(int i=0;i<UNROLLCOPY;i++) {
-                    dstptr[offset+line+i*blockDim.x*gridDim.x]=val[i];
+                    dstptr[recv_offset+line+i*blockDim.x*gridDim.x]=val[i];
                 }
             }
             for (int line=end_aligned;line<end_elem;line+=blockDim.x*gridDim.x) {
-                dstptr[offset+line] = srcptr[offset+line];
+                dstptr[recv_offset+line] = srcptr[send_offset+line];
             }
         }
         __syncthreads();
@@ -2071,6 +2072,7 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
         atomicAdd_system(send_flagptr,1);
     }
 
+    // wait for message to arrive.
     if(blockIdx.x==0 && threadIdx.x==0) {
         const int signal_id = (*recv_id) + adder;
         *recv_id = signal_id;
@@ -2078,19 +2080,22 @@ kuserbuffers_pushsendrecv_multiatomic(int* send_id, int* send_flagptr,int4 *srcp
         //if(*flag>=signal_id) return;
         clock_t s=clock64();
         while(*flag<signal_id) {if(clock64()-s>TIMEOUT) {printf("%d from %d] pushrecv: expected %d, stuck with %d\n",myrank,peer,signal_id,*flag);/*return;*/}}
+    }
 
+    // Producer must update counters.
+    if(blockIdx.x==0 && threadIdx.x==0) {
         // Decrement atomic val to signal current output tile finish
         if(counters) {
-            ((unsigned int*)counters)[recv_chunk] = 0;
+            ((unsigned int*)counters)[recv_chunk_id/*chunk_i+1*/] = 0;
             asm volatile ("fence.sc.gpu;\n");
         }
     }
+
     // sync all CTAs before moving to next chunk.
     if(threadIdx.x==0) {
         int old_val2;
-        atomicInc(((unsigned int *)counters)+nchunks+j, gridDim.x-1);
-        clock_t s=clock64();
-        while ( 0 != ( old_val2 = atomicCAS( ((unsigned int*)counters)+nchunks+j, 0, 0) ) ) {if(clock64()-s>TIMEOUT) {printf("push_sendrecv %d chunk %d stuck at %d expect %d\n", myrank, j, old_val2, gridDim.x);}}
+        atomicInc(((unsigned int *)counters)+nchunks+chunk_i, gridDim.x-1);
+        while ( 0 != ( old_val2 = atomicCAS( ((unsigned int*)counters)+nchunks+chunk_i, 0, 0) ) ) {}
     }
     __syncthreads();
     }
@@ -2169,7 +2174,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
     void* flagptr_send = (comm->peer_ptr[0][send_peerlocal])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+comm->myrank*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
     void *flagptr_recv = (comm->mem_ptr[0])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+recv_peer*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
 
-    if(comm->push==0) {
+    /*if(comm->push==0) {
         void *recv_dstptr = (comm->mem_ptr[dsthandler])+recv_offset;
         void *recv_srcptr = (comm->peer_ptr[srchandler][recv_peerlocal])+recv_offset;
 
@@ -2188,7 +2193,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 	    CUDACHECK(cudaMemcpyAsync(recv_dstptr,recv_srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
             kuserbuffers_inc<<<1,1,0,stream>>> (&(comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler]));
         }
-    } else {
+    } else {*/
         void *send_srcptr = (comm->mem_ptr[srchandler])+send_offset;
         void *send_dstptr = (comm->peer_ptr[dsthandler][send_peerlocal])+send_offset;
         if(comm->use_ce) CUDACHECK(cudaMemcpyAsync(send_dstptr,send_srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
@@ -2206,7 +2211,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 	int arg10=signalonly ? 1:comm->sms;
         void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10};
         CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv, kernelArgs));
-    }
+    //}
 }
 
 void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
@@ -2224,7 +2229,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, con
     int *arg1=&comm->send_id[send_peer];
     int *arg2=(int*)flagptr_send;
     int4 *arg3=(int4*)((comm->mem_ptr[srchandler])+send_offset);
-    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+send_offset);
+    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+recv_offset);
     int arg5=bytes/16;
     int arg6=comm->myrank;
     int arg7=recv_peer;
@@ -2237,7 +2242,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, con
 }
 
 void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_stride, const size_t recv_stride,
-                                      const size_t bytes, communicator* comm, const int nchunks, void *counters, cudaStream_t stream) {
+                                      const size_t bytes, communicator* comm, const int nchunks, void *counters, bool shuffle, cudaStream_t stream) {
 
     assert(comm->push && comm->use_ce==0);
 
@@ -2265,7 +2270,9 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
     void *arg11=counters;
     int arg12=nchunks;
     int arg13=send_stride;
-    void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11,(void*)&arg12,(void*)&arg13};
+    int arg14=recv_stride;
+    bool arg15=shuffle;
+    void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11,(void*)&arg12,(void*)&arg13,(void*)&arg14,(void*)&arg15};
     CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv_multiatomic, kernelArgs));
 }
 
