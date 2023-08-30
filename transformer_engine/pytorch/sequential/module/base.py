@@ -53,7 +53,7 @@ class BaseModule(nn.Module, ABC):
             self.pipeline.next_iteration()
             self.loop(
                 enumerate(self.pipeline.functions),
-                {"x": x, "nvte_x": nvte_x},
+                {"x": x, "nvte_x": nvte_x, "next_upcoming_backward": None},
             )
             return x
 

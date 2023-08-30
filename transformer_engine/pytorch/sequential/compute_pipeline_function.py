@@ -199,6 +199,7 @@ class ComputePipelineFunction(autograd.Function):
 class LoopState(TypedDict):
     x: torch.Tensor
     nvte_x: nvte.Tensor
+    next_upcoming_backward: BackwardComm | None
 
 
 def make_loop(pipeline: ComputePipeline):
@@ -207,11 +208,12 @@ def make_loop(pipeline: ComputePipeline):
         i: int,
         contained_op: Op,
         loop_state: LoopState,
-        /,
-        *,
-        next_upcoming_backward: BackwardComm | None = None,
-    ):
-        x_, nvte_x_ = (loop_state["x"], loop_state["nvte_x"])
+    ) -> LoopState:
+        x_, nvte_x_, next_upcoming_backward = (
+            loop_state["x"],
+            loop_state["nvte_x"],
+            loop_state["next_upcoming_backward"],
+        )
         op = contained_op
         upcoming_backward, next_upcoming_backward = (
             (None, BackwardComm())
