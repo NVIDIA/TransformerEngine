@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TypedDict
+from typing import Optional, TypedDict
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
@@ -197,9 +197,8 @@ class ComputePipelineFunction(autograd.Function):
 
 
 class LoopState(TypedDict):
-    x_: torch.Tensor
-    nvte_x_: nvte.Tensor
-    next_upcoming_backward: BackwardComm | None
+    x: torch.Tensor
+    nvte_x: nvte.Tensor
 
 
 def make_loop(pipeline: ComputePipeline):
@@ -208,12 +207,11 @@ def make_loop(pipeline: ComputePipeline):
         i: int,
         contained_op: Op,
         loop_state: LoopState,
+        /,
+        *,
+        next_upcoming_backward: BackwardComm | None = None,
     ):
-        x_, nvte_x_, next_upcoming_backward = (
-            loop_state["x_"],
-            loop_state["nvte_x_"],
-            loop_state["next_upcoming_backward"],
-        )
+        x_, nvte_x_ = (loop_state["x"], loop_state["nvte_x"])
         op = contained_op
         upcoming_backward, next_upcoming_backward = (
             (None, BackwardComm())
@@ -250,19 +248,6 @@ def make_loop(pipeline: ComputePipeline):
         }
 
     return compute_pipeline_function_wrapping_loop
-
-
-def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
-    nvte_x = nvte.make_nvte_tensor(x)
-    if not training:
-        y = pipeline.run_inference(nvte_x)
-        assert not nvte.is_fp8(y)
-        return y.data
-    else:
-        pipeline.next_iteration()
-        loop = make_loop(pipeline)
-        loop(enumerate(pipeline.functions), {"x_": x, "nvte_x_": nvte_x})
-        return x
 
 
 # The squish needs to be invertible and
