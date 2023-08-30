@@ -2,41 +2,17 @@ from __future__ import annotations
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
-from typing import Final, Sequence
 from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
 from .compute_pipeline import ComputePipeline
+from .utils import unrolled_for
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class BackwardComm:
     nvte_grad_output: nvte.Tensor | None = None
-
-
-class ForwardArgs:
-    is_exposed_x_squished_now: bool
-    upcoming_backward: BackwardComm | None
-    next_upcoming_backward: BackwardComm
-    op: Op
-    meta_tensor_provider_fwd: Persistent[FP8Meta]
-    meta_tensor_provider_bwd: Persistent[FP8Meta]
-
-    def __init__(
-        self,
-        is_exposed_x_squished_now: bool,
-        upcoming_backward: BackwardComm | None,
-        op: Op,
-        meta_tensor_provider_fwd: Persistent[FP8Meta],
-        meta_tensor_provider_bwd: Persistent[FP8Meta],
-    ):
-        self.is_exposed_x_squished_now = is_exposed_x_squished_now
-        self.upcoming_backward = upcoming_backward
-        self.next_upcoming_backward = BackwardComm()
-        self.op = op
-        self.meta_tensor_provider_fwd = meta_tensor_provider_fwd
-        self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
 def get_exposed_y_saving_nvte_y_save_for_backward(
@@ -227,9 +203,17 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
-        meta_tensor_provider_fwd: Persistent[FP8Meta] = pipeline.meta_fwd
-        meta_tensor_provider_bwd: Persistent[FP8Meta] = pipeline.meta_bwd
-        for i, contained_op in enumerate(pipeline.functions):
+
+        @unrolled_for(enumerate(pipeline.functions))
+        def _(
+            i: int,
+            contained_op: Op,
+            /,
+            *,
+            x_: torch.Tensor = x,
+            nvte_x_: nvte.Tensor = nvte_x,
+            next_upcoming_backward: BackwardComm | None = None,
+        ):
             op = contained_op
             upcoming_backward, next_upcoming_backward = (
                 (None, BackwardComm())
@@ -245,24 +229,30 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
 
-            x = ComputePipelineFunction.apply(  # type: ignore
-                x,
+            x_ = ComputePipelineFunction.apply(  # type: ignore
+                x_,
                 *exposed_tensors,
-                *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
+                *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
                 upcoming_backward=upcoming_backward,
                 next_upcoming_backward=next_upcoming_backward,
                 op=op,
-                meta_tensor_provider_fwd=meta_tensor_provider_fwd,
-                meta_tensor_provider_bwd=meta_tensor_provider_bwd,
+                meta_tensor_provider_fwd=pipeline.meta_fwd,
+                meta_tensor_provider_bwd=pipeline.meta_bwd,
             )
             assert isinstance(x, torch.Tensor)
             with torch.no_grad():
                 (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(
                     x
                 )
-                nvte_x = nvte.Tensor(
+                nvte_x_ = nvte.Tensor(
                     nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
                 )
+            return {
+                "x": x_,
+                "nvte_x": nvte_x_,
+                "next_upcoming_backward": next_upcoming_backward,
+            }
+
         return x
 
 

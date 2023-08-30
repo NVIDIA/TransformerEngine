@@ -6,13 +6,16 @@ from typing import (
     Literal,
     Protocol,
     TypeVar,
+    Union,
     overload,
+    Iterable,
 )
 from types import TracebackType, ModuleType, GenericAlias
 from typing_extensions import ParamSpec, TypeVarTuple, Unpack
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
+Ts = TypeVarTuple("Ts")
 ExcT = TypeVar("ExcT")
 
 
@@ -195,7 +198,44 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
     sources.append(source)
 
 
-Ts = TypeVarTuple("Ts")
+@overload
+def unrolled_for(
+    iterable_: Iterable[tuple[Unpack[Ts]]],
+) -> Callable[[Callable[[Unpack[Ts]], None | dict[str, Any]]], None]:
+    ...
+
+
+@overload
+def unrolled_for(
+    iterable_: Iterable[T],
+) -> Callable[[Callable[[T], None | dict[str, Any]]], None]:
+    ...
+
+
+def unrolled_for(
+    iterable_: Iterable[T] | Iterable[tuple[Unpack[Ts]]],
+) -> (
+    Callable[[Callable[[T], None | dict[str, Any]]], None]
+    | Callable[[Callable[[Unpack[Ts]], None | dict[str, Any]]], None]
+):
+    def decorator(
+        f: Callable[[T], None | dict[str, Any]]
+        | Callable[[Unpack[Ts]], None | dict[str, Any]]
+    ):
+        loop_state: None | dict[str, Any] = None
+        for item in iterable_:
+            if isinstance(item, tuple):
+                if loop_state is None:
+                    loop_state = f(*item)  # type: ignore
+                else:
+                    loop_state = f(*item, **loop_state)  # type: ignore
+            else:
+                if loop_state is None:
+                    loop_state = f(item)  # type: ignore
+                else:
+                    loop_state = f(item, **loop_state)  # type: ignore
+
+    return decorator
 
 
 class Decorator(Protocol[Unpack[Ts], T]):
