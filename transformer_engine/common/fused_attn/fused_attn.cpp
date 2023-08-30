@@ -459,7 +459,7 @@ void nvte_fused_attn_fwd_q_k_v(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream) {
-  NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
+  NVTE_API_CALL(nvte_flash_attn_fwd_q_k_v);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
@@ -553,7 +553,7 @@ void nvte_fused_attn_bwd_q_k_v(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream) {
-  NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
+  NVTE_API_CALL(nvte_flash_attn_bwd_q_k_v);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
