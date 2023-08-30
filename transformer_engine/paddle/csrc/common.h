@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "paddle/extension.h"
+#include "paddle/phi/backends/all_context.h"
 
 namespace transformer_engine {
 namespace paddle_ext {

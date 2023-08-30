@@ -11,6 +11,9 @@
 namespace transformer_engine {
 namespace paddle_ext {
 
+const int BACKEND_F16m512_FP16_THREADS_PER_CTA = 128;
+const int BACKEND_F16arb_ELTS_PER_THREADS = 16;
+
 // MHA utils
 // convert QKV layout to enum
 NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout) {
@@ -542,6 +545,11 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
     return {dx, dgamma};
 }
 
+__global__ void set_rng_state(std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
+    rng_state_ptr[0] = static_cast<int64_t>(seed_offset.first);
+    rng_state_ptr[1] = static_cast<int64_t>(seed_offset.second);
+}
+
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
                                  const paddle::optional<paddle::Tensor> &Bias,
                                  paddle::Tensor &O,                              // NOLINT
@@ -580,6 +588,18 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
     // extract random number generator seed and offset
+    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(QKV.place());
+    int offset;
+    if (max_seqlen <= 512) {
+        offset = (max_seqlen * max_seqlen + BACKEND_F16m512_FP16_THREADS_PER_CTA - 1) /
+                 BACKEND_F16m512_FP16_THREADS_PER_CTA;
+    } else {
+        offset = BACKEND_F16arb_ELTS_PER_THREADS;
+    }
+    auto gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(offset);
+    set_rng_state<<<1, 1, 0, QKV.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors
@@ -747,6 +767,17 @@ void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
+    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
+    int offset;
+    if ((max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
+        offset = (max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP16_THREADS_PER_CTA - 1) /
+                 BACKEND_F16m512_FP16_THREADS_PER_CTA;
+    } else {
+        offset = BACKEND_F16arb_ELTS_PER_THREADS;
+    }
+    auto gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(offset);
+    set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors
@@ -1043,6 +1074,96 @@ std::vector<paddle::Tensor> update_scale(const paddle::Tensor &amax, const paddl
     return {scale_out};
 }
 
+constexpr int block_size = 512;
+
+__global__ void mask_to_actual_seqlens_kernel(const bool *mask, int32_t *q_actual_seqlen,
+                                              int32_t *kv_actual_seqlen, int q_seqlen,
+                                              int kv_seqlen, bool need_kv) {
+    __shared__ int q_smem[block_size];
+    __shared__ int kv_smem[block_size];
+    unsigned int tid = threadIdx.x;
+    unsigned int batch_offset = blockIdx.x * q_seqlen * kv_seqlen;
+
+    // load mask, convert to 1/0, add to shared mem
+    q_smem[tid] = 0;
+    for (unsigned int q_idx = tid * kv_seqlen; q_idx < q_seqlen * kv_seqlen;
+         q_idx += block_size * kv_seqlen) {
+        q_smem[tid] += (mask[q_idx + batch_offset] ? 0 : 1);
+    }
+    if (need_kv) {
+        kv_smem[tid] = 0;
+        for (unsigned int kv_idx = tid; kv_idx < kv_seqlen; kv_idx += block_size) {
+            kv_smem[tid] += (mask[kv_idx + batch_offset] ? 0 : 1);
+        }
+    }
+    __syncthreads();
+
+    // do reduction in shared mem
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            q_smem[tid] += q_smem[tid + s];
+            if (need_kv) kv_smem[tid] += kv_smem[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // write result for this block to global mem
+    if (tid == 0) {
+        q_actual_seqlen[blockIdx.x + 1] = q_smem[0];
+        if (need_kv) {
+            kv_actual_seqlen[blockIdx.x + 1] = kv_smem[0];
+        }
+    }
+}
+
+__global__ void block_prefix_sum_inplace(int32_t *x, int n) {
+    __shared__ int32_t smem[block_size];
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // load data into shared memory
+    if (i + 1 < n) {
+        // assume x[0] is 0, so skip the first elem
+        smem[threadIdx.x] = x[i + 1];
+    }
+    __syncthreads();
+
+    int32_t tmp;
+    for (unsigned int stride = 1; stride <= threadIdx.x; stride *= 2) {
+        tmp = 0;
+        if (threadIdx.x >= stride) {
+            tmp = smem[threadIdx.x - stride];
+        }
+        __syncthreads();
+        smem[threadIdx.x] += tmp;
+        __syncthreads();
+    }
+    if (i + 1 < n) {
+        x[i + 1] = smem[threadIdx.x];
+    }
+}
+
+void mask_to_cu_seqlens(const paddle::Tensor &mask,
+                        paddle::Tensor &q_cu_seqlen,                     // NOLINT
+                        paddle::optional<paddle::Tensor> &kv_cu_seqlen,  // NOLINT
+                        int q_seqlen, int kv_seqlen, bool need_kv) {
+    if (need_kv) {
+        NVTE_CHECK(GetOptionalDataPtr(kv_cu_seqlen) != nullptr,
+                   "kv_cu_seqlen must be provided when need_kv is true");
+    }
+    mask_to_actual_seqlens_kernel<<<mask.shape()[0], block_size, 0, mask.stream()>>>(
+        mask.data<bool>(), q_cu_seqlen.data<int32_t>(),
+        reinterpret_cast<int32_t *>(GetOptionalDataPtr(kv_cu_seqlen)), q_seqlen, kv_seqlen,
+        need_kv);
+    // q_cu_seqlen shape: [bs+1], assume bs is not too large (<=512), so we can use a single block
+    // to do prefix sum
+    NVTE_CHECK(q_cu_seqlen.numel() <= block_size, "batch size too large, kernel may fail");
+    block_prefix_sum_inplace<<<1, block_size, 0, mask.stream()>>>(q_cu_seqlen.data<int32_t>(),
+                                                                  q_cu_seqlen.numel());
+    if (need_kv) {
+        block_prefix_sum_inplace<<<1, block_size, 0, mask.stream()>>>(
+            reinterpret_cast<int32_t *>(GetOptionalDataPtr(kv_cu_seqlen)), kv_cu_seqlen->numel());
+    }
+}
+
 }  // namespace paddle_ext
 }  // namespace transformer_engine
 
@@ -1247,3 +1368,11 @@ PD_BUILD_OP(update_scale)
     .Outputs({"ScaleOut"})
     .Attrs({"fp8_max: float", "margin: float"})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::update_scale));
+
+PD_BUILD_OP(mask_to_cu_seqlens)
+    .Inputs({"mask", "_q_cu_seqlen", paddle::Optional("_kv_cu_seqlen")})
+    .Outputs({"q_cu_seqlen", paddle::Optional("kv_cu_seqlen")})
+    .Attrs({"q_seqlen: int", "kv_seqlen: int", "need_kv: bool"})
+    .SetInplaceMap({{"_q_cu_seqlen", "q_cu_seqlen"},
+                    {paddle::Optional("_kv_cu_seqlen"), paddle::Optional("kv_cu_seqlen")}})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::mask_to_cu_seqlens));

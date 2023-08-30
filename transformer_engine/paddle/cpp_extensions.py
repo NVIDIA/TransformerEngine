@@ -400,10 +400,26 @@ def rmsnorm_bwd(
     return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin)
 
 
+def mask_to_cu_seqlens(
+    mask: paddle.Tensor,
+    need_kv: bool = False,
+) -> paddle.Tensor:
+    """Convert mask to cu_seqlens"""
+    # mask shape: [b, 1, s_q, s_kv]
+    q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
+    q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+    q_cu_seqlens[0] = 0
+    kv_cu_seqlens = None
+    if need_kv:
+        kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+        kv_cu_seqlens[0] = 0
+    tex.mask_to_cu_seqlens(mask, q_cu_seqlens, kv_cu_seqlens, q_seqlen, kv_seqlen, need_kv)
+    return q_cu_seqlens, kv_cu_seqlens
+
+
 def fused_attn_fwd_qkvpacked(
     qkv: paddle.Tensor,
     cu_seqlens: paddle.Tensor,
-    rng_state: paddle.Tensor,
     is_training: bool,
     max_seqlen: int,
     qkv_dtype: tex.DType,
@@ -444,6 +460,10 @@ def fused_attn_fwd_qkvpacked(
     else:
         softmax_aux = None
 
+    rng_state = paddle.empty(shape=[
+        2,
+    ], dtype=paddle.int64)
+
     # execute kernel
     tex.te_fused_attn_fwd_qkvpacked(
         qkv,
@@ -465,8 +485,7 @@ def fused_attn_fwd_qkvpacked(
         attn_mask_type,
         int(qkv_dtype),
     )
-
-    return out, softmax_aux
+    return out, softmax_aux, rng_state
 
 
 def fused_attn_bwd_qkvpacked(
@@ -538,7 +557,6 @@ def fused_attn_fwd_kvpacked(
     kv: paddle.Tensor,
     cu_seqlens_q: paddle.Tensor,
     cu_seqlens_kv: paddle.Tensor,
-    rng_state: paddle.Tensor,
     is_training: bool,
     max_seqlen_q: int,
     max_seqlen_kv: int,
@@ -583,6 +601,10 @@ def fused_attn_fwd_kvpacked(
     else:
         softmax_aux = None
 
+    rng_state = paddle.empty(shape=[
+        2,
+    ], dtype=paddle.int64)
+
     # execute kernel
     tex.te_fused_attn_fwd_kvpacked(
         q,
@@ -609,7 +631,7 @@ def fused_attn_fwd_kvpacked(
         int(qkv_dtype),
     )
 
-    return out, softmax_aux
+    return out, softmax_aux, rng_state
 
 
 def fused_attn_bwd_kvpacked(
