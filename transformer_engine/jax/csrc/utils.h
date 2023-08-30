@@ -10,10 +10,10 @@
 #include <pybind11/pybind11.h>
 
 #include <cstdint>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include <vector>
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 
@@ -42,23 +42,18 @@ class WorkspaceManager {
         return workspace_;
     }
 
-    std::vector<void *> GetWorkspace(std::vector<size_t> sizes) {
-        size_t total_size = 0;
-        for (int i = 0; i < sizes.size(); i++) {
-            sizes[i] = PadSize_(sizes[i]);
-            total_size += sizes[i];
-        }
-
-        ReallocateIfNeed_(total_size);
-        std::vector<void *> ptrs(sizes.size(), workspace_);
-
-        size_t accumulated = 0;
-        for (int i = 0; i < ptrs.size(); i++) {
-            ptrs[i] = static_cast<char *>(workspace_) + accumulated;
-            accumulated += sizes[i];
-        }
-
-        return ptrs;
+    template <typename... Args>
+    inline auto GetWorkspace(Args... args) {
+        auto asks = std::array<size_t, sizeof...(Args)>{args...};
+        std::array<size_t, sizeof...(Args) + 1> offsets = {0};
+        std::array<void *, sizeof...(Args)> workspaces = {nullptr};
+        std::transform_inclusive_scan(
+            asks.cbegin(), asks.cend(), offsets.begin() + 1, std::plus<size_t>{},
+            [=](auto x) { return PadSize_(x); }, 0);
+        auto *workspace = GetWorkspace(offsets.back());
+        std::transform(offsets.cbegin(), offsets.cend() - 1, workspaces.begin(),
+                       [workspace](auto x) { return static_cast<char *>(workspace) + x; });
+        return workspaces;
     }
 
  private:

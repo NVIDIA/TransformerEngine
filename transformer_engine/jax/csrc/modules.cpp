@@ -422,13 +422,8 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
                               dummy_dgamma_part_tensor.shape().data[1] *
                               typeToSize(dummy_dgamma_part_tensor.dtype());
 
-    auto workspace_ptrs = WorkspaceManager::Instance().GetWorkspace(
-        {workspace_size, dgamma_part_size, dbeta_part_size, barrier_size});
-
-    void *workspace = workspace_ptrs[0];
-    void *dgamma_part = workspace_ptrs[1];
-    void *dbeta_part = workspace_ptrs[2];
-    void *barrier = workspace_ptrs[3];
+    auto [workspace, dgamma_part, dbeta_part, barrier] = WorkspaceManager::Instance().GetWorkspace(
+        workspace_size, dgamma_part_size, dbeta_part_size, barrier_size);
 
     auto workspace_tensor =
         TensorWrapper(workspace, dummy_workspace_tensor.shape(), dummy_workspace_tensor.dtype());
