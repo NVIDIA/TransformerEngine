@@ -197,7 +197,7 @@ def unrolled_for(
     iterations: int,
 ) -> Callable[
     [Callable[[Unpack[Ts], SomeDict], SomeDict]],
-    Callable[[SizedIterable[tuple[Unpack[Ts]]], SomeDict], None],
+    Callable[[Iterable[tuple[Unpack[Ts]]], SomeDict], None],
 ]:
     if not hasattr(unrolled_for, "memo"):
         setattr(unrolled_for, "memo", {})
@@ -207,7 +207,7 @@ def unrolled_for(
 
     def decorator(
         f: Callable[[Unpack[Ts], SomeDict], SomeDict]
-    ) -> Callable[[SizedIterable[tuple[Unpack[Ts]]], SomeDict], None]:
+    ) -> Callable[[Iterable[tuple[Unpack[Ts]]], SomeDict], None]:
         import inspect
 
         unpack = len(inspect.getfullargspec(f).args) > 1
