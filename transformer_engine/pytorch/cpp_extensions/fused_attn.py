@@ -6,7 +6,6 @@
 import math
 from typing import Tuple, List, Union
 import torch
-import nvtx
 import transformer_engine_extensions as tex
 from transformer_engine_extensions import (
     NVTE_QKV_Layout,
@@ -1003,8 +1002,6 @@ def fused_attn_fwd_q_k_v(
         rng_elts_per_thread = (max_seqlen_q * max_seqlen_q
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
-    torch.cuda.synchronize()
-    range_fused = nvtx.start_range("fused-fwd-cppext")
     # execute kernel
     output_tensors = tex.fused_attn_fwd_q_k_v(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
@@ -1013,8 +1010,6 @@ def fused_attn_fwd_q_k_v(
             d_scale_qkv, q_scale_s, q_scale_o, amax_s, amax_o,
             attn_bias, rng_gen, rng_elts_per_thread,
     )
-    torch.cuda.synchronize()
-    nvtx.end_range(range_fused)
 
     # out, aux_ctx_tensors
     return output_tensors[0], output_tensors[1:]
@@ -1191,8 +1186,6 @@ def fused_attn_bwd_q_k_v(
         check_stats(m, b, h, max_seqlen_q)
         check_stats(z_inv, b, h, max_seqlen_q)
 
-    torch.cuda.synchronize()
-    range_fused = nvtx.start_range("fused-bwd-cppext")
     # execute kernel
     output_tensors = tex.fused_attn_bwd_q_k_v(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
@@ -1201,7 +1194,5 @@ def fused_attn_bwd_q_k_v(
             d_scale_qkv, d_scale_s, d_scale_o, d_scale_do,
             q_scale_s, q_scale_dp, q_scale_dqkv, amax_dp, amax_dqkv,
     )
-    torch.cuda.synchronize()
-    nvtx.end_range(range_fused)
 
     return tuple(output_tensors)

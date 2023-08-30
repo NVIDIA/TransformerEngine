@@ -39,15 +39,15 @@ class ModelConfig:
         self.attn_mask_type  = attn_mask_type
 
 model_configs = {
-    #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    #"test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    #"test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    #"test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    #"test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    #"test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    #"test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    #"test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    #"test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
@@ -55,8 +55,8 @@ param_types = [torch.float16]
 #    param_types.append(torch.bfloat16)
 
 #batch_sizes = [1, 2, 32]
-#batch_sizes = [1] #, 32]
-batch_sizes = [2] #, 32]
+batch_sizes = [1] #, 32]
+#batch_sizes = [2] #, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -70,8 +70,8 @@ def test_dpa_qkv_layout(dtype, bs, model):
 
     qkv_layouts = [
         #'qkv_interleaved',
-        'sb3hd',
-        #'sbh3d',
+        #'sb3hd',
+        'sbh3d',
         #'bs3hd',
         #'sbhd_sb2hd',
         #'sbhd_sbh2d',

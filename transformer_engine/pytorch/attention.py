@@ -12,7 +12,6 @@ from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
-import nvtx
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -520,8 +519,6 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[1]
             if cu_seqlens_q is None:
-                #cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
-                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
                 cu_seqlens_q = torch.arange(
                         0,
                         (batch_size + 1) * max_seqlen_q,
@@ -529,8 +526,6 @@ class FlashAttention(torch.nn.Module):
                         dtype=torch.int32,
                         device=query_layer.device)
             if cu_seqlens_kv is None:
-                #cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
-                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
                 cu_seqlens_kv = torch.arange(
                         0,
                         (batch_size + 1) * max_seqlen_kv,
@@ -713,8 +708,6 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend):
-        torch.cuda.synchronize()
-        range_fused = nvtx.start_range("fused-apply-fwd")
         out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -734,18 +727,12 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
-        torch.cuda.synchronize()
-        nvtx.end_range(range_fused)
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
-        torch.cuda.synchronize()
-        range_fused = nvtx.start_range("fused-apply-bwd")
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
-        torch.cuda.synchronize()
-        range_fused1 = nvtx.start_range("fused-apply-bwd1")
         dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
             ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, out, d_out,
@@ -754,19 +741,12 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             None, None, None, None, None, None, None, None, None,
             ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
             ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
-        torch.cuda.synchronize()
-        nvtx.end_range(range_fused1)
-        nvtx.end_range(range_fused)
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
-            torch.cuda.synchronize()
-            range_fused2 = nvtx.start_range("fused-apply-bwd2")
             ret = (None, None, None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
-            torch.cuda.synchronize()
-            nvtx.end_range(range_fused2)
             return ret
             #return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
             #        None, None, None, None, None, None,
@@ -857,8 +837,6 @@ class FusedAttention(torch.nn.Module):
             max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
             max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
             if cu_seqlens_q is None:
-                #cu_seqlens_q = torch.Tensor([0]+[max_seqlen_q] * batch_size
-                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
                 cu_seqlens_q = torch.arange(
                         0,
                         (batch_size + 1) * max_seqlen_q,
@@ -866,8 +844,6 @@ class FusedAttention(torch.nn.Module):
                         dtype=torch.int32,
                         device=query_layer.device)
             if cu_seqlens_kv is None:
-                #cu_seqlens_kv = torch.Tensor([0]+[max_seqlen_kv] * batch_size
-                #        ).cumsum(0).to(dtype=torch.int32, device=query_layer.device)
                 cu_seqlens_kv = torch.arange(
                         0,
                         (batch_size + 1) * max_seqlen_kv,
