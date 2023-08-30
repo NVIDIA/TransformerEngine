@@ -6,7 +6,6 @@ from ..ops import Op
 from ..recipe import Recipe
 from ..compute_pipeline import ComputePipeline
 from ..compute_pipeline_function import make_loop
-from ..utils import enumerate
 from .. import nvte
 
 

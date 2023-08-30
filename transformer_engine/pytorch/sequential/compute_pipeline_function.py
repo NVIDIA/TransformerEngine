@@ -7,7 +7,7 @@ from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
 from .compute_pipeline import ComputePipeline
-from .utils import unrolled_for, enumerate
+from .utils import unrolled_for
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
