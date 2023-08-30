@@ -81,14 +81,18 @@ class ComputePipelineFunction(autograd.Function):
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
         *tensor_mess: torch.Tensor,
-        _args: ForwardArgs,
+        meta_tensor_provider_fwd: Persistent[FP8Meta],
+        meta_tensor_provider_bwd: Persistent[FP8Meta],
+        op: Op,
+        upcoming_backward: BackwardComm | None,
+        next_upcoming_backward: BackwardComm,
     ) -> torch.Tensor:
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
-        nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
+        nvte.set_execution_state("forward", meta_tensor_provider_fwd)
         with torch.no_grad():
-            nvte_y, to_save = _args.op.forward(nvte_x)
+            nvte_y, to_save = op.forward(nvte_x)
 
         # Expose backward context for tracing
         bwd_ctx: list[torch.Tensor] = []
@@ -101,8 +105,8 @@ class ComputePipelineFunction(autograd.Function):
 
         # Save real context
         setattr(ctx, "nvte_ctx", to_save)
-        setattr(ctx, "nvte_op", _args.op)
-        setattr(ctx, "nvte_meta_tensor_provider_bwd", _args.meta_tensor_provider_bwd)
+        setattr(ctx, "nvte_op", op)
+        setattr(ctx, "nvte_meta_tensor_provider_bwd", meta_tensor_provider_bwd)
 
         # Pytorch will break the computation graph
         # if it will see an output tensor of an integer type.
@@ -115,7 +119,8 @@ class ComputePipelineFunction(autograd.Function):
         # won't run at inference anyway.
 
         # Unsquish x if needed:
-        if _args.is_exposed_x_squished_now:
+        is_exposed_x_squished_now = exposed_x.dtype != nvte_x.data.dtype
+        if is_exposed_x_squished_now:
             # Intentionally commented out - _unsquish(exposed_x)
             # We don't need to perform the unsquish itself, as this
             # data will not be read anyway.
@@ -152,8 +157,8 @@ class ComputePipelineFunction(autograd.Function):
         # pass data to the next backward (the backward of the
         # preceding operation). This is needed to pass
         # fp8 gradients properly.
-        setattr(ctx, "nvte_upcoming_backward_comm", _args.upcoming_backward)
-        setattr(ctx, "nvte_preceding_backward_comm", _args.next_upcoming_backward)
+        setattr(ctx, "nvte_upcoming_backward_comm", upcoming_backward)
+        setattr(ctx, "nvte_preceding_backward_comm", next_upcoming_backward)
 
         return exposed_y
 
@@ -222,22 +227,15 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
-        args: ForwardArgs | None = None
+        meta_tensor_provider_fwd: Persistent[FP8Meta] = pipeline.meta_fwd
+        meta_tensor_provider_bwd: Persistent[FP8Meta] = pipeline.meta_bwd
         for i, contained_op in enumerate(pipeline.functions):
-            if i == 0:
-                args = ForwardArgs(
-                    False,
-                    None,
-                    contained_op,
-                    pipeline.meta_fwd,
-                    pipeline.meta_bwd,
-                )
-            else:
-                assert args is not None
-                args.is_exposed_x_squished_now = x.dtype != nvte_x.data.dtype
-                args.upcoming_backward = args.next_upcoming_backward
-                args.next_upcoming_backward = BackwardComm()
-                args.op = contained_op
+            op = contained_op
+            upcoming_backward, next_upcoming_backward = (
+                (None, BackwardComm())
+                if i == 0
+                else (next_upcoming_backward, BackwardComm())
+            )
 
             nvte_tensors = contained_op.require_grad()
             exposed_tensors: list[torch.Tensor] = []
@@ -251,7 +249,11 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 x,
                 *exposed_tensors,
                 *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
-                _args=args,
+                upcoming_backward=upcoming_backward,
+                next_upcoming_backward=next_upcoming_backward,
+                op=op,
+                meta_tensor_provider_fwd=meta_tensor_provider_fwd,
+                meta_tensor_provider_bwd=meta_tensor_provider_bwd,
             )
             assert isinstance(x, torch.Tensor)
             with torch.no_grad():
