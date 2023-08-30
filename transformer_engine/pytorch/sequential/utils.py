@@ -5,20 +5,24 @@ from typing import (
     Generic,
     Generator,
     Literal,
+    Mapping,
     Protocol,
+    Sized,
     TypeVar,
-    Union,
     overload,
     Iterable,
 )
-from types import TracebackType, ModuleType, GenericAlias
+from types import NoneType, TracebackType, ModuleType, GenericAlias
 from typing_extensions import ParamSpec, TypeVarTuple, Unpack
 from .exec_saving_source import exec_saving_source
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
 Ts = TypeVarTuple("Ts")
+Ts2 = TypeVarTuple("Ts2")
+CT = TypeVar("CT", covariant=True)
 ExcT = TypeVar("ExcT")
+SomeDict = TypeVar("SomeDict", bound=Mapping[Any, Any], covariant=True)
 
 
 class _Context(Generic[PS, T]):
@@ -175,42 +179,60 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
     return return_type  # type: ignore
 
 
-@overload
+class SizedIterable(Sized, Iterable[CT], Protocol):
+    pass
+
+
+class enumerate(enumerate[T]):
+    def __init__(self, iterable: Iterable[T], start: int = 0) -> None:
+        if isinstance(iterable, Sized):
+            self.__len__ = lambda: len(iterable)
+        super().__init__(iterable, start)
+
+    def __len__(self) -> int:
+        ...
+
+
 def unrolled_for(
-    iterable_: Iterable[tuple[Unpack[Ts]]],
-) -> Callable[[Callable[[Unpack[Ts]], None | dict[str, Any]]], None]:
-    ...
+    iterations: int,
+) -> Callable[
+    [Callable[[Unpack[Ts], SomeDict], SomeDict]],
+    Callable[[SizedIterable[tuple[Unpack[Ts]]], SomeDict], None],
+]:
+    if not hasattr(unrolled_for, "memo"):
+        setattr(unrolled_for, "memo", {})
+    memo: dict[tuple[int, bool, bool], Callable[..., Any]] = getattr(
+        unrolled_for, "memo"
+    )
 
-
-@overload
-def unrolled_for(
-    iterable_: Iterable[T],
-) -> Callable[[Callable[[T], None | dict[str, Any]]], None]:
-    ...
-
-
-def unrolled_for(
-    iterable_: Iterable[T] | Iterable[tuple[Unpack[Ts]]],
-) -> (
-    Callable[[Callable[[T], None | dict[str, Any]]], None]
-    | Callable[[Callable[[Unpack[Ts]], None | dict[str, Any]]], None]
-):
     def decorator(
-        f: Callable[[T], None | dict[str, Any]]
-        | Callable[[Unpack[Ts]], None | dict[str, Any]]
-    ):
-        loop_state: None | dict[str, Any] = None
-        for item in iterable_:
-            if isinstance(item, tuple):
-                if loop_state is None:
-                    loop_state = f(*item)  # type: ignore
-                else:
-                    loop_state = f(*item, **loop_state)  # type: ignore
+        f: Callable[[Unpack[Ts], SomeDict], SomeDict]
+    ) -> Callable[[SizedIterable[tuple[Unpack[Ts]]], SomeDict], None]:
+        import inspect
+
+        unpack = len(inspect.getfullargspec(f).args) > 1
+        INDENT = " " * 4
+        pref_code = f"def unrolled_{iterations}(f, iterable, loop_state):\n"
+        pref_code += INDENT + "iterator = iter(iterable)\n"
+        iter_code = INDENT + "item = next(iterator)\n"
+        return_type = get_return_type(f)
+        if unpack:
+            if return_type is NoneType:
+                iter_code += INDENT + "f(*item)\n"
             else:
-                if loop_state is None:
-                    loop_state = f(item)  # type: ignore
-                else:
-                    loop_state = f(item, **loop_state)  # type: ignore
+                iter_code += INDENT + "loop_state = f(*item, **loop_state)\n"
+        else:
+            if return_type is NoneType:
+                iter_code += INDENT + "f(item)\n"
+            else:
+                iter_code += INDENT + "loop_state = f(item, **loop_state)\n"
+        sufx_code = "\n"
+        namespace: dict[str, Any] = {}
+        full_code = pref_code + iter_code * iterations + sufx_code
+        exec_saving_source(full_code, namespace)
+        unrolled_loop = namespace[f"unrolled_{iterations}"]
+        memo[(iterations, unpack, return_type is not NoneType)] = unrolled_loop
+        return lambda iterable, loop_state: unrolled_loop(f, iterable, loop_state)
 
     return decorator
 

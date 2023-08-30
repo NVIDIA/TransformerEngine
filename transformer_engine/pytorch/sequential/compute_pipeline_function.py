@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import TypedDict
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
@@ -6,7 +7,7 @@ from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
 from .compute_pipeline import ComputePipeline
-from .utils import unrolled_for
+from .utils import unrolled_for, enumerate
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -195,6 +196,62 @@ class ComputePipelineFunction(autograd.Function):
         return (*torch_grads, None, None, None)
 
 
+class LoopState(TypedDict):
+    x_: torch.Tensor
+    nvte_x_: nvte.Tensor
+    next_upcoming_backward: BackwardComm | None
+
+
+def make_loop(pipeline: ComputePipeline):
+    @unrolled_for(len(pipeline.functions))
+    def compute_pipeline_function_wrapping_loop(
+        i: int,
+        contained_op: Op,
+        loop_state: LoopState,
+    ):
+        x_, nvte_x_, next_upcoming_backward = (
+            loop_state["x_"],
+            loop_state["nvte_x_"],
+            loop_state["next_upcoming_backward"],
+        )
+        op = contained_op
+        upcoming_backward, next_upcoming_backward = (
+            (None, BackwardComm())
+            if i == 0
+            else (next_upcoming_backward, BackwardComm())
+        )
+        nvte_tensors = contained_op.require_grad()
+        exposed_tensors: list[torch.Tensor] = []
+        for nvte_tensor in nvte_tensors:
+            assert not nvte.is_fp8(
+                nvte_tensor
+            )  # TODO: change when fp8 optimizer comes along
+            exposed_tensors.append(nvte_tensor.data)
+        x_ = ComputePipelineFunction.apply(  # type: ignore
+            x_,
+            *exposed_tensors,
+            *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
+            upcoming_backward=upcoming_backward,
+            next_upcoming_backward=next_upcoming_backward,
+            op=op,
+            meta_tensor_provider_fwd=pipeline.meta_fwd,
+            meta_tensor_provider_bwd=pipeline.meta_bwd,
+        )
+        assert isinstance(x_, torch.Tensor)
+        with torch.no_grad():
+            (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(x_)
+            nvte_x_ = nvte.Tensor(
+                nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
+            )
+        return {
+            "x": x_,
+            "nvte_x": nvte_x_,
+            "next_upcoming_backward": next_upcoming_backward,
+        }
+
+    return compute_pipeline_function_wrapping_loop
+
+
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
     nvte_x = nvte.make_nvte_tensor(x)
     if not training:
@@ -203,56 +260,8 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
-
-        @unrolled_for(enumerate(pipeline.functions))
-        def _(
-            i: int,
-            contained_op: Op,
-            /,
-            *,
-            x_: torch.Tensor = x,
-            nvte_x_: nvte.Tensor = nvte_x,
-            next_upcoming_backward: BackwardComm | None = None,
-        ):
-            op = contained_op
-            upcoming_backward, next_upcoming_backward = (
-                (None, BackwardComm())
-                if i == 0
-                else (next_upcoming_backward, BackwardComm())
-            )
-
-            nvte_tensors = contained_op.require_grad()
-            exposed_tensors: list[torch.Tensor] = []
-            for nvte_tensor in nvte_tensors:
-                assert not nvte.is_fp8(
-                    nvte_tensor
-                )  # TODO: change when fp8 optimizer comes along
-                exposed_tensors.append(nvte_tensor.data)
-
-            x_ = ComputePipelineFunction.apply(  # type: ignore
-                x_,
-                *exposed_tensors,
-                *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
-                upcoming_backward=upcoming_backward,
-                next_upcoming_backward=next_upcoming_backward,
-                op=op,
-                meta_tensor_provider_fwd=pipeline.meta_fwd,
-                meta_tensor_provider_bwd=pipeline.meta_bwd,
-            )
-            assert isinstance(x, torch.Tensor)
-            with torch.no_grad():
-                (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(
-                    x
-                )
-                nvte_x_ = nvte.Tensor(
-                    nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
-                )
-            return {
-                "x": x_,
-                "nvte_x": nvte_x_,
-                "next_upcoming_backward": next_upcoming_backward,
-            }
-
+        loop = make_loop(pipeline)
+        loop(enumerate(pipeline.functions), {"x_": x, "nvte_x_": nvte_x})
         return x
 
 
