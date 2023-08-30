@@ -212,7 +212,7 @@ def unrolled_for(
 
         unpack = len(inspect.getfullargspec(f).args) > 1
         INDENT = " " * 4
-        pref_code = f"def unrolled_{iterations}(f, iterable, loop_state):\n"
+        pref_code = f"\ndef unrolled_{iterations}(f, iterable, loop_state):\n"
         pref_code += INDENT + "iterator = iter(iterable)\n"
         iter_code = INDENT + "item = next(iterator)\n"
         return_type = get_return_type(f)
@@ -226,7 +226,7 @@ def unrolled_for(
                 iter_code += INDENT + "f(item)\n"
             else:
                 iter_code += INDENT + "loop_state = f(item, loop_state)\n"
-        sufx_code = "\n"
+        sufx_code = ""
         namespace: dict[str, Any] = {}
         full_code = pref_code + iter_code * iterations + sufx_code
         exec_saving_source(full_code, namespace)
