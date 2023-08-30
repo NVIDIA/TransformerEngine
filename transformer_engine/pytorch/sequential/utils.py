@@ -13,7 +13,7 @@ from typing import (
 )
 from types import TracebackType, ModuleType, GenericAlias
 from typing_extensions import ParamSpec, TypeVarTuple, Unpack
-from .annotations import get_arg_names, get_arg_types, get_return_type
+from .exec_saving_source import exec_saving_source
 
 PS = ParamSpec("PS")
 T = TypeVar("T")
@@ -136,29 +136,43 @@ def import_file_as_module(
             os.chdir(old_cwd)
 
 
-def exec_saving_source(source: str, globals: dict[str, Any]):
+def get_arg_types(f: Callable[..., Any]) -> list[type]:
+    import typing
     import ast
-    import linecache
 
-    if not hasattr(exec_saving_source, "sources"):
-        old_getlines = linecache.getlines
-        sources: list[str] = []
+    annotations = typing.get_type_hints(f)
+    annotations.pop("return", None)
+    arg_type_annotations = tuple(annotations.values())
 
-        def patched_getlines(filename: str, module_globals: Any = None):
-            if "<exec#" in filename:
-                index = int(filename.split("#")[1].split(">")[0])
-                return sources[index].splitlines(True)
-            else:
-                return old_getlines(filename, module_globals)
+    arg_types = [
+        ast.literal_eval(val) if isinstance(val, str) else val
+        for val in arg_type_annotations
+    ]
 
-        linecache.getlines = patched_getlines
-        setattr(exec_saving_source, "sources", sources)
-    sources: list[str] = getattr(exec_saving_source, "sources")
-    exec(
-        compile(ast.parse(source), filename=f"<exec#{len(sources)}>", mode="exec"),
-        globals,
+    return arg_types
+
+
+def get_arg_names(f: Callable[..., Any]) -> list[str]:
+    import typing
+
+    annotations = typing.get_type_hints(f)
+    annotations.pop("return", None)
+    return list(annotations.keys())
+
+
+def get_return_type(f: Callable[..., T]) -> type[T]:
+    import typing
+    import ast
+
+    return_annotation = typing.get_type_hints(f)["return"]
+
+    return_type = (
+        ast.literal_eval(return_annotation)
+        if isinstance(return_annotation, str)
+        else return_annotation
     )
-    sources.append(source)
+
+    return return_type  # type: ignore
 
 
 @overload
