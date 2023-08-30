@@ -1481,16 +1481,13 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
         size_t max_allowed = 1024 * 1024 * 1024;
 
         use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
-        std::cout << "after logic, use opt: " << use_workspace_opt << std::endl;
     }
-    use_workspace_opt = false;
-    std::cout << "manual set to false, use opt: " << use_workspace_opt << std::endl;
     if (!use_workspace_opt) {
         const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
         if ((env_workspace_opt != nullptr)
             && (strcmp(env_workspace_opt, "1") == 0)) {
                 use_workspace_opt = true;
-                std::cout << "env var set to true, use opt: " << use_workspace_opt << std::endl;
+                std::cout << "Warning: manually setting use_workspace_opt to " << use_workspace_opt << std::endl;
         }
     }
 #endif
