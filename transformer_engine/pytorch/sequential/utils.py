@@ -220,12 +220,12 @@ def unrolled_for(
             if return_type is NoneType:
                 iter_code += INDENT + "f(*item)\n"
             else:
-                iter_code += INDENT + "loop_state = f(*item, **loop_state)\n"
+                iter_code += INDENT + "loop_state = f(*item, loop_state)\n"
         else:
             if return_type is NoneType:
                 iter_code += INDENT + "f(item)\n"
             else:
-                iter_code += INDENT + "loop_state = f(item, **loop_state)\n"
+                iter_code += INDENT + "loop_state = f(item, loop_state)\n"
         sufx_code = "\n"
         namespace: dict[str, Any] = {}
         full_code = pref_code + iter_code * iterations + sufx_code
