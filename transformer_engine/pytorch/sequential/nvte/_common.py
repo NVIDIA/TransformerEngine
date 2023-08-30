@@ -248,7 +248,7 @@ def {func.__name__}_wrap{outer_sig}:
 
 
 def _run_full_code(*codes: str, **namespace: Any):
-    source = f"""\
+    source = """\
 import torch
 from .. import cpp_extensions
 import typing

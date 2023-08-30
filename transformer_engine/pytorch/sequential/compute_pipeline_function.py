@@ -39,9 +39,6 @@ class ForwardArgs:
         self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
-_args: ForwardArgs | None = None
-
-
 def get_exposed_y_saving_nvte_y_save_for_backward(
     inputs: tuple[torch.Tensor, nvte.Tensor], output: torch.Tensor
 ) -> None:
@@ -84,11 +81,11 @@ class ComputePipelineFunction(autograd.Function):
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
         *tensor_mess: torch.Tensor,
+        _args: ForwardArgs,
     ) -> torch.Tensor:
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
-        _args = get_args()
         nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
         with torch.no_grad():
             nvte_y, to_save = _args.op.forward(nvte_x)
@@ -225,10 +222,10 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
         return y.data
     else:
         pipeline.next_iteration()
+        args: ForwardArgs | None = None
         for i, contained_op in enumerate(pipeline.functions):
-            global _args
             if i == 0:
-                _args = ForwardArgs(
+                args = ForwardArgs(
                     False,
                     None,
                     contained_op,
@@ -236,11 +233,11 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                     pipeline.meta_bwd,
                 )
             else:
-                assert _args is not None
-                _args.is_exposed_x_squished_now = x.dtype != nvte_x.data.dtype
-                _args.upcoming_backward = _args.next_upcoming_backward
-                _args.next_upcoming_backward = BackwardComm()
-                _args.op = contained_op
+                assert args is not None
+                args.is_exposed_x_squished_now = x.dtype != nvte_x.data.dtype
+                args.upcoming_backward = args.next_upcoming_backward
+                args.next_upcoming_backward = BackwardComm()
+                args.op = contained_op
 
             nvte_tensors = contained_op.require_grad()
             exposed_tensors: list[torch.Tensor] = []
@@ -254,6 +251,7 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                 x,
                 *exposed_tensors,
                 *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
+                _args=args,
             )
             assert isinstance(x, torch.Tensor)
             with torch.no_grad():
@@ -264,12 +262,6 @@ def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.T
                     nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
                 )
         return x
-
-
-@torch._dynamo.allow_in_graph  # type: ignore
-def get_args() -> ForwardArgs:
-    assert _args is not None
-    return _args
 
 
 # The squish needs to be invertible and
