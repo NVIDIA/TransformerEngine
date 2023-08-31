@@ -14,10 +14,16 @@ import transformer_engine.paddle as te
 from transformer_engine.paddle.fp8 import is_fp8_available, fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling
 
-paddle.seed(10)
 is_fp8_supported, reason = is_fp8_available()
 LINEAR_CASES = [(16, 16, 32), (32, 32, 64)]
 NORM_CASES = [(16, 32), (256, 1024)]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    paddle.seed(10)
+    yield
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -48,6 +54,51 @@ def test_checkpoint(use_fp8):
         out = model_loaded(input_tensor)
 
     assert_allclose(out, out_ref)
+
+
+@pytest.mark.skipif(not is_fp8_supported, reason=reason)
+@pytest.mark.parametrize('use_fp8', [False, True])
+@pytest.mark.parametrize('use_reentrant', [False, True])
+def test_recompute(use_fp8, use_reentrant):
+    """
+    Test recompute
+    """
+    rtol = 1e-5
+    atol = 1e-5
+
+    activation_dtype = 'float32'
+    bs = 16
+    in_features = 16
+    out_features = 32
+
+    input_tensor = paddle.uniform(shape=(bs, in_features), dtype=activation_dtype)
+    input_tensor.stop_gradient = False
+    grad_out = paddle.uniform(shape=(bs, out_features), dtype=activation_dtype)
+
+    paddle.set_default_dtype(activation_dtype)
+    layer_recompute = te.Linear(in_features, out_features)
+    layer_normal = te.Linear(in_features, out_features)
+    layer_normal.weight.copy_(layer_recompute.weight, True)
+
+    def calc_output_and_grad_recompute(layer, x, dy):
+        """
+        Calculate forward and backward pass with recompute
+        """
+        inp = paddle.to_tensor(x)
+        inp.stop_gradient = x.stop_gradient
+        y = te.recompute(layer, inp, use_reentrant=use_reentrant)
+        y.backward(dy)
+
+        return y, inp.grad if not inp.stop_gradient else None
+
+    with fp8_autocast(enabled=use_fp8):
+        out_ref, grad_input_ref = calc_output_and_grad(layer_normal, input_tensor, grad_out)
+        out, grad_input = calc_output_and_grad_recompute(layer_recompute, input_tensor, grad_out)
+
+    assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert_allclose(grad_input, grad_input_ref, rtol=rtol, atol=atol)
+    assert_allclose(layer_normal.weight.grad, layer_recompute.weight.grad, rtol=rtol, atol=atol)
+    assert_allclose(layer_normal.bias.grad, layer_recompute.bias.grad, rtol=rtol, atol=atol)
 
 
 def calc_output_and_grad(layer, x, dy):
