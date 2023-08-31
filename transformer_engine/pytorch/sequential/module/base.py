@@ -50,8 +50,7 @@ class BaseModule(nn.Module, ABC):
             return y.data
         else:
             self.pipeline.next_iteration()
-            self.loop(x, nvte_x)
-            return x
+            return self.loop(x, nvte_x)[0]
 
     @staticmethod
     def _create_seq_lens_tensor(x: torch.Tensor):

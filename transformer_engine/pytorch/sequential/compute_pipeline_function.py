@@ -56,6 +56,7 @@ PIPELINE = MacroVar("PIPELINE", ComputePipeline)
 OP = MacroVar("OP", SelfContainedOp)
 UPCOMING_BACKWARD: BackwardComm | None = MacroVar("UPCOMING_BACKWARD", BackwardComm | None)  # type: ignore[assignment]
 NEXT_UPCOMING_BACKWARD = MacroVar("NEXT_UPCOMING_BACKWARD", BackwardComm)
+AUTOGRAD_FUNC: type[autograd.Function] = MacroVar("AUTOGRAD_FUNC", type[autograd.Function])  # type: ignore[assignment]
 
 
 class Backward:
@@ -200,51 +201,58 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
         return exposed_y
 
 
-def loop(
+@macro(OP, AUTOGRAD_FUNC, textual=False)
+def loop_iteration(
     x_: torch.Tensor,
     nvte_x_: nvte.Tensor,
-    pipeline: ComputePipeline,
-    ag_fs: list[type[autograd.Function]],
 ):
-    for op, autograd_func in zip(pipeline.functions, ag_fs):
-        nvte_tensors = op.require_grad()
-        exposed_tensors: list[torch.Tensor] = []
-        for nvte_tensor in nvte_tensors:
-            assert not nvte.is_fp8(
-                nvte_tensor
-            )  # TODO: change when fp8 optimizer comes along
-            exposed_tensors.append(nvte_tensor.data)
+    nvte_tensors = OP.require_grad()
+    exposed_tensors: list[torch.Tensor] = []
+    for nvte_tensor in nvte_tensors:
+        assert not nvte.is_fp8(
+            nvte_tensor
+        )  # TODO: change when fp8 optimizer comes along
+        exposed_tensors.append(nvte_tensor.data)
 
-        x_ = autograd_func.apply(  # type: ignore
-            x_,
-            *exposed_tensors,
-            *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
-        )
-        assert isinstance(x_, torch.Tensor)
-        with torch.no_grad():
-            (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(x_)
-            nvte_x_ = nvte.Tensor(
-                nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
-            )
+    x_ = AUTOGRAD_FUNC.apply(  # type: ignore
+        x_,
+        *exposed_tensors,
+        *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
+    )
+    assert isinstance(x_, torch.Tensor)
+    with torch.no_grad():
+        (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(x_)
+        nvte_x_ = nvte.Tensor(nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv)
+    return x_, nvte_x_
 
 
-def make_loop(pipeline: ComputePipeline) -> Callable[[torch.Tensor, nvte.Tensor], None]:
+def make_loop(pipeline: ComputePipeline):
     upcoming_backward = None
     next_upcoming_backward = BackwardComm()
-    ag_fs: list[type[autograd.Function]] = []
+    iterations: list[
+        Callable[[torch.Tensor, nvte.Tensor], tuple[torch.Tensor, nvte.Tensor]]
+    ] = []
     for i, op in enumerate(pipeline.functions):
         upcoming_backward, next_upcoming_backward = (
             (None, BackwardComm())
             if i == 0
             else (next_upcoming_backward, BackwardComm())
         )
-        ag_fs.append(
-            ComputePipelineFunction(
-                pipeline, op, upcoming_backward, next_upcoming_backward
+        iterations.append(
+            loop_iteration(
+                op,
+                ComputePipelineFunction(
+                    pipeline, op, upcoming_backward, next_upcoming_backward
+                ),
             )
         )
 
-    return lambda x, nvte_x: loop(x, nvte_x, pipeline, ag_fs)
+    def loop(x: torch.Tensor, nvte_x: nvte.Tensor):
+        for iteration in iterations:
+            x, nvte_x = iteration(x, nvte_x)
+        return x, nvte_x
+
+    return loop
 
 
 # The squish needs to be invertible and
