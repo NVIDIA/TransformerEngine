@@ -181,6 +181,7 @@ class TransformerLayer(paddle.nn.Layer):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
+        recompute_core_attention: bool = False,
     ) -> paddle.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -207,6 +208,11 @@ class TransformerLayer(paddle.nn.Layer):
                     Bias tensor for Q * K.T
         set_zero: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        recompute_core_attention: bool, default = `False`
+                                  If true, forward activations for core attention are recomputed
+                                  during the backward pass in order to save memory that would
+                                  otherwise be occupied to store the forward activations until
+                                  backprop.
         """
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
@@ -222,6 +228,7 @@ class TransformerLayer(paddle.nn.Layer):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             set_zero=set_zero,
+            recompute_core_attention=recompute_core_attention,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -248,6 +255,7 @@ class TransformerLayer(paddle.nn.Layer):
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 set_zero=set_zero,
+                recompute_core_attention=recompute_core_attention,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, residual = inter_attention_outputs

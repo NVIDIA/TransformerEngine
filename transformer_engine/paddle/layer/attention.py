@@ -23,6 +23,7 @@ from ..cpp_extensions import (
 )
 from ..distributed import get_tp_group_and_world_size, track_rng_state
 from ..utils import attention_mask_func, divide, mask_to_cu_seqlens
+from ..recompute import recompute
 
 
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
@@ -516,6 +517,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
+        recompute_core_attention: bool = False,
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
         """
         MultiHeadAttention Layer.
@@ -535,7 +537,11 @@ class MultiHeadAttention(paddle.nn.Layer):
                     Bias tensor for Q * K.T
         set_zero: bool, defautl = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
-
+        recompute_core_attention: bool, default = `False`
+                                  If true, forward activations for core attention are recomputed
+                                  during the backward pass in order to save memory that would
+                                  otherwise be occupied to store the forward activations until
+                                  backprop.
         """
 
         # hidden_states: [b, s_q, hidden_size]
@@ -558,14 +564,26 @@ class MultiHeadAttention(paddle.nn.Layer):
             ])
 
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
-                context_layer = self.core_attention(
-                    query_layer=mixed_qkv_layer,
-                    key_value_layer=None,
-                    attention_mask=attention_mask,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
-                    set_zero=set_zero,
-                )
+                if recompute_core_attention:
+                    context_layer = recompute(
+                        self.core_attention,
+                        query_layer=mixed_qkv_layer,
+                        key_value_layer=None,
+                        attention_mask=attention_mask,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        set_zero=set_zero,
+                        use_reentrant=False,
+                    )
+                else:
+                    context_layer = self.core_attention(
+                        query_layer=mixed_qkv_layer,
+                        key_value_layer=None,
+                        attention_mask=attention_mask,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        set_zero=set_zero,
+                    )
 
         else:    # cross attention
             mixed_kv_layer = self.key_value(encoder_output)
@@ -587,14 +605,26 @@ class MultiHeadAttention(paddle.nn.Layer):
                 0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
             ])
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
-                context_layer = self.core_attention(
-                    query_layer=query_layer,
-                    key_value_layer=mixed_kv_layer,
-                    attention_mask=attention_mask,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
-                    set_zero=set_zero,
-                )
+                if recompute_core_attention:
+                    context_layer = recompute(
+                        self.core_attention,
+                        query_layer=query_layer,
+                        key_value_layer=mixed_kv_layer,
+                        attention_mask=attention_mask,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        set_zero=set_zero,
+                        use_reentrant=False,
+                    )
+                else:
+                    context_layer = self.core_attention(
+                        query_layer=query_layer,
+                        key_value_layer=mixed_kv_layer,
+                        attention_mask=attention_mask,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        set_zero=set_zero,
+                    )
 
         context_layer = paddle.reshape(context_layer,
                                        [0, 0, context_layer.shape[2] * context_layer.shape[3]])
