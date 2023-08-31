@@ -125,6 +125,17 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
         exposed_x: torch.Tensor,
         *tensor_mess: torch.Tensor,
     ) -> torch.Tensor:
+        # Hack for torch dynamo
+        params_unpacked = [
+            nvte.Tensor(*(tensor_mess[j] for j in range(i, i + 4, 1)))
+            for i in range(0, len(tensor_mess), 4)
+        ]
+        for param_in, param_cur in zip(params_unpacked, OP.require_grad()):
+            param_cur.data = param_in.data
+            param_cur.amax = param_in.amax
+            param_cur.scale = param_in.scale
+            param_cur.scale_inv = param_in.scale_inv
+
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
