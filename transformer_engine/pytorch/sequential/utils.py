@@ -6,7 +6,6 @@ from typing import (
     Generic,
     Generator,
     Literal,
-    LiteralString,
     Mapping,
     Protocol,
     Sequence,
@@ -26,7 +25,6 @@ Ts2 = TypeVarTuple("Ts2")
 CT = TypeVar("CT", covariant=True)
 ExcT = TypeVar("ExcT")
 SomeDict = TypeVar("SomeDict", bound=Mapping[Any, Any], covariant=True)
-LitStr = TypeVar("LitStr", bound=LiteralString, covariant=True)
 
 
 class _Context(Generic[PS, T]):
