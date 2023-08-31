@@ -130,7 +130,8 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
             nvte.Tensor(*(tensor_mess[j] for j in range(i, i + 4, 1)))
             for i in range(0, len(tensor_mess) - 4, 4)
         ]
-        for param_in, param_cur in zip(params_unpacked, OP.require_grad()):
+        params_cur = OP.require_grad()
+        for param_in, param_cur in zip(params_unpacked, params_cur):
             param_cur.data = param_in.data
             param_cur.amax = param_in.amax
             param_cur.scale = param_in.scale
