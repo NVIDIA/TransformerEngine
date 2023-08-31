@@ -1330,18 +1330,21 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
-        // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
-        size_t free_byte;
-        size_t total_byte;
-        NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
-        size_t max_seqlen_div_up = ((max_seqlen + 64 - 1) / 64) * 64;
-        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up * head_dim * 2
-                        + 2 * batch * num_head * max_seqlen_div_up * sizeof(float)
-                        + batch * num_head * max_seqlen_div_up * max_seqlen_div_up * 2;
-        size_t max_allowed = 1024 * 1024 * 1024;
-
-        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
+        //// quick estimate of dp workspace size
+        //size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        //size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        //size_t wkspace_size = batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2;
+        //// default upper limit for dp workspace 256MB
+        //size_t max_allowed = 256 * 1024 * 1024;
+        //if {wkspace_size < max_allowed) {
+            const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
+            if ((env_workspace_opt != nullptr)
+                && (strcmp(env_workspace_opt, "1") == 0)) {
+                    use_workspace_opt = true;
+            }
+        //}
     }
+    //std::cout << "use opt: " << (int)use_workspace_opt << std::endl;
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
@@ -1469,27 +1472,21 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
-        // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
-        size_t free_byte;
-        size_t total_byte;
-        NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
-        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
-        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
-        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up_q * head_dim * 2
-                        + 2 * batch * num_head * max_seqlen_div_up_q * sizeof(float)
-                        + batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2;
-        size_t max_allowed = 1024 * 1024 * 1024;
-
-        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
+        //// quick estimate of dp workspace size
+        //size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        //size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        //size_t wkspace_size = batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2;
+        //// default upper limit for dp workspace 256MB
+        //size_t max_allowed = 256 * 1024 * 1024;
+        //if {wkspace_size < max_allowed) {
+            const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
+            if ((env_workspace_opt != nullptr)
+                && (strcmp(env_workspace_opt, "1") == 0)) {
+                    use_workspace_opt = true;
+            }
+        //}
     }
-    if (!use_workspace_opt) {
-        const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
-        if ((env_workspace_opt != nullptr)
-            && (strcmp(env_workspace_opt, "1") == 0)) {
-                use_workspace_opt = true;
-                std::cout << "Warning: manually setting use_workspace_opt to " << use_workspace_opt << std::endl;
-        }
-    }
+    //std::cout << "use opt: " << (int)use_workspace_opt << std::endl;
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
