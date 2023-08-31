@@ -559,7 +559,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  int64_t max_seqlen, bool is_training, float attn_scale,
                                  float p_dropout, const std::string &qkv_layout,
                                  const std::string &bias_type, const std::string &attn_mask_type,
-                                 const int64_t qkv_type) {
+                                 const int64_t qkv_type, int64_t rng_elts_per_thread) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
@@ -589,15 +589,8 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
 
     // extract random number generator seed and offset
     auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(QKV.place());
-    int offset;
-    if (max_seqlen <= 512) {
-        offset = (max_seqlen * max_seqlen + BACKEND_F16m512_FP16_THREADS_PER_CTA - 1) /
-                 BACKEND_F16m512_FP16_THREADS_PER_CTA;
-    } else {
-        offset = BACKEND_F16arb_ELTS_PER_THREADS;
-    }
     auto gen_cuda = dev_ctx->GetGenerator();
-    auto seed_offset = gen_cuda->IncrementOffset(offset);
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
     set_rng_state<<<1, 1, 0, QKV.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
 
     auto te_rng_state = MakeNvteTensor(rng_state);
@@ -712,18 +705,16 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
 }
 
-void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &KV,
-                                const paddle::Tensor &cu_seqlens_q,
-                                const paddle::Tensor &cu_seqlens_kv,
-                                const paddle::optional<paddle::Tensor> &Bias,
-                                paddle::Tensor &O,                              // NOLINT
-                                paddle::optional<paddle::Tensor> &softmax_aux,  // NOLINT
-                                paddle::Tensor &rng_state,                      // NOLINT
-                                int64_t b, int64_t h, int64_t d, int64_t total_seqs_q,
-                                int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
-                                bool is_training, float attn_scale, float p_dropout,
-                                const std::string &qkv_layout, const std::string &bias_type,
-                                const std::string &attn_mask_type, const int64_t qkv_type) {
+void te_fused_attn_fwd_kvpacked(
+    const paddle::Tensor &Q, const paddle::Tensor &KV, const paddle::Tensor &cu_seqlens_q,
+    const paddle::Tensor &cu_seqlens_kv, const paddle::optional<paddle::Tensor> &Bias,
+    paddle::Tensor &O,                              // NOLINT
+    paddle::optional<paddle::Tensor> &softmax_aux,  // NOLINT
+    paddle::Tensor &rng_state,                      // NOLINT
+    int64_t b, int64_t h, int64_t d, int64_t total_seqs_q, int64_t total_seqs_kv,
+    int64_t max_seqlen_q, int64_t max_seqlen_kv, bool is_training, float attn_scale,
+    float p_dropout, const std::string &qkv_layout, const std::string &bias_type,
+    const std::string &attn_mask_type, const int64_t qkv_type, int64_t rng_elts_per_thread) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
@@ -768,15 +759,8 @@ void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
     auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
-    int offset;
-    if ((max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-        offset = (max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP16_THREADS_PER_CTA - 1) /
-                 BACKEND_F16m512_FP16_THREADS_PER_CTA;
-    } else {
-        offset = BACKEND_F16arb_ELTS_PER_THREADS;
-    }
     auto gen_cuda = dev_ctx->GetGenerator();
-    auto seed_offset = gen_cuda->IncrementOffset(offset);
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
     set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
     auto te_rng_state = MakeNvteTensor(rng_state);
 
@@ -1282,7 +1266,8 @@ PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)
     .Outputs({"O", paddle::Optional("softmax_aux")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_qkvpacked));
@@ -1304,7 +1289,8 @@ PD_BUILD_OP(te_fused_attn_fwd_kvpacked)
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_kvpacked));

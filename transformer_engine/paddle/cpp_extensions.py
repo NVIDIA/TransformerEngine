@@ -7,8 +7,11 @@ import math
 from typing import Optional, Tuple, Union
 import paddle
 import transformer_engine_paddle as tex
-from .constants import TE_DType, FP8FwdTensors, FP8BwdTensors
+from .constants import TE_DType, FusedAttnBackend, FP8FwdTensors, FP8BwdTensors
 from .fp8 import FP8TensorMeta
+
+BACKEND_F16m512_THREADS_PER_CTA = 128
+BACKEND_F16arb_ELTS_PER_THREADS = 16
 
 
 def gemm(
@@ -423,6 +426,7 @@ def fused_attn_fwd_qkvpacked(
     is_training: bool,
     max_seqlen: int,
     qkv_dtype: tex.DType,
+    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     Bias: paddle.Tensor = None,
     attn_scale: float = None,
     dropout: float = 0.0,
@@ -449,6 +453,18 @@ def fused_attn_fwd_qkvpacked(
         assert (Bias.shape == [1, h, max_seqlen, max_seqlen
                               ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
         assert (Bias.dtype == qkv.dtype), "bias tensor must be in the same dtype as qkv."
+
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
+           ), "Fused attention does not support this input combination."
+
+    # BF16/FP16 fused attention API from fmha_v1 apex
+    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+        rng_elts_per_thread = (max_seqlen * max_seqlen + BACKEND_F16m512_THREADS_PER_CTA -
+                               1) // BACKEND_F16m512_THREADS_PER_CTA
+
+    # BF16/FP16 fused attention API from fmha_v2
+    if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen, h, d], fill_value=0, dtype=qkv.dtype)
@@ -484,6 +500,7 @@ def fused_attn_fwd_qkvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        rng_elts_per_thread,
     )
     return out, softmax_aux, rng_state
 
@@ -495,6 +512,7 @@ def fused_attn_bwd_qkvpacked(
     o: paddle.Tensor,
     d_o: paddle.Tensor,
     softmax_aux: paddle.Tensor,
+    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     max_seqlen: int,
     qkv_dtype: tex.DType,
     attn_scale: float = None,
@@ -516,6 +534,9 @@ def fused_attn_bwd_qkvpacked(
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
+
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
+           ), "Fused attention does not support this input combination."
 
     if set_zero:
         dqkv = paddle.full(shape=qkv.shape, fill_value=0, dtype=qkv.dtype)
@@ -561,6 +582,7 @@ def fused_attn_fwd_kvpacked(
     max_seqlen_q: int,
     max_seqlen_kv: int,
     qkv_dtype: tex.DType,
+    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     Bias: paddle.Tensor = None,
     attn_scale: float = None,
     dropout: float = 0.0,
@@ -590,6 +612,18 @@ def fused_attn_fwd_kvpacked(
         assert (Bias.shape == [1, h, max_seqlen_q, max_seqlen_kv
                               ]), "bias tensor must be in [1, h, max_seqlen, max_seqlen] shape."
         assert (Bias.dtype == q.dtype), "bias tensor must be in the same dtype as q and kv."
+
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
+           ), "Fused attention does not support this input combination."
+
+    # BF16/FP16 fused attention API from fmha_v1 apex
+    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+        rng_elts_per_thread = (max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_THREADS_PER_CTA -
+                               1) // BACKEND_F16m512_THREADS_PER_CTA
+
+    # BF16/FP16 fused attention API from fmha_v2
+    if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
 
     if set_zero:
         out = paddle.full(shape=[b, max_seqlen_q, h, d], fill_value=0, dtype=q.dtype)
@@ -629,6 +663,7 @@ def fused_attn_fwd_kvpacked(
         bias_type,
         attn_mask_type,
         int(qkv_dtype),
+        rng_elts_per_thread,
     )
 
     return out, softmax_aux, rng_state
@@ -643,6 +678,7 @@ def fused_attn_bwd_kvpacked(
     o: paddle.Tensor,
     d_o: paddle.Tensor,
     softmax_aux: paddle.Tensor,
+    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     max_seqlen_q: int,
     max_seqlen_kv: int,
     qkv_dtype: tex.DType,
@@ -668,6 +704,9 @@ def fused_attn_bwd_kvpacked(
 
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(d)
+
+    assert (fused_attention_backend != FusedAttnBackend["No_Backend"]
+           ), "Fused attention does not support this input combination."
 
     if set_zero:
         dq = paddle.full(shape=q.shape, fill_value=0, dtype=q.dtype)

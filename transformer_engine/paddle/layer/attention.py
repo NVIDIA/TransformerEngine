@@ -10,11 +10,13 @@ from typing import Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
+import transformer_engine_paddle as tex
 
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .softmax import FusedScaleMaskSoftmax
-from ..constants import AttnTypes, TE_DType, dist_group_type
+from ..constants import (AttnTypes, TE_DType, QKVLayout, AttnBiasType, AttnMaskType,
+                         FusedAttnBackend, dist_group_type)
 from ..cpp_extensions import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
@@ -32,7 +34,8 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, qkv, cu_seqlens, attn_bias, max_seqlen, attn_scale, qkv_dtype, dropout_p,
-                set_zero, qkv_layout, attn_bias_type, attn_mask_type, is_training):
+                set_zero, qkv_layout, attn_bias_type, attn_mask_type, is_training,
+                fused_attention_backend):
         """Forward function for FusedAttention with packed QKV input"""
         out, softmax_aux, rng_state = fused_attn_fwd_qkvpacked(
             qkv,
@@ -40,6 +43,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
             is_training,
             max_seqlen,
             qkv_dtype,
+            fused_attention_backend,
             attn_bias,
             attn_scale,
             dropout_p,
@@ -58,6 +62,7 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.fused_attention_backend = fused_attention_backend
 
         return out
 
@@ -66,9 +71,10 @@ class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
         """Backward function for FusedAttention with packed QKV input"""
         qkv, out, cu_seqlens, rng_state, softmax_aux = ctx.saved_tensor()
         dqkv, *rest = fused_attn_bwd_qkvpacked(qkv, cu_seqlens, rng_state, out, d_out, softmax_aux,
-                                               ctx.max_seqlen, ctx.qkv_dtype, ctx.attn_scale,
-                                               ctx.dropout_p, ctx.set_zero, ctx.qkv_layout,
-                                               ctx.attn_bias_type, ctx.attn_mask_type)
+                                               ctx.fused_attention_backend, ctx.max_seqlen,
+                                               ctx.qkv_dtype, ctx.attn_scale, ctx.dropout_p,
+                                               ctx.set_zero, ctx.qkv_layout, ctx.attn_bias_type,
+                                               ctx.attn_mask_type)
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
@@ -83,11 +89,12 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, q, kv, cu_seqlens_q, cu_seqlens_kv, attn_bias, max_seqlen_q, max_seqlen_kv,
                 attn_scale, qkv_dtype, dropout_p, set_zero, qkv_layout, attn_bias_type,
-                attn_mask_type, is_training):
+                attn_mask_type, is_training, fused_attention_backend):
         """Forward function for FusedAttention with packed KV input"""
         out, softmax_aux, rng_state = fused_attn_fwd_kvpacked(
             q, kv, cu_seqlens_q, cu_seqlens_kv, is_training, max_seqlen_q, max_seqlen_kv, qkv_dtype,
-            attn_bias, attn_scale, dropout_p, set_zero, qkv_layout, attn_bias_type, attn_mask_type)
+            fused_attention_backend, attn_bias, attn_scale, dropout_p, set_zero, qkv_layout,
+            attn_bias_type, attn_mask_type)
 
         ctx.save_for_backward(q, kv, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux)
         ctx.max_seqlen_q = max_seqlen_q
@@ -99,6 +106,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.fused_attention_backend = fused_attention_backend
 
         return out
 
@@ -107,10 +115,11 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
         """Backward function for FusedAttention with packed KV input"""
         q, kv, out, cu_seqlens_q, cu_seqlens_kv, rng_state, softmax_aux = ctx.saved_tensor()
         dq, dkv, *rest = fused_attn_bwd_kvpacked(q, kv, cu_seqlens_q, cu_seqlens_kv, rng_state, out,
-                                                 d_out, softmax_aux, ctx.max_seqlen_q,
-                                                 ctx.max_seqlen_kv, ctx.qkv_dtype, ctx.attn_scale,
-                                                 ctx.dropout_p, ctx.set_zero, ctx.qkv_layout,
-                                                 ctx.attn_bias_type, ctx.attn_mask_type)
+                                                 d_out, softmax_aux, ctx.fused_attention_backend,
+                                                 ctx.max_seqlen_q, ctx.max_seqlen_kv, ctx.qkv_dtype,
+                                                 ctx.attn_scale, ctx.dropout_p, ctx.set_zero,
+                                                 ctx.qkv_layout, ctx.attn_bias_type,
+                                                 ctx.attn_mask_type)
 
         # if no_bias, return dq, dkv
         if ctx.attn_bias_type == "no_bias":
@@ -157,16 +166,17 @@ class DotProductAttention(paddle.nn.Layer):
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
+        self.qkv_layout = "qkv_interleaved" if attention_type == "self" else "kv_interleaved"
 
         self.backend = backend
 
         arch = paddle.device.cuda.get_device_capability()
         self.is_fused_attn_supported = arch in ((8, 0), (9, 0))
-        self.enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN",
-                                               "0")) and self.is_fused_attn_supported
+        self.use_fused_attention = (int(os.getenv("NVTE_FUSED_ATTN", "1"))
+                                    and self.is_fused_attn_supported)
 
-        if not self.enable_fused_attn and backend == 'transformer_engine':
-            # FMHA is not enabled, falling back to Paddle backend
+        if not self.use_fused_attention and backend == 'transformer_engine':
+            warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
             self.backend = 'paddle'
 
         if self.backend != 'transformer_engine':
@@ -222,8 +232,25 @@ class DotProductAttention(paddle.nn.Layer):
         """
 
         if self.backend == 'transformer_engine':
-            return self._te_forward(query_layer, key_value_layer, attention_mask,
-                                    core_attention_bias_type, core_attention_bias, set_zero)
+            max_s_q = query_layer.shape[1]
+            max_s_kv = max_s_q if self.attention_type == "self" else key_value_layer.shape[1]
+            self.fused_attention_backend = tex.get_fused_attn_backend(
+                TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
+                QKVLayout[self.qkv_layout], AttnBiasType[core_attention_bias_type],
+                AttnMaskType[self.attn_mask_type], self.attention_dropout, max_s_q, max_s_kv,
+                query_layer.shape[-1])
+
+            is_backend_avail = (self.fused_attention_backend in [
+                FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]
+            ])
+            if is_backend_avail and self.use_fused_attention:
+                return self._te_forward(query_layer, key_value_layer, attention_mask,
+                                        core_attention_bias_type, core_attention_bias, set_zero)
+            warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
+            self.backend = 'paddle'
+            self.scale_mask_softmax = FusedScaleMaskSoftmax(self.attn_mask_type,
+                                                            attention_mask_func,
+                                                            backend=self.backend)
         if self.backend == 'paddle':
             if core_attention_bias_type != "no_bias":
                 warnings.warn("Paddle backend dot product attention does not support bias yet. "
@@ -254,22 +281,13 @@ class DotProductAttention(paddle.nn.Layer):
             else:
                 cu_seqlens, _ = mask_to_cu_seqlens(attention_mask, need_kv=False)
             qkv_dtype = TE_DType[query_layer.dtype]
-            qkv_layout = "qkv_interleaved"
 
-            output = FusedAttnFuncPackedQKV.apply(
-                query_layer,
-                cu_seqlens,
-                core_attention_bias,
-                max_seqlen,
-                1.0 / self.norm_factor,
-                qkv_dtype,
-                self.attention_dropout if self.training else 0.0,
-                set_zero,
-                qkv_layout,
-                core_attention_bias_type,
-                self.attn_mask_type,
-                self.training,
-            )
+            output = FusedAttnFuncPackedQKV.apply(query_layer, cu_seqlens, core_attention_bias,
+                                                  max_seqlen, 1.0 / self.norm_factor, qkv_dtype,
+                                                  self.attention_dropout if self.training else 0.0,
+                                                  set_zero, self.qkv_layout,
+                                                  core_attention_bias_type, self.attn_mask_type,
+                                                  self.training, self.fused_attention_backend)
         elif self.attention_type == "cross":
             # cross attention - q: [b, s_q, h, d]  kv: [b, s_kv, 2, h, d]
             assert (
@@ -283,24 +301,13 @@ class DotProductAttention(paddle.nn.Layer):
             max_seqlen_kv = key_value_layer.shape[1]
             cu_seqlens_q, cu_seqlens_kv = mask_to_cu_seqlens(attention_mask, need_kv=True)
             qkv_dtype = TE_DType[query_layer.dtype]
-            qkv_layout = "kv_interleaved"
-            output = FusedAttnFuncPackedKV.apply(
-                query_layer,
-                key_value_layer,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                core_attention_bias,
-                max_seqlen_q,
-                max_seqlen_kv,
-                1.0 / self.norm_factor,
-                qkv_dtype,
-                self.attention_dropout if self.training else 0.0,
-                set_zero,
-                qkv_layout,
-                core_attention_bias_type,
-                self.attn_mask_type,
-                self.training,
-            )
+            output = FusedAttnFuncPackedKV.apply(query_layer, key_value_layer, cu_seqlens_q,
+                                                 cu_seqlens_kv, core_attention_bias, max_seqlen_q,
+                                                 max_seqlen_kv, 1.0 / self.norm_factor, qkv_dtype,
+                                                 self.attention_dropout if self.training else 0.0,
+                                                 set_zero, self.qkv_layout,
+                                                 core_attention_bias_type, self.attn_mask_type,
+                                                 self.training, self.fused_attention_backend)
         else:
             raise ValueError("attention_type must be one of ['self', 'cross']")
         return output
