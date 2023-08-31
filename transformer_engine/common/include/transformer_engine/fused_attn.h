@@ -75,22 +75,22 @@ enum NVTE_QKV_Layout {
     \endverbatim
  */
     NVTE_KV_INTERLEAVED = 2,
-
-    NVTE_SB3HD = NVTE_KV_INTERLEAVED + 0,
-    NVTE_SBH3D = NVTE_KV_INTERLEAVED + 1,
-    NVTE_SBHD_SB2HD = NVTE_KV_INTERLEAVED + 2,
-    NVTE_SBHD_SBH2D = NVTE_KV_INTERLEAVED + 3,
-    NVTE_SBHD_SBHD_SBHD = NVTE_KV_INTERLEAVED + 4,
-    NVTE_BS3HD = NVTE_KV_INTERLEAVED + 5,
-    NVTE_BSH3D = NVTE_KV_INTERLEAVED + 6,
-    NVTE_BSHD_BS2HD = NVTE_KV_INTERLEAVED + 7,
-    NVTE_BSHD_BSH2D = NVTE_KV_INTERLEAVED + 8,
-    NVTE_BSHD_BSHD_BSHD = NVTE_KV_INTERLEAVED + 9,
-    NVTE_T3HD = NVTE_KV_INTERLEAVED + 10,
-    NVTE_TH3D = NVTE_KV_INTERLEAVED + 11,
-    NVTE_THD_T2HD = NVTE_KV_INTERLEAVED + 12,
-    NVTE_THD_TH2D = NVTE_KV_INTERLEAVED + 13,
-    NVTE_THD_THD_THD = NVTE_KV_INTERLEAVED + 14,
+ 
+    NVTE_SB3HD = 3,
+    NVTE_SBH3D = 4,
+    NVTE_SBHD_SB2HD = 5,
+    NVTE_SBHD_SBH2D = 6,
+    NVTE_SBHD_SBHD_SBHD = 7,
+    NVTE_BS3HD = 8,
+    NVTE_BSH3D = 9,
+    NVTE_BSHD_BS2HD = 10,
+    NVTE_BSHD_BSH2D = 11,
+    NVTE_BSHD_BSHD_BSHD = 12,
+    NVTE_T3HD = 13,
+    NVTE_TH3D = 14,
+    NVTE_THD_T2HD = 15,
+    NVTE_THD_TH2D = 16,
+    NVTE_THD_THD_THD = 17,
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -104,45 +104,6 @@ enum NVTE_QKV_Layout_Group {
     NVTE_HD_HD_HD = 4,
 };
 
-///*! \def MAP_LAYOUT_TO_GROUP
-// *  \brief Map QKV matrix layout to layout group
-// */
-//#define MAP_LAYOUT_TO_GROUP(NVTE_QKV_Layout) \
-//{ \
-//    switch (NVTE_QKV_Layout) { \
-//        case NVTE_SB3HD: \
-//        case NVTE_BS3HD: \
-//        case NVTE_T3HD: \
-//            { \
-//                return NVTE_3HD; \
-//            } \
-//        case NVTE_SBH3D: \
-//        case NVTE_BSH3D: \
-//        case NVTE_TH3D: \
-//            { \
-//                return NVTE_H3D; \
-//            } \
-//        case NVTE_SBHD_SB2HD: \
-//        case NVTE_BSHD_BS2HD: \
-//        case NVTE_THD_T2HD: \
-//            { \
-//                return NVTE_HD_2HD; \
-//            } \
-//        case NVTE_SBHD_SBH2D: \
-//        case NVTE_BSHD_BSH2D: \
-//        case NVTE_THD_TH2D: \
-//            { \
-//                return NVTE_HD_H2D; \
-//            } \
-//        case NVTE_SBHD_SBHD_SBHD: \
-//        case NVTE_BSHD_BSHD_BSHD: \
-//        case NVTE_THD_THD_THD: \
-//            { \
-//                return NVTE_HD_HD_HD; \
-//            } \
-//    } \
-//} \
-
 /*! \enum NVTE_QKV_Format
  *  \brief QKV matrix layout groups
  */
@@ -151,39 +112,6 @@ enum NVTE_QKV_Format {
     NVTE_BSHD = 1,
     NVTE_THD = 2,
 };
-
-///*! \def MAP_LAYOUT_TO_FORMAT
-// *  \brief Map QKV matrix layout to format
-// */
-//#define MAP_LAYOUT_TO_FORMAT(NVTE_QKV_Layout) \
-//{ \
-//    switch (NVTE_QKV_Layout) { \
-//        case NVTE_SB3HD: \
-//        case NVTE_SBH3D: \
-//        case NVTE_SBHD_SB2HD: \
-//        case NVTE_SBHD_SBH2D: \
-//        case NVTE_SBHD_SBHD_SBHD: \
-//            { \
-//                return NVTE_SBHD; \
-//            } \
-//        case NVTE_BS3HD: \
-//        case NVTE_BSH3D: \
-//        case NVTE_BSHD_BS2HD: \
-//        case NVTE_BSHD_BSH2D: \
-//        case NVTE_BSHD_BSHD_BSHD: \
-//            { \
-//                return NVTE_BSHD; \
-//            } \
-//        case NVTE_T3HD: \
-//        case NVTE_TH3D: \
-//        case NVTE_THD_T2HD: \
-//        case NVTE_THD_TH2D: \
-//        case NVTE_THD_THD_THD: \
-//            { \
-//                return NVTE_THD; \
-//            } \
-//    } \
-//} \
 
 /*! \enum NVTE_Bias_Type
  *  \brief Bias types
@@ -220,11 +148,24 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_FP8 = 2,
 };
 
+/*!  \brief Map QKV tensor layout to layout group
+ *
+ *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
+ *
+ *  \return        qkv layout group, e.g. h3d.
+ */
 NVTE_QKV_Layout_Group map_layout_to_group(NVTE_QKV_Layout qkv_layout);
+
+/*!  \brief Map QKV tensor layout to qkv format
+ *
+ *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
+ *
+ *  \return        qkv format, e.g. sbhd.
+ */
 NVTE_QKV_Format map_layout_to_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
- * 
+ *
  *  \param[in]     q_dtype          The data type of Tensor Q.
  *  \param[in]     kv_dtype         The data type of Tensors K, V.
  *  \param[in]     qkv_layout       The layout of Tensors Q, K, V.
@@ -270,7 +211,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(cu_seqlens). 
+ *                                          it may be >= max(cu_seqlens).
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -317,7 +258,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(cu_seqlens). 
+ *                                          it may be >= max(cu_seqlens).
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensor's layout.
@@ -367,10 +308,10 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
- *                                          it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.  
- *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.
+ *                                          it may be >= max(cu_seqlens_kv).
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -418,10 +359,10 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
- *                                          it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.  
- *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.
+ *                                          it may be >= max(cu_seqlens_kv).
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensor's layout.
@@ -477,10 +418,10 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
- *                                          it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.  
- *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
+ *                                          it may be >= max(cu_seqlens_kv).
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -533,10 +474,10 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
- *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.  
- *                                          it may be >= max(cu_seqlens_q). 
- *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.  
- *                                          it may be >= max(cu_seqlens_kv). 
+ *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
+ *                                          it may be >= max(cu_seqlens_q).
+ *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
+ *                                          it may be >= max(cu_seqlens_kv).
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensors' layout.

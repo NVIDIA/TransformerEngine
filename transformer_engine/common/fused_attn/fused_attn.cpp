@@ -128,7 +128,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
-                //|| (static_cast<int>(qkv_layout) < 10))) {  // temporary fix
                 || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
                 || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_m512 = true;
@@ -144,7 +143,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-            //|| (static_cast<int>(qkv_layout) < 10))) {  // temporary fix
                 || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
                 || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
