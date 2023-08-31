@@ -58,8 +58,66 @@ UPCOMING_BACKWARD: BackwardComm | None = MacroVar("UPCOMING_BACKWARD", BackwardC
 NEXT_UPCOMING_BACKWARD = MacroVar("NEXT_UPCOMING_BACKWARD", BackwardComm)
 
 
+class Backward:
+    @staticmethod
+    def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
+        # The context needs to think that the tensors were read
+        _ = ctx.saved_tensors  # type: ignore
+
+        # Get real context
+        saved: Context = getattr(ctx, "nvte_ctx")
+        op: Op = getattr(ctx, "nvte_op")
+        preceding_backward: BackwardComm = getattr(ctx, "nvte_preceding_backward_comm")
+        upcoming_backward: BackwardComm | None = getattr(
+            ctx, "nvte_upcoming_backward_comm"
+        )
+
+        # Get real gradient
+        if preceding_backward.nvte_grad_output is None:
+            # This is the first backward in the compute pipeline
+
+            grad_output = grad_output.contiguous()  # TODO: try to avoid this
+
+            # Check if incoming gradient needs to be unsquished
+            unsquish_incoming_dgrad: bool = getattr(ctx, "nvte_unsquish_incoming_dgrad")
+            if unsquish_incoming_dgrad:
+                _unsquish(grad_output)
+            nvte_grad = nvte.make_nvte_tensor(grad_output)
+        else:
+            nvte_grad = preceding_backward.nvte_grad_output
+        del grad_output
+
+        meta_tensor_provider: Persistent[FP8Meta] = getattr(
+            ctx, "nvte_meta_tensor_provider_bwd"
+        )
+        nvte.set_execution_state("backward", meta_tensor_provider)
+        with torch.no_grad():
+            data_grad, param_grads = op.backward(saved, nvte_grad)
+
+        # Store real gradient for next backward in pipeline
+        if upcoming_backward is None:
+            # This is the last backward in the compute pipeline
+            assert not nvte.is_fp8(data_grad)
+        else:
+            upcoming_backward.nvte_grad_output = data_grad
+
+        # Check that gradients are not fp8 and can be processed by the optimizer
+        # TODO: change this when fp8 optimizer comes along
+        assert all(not nvte.is_fp8(g) for g in param_grads)
+
+        # Check if outgoing gradient needs to be squished
+        exposed_dgrad = data_grad.data
+        squish_outgoing_dgrad: bool = getattr(ctx, "nvte_squish_outgoing_dgrad")
+        if squish_outgoing_dgrad:
+            _squish(exposed_dgrad)
+
+        torch_grads = [exposed_dgrad] + [g.data for g in param_grads]
+
+        return (*torch_grads, None, None, None)
+
+
 @macro(PIPELINE, OP, UPCOMING_BACKWARD, NEXT_UPCOMING_BACKWARD, textual=False)
-class ComputePipelineFunction(autograd.Function):
+class ComputePipelineFunction(Backward, autograd.Function):
     @staticmethod
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
@@ -140,62 +198,6 @@ class ComputePipelineFunction(autograd.Function):
         setattr(ctx, "nvte_preceding_backward_comm", NEXT_UPCOMING_BACKWARD)
 
         return exposed_y
-
-    @staticmethod
-    def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
-        # The context needs to think that the tensors were read
-        _ = ctx.saved_tensors  # type: ignore
-
-        # Get real context
-        saved: Context = getattr(ctx, "nvte_ctx")
-        op: Op = getattr(ctx, "nvte_op")
-        preceding_backward: BackwardComm = getattr(ctx, "nvte_preceding_backward_comm")
-        upcoming_backward: BackwardComm | None = getattr(
-            ctx, "nvte_upcoming_backward_comm"
-        )
-
-        # Get real gradient
-        if preceding_backward.nvte_grad_output is None:
-            # This is the first backward in the compute pipeline
-
-            grad_output = grad_output.contiguous()  # TODO: try to avoid this
-
-            # Check if incoming gradient needs to be unsquished
-            unsquish_incoming_dgrad: bool = getattr(ctx, "nvte_unsquish_incoming_dgrad")
-            if unsquish_incoming_dgrad:
-                _unsquish(grad_output)
-            nvte_grad = nvte.make_nvte_tensor(grad_output)
-        else:
-            nvte_grad = preceding_backward.nvte_grad_output
-        del grad_output
-
-        meta_tensor_provider: Persistent[FP8Meta] = getattr(
-            ctx, "nvte_meta_tensor_provider_bwd"
-        )
-        nvte.set_execution_state("backward", meta_tensor_provider)
-        with torch.no_grad():
-            data_grad, param_grads = op.backward(saved, nvte_grad)
-
-        # Store real gradient for next backward in pipeline
-        if upcoming_backward is None:
-            # This is the last backward in the compute pipeline
-            assert not nvte.is_fp8(data_grad)
-        else:
-            upcoming_backward.nvte_grad_output = data_grad
-
-        # Check that gradients are not fp8 and can be processed by the optimizer
-        # TODO: change this when fp8 optimizer comes along
-        assert all(not nvte.is_fp8(g) for g in param_grads)
-
-        # Check if outgoing gradient needs to be squished
-        exposed_dgrad = data_grad.data
-        squish_outgoing_dgrad: bool = getattr(ctx, "nvte_squish_outgoing_dgrad")
-        if squish_outgoing_dgrad:
-            _squish(exposed_dgrad)
-
-        torch_grads = [exposed_dgrad] + [g.data for g in param_grads]
-
-        return (*torch_grads, None, None, None)
 
 
 class LoopState(TypedDict):
