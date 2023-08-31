@@ -1,13 +1,13 @@
 from __future__ import annotations
-from typing import Optional, TypedDict
+from typing import TypedDict
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
 from .persistent import Persistent
 from . import nvte
 from .ops import Context, Op
-from .compute_pipeline import ComputePipeline
-from .utils import unrolled_for
+from .compute_pipeline import ComputePipeline, SelfContainedOp
+from .utils import macro, MacroVar
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -52,93 +52,13 @@ def get_nvte_y(
     return _saved.data, _saved.amax, _saved.scale, _saved.scale_inv
 
 
-class ComputePipelineFunction(autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[arg-type]
-        ctx: FunctionCtx,
-        exposed_x: torch.Tensor,
-        *tensor_mess: torch.Tensor,
-        meta_tensor_provider_fwd: Persistent[FP8Meta],
-        meta_tensor_provider_bwd: Persistent[FP8Meta],
-        op: Op,
-        upcoming_backward: BackwardComm | None,
-        next_upcoming_backward: BackwardComm,
-    ) -> torch.Tensor:
-        nvte_x = nvte.Tensor(*tensor_mess[-4:])
-        del tensor_mess
+PIPELINE = MacroVar("PIPELINE", ComputePipeline)
+OP = MacroVar("OP", SelfContainedOp)
+UPCOMING_BACKWARD: BackwardComm | None = MacroVar("UPCOMING_BACKWARD", BackwardComm | None)  # type: ignore[assignment]
+NEXT_UPCOMING_BACKWARD = MacroVar("NEXT_UPCOMING_BACKWARD", BackwardComm)
 
-        nvte.set_execution_state("forward", meta_tensor_provider_fwd)
-        with torch.no_grad():
-            nvte_y, to_save = op.forward(nvte_x)
 
-        # Expose backward context for tracing
-        bwd_ctx: list[torch.Tensor] = []
-        for _, tensor in to_save.items():
-            bwd_ctx.append(tensor.data)
-            bwd_ctx.append(tensor.amax)
-            bwd_ctx.append(tensor.scale)
-            bwd_ctx.append(tensor.scale_inv)
-        ctx.save_for_backward(*bwd_ctx)
-
-        # Save real context
-        setattr(ctx, "nvte_ctx", to_save)
-        setattr(ctx, "nvte_op", op)
-        setattr(ctx, "nvte_meta_tensor_provider_bwd", meta_tensor_provider_bwd)
-
-        # Pytorch will break the computation graph
-        # if it will see an output tensor of an integer type.
-        # As fp8 tensors internally have dtype int8,
-        # we need to pretend that this type is actually different
-        # by "squishing" it into a floating point dtype.
-        # ("Squishing" because, while the new dtype is larger,
-        # the numel() gets smaller).
-        # This doesn't work in TorchScript, but this code
-        # won't run at inference anyway.
-
-        # Unsquish x if needed:
-        is_exposed_x_squished_now = exposed_x.dtype != nvte_x.data.dtype
-        if is_exposed_x_squished_now:
-            # Intentionally commented out - _unsquish(exposed_x)
-            # We don't need to perform the unsquish itself, as this
-            # data will not be read anyway.
-            # It is only really neccesarry to notify
-            # the backward.
-            #
-            # If the input to the forward was squished,
-            # Pytorch will expect its gradient to be squished
-            # as well. The backward of this forward will be
-            # responsible for producing the gradient of
-            # this squished input, so it is responsible for
-            # squishing it.
-            setattr(ctx, "nvte_squish_outgoing_dgrad", True)
-        else:
-            setattr(ctx, "nvte_squish_outgoing_dgrad", False)
-
-        # Expose result for Pytorch
-        exposed_y = get_exposed_y_saving_nvte_y(exposed_x, nvte_y)
-
-        # Squish y if fp8:
-        if exposed_y.data.dtype == torch.int8:
-            _squish(exposed_y)
-            # Because the output is squished, the gradient also needs to be.
-            # The backward of this forward recieves the gradient of the
-            # output as its input. So, the backward before it needs
-            # to squish it, while the backward coresponding to this
-            # forward needs to unsquish it.
-            setattr(ctx, "nvte_unsquish_incoming_dgrad", True)
-        else:
-            setattr(ctx, "nvte_unsquish_incoming_dgrad", False)
-
-        # Save backward comm
-        # This object is allows for the current backward to
-        # pass data to the next backward (the backward of the
-        # preceding operation). This is needed to pass
-        # fp8 gradients properly.
-        setattr(ctx, "nvte_upcoming_backward_comm", upcoming_backward)
-        setattr(ctx, "nvte_preceding_backward_comm", next_upcoming_backward)
-
-        return exposed_y
-
+class Backward:
     @staticmethod
     def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
         # The context needs to think that the tensors were read
@@ -196,6 +116,90 @@ class ComputePipelineFunction(autograd.Function):
         return (*torch_grads, None, None, None)
 
 
+@macro(PIPELINE, OP, UPCOMING_BACKWARD, NEXT_UPCOMING_BACKWARD, textual=False)
+class ComputePipelineFunction(autograd.Function, Backward):
+    @staticmethod
+    def forward(  # type: ignore[arg-type]
+        ctx: FunctionCtx,
+        exposed_x: torch.Tensor,
+        *tensor_mess: torch.Tensor,
+    ) -> torch.Tensor:
+        nvte_x = nvte.Tensor(*tensor_mess[-4:])
+        del tensor_mess
+
+        nvte.set_execution_state("forward", PIPELINE.meta_fwd)
+        with torch.no_grad():
+            nvte_y, to_save = OP.forward(nvte_x)
+
+        # Expose backward context for tracing
+        bwd_ctx: list[torch.Tensor] = []
+        for _, tensor in to_save.items():
+            bwd_ctx.append(tensor.data)
+            bwd_ctx.append(tensor.amax)
+            bwd_ctx.append(tensor.scale)
+            bwd_ctx.append(tensor.scale_inv)
+        ctx.save_for_backward(*bwd_ctx)
+
+        # Save real context
+        setattr(ctx, "nvte_ctx", to_save)
+        setattr(ctx, "nvte_op", OP)
+        setattr(ctx, "nvte_meta_tensor_provider_bwd", PIPELINE.meta_bwd)
+
+        # Pytorch will break the computation graph
+        # if it will see an output tensor of an integer type.
+        # As fp8 tensors internally have dtype int8,
+        # we need to pretend that this type is actually different
+        # by "squishing" it into a floating point dtype.
+        # ("Squishing" because, while the new dtype is larger,
+        # the numel() gets smaller).
+        # This doesn't work in TorchScript, but this code
+        # won't run at inference anyway.
+
+        # Unsquish x if needed:
+        is_exposed_x_squished_now = exposed_x.dtype != nvte_x.data.dtype
+        if is_exposed_x_squished_now:
+            # Intentionally commented out - _unsquish(exposed_x)
+            # We don't need to perform the unsquish itself, as this
+            # data will not be read anyway.
+            # It is only really neccesarry to notify
+            # the backward.
+            #
+            # If the input to the forward was squished,
+            # Pytorch will expect its gradient to be squished
+            # as well. The backward of this forward will be
+            # responsible for producing the gradient of
+            # this squished input, so it is responsible for
+            # squishing it.
+            setattr(ctx, "nvte_squish_outgoing_dgrad", True)
+        else:
+            setattr(ctx, "nvte_squish_outgoing_dgrad", False)
+
+        # Expose result for Pytorch
+        exposed_y = get_exposed_y_saving_nvte_y(exposed_x, nvte_y)
+
+        # Squish y if fp8:
+        if exposed_y.data.dtype == torch.int8:
+            _squish(exposed_y)
+            # Because the output is squished, the gradient also needs to be.
+            # The backward of this forward recieves the gradient of the
+            # output as its input. So, the backward before it needs
+            # to squish it, while the backward coresponding to this
+            # forward needs to unsquish it.
+            setattr(ctx, "nvte_unsquish_incoming_dgrad", True)
+        else:
+            setattr(ctx, "nvte_unsquish_incoming_dgrad", False)
+
+        # Save backward comm
+        # This object is allows for the current backward to
+        # pass data to the next backward (the backward of the
+        # preceding operation). This is needed to pass
+        # fp8 gradients properly.
+        setattr(ctx, "nvte_upcoming_backward_comm", UPCOMING_BACKWARD)
+        setattr(ctx, "nvte_preceding_backward_comm", NEXT_UPCOMING_BACKWARD)
+
+        return exposed_y
+
+
 class LoopState(TypedDict):
     x: torch.Tensor
     nvte_x: nvte.Tensor
@@ -203,53 +207,46 @@ class LoopState(TypedDict):
 
 
 def make_loop(pipeline: ComputePipeline):
-    @unrolled_for(len(pipeline.functions))
-    def compute_pipeline_function_wrapping_loop(
-        i: int,
-        contained_op: Op,
-        loop_state: LoopState,
-    ) -> LoopState:
-        x_, nvte_x_, next_upcoming_backward = (
-            loop_state["x"],
-            loop_state["nvte_x"],
-            loop_state["next_upcoming_backward"],
-        )
-        op = contained_op
+    upcoming_backward = None
+    next_upcoming_backward = BackwardComm()
+    ag_fs: list[type[autograd.Function]] = []
+    for i, op in enumerate(pipeline.functions):
         upcoming_backward, next_upcoming_backward = (
             (None, BackwardComm())
             if i == 0
             else (next_upcoming_backward, BackwardComm())
         )
-        nvte_tensors = contained_op.require_grad()
-        exposed_tensors: list[torch.Tensor] = []
-        for nvte_tensor in nvte_tensors:
-            assert not nvte.is_fp8(
-                nvte_tensor
-            )  # TODO: change when fp8 optimizer comes along
-            exposed_tensors.append(nvte_tensor.data)
-        x_ = ComputePipelineFunction.apply(  # type: ignore
-            x_,
-            *exposed_tensors,
-            *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
-            upcoming_backward=upcoming_backward,
-            next_upcoming_backward=next_upcoming_backward,
-            op=op,
-            meta_tensor_provider_fwd=pipeline.meta_fwd,
-            meta_tensor_provider_bwd=pipeline.meta_bwd,
-        )
-        assert isinstance(x_, torch.Tensor)
-        with torch.no_grad():
-            (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(x_)
-            nvte_x_ = nvte.Tensor(
-                nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
+        ag_fs.append(
+            ComputePipelineFunction(
+                pipeline, op, upcoming_backward, next_upcoming_backward
             )
-        return {
-            "x": x_,
-            "nvte_x": nvte_x_,
-            "next_upcoming_backward": next_upcoming_backward,
-        }
+        )
 
-    return compute_pipeline_function_wrapping_loop
+    def loop(x_: torch.Tensor, nvte_x_: nvte.Tensor):
+        for op, autograd_func in zip(pipeline.functions, ag_fs):
+            nvte_tensors = op.require_grad()
+            exposed_tensors: list[torch.Tensor] = []
+            for nvte_tensor in nvte_tensors:
+                assert not nvte.is_fp8(
+                    nvte_tensor
+                )  # TODO: change when fp8 optimizer comes along
+                exposed_tensors.append(nvte_tensor.data)
+
+            x_ = autograd_func.apply(  # type: ignore
+                x_,
+                *exposed_tensors,
+                *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
+            )
+            assert isinstance(x_, torch.Tensor)
+            with torch.no_grad():
+                (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(
+                    x_
+                )
+                nvte_x_ = nvte.Tensor(
+                    nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
+                )
+
+    return loop
 
 
 # The squish needs to be invertible and

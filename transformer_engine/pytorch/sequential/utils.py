@@ -1,12 +1,15 @@
 from __future__ import annotations
+import ast
 from typing import (
     Any,
     Callable,
     Generic,
     Generator,
     Literal,
+    LiteralString,
     Mapping,
     Protocol,
+    Sequence,
     Sized,
     TypeVar,
     overload,
@@ -23,6 +26,7 @@ Ts2 = TypeVarTuple("Ts2")
 CT = TypeVar("CT", covariant=True)
 ExcT = TypeVar("ExcT")
 SomeDict = TypeVar("SomeDict", bound=Mapping[Any, Any], covariant=True)
+LitStr = TypeVar("LitStr", bound=LiteralString, covariant=True)
 
 
 class _Context(Generic[PS, T]):
@@ -237,9 +241,112 @@ def unrolled_for(
     return decorator
 
 
-class Decorator(Protocol[Unpack[Ts], T]):
-    def __call__(self, f: Callable[[Unpack[Ts]], T]) -> Callable[[Unpack[Ts]], T]:
-        ...
+class MacroVar(Generic[T]):
+    def __new__(cls, name: str, type_: type[T] = object) -> T:
+        return (name, type_)  # type: ignore
+
+
+class _MacroTransformer(ast.NodeTransformer):
+    def __init__(self, names: Sequence[str], values: Sequence[Any]) -> None:
+        if not len(names) == len(values):
+            raise ValueError(f"Length mismatch: {len(names)} != {len(values)}")
+        for name in names:
+            if not name.isidentifier():
+                raise ValueError(f"Invalid identifier: {name}")
+            if not names.count(name) == 1:
+                raise ValueError(f"Duplicate identifier: {name}")
+        for value in values:
+            try:
+                constant = ast.Constant(value=value)
+                source = ast.unparse(constant)
+                reconstructed = ast.literal_eval(source)
+                if not reconstructed == value:
+                    raise ValueError(
+                        f"Cannot reconstruct value after serialization: {value}"
+                    )
+            except Exception as e:
+                raise ValueError(f"Cannot serialize value: {value}") from e
+        self.names = names
+        self.values = values
+
+    def visit_Name(self, node: ast.Name):
+        if node.id in self.names:
+            idx = self.names.index(node.id)
+            value = self.values[idx]
+            return ast.Constant(value=value)
+        else:
+            return node
+
+
+def macro(
+    *substitutions: Unpack[Ts], textual: bool = True
+) -> Callable[[T], Callable[[Unpack[Ts]], T]]:
+    names: list[str] = [name for name, _ in substitutions]  # type: ignore
+    for name in names:
+        assert name.isidentifier()
+        assert names.count(name) == 1
+
+    if textual:
+
+        def textual_decorator(definition: T) -> Callable[[Unpack[Ts]], T]:
+            import inspect
+            import ast
+
+            try:
+                source = inspect.getsource(definition)  # type: ignore
+                # Source includes the decorator, remove it
+                source = source[source.find("\n") + 1 :].strip()
+                ast_tree = ast.parse(source)
+            except OSError:
+                raise ValueError("Cannot get source code of definition")
+
+            def macro_impl(*values: Unpack[Ts]) -> T:
+                _MacroTransformer(names, values).visit(ast_tree)
+                ast.fix_missing_locations(ast_tree)
+                source = ast.unparse(ast_tree)
+                if hasattr(definition, "__globals__"):
+                    assert isinstance(definition.__globals__, dict)  # type: ignore
+                    globals_: dict[str, Any] = {}
+                    for key, value in definition.__globals__.items():  # type: ignore
+                        globals_[key] = value  # type: ignore
+                    del globals_[definition.__name__]  # type: ignore
+                else:
+                    globals_: dict[str, Any] = {}
+                exec_saving_source(source, globals_)
+                return globals_[definition.__name__]  # type: ignore
+
+            return macro_impl
+
+        return textual_decorator
+    else:
+
+        def injection_decorator(definition: T) -> Callable[[Unpack[Ts]], T]:
+            import inspect
+
+            try:
+                source = inspect.getsource(definition)  # type: ignore
+                # Source includes the decorator, remove it
+                source = source[source.find("\n") + 1 :].strip()
+            except OSError:
+                raise ValueError("Cannot get source code of definition")
+
+            def macro_impl(*values: Unpack[Ts]) -> T:
+                if hasattr(definition, "__globals__"):
+                    assert isinstance(definition.__globals__, dict)  # type: ignore
+                    globals_: dict[str, Any] = {}
+                    for key, value in definition.__globals__.items():  # type: ignore
+                        globals_[key] = value  # type: ignore
+                    del globals_[definition.__name__]  # type: ignore
+                else:
+                    globals_: dict[str, Any] = {}
+                for name, value in zip(names, values):
+                    globals_[name] = value
+                exec_saving_source(source, globals_)
+                return globals_[definition.__name__]  # type: ignore
+
+            return macro_impl
+
+        return injection_decorator
 
 
 @overload
@@ -269,4 +376,6 @@ __all__ = [
     "get_arg_names",
     "get_arg_types",
     "get_return_type",
+    "macro",
+    "MacroVar",
 ]

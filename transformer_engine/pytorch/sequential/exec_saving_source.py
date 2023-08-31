@@ -22,8 +22,8 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
         linecache.getlines = patched_getlines
         setattr(exec_saving_source, "sources", sources)
     sources: list[str] = getattr(exec_saving_source, "sources")
+    sources.append(source)
     exec(
-        compile(ast.parse(source), filename=f"<exec#{len(sources)}>", mode="exec"),
+        compile(ast.parse(source), filename=f"<exec#{len(sources) - 1}>", mode="exec"),
         globals,
     )
-    sources.append(source)
