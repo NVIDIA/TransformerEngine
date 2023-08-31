@@ -587,7 +587,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         const char* env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
         if (env_p != nullptr && env_p[0]=='1') {
           userbuffers_sendrecv_atomic(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
-                            _next_rank, _prev_rank, &counter_ptr[i+1]/*recv_chunk_id]*/, (cudaStream_t)_stream_recv);
+                            _next_rank, _prev_rank, &counter_ptr[recv_chunk_id], (cudaStream_t)_stream_recv);
         }
         else if (env_p != nullptr && env_p[0]=='2') {
           if (i==0) {
@@ -598,7 +598,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         else {
           userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
                             _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
-          producer(counter_ptr, i+1/*recv_chunk_id*/, (cudaStream_t)_stream_recv);
+          producer(counter_ptr, /*i+1*/recv_chunk_id, (cudaStream_t)_stream_recv);
         }
       }
     }
