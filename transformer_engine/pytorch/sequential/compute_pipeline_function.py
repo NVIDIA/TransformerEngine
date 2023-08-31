@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TypedDict
+from typing import Callable, TypedDict
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
@@ -117,7 +117,7 @@ class Backward:
 
 
 @macro(PIPELINE, OP, UPCOMING_BACKWARD, NEXT_UPCOMING_BACKWARD, textual=False)
-class ComputePipelineFunction(Backward, autograd.Function):
+class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc]
     @staticmethod
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
@@ -200,13 +200,35 @@ class ComputePipelineFunction(Backward, autograd.Function):
         return exposed_y
 
 
-class LoopState(TypedDict):
-    x: torch.Tensor
-    nvte_x: nvte.Tensor
-    next_upcoming_backward: BackwardComm | None
+def loop(
+    x_: torch.Tensor,
+    nvte_x_: nvte.Tensor,
+    pipeline: ComputePipeline,
+    ag_fs: list[type[autograd.Function]],
+):
+    for op, autograd_func in zip(pipeline.functions, ag_fs):
+        nvte_tensors = op.require_grad()
+        exposed_tensors: list[torch.Tensor] = []
+        for nvte_tensor in nvte_tensors:
+            assert not nvte.is_fp8(
+                nvte_tensor
+            )  # TODO: change when fp8 optimizer comes along
+            exposed_tensors.append(nvte_tensor.data)
+
+        x_ = autograd_func.apply(  # type: ignore
+            x_,
+            *exposed_tensors,
+            *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
+        )
+        assert isinstance(x_, torch.Tensor)
+        with torch.no_grad():
+            (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(x_)
+            nvte_x_ = nvte.Tensor(
+                nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
+            )
 
 
-def make_loop(pipeline: ComputePipeline):
+def make_loop(pipeline: ComputePipeline) -> Callable[[torch.Tensor, nvte.Tensor], None]:
     upcoming_backward = None
     next_upcoming_backward = BackwardComm()
     ag_fs: list[type[autograd.Function]] = []
@@ -222,31 +244,7 @@ def make_loop(pipeline: ComputePipeline):
             )
         )
 
-    def loop(x_: torch.Tensor, nvte_x_: nvte.Tensor):
-        for op, autograd_func in zip(pipeline.functions, ag_fs):
-            nvte_tensors = op.require_grad()
-            exposed_tensors: list[torch.Tensor] = []
-            for nvte_tensor in nvte_tensors:
-                assert not nvte.is_fp8(
-                    nvte_tensor
-                )  # TODO: change when fp8 optimizer comes along
-                exposed_tensors.append(nvte_tensor.data)
-
-            x_ = autograd_func.apply(  # type: ignore
-                x_,
-                *exposed_tensors,
-                *(nvte_x_.data, nvte_x_.amax, nvte_x_.scale, nvte_x_.scale_inv),
-            )
-            assert isinstance(x_, torch.Tensor)
-            with torch.no_grad():
-                (nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = get_nvte_y(
-                    x_
-                )
-                nvte_x_ = nvte.Tensor(
-                    nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv
-                )
-
-    return loop
+    return lambda x, nvte_x: loop(x, nvte_x, pipeline, ag_fs)
 
 
 # The squish needs to be invertible and
