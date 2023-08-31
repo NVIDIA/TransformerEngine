@@ -927,10 +927,12 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   at::Tensor dK;
   at::Tensor dV;
   at::Tensor dQKV, dKV;
-  int layout_mod = static_cast<int>(qkv_layout) % 5;
+  //int layout_mod = static_cast<int>(qkv_layout) % 5;
+  NVTE_QKV_Layout_Group layout_group = map_layout_to_group(qkv_layout);
   std::vector<int64_t> tmp_shape;
-  switch (layout_mod) {
-      case 0:  // 3HD
+  switch (layout_group) {
+      //case 0:  // 3HD
+      case NVTE_QKV_Layout_Group::NVTE_3HD:  // 3HD
           tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
           dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
@@ -944,7 +946,8 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
               torch::indexing::Slice(0, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}).squeeze(tmp_shape.size() - 3);
           break;
-      case 1:  // H3D
+      //case 1:  // H3D
+      case NVTE_QKV_Layout_Group::NVTE_H3D:  // 3HD
           tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
           dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
@@ -955,7 +958,8 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           dV = dQKV.index({"...", torch::indexing::Slice(2, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}).squeeze(tmp_shape.size() - 2);
           break;
-      case 2:  // 2HD
+      //case 2:  // 2HD
+      case NVTE_QKV_Layout_Group::NVTE_HD_2HD:  // 3HD
           dQ = torch::empty_like(Q);
           tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
@@ -967,7 +971,8 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
               torch::indexing::Slice(0, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}).squeeze(tmp_shape.size() - 3);
           break;
-      case 3:  // H2D
+      //case 3:  // H2D
+      case NVTE_QKV_Layout_Group::NVTE_HD_H2D:  // 3HD
           dQ = torch::empty_like(Q);
           tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
           tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
@@ -977,7 +982,8 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
           dV = dKV.index({"...", torch::indexing::Slice(1, torch::indexing::None, 1),
               torch::indexing::Slice(0, torch::indexing::None, 1)}).squeeze(tmp_shape.size() - 2);
           break;
-      case 4:  // HD
+      //case 4:  // HD
+      case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:  // 3HD
           dQ = torch::empty_like(Q);
           dK = torch::empty_like(K);
           dV = torch::empty_like(V);

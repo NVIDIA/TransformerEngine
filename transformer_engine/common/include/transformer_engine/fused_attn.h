@@ -27,21 +27,6 @@ extern "C" {
     `KV_INTERLEAVED` and `NOT_INTERLEAVED` are to be deprecated soon.
  */
 enum NVTE_QKV_Layout {
-    NVTE_SB3HD = 0,
-    NVTE_SBH3D = 1,
-    NVTE_SBHD_SB2HD = 2,
-    NVTE_SBHD_SBH2D = 3,
-    NVTE_SBHD_SBHD_SBHD = 4,
-    NVTE_BS3HD = 5,
-    NVTE_BSH3D = 6,
-    NVTE_BSHD_BS2HD = 7,
-    NVTE_BSHD_BSH2D = 8,
-    NVTE_BSHD_BSHD_BSHD = 9,
-    NVTE_T3HD = 10,
-    NVTE_TH3D = 11,
-    NVTE_THD_T2HD = 12,
-    NVTE_THD_TH2D = 13,
-    NVTE_THD_THD_THD = 14,
 
 /*! Separate Q, K, V tensors.
     \verbatim
@@ -62,7 +47,7 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_NOT_INTERLEAVED = 15,
+    NVTE_NOT_INTERLEAVED = 0,
 
 /*! Packed QKV.
     \verbatim
@@ -73,7 +58,7 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_QKV_INTERLEAVED = 16,
+    NVTE_QKV_INTERLEAVED = 1,
 
  /*! Q and packed KV.
      \verbatim
@@ -89,8 +74,116 @@ enum NVTE_QKV_Layout {
                           |   num_heads * head_dim
     \endverbatim
  */
-    NVTE_KV_INTERLEAVED = 17,
+    NVTE_KV_INTERLEAVED = 2,
+
+    NVTE_SB3HD = NVTE_KV_INTERLEAVED + 0,
+    NVTE_SBH3D = NVTE_KV_INTERLEAVED + 1,
+    NVTE_SBHD_SB2HD = NVTE_KV_INTERLEAVED + 2,
+    NVTE_SBHD_SBH2D = NVTE_KV_INTERLEAVED + 3,
+    NVTE_SBHD_SBHD_SBHD = NVTE_KV_INTERLEAVED + 4,
+    NVTE_BS3HD = NVTE_KV_INTERLEAVED + 5,
+    NVTE_BSH3D = NVTE_KV_INTERLEAVED + 6,
+    NVTE_BSHD_BS2HD = NVTE_KV_INTERLEAVED + 7,
+    NVTE_BSHD_BSH2D = NVTE_KV_INTERLEAVED + 8,
+    NVTE_BSHD_BSHD_BSHD = NVTE_KV_INTERLEAVED + 9,
+    NVTE_T3HD = NVTE_KV_INTERLEAVED + 10,
+    NVTE_TH3D = NVTE_KV_INTERLEAVED + 11,
+    NVTE_THD_T2HD = NVTE_KV_INTERLEAVED + 12,
+    NVTE_THD_TH2D = NVTE_KV_INTERLEAVED + 13,
+    NVTE_THD_THD_THD = NVTE_KV_INTERLEAVED + 14,
 };
+
+/*! \enum NVTE_QKV_Layout_Group
+ *  \brief QKV matrix layout groups
+ */
+enum NVTE_QKV_Layout_Group {
+    NVTE_3HD = 0,
+    NVTE_H3D = 1,
+    NVTE_HD_2HD = 2,
+    NVTE_HD_H2D = 3,
+    NVTE_HD_HD_HD = 4,
+};
+
+///*! \def MAP_LAYOUT_TO_GROUP
+// *  \brief Map QKV matrix layout to layout group
+// */
+//#define MAP_LAYOUT_TO_GROUP(NVTE_QKV_Layout) \
+//{ \
+//    switch (NVTE_QKV_Layout) { \
+//        case NVTE_SB3HD: \
+//        case NVTE_BS3HD: \
+//        case NVTE_T3HD: \
+//            { \
+//                return NVTE_3HD; \
+//            } \
+//        case NVTE_SBH3D: \
+//        case NVTE_BSH3D: \
+//        case NVTE_TH3D: \
+//            { \
+//                return NVTE_H3D; \
+//            } \
+//        case NVTE_SBHD_SB2HD: \
+//        case NVTE_BSHD_BS2HD: \
+//        case NVTE_THD_T2HD: \
+//            { \
+//                return NVTE_HD_2HD; \
+//            } \
+//        case NVTE_SBHD_SBH2D: \
+//        case NVTE_BSHD_BSH2D: \
+//        case NVTE_THD_TH2D: \
+//            { \
+//                return NVTE_HD_H2D; \
+//            } \
+//        case NVTE_SBHD_SBHD_SBHD: \
+//        case NVTE_BSHD_BSHD_BSHD: \
+//        case NVTE_THD_THD_THD: \
+//            { \
+//                return NVTE_HD_HD_HD; \
+//            } \
+//    } \
+//} \
+
+/*! \enum NVTE_QKV_Format
+ *  \brief QKV matrix layout groups
+ */
+enum NVTE_QKV_Format {
+    NVTE_SBHD = 0,
+    NVTE_BSHD = 1,
+    NVTE_THD = 2,
+};
+
+///*! \def MAP_LAYOUT_TO_FORMAT
+// *  \brief Map QKV matrix layout to format
+// */
+//#define MAP_LAYOUT_TO_FORMAT(NVTE_QKV_Layout) \
+//{ \
+//    switch (NVTE_QKV_Layout) { \
+//        case NVTE_SB3HD: \
+//        case NVTE_SBH3D: \
+//        case NVTE_SBHD_SB2HD: \
+//        case NVTE_SBHD_SBH2D: \
+//        case NVTE_SBHD_SBHD_SBHD: \
+//            { \
+//                return NVTE_SBHD; \
+//            } \
+//        case NVTE_BS3HD: \
+//        case NVTE_BSH3D: \
+//        case NVTE_BSHD_BS2HD: \
+//        case NVTE_BSHD_BSH2D: \
+//        case NVTE_BSHD_BSHD_BSHD: \
+//            { \
+//                return NVTE_BSHD; \
+//            } \
+//        case NVTE_T3HD: \
+//        case NVTE_TH3D: \
+//        case NVTE_THD_T2HD: \
+//        case NVTE_THD_TH2D: \
+//        case NVTE_THD_THD_THD: \
+//            { \
+//                return NVTE_THD; \
+//            } \
+//    } \
+//} \
 
 /*! \enum NVTE_Bias_Type
  *  \brief Bias types
@@ -126,6 +219,9 @@ enum NVTE_Fused_Attn_Backend {
     /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
     NVTE_FP8 = 2,
 };
+
+NVTE_QKV_Layout_Group map_layout_to_group(NVTE_QKV_Layout qkv_layout);
+NVTE_QKV_Format map_layout_to_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  * 
