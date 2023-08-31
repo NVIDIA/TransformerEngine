@@ -18,6 +18,13 @@ class Op(ABC):
     ):
         ...
 
+    def __VERY_BAD_TORCH_DYNAMO_HACK__(self, tensors: list[nvte.Tensor]):
+        for cur_tensor, in_tensor in zip(self.require_grad(), tensors):
+            cur_tensor.data = in_tensor.data
+            cur_tensor.amax = in_tensor.amax
+            cur_tensor.scale = in_tensor.scale
+            cur_tensor.scale_inv = in_tensor.scale_inv
+
     def inference(self, x: nvte.Tensor, /):
         return self.forward(x)[0]
 
