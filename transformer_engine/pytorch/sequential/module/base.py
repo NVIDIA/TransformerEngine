@@ -1,7 +1,9 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+from typing import Iterator
 import torch
 from torch import nn
+from torch.nn.parameter import Parameter
 from ..ops import Op
 from ..recipe import Recipe
 from ..compute_pipeline import ComputePipeline
@@ -27,6 +29,25 @@ class BaseModule(nn.Module, ABC):
     ) -> torch.Tensor:
         self.precompiled_for(x, seq_lens)
         return self._run(x)
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        # TODO: this is a hack to make torch dynamo work
+        del recurse
+        assert self.pipeline is not None
+        for op in self.pipeline.functions:
+            for tensor in op.require_grad():
+                assert isinstance(tensor.data, Parameter)
+                yield tensor.data
+
+    def buffers(self, recurse: bool = True):
+        # TODO: this is a hack to make torch dynamo work
+        del recurse
+        assert self.pipeline is not None
+        for op in self.pipeline.functions:
+            for tensor in op.require_grad():
+                yield tensor.amax
+                yield tensor.scale
+                yield tensor.scale_inv
 
     def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
         with torch.no_grad():
