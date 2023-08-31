@@ -239,6 +239,20 @@ def unrolled_for(
     return decorator
 
 
+def get_globals(o: object) -> dict[str, Any]:
+    try:
+        return o.__globals__  # type: ignore
+    except:
+        pass
+    try:
+        import sys
+
+        return sys.modules[o.__module__].__dict__
+    except:
+        pass
+    raise ValueError(f"Cannot get globals for {o}")
+
+
 class MacroVar(Generic[T]):
     def __new__(cls, name: str, type_: type[T] = object) -> T:
         return (name, type_)  # type: ignore
@@ -302,14 +316,11 @@ def macro(
                 _MacroTransformer(names, values).visit(ast_tree)
                 ast.fix_missing_locations(ast_tree)
                 source = ast.unparse(ast_tree)
-                if hasattr(definition, "__globals__"):
-                    assert isinstance(definition.__globals__, dict)  # type: ignore
-                    globals_: dict[str, Any] = {}
-                    for key, value in definition.__globals__.items():  # type: ignore
-                        globals_[key] = value  # type: ignore
+                try:
+                    globals_ = get_globals(definition).copy()
                     del globals_[definition.__name__]  # type: ignore
-                else:
-                    globals_: dict[str, Any] = {}
+                except:
+                    globals_ = {}
                 exec_saving_source(source, globals_)
                 return globals_[definition.__name__]  # type: ignore
 
@@ -329,14 +340,11 @@ def macro(
                 raise ValueError("Cannot get source code of definition")
 
             def macro_impl(*values: Unpack[Ts]) -> T:
-                if hasattr(definition, "__globals__"):
-                    assert isinstance(definition.__globals__, dict)  # type: ignore
-                    globals_: dict[str, Any] = {}
-                    for key, value in definition.__globals__.items():  # type: ignore
-                        globals_[key] = value  # type: ignore
+                try:
+                    globals_ = get_globals(definition).copy()
                     del globals_[definition.__name__]  # type: ignore
-                else:
-                    globals_: dict[str, Any] = {}
+                except:
+                    globals_ = {}
                 for name, value in zip(names, values):
                     globals_[name] = value
                 exec_saving_source(source, globals_)
