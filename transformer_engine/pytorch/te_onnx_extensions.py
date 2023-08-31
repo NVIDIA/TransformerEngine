@@ -283,6 +283,20 @@ def onnx_te_gemm(
     return output
 
 
+def _ones_like(g, inp, dtype):
+    """Returns a tensor filled with the scalar value 1, with the same size as input and
+    with dtype data-type"""
+    shape = g.op("Shape", inp)
+    # WAR ONNX spec: ConstantOfShape accepts all data types except for BF16. To WAR
+    # create a ConstantOfShape with type FP32 and then add a Cast to BF16.
+    is_bf16 = dtype == torch.bfloat16
+    one = g.op("ConstantOfShape", shape, value_t=torch.tensor([1],
+        dtype=torch.float32 if is_bf16 else dtype))
+    if is_bf16:
+        one = g.op("Cast", one, to_i=_C_onnx.TensorProtoDataType.BFLOAT16)
+    return one
+
+
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v", "fs", "i", "i", "b")
 def onnx_layernorm_fwd_fp8(g, inputs, weight, bias, eps, scale, amax,
                             scale_inv, fp8_tensor, otype, zero_centered_gamma):
@@ -305,19 +319,6 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     """ONNX graph for layernorm_fwd"""
     # pylint: disable=unused-argument
 
-    def ones_like(inp, dtype):
-        """Returns a tensor filled with the scalar value 1, with the same size as input and
-        with dtype data-type"""
-        shape = g.op("Shape", inp)
-        # WAR ONNX spec: ConstantOfShape accepts all data types except for BF16. To WAR
-        # create a ConstantOfShape with type FP32 and then add a Cast to BF16.
-        is_bf16 = dtype == torch.bfloat16
-        one = g.op("ConstantOfShape", shape, value_t=torch.tensor([1],
-            dtype=torch.float32 if is_bf16 else dtype))
-        if is_bf16:
-            one = g.op("Cast", one, to_i=_C_onnx.TensorProtoDataType.BFLOAT16)
-        return one
-
     normalized_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
     if normalized_shape is None:
         ndim = torch.onnx.symbolic_helper._get_tensor_rank(inputs)
@@ -328,7 +329,7 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
 
     if zero_centered_gamma:
         inputs_dtype = inputs.type().dtype()
-        one = ones_like(weight, inputs_dtype)
+        one = _ones_like(g, weight, inputs_dtype)
         weight = g.op("Add", weight, one)
 
     axis = -len(normalized_shape)
@@ -344,6 +345,56 @@ def onnx_layernorm_fwd(g, inputs, weight, bias, eps, zero_centered_gamma):
     )
     return ln
 
+@symbolic_helper.parse_args("v", "v", "f", "v", "v", "fs", "i", "i", "b")
+def onnx_rmsnorm_fwd_fp8(g, inputs, weight, eps, scale, amax,
+                         scale_inv, fp8_tensor, otype, zero_centered_gamma):
+    """ONNX graph for rmsnorm_fwd_fp8"""
+    # pylint: disable=unused-argument
+    inp_dtype = get_TensorProtoDataType(inputs)
+
+    if inp_dtype != get_TensorProtoDataType(weight):
+        weight = g.op("Cast", weight, to_i=inp_dtype)
+
+    ln = onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma)
+    fp8_ln = quantize(g, ln, scale_inv, fp8_tensor)
+    return fp8_ln
+
+
+@symbolic_helper.parse_args("v", "v", "f", "b")
+def onnx_rmsnorm_fwd(g, inputs, weight, eps, zero_centered_gamma):
+    """ONNX graph for rmsnorm_fwd"""
+    # pylint: disable=unused-argument
+
+    normalized_shape = torch.onnx.symbolic_helper._get_tensor_sizes(inputs)
+    if normalized_shape is None:
+        ndim = torch.onnx.symbolic_helper._get_tensor_rank(inputs)
+        assert ndim is not None
+        normalized_shape = list(range(0, ndim))
+    # Normalization axis = 0, so normalized_shape uses all dims except dim = 0
+    normalized_shape = normalized_shape[1:]
+
+    if zero_centered_gamma:
+        inputs_dtype = inputs.type().dtype()
+        one = _ones_like(g, weight, inputs_dtype)
+        weight = g.op("Add", weight, one)
+
+    axis = -len(normalized_shape)
+
+    inputs_float = g.op("Cast", inputs, to_i=_C_onnx.TensorProtoDataType.FLOAT)
+
+    sum_square = g.op("ReduceSumSquare", inputs_float, axes_i=[axis])
+    shape = g.op("Shape", inputs_float, start_i=-1)
+    shape_f = g.op("Cast", shape, to_i=_C_onnx.TensorProtoDataType.FLOAT)
+    mean_squared = g.op("Div", sum_square, shape_f)
+    eps_tensor = g.op("ConstantOfShape", shape, value_t=torch.tensor([eps], dtype=torch.float32))
+    rms_squared = g.op("Add", mean_squared, eps_tensor)
+    rms_eps = g.op("Sqrt", rms_squared)
+    normalized_input = g.op("Div", inputs_float, rms_eps)
+    result = g.op("Mul", weight, normalized_input)
+    result = g.op("Cast", result, to_i=get_TensorProtoDataType(inputs))
+
+
+    return result
 
 register_custom_op_symbolic('tex_ts::cast_to_fp8_ts', onnx_cast_to_fp8, VER)
 register_custom_op_symbolic('tex_ts::cast_from_fp8_ts', onnx_cast_from_fp8, VER)
@@ -355,3 +406,5 @@ register_custom_op_symbolic('tex_ts::swiglu_ts', onnx_fp8_swiglu, VER)
 register_custom_op_symbolic('tex_ts::te_gemm_ts', onnx_te_gemm, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_fp8_inf_ts', onnx_layernorm_fwd_fp8, VER)
 register_custom_op_symbolic('tex_ts::layernorm_fwd_inf_ts', onnx_layernorm_fwd, VER)
+register_custom_op_symbolic('tex_ts::rmsnorm_fwd_fp8_inf_ts', onnx_rmsnorm_fwd_fp8, VER)
+register_custom_op_symbolic('tex_ts::rmsnorm_fwd_inf_ts', onnx_rmsnorm_fwd, VER)

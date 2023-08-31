@@ -215,19 +215,16 @@ class FusedScaleMaskSoftmax(nn.Module):
     fused operation: scaling + mask + softmax
 
     Arguments:
-        attn_mask_type: attention mask type ('padding', 'causal', 'no_mask', or 'arbitrary')
         mask_func: mask function to be applied.
         softmax_in_fp32: if true, softmax in performed at fp32 precision.
     """
 
     def __init__(
         self,
-        attn_mask_type: str,
         mask_func: Callable,
         softmax_in_fp32: bool = True,
     ) -> None:
         super().__init__()
-        self.attn_mask_type = attn_mask_type
         self.scaled_masked_softmax_fusion = bool(
             int(os.getenv("NVTE_MASKED_SOFTMAX_FUSION", "1"))
         )
@@ -249,6 +246,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         self,
         inp: torch.Tensor,
         mask: torch.Tensor,
+        attn_mask_type: str,
         scale: Optional[float] = None,
     ) -> torch.Tensor:
         """FusedScaleMaskSoftmax fprop"""
@@ -257,6 +255,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.input_in_fp16 = inp.dtype == torch.float16
         self.input_in_bf16 = inp.dtype == torch.bfloat16
         self.input_in_float16 = self.input_in_fp16 or self.input_in_bf16
+        self.attn_mask_type = attn_mask_type
 
         assert (
             scale is None or self.softmax_in_fp32
@@ -270,10 +269,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
-        if (  # pylint: disable=too-many-boolean-expressions
+        if ( # pylint: disable=too-many-boolean-expressions
             self.scaled_masked_softmax_fusion  # user wants to fuse
             and self.input_in_float16  # input must be fp16
             and 16 < sk <= 4096  # sk must be 16 ~ 2048
+            and sk % 8 == 0  # sk must be divisor of 8
             and sq % 4 == 0  # sq must be divisor of 4
             and attn_batches % 4 == 0  # np * b must be divisor of 4
             and self.attn_mask_type != "arbitrary"  # Custom masks not supported

@@ -9,6 +9,7 @@
 
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
+#include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/transpose.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/logging.h>
@@ -179,5 +180,7 @@ at::Tensor allocateTorchTensor(int M,
 at::Tensor allocateTorchTensor(int M,
                                transformer_engine::DType dtype
 );
+
+void *getDataPtr(at::Tensor t);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_

@@ -4,10 +4,11 @@
 
 """Attention."""
 import os
+import warnings
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 
 import torch
@@ -30,10 +31,12 @@ from transformer_engine.pytorch.utils import (
     attention_mask_func,
     split_tensor_along_dim,
     get_device_compute_capability,
+    get_default_init_method,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
+    AttnBiasTypes,
     dist_group_type,
     TE_DType,
 )
@@ -51,14 +54,15 @@ _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
+    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd # pylint: disable=no-name-in-module
 else:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module
+    from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 
 
-__all__ = ["DotProductAttention"]
+__all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
 def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -326,6 +330,64 @@ class _SplitLastDim(torch.autograd.Function):
 
         return torch.cat(grad_outputs, dim = -1), None
 
+class _CombineQKV(torch.autograd.Function):
+    """"""
+
+    @staticmethod
+    def forward(ctx,
+                query_layer: torch.Tensor,
+                key_layer: torch.Tensor, # pylint: disable=unused-argument
+                value_layer: torch.Tensor, # pylint: disable=unused-argument
+                dim: int,
+    ) -> torch.Tensor:
+
+        mixed_layer = torch.Tensor().to(device=query_layer.device,
+                                dtype=query_layer.dtype)
+        new_shape = list(query_layer.shape)
+        new_shape[dim] = new_shape[dim] * 3
+        mixed_layer.set_(query_layer.untyped_storage(),
+                 query_layer.storage_offset(),
+                 new_shape,
+                 query_layer.stride())
+        ctx.dim = dim
+        return mixed_layer
+
+    @staticmethod
+    def backward(ctx,
+                 *grad_outputs,
+    ) -> Tuple[torch.Tensor, ...]:
+        assert len(grad_outputs) > 0, "No gradients received for backprop!"
+        tensors = split_tensor_along_dim(grad_outputs[0], ctx.dim, 3)
+        return tensors[0], tensors[1], tensors[2], None
+
+class _CombineKV(torch.autograd.Function):
+    """"""
+
+    @staticmethod
+    def forward(ctx,
+                key_layer: torch.Tensor,
+                value_layer: torch.Tensor, # pylint: disable=unused-argument
+                dim: int,
+    ) -> torch.Tensor:
+
+        mixed_layer = torch.Tensor().to(device=key_layer.device,
+                                dtype=key_layer.dtype)
+        new_shape = list(key_layer.shape)
+        new_shape[dim] = new_shape[dim] * 2
+        mixed_layer.set_(key_layer.untyped_storage(),
+                 key_layer.storage_offset(),
+                 new_shape,
+                 key_layer.stride())
+        ctx.dim = dim
+        return mixed_layer
+
+    @staticmethod
+    def backward(ctx,
+                 *grad_outputs,
+    ) -> Tuple[torch.Tensor, ...]:
+        assert len(grad_outputs) > 0, "No gradients received for backprop!"
+        tensors = split_tensor_along_dim(grad_outputs[0], ctx.dim, 2)
+        return tensors[0], tensors[1], None
 
 class UnfusedDotProductAttention(torch.nn.Module):
     """Parallel attention w/o QKV and Proj Gemms
@@ -337,7 +399,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -346,10 +407,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            attn_mask_type,
-            attention_mask_func,
-        )
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(attention_mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -365,9 +423,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
+
+        assert (
+            attn_mask_type in AttnMaskTypes
+        ), f"attn_mask_type {attn_mask_type} not supported"
+
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
@@ -378,6 +444,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer.size(0),
             key_layer.size(0),
         )
+
+        assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
+        if key_layer.shape[2] != query_layer.shape[2]:
+            assert (query_layer.shape[2]%key_layer.shape[2]==0
+                ),"The number of attention heads must be divisible by the number of GQA groups!"
+            key_layer = key_layer.repeat_interleave(
+                    int(query_layer.shape[2]/key_layer.shape[2]), dim = 2)
+            value_layer = value_layer.repeat_interleave(
+                    int(query_layer.shape[2]/value_layer.shape[2]), dim = 2)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.reshape(
@@ -405,20 +480,50 @@ class UnfusedDotProductAttention(torch.nn.Module):
             scale *= self.layer_number
 
         # Raw attention scores. [b * np, sq, sk]
-        matmul_result = torch.baddbmm(
-            matmul_result,
-            query_layer.transpose(0, 1),  # [b * np, sq, hn]
-            key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-            beta=0.0,
-            alpha=(1.0 / scale),
-        )
+        if core_attention_bias_type == "no_bias":
+            matmul_result = torch.baddbmm(
+                matmul_result,
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                beta=0.0,
+                alpha=(1.0 / scale),
+            )
+
+        elif core_attention_bias_type == "pre_scale_bias":
+            assert core_attention_bias is not None, "core_attention_bias should not be None!"
+            assert (core_attention_bias.shape == torch.Size(1, *output_size[1:])
+                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            matmul_result = torch.bmm(
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+            )
+            matmul_result = (matmul_result.view(
+                output_size[0], output_size[1], output_size[2], output_size[3])
+                + core_attention_bias).view(-1, output_size[2], output_size[3])
+            matmul_result /= scale
+
+        elif core_attention_bias_type == "post_scale_bias":
+            assert core_attention_bias is not None, "core_attention_bias should not be None!"
+            assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
+                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            matmul_result = torch.baddbmm(
+                matmul_result,
+                query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                beta=0.0,
+                alpha=(1.0 / scale),
+            )
+            matmul_result = (matmul_result.view(
+                output_size[0], output_size[1], output_size[2], output_size[3])
+                + core_attention_bias).view(-1, output_size[2], output_size[3])
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
 
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask, softmax_scale)
+        attention_probs = self.scale_mask_softmax(
+            attention_scores, attention_mask, attn_mask_type, softmax_scale)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -490,7 +595,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
-def _check_if_interleaved_qkv(q, k, v):
+def _check_qkv_layout(q, k, v):
     data_ptr = q.untyped_storage().data_ptr()
     check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
     if not check_ptrs:
@@ -509,10 +614,19 @@ def _check_if_interleaved_qkv(q, k, v):
     last_dim_size = shape[-1]
     check_offsets = all(i * last_dim_size == x.storage_offset()
                         for i, x in enumerate([q, k, v]))
-    return check_offsets
+    if check_offsets:
+        return "sbh3d"
+
+    last_dims_size = shape[-1] * shape[-2]
+    check_offsets = all(i * last_dims_size == x.storage_offset()
+                        for i, x in enumerate([q, k, v]))
+    if check_offsets:
+        return "sb3hd"
+
+    return "other"
 
 
-def _check_if_interleaved_kv(k, v):
+def _check_kv_layout(k, v):
     data_ptr = k.untyped_storage().data_ptr()
     check_ptrs = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
     if not check_ptrs:
@@ -531,8 +645,16 @@ def _check_if_interleaved_kv(k, v):
     last_dim_size = shape[-1]
     check_offsets = all(i * last_dim_size == x.storage_offset()
                         for i, x in enumerate([k, v]))
-    return check_offsets
+    if check_offsets:
+        return "sbh2d"
 
+    last_dims_size = shape[-1] * shape[-2]
+    check_offsets = all(i * last_dims_size == x.storage_offset()
+                        for i, x in enumerate([k, v]))
+    if check_offsets:
+        return "sb2hd"
+
+    return "other"
 
 
 class FlashAttention(torch.nn.Module):
@@ -545,10 +667,9 @@ class FlashAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         attention_type: str = "self",
-        causal: bool = True,
         layer_number: Optional[int] = None,
+        deterministic: bool = False,
     ) -> None:
         super().__init__()
 
@@ -556,14 +677,12 @@ class FlashAttention(torch.nn.Module):
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
 
-        self.attn_mask_type = attn_mask_type
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
-        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-        self.causal = causal
         self.layer_number = 1 if layer_number is None else layer_number
+        self.deterministic = deterministic
 
     def forward(
         self,
@@ -571,13 +690,14 @@ class FlashAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        attn_mask_type: str = "causal",
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
         # For now just 128, will make it more general in the future
         if (query_layer.shape[-1] == 128 and
             query_layer.shape[0] * query_layer.shape[1] >= 512 and
-            _check_if_interleaved_qkv(query_layer, key_layer, value_layer)):
+            _check_qkv_layout(query_layer, key_layer, value_layer) == "sbh3d"):
             query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(query_layer,
                                                                          key_layer,
                                                                          value_layer)
@@ -596,7 +716,7 @@ class FlashAttention(torch.nn.Module):
         ]
 
         global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
-        if self.attn_mask_type != 'padding':
+        if attn_mask_type != 'padding':
             _cu_seqlens_q = torch.arange(
                 0,
                 (batch_size + 1) * max_seqlen_q,
@@ -640,11 +760,11 @@ class FlashAttention(torch.nn.Module):
                 query_layer_packed, key_layer_packed, value_layer_packed,
                 _cu_seqlens_q, _cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                 self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.causal,
+                softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
                 **fa_optional_forward_kwargs
             )
 
-        if self.attn_mask_type == 'padding':
+        if attn_mask_type == 'padding':
             output = UnpackTensor.apply(_indices_q, batch_size * max_seqlen_q, output)
 
         # [(b sq), np, hn] -> [sq, b, (np hn)]
@@ -657,7 +777,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
     @staticmethod
     def forward(ctx, is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype, attn_bias, attn_scale,
                 dropout_p, fast_zero_fill, qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend):
+                rng_gen, fused_attention_backend, use_FAv2_bwd):
         out, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
             is_training, max_seqlen, cu_seqlens, qkv, qkv_dtype,
             fused_attention_backend, attn_bias,
@@ -676,19 +796,34 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
         qkv, out, cu_seqlens = ctx.saved_tensors
-        dqkv, *rest = fused_attn_bwd_qkvpacked(
-            ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
-            ctx.qkv_dtype, ctx.aux_ctx_tensors,
-            ctx.fused_attention_backend,
-            None, None, None, None, None, None, None, None, None,
-            ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
-            ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+        if ctx.use_FAv2_bwd:
+            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            dqkv = torch.empty_like(qkv)
+            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+            d_out, q, k, v, out = [maybe_contiguous(x)
+                for x in (d_out, qkv[:,0], qkv[:,1], qkv[:,2], out)]
+            flash_attn_cuda_bwd(
+                d_out, q, k, v, out, softmax_lse, dqkv[:,0], dqkv[:,1], dqkv[:,2],
+                cu_seqlens, cu_seqlens, ctx.max_seqlen, ctx.max_seqlen,
+                ctx.dropout_p, ctx.attn_scale, False,
+                ctx.attn_mask_type == "causal", None, rng_state
+            )
+            dqkv = dqkv[..., :d_out.shape[-1]]
+        else:
+            dqkv, *rest = fused_attn_bwd_qkvpacked(
+                ctx.max_seqlen, cu_seqlens, qkv, out, d_out,
+                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.fused_attention_backend,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
@@ -707,7 +842,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, kv, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend):
+                rng_gen, fused_attention_backend, use_FAv2_bwd):
         out, aux_ctx_tensors = fused_attn_fwd_kvpacked(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, kv, qkv_dtype, fused_attention_backend, attn_bias,
@@ -727,20 +862,37 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
         q, kv, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
-        dq, dkv, *rest = fused_attn_bwd_kvpacked(
-            ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-            q, kv, out, d_out,
-            ctx.qkv_dtype, ctx.aux_ctx_tensors,
-            ctx.fused_attention_backend,
-            None, None, None, None, None, None, None, None, None,
-            ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
-            ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+        if ctx.use_FAv2_bwd:
+            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            dq = torch.empty_like(q)
+            dkv = torch.empty_like(kv)
+            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+            d_out, q, k, v, out = [maybe_contiguous(x)
+                for x in (d_out, q, kv[:,0], kv[:,1], out)]
+            flash_attn_cuda_bwd(
+                d_out, q, k, v, out, softmax_lse, dq, dkv[:,0], dkv[:,1],
+                cu_seqlens_q, cu_seqlens_kv, ctx.max_seqlen_q, ctx.max_seqlen_kv,
+                ctx.dropout_p, ctx.attn_scale, False,
+                ctx.attn_mask_type == "causal", None, rng_state
+            )
+            dq = dq[..., :d_out.shape[-1]]
+            dkv = dkv[..., :d_out.shape[-1]]
+        else:
+            dq, dkv, *rest = fused_attn_bwd_kvpacked(
+                ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, kv, out, d_out,
+                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.fused_attention_backend,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
@@ -783,7 +935,6 @@ class FusedAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         attention_type: str = "self",
     ) -> None:
         super().__init__()
@@ -791,20 +942,36 @@ class FusedAttention(torch.nn.Module):
         self.norm_factor = norm_factor
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
-        self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
+        self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
+                        and _flash_attn_2_available
+                        and get_device_compute_capability() == 9.0)
 
     def forward(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+        attn_mask_type: str = "causal",
+        fused_attention_backend:
+            tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """fused attention fprop"""
+
+        assert (fused_attention_backend
+                != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+                ), 'No fused attention backend supports this input combination!'
+        assert (
+            (query_layer.dtype in [torch.float16, torch.bfloat16])
+            and (key_layer.dtype in [torch.float16, torch.bfloat16])
+            and (value_layer.dtype in [torch.float16, torch.bfloat16])
+            ), 'FusedAttention only supports FP16 and BF16 data types.'
+        assert (
+            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
+            ), 'FusedAttention only supports CUDA tensors.'
 
         qkv_dtype = TE_DType[query_layer.dtype]
         seqlen_q, batch_size = query_layer.shape[0], query_layer.shape[1]
@@ -813,26 +980,27 @@ class FusedAttention(torch.nn.Module):
         max_seqlen_kv = seqlen_kv
 
         if self.attention_type == "self":
-            if _check_if_interleaved_qkv(query_layer, key_layer, value_layer):
-                query_layer = query_layer.unsqueeze(3)
-                key_layer = key_layer.unsqueeze(3)
-                value_layer = value_layer.unsqueeze(3)
+            qkv_layout = _check_qkv_layout(query_layer, key_layer, value_layer)
+            if qkv_layout == "sbh3d":
+                mixed_layer = _CombineQKV.apply(query_layer, key_layer, value_layer, 3)
                 # [s, b, h, 3, d]
-                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 3)
+                mixed_layer = mixed_layer.view(
+                        *mixed_layer.shape[0:3], 3, query_layer.shape[-1])
                 # [b, s, 3, h, d]
                 mixed_layer = mixed_layer.transpose(2, 3).transpose(0, 1).contiguous()
-            else:
-                query_layer = query_layer.unsqueeze(2)
-                key_layer = key_layer.unsqueeze(2)
-                value_layer = value_layer.unsqueeze(2)
+            elif qkv_layout == "sb3hd":
+                mixed_layer = _CombineQKV.apply(query_layer, key_layer, value_layer, 2)
                 # [s, b, 3, h, d]
-                mixed_layer = torch.cat([query_layer, key_layer, value_layer], dim = 2)
+                mixed_layer = mixed_layer.view(
+                        *mixed_layer.shape[0:2], 3, *query_layer.shape[2:])
                 # [b, s, 3, h, d]
                 mixed_layer = mixed_layer.transpose(0, 1).contiguous()
+            else:
+                raise Exception("FusedAttention only supports qkv layout sbh3d or sb3hd!")
 
             # [total_seqs, 3, h, d]
             mixed_layer = mixed_layer.view(
-                mixed_layer.shape[0] * mixed_layer.shape[1], *mixed_layer.shape[2:]).contiguous()
+                mixed_layer.shape[0] * mixed_layer.shape[1], *mixed_layer.shape[2:])
 
             qkv_layout = "qkv_interleaved"
             max_seqlen = seqlen_q
@@ -842,6 +1010,10 @@ class FusedAttention(torch.nn.Module):
                 step=seqlen_q,
                 dtype=torch.int32,
                 device=query_layer.device)
+            use_FAv2_bwd = (self.use_FAv2_bwd
+                        and (fused_attention_backend
+                            == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+                        and core_attention_bias_type == "no_bias")
 
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc_qkvpacked.apply(
@@ -856,34 +1028,39 @@ class FusedAttention(torch.nn.Module):
                     fast_zero_fill,
                     qkv_layout,
                     core_attention_bias_type,
-                    self.attn_mask_type,
+                    attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
+                    use_FAv2_bwd
                 )
             output = output.view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous()
 
         if self.attention_type == "cross":
-            if _check_if_interleaved_kv(key_layer, value_layer):
+            kv_layout = _check_kv_layout(key_layer, value_layer)
+            if kv_layout == "sbh2d":
+                key_value = _CombineKV.apply(key_layer, value_layer, 3)
                 # [s, b, h, 2, d]
-                key_layer = key_layer.unsqueeze(3)
-                value_layer = value_layer.unsqueeze(3)
-                key_value = torch.cat([key_layer, value_layer], dim = 3)
+                key_value = key_value.view(
+                        *key_value.shape[0:3], 2, key_layer.shape[-1])
                 # [b, s, 2, h, d]
                 key_value = key_value.transpose(2, 3).transpose(0, 1).contiguous()
-            else:
+            elif qkv_layout == "sb2hd":
+                key_value = _CombineKV.apply(key_layer, value_layer, 2)
                 # [s, b, 2, h, d]
-                key_layer = key_layer.unsqueeze(2)
-                value_layer = value_layer.unsqueeze(2)
-                key_value = torch.cat([key_layer, value_layer], dim = 2)
+                key_value = key_value.view(
+                        *key_value.shape[0:2], 2, *key_layer.shape[2:])
                 # [b, s, 2, h, d]
                 key_value = key_value.transpose(0, 1).contiguous()
+            else:
+                raise Exception("FusedAttention only supports kv layout sbh2d or sb2hd!")
 
-            # [total_seqs, 2, h, d]
+            # [total_seqs, h, d]
             query_layer = query_layer.transpose(0, 1).contiguous()
             query_layer = query_layer.view(
                     query_layer.shape[0] * query_layer.shape[1], *query_layer.shape[2:])
+            # [total_seqs, 2, h, d]
             key_value = key_value.view([key_value.shape[0] * key_value.shape[1]]
-                + key_value.shape[2:]).contiguous()
+                + key_value.shape[2:])
 
             qkv_layout = "kv_interleaved"
             cu_seqlens_q = torch.arange(
@@ -912,9 +1089,10 @@ class FusedAttention(torch.nn.Module):
                     fast_zero_fill,
                     qkv_layout,
                     core_attention_bias_type,
-                    self.attn_mask_type,
+                    attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
+                    use_FAv2_bwd
                 )
 
             output = (outputs[0].view(batch_size, seqlen_q, -1).transpose(0, 1).contiguous(),
@@ -939,12 +1117,25 @@ class DotProductAttention(torch.nn.Module):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
+    .. warning::
+
+        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
+        is deprecated. It will be fully removed in future releases.
+
     Parameters
     ----------
     num_attention_heads : int
                          number of attention heads in the transformer layer.
     kv_channels : int
                 number of key-value channels.
+    num_gqa_groups : Optional[int] = None
+                    number of GQA groups in the transformer layer.
+                    Grouped Query Attention is described in
+                    `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                    This only affects the keys and values, not the queries.
+                    GQA-1 is equivalent to Multi-Query Attention
+                    (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: str, default = `causal`
@@ -980,8 +1171,9 @@ class DotProductAttention(torch.nn.Module):
         self,
         num_attention_heads: int,
         kv_channels: int,
+        num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -991,15 +1183,27 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+
+        self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
+        self.num_attention_heads = num_attention_heads
 
-        projection_size = kv_channels * num_attention_heads
-        self.hidden_size_per_partition = divide(projection_size, self.tp_size)
-        self.hidden_size_per_attention_head = divide(
-            projection_size, num_attention_heads
+        self.hidden_size_per_attention_head = kv_channels
+        self.num_gqa_groups = (
+            num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+
+        assert (num_attention_heads % self.num_gqa_groups == 0
+                ), "The number of attention heads must be divisible by the number of GQA groups!"
 
         if sequence_parallel or get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
@@ -1009,10 +1213,20 @@ class DotProductAttention(torch.nn.Module):
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
         self.device_compute_capability = get_device_compute_capability()
+        self.deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
             and self.device_compute_capability >= 8.0
         )
+        if _flash_attn_2_available and self.deterministic:
+            self.use_flash_attention = False
+            warnings.warn(
+                "Disabling usage of FlashAttention since version 2 does not support deterministic"
+                "execution. In order to use FA with deterministic behavior, please install"
+                "FlashAttention version 1."
+            )
+
         self.use_fused_attention = (
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
             and self.device_compute_capability >= 8.0
@@ -1024,20 +1238,19 @@ class DotProductAttention(torch.nn.Module):
 
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
-        self.attn_mask_type, self.causal_mask = _unpack_attn_mask_type(attn_mask_type)
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
-            "attn_mask_type": attn_mask_type,
         }
 
         if self.use_flash_attention:
             self.flash_attention = FlashAttention(norm_factor,
-                                                  causal=self.causal_mask,
                                                   attention_type=attention_type,
                                                   layer_number=layer_number,
+                                                  deterministic=self.deterministic,
                                                   **attn_kwargs)
+
         # Instantiating three types since use of flash-attn and FusedAttention
         # might be ruled out due to forward inputs.
         if self.use_fused_attention:
@@ -1051,11 +1264,12 @@ class DotProductAttention(torch.nn.Module):
         self,
         attention_func: Callable,
         *forward_args: Tuple[torch.Tensor, ...],
+        **forward_kwargs: Dict[str, Any],
     ) -> torch.Tensor:
         """Forward method with activation checkpointing."""
 
-        def custom_forward(*inputs):
-            return attention_func(*inputs)
+        def custom_forward(*input_args, **input_kwargs):
+            return attention_func(*input_args, **input_kwargs)
 
         hidden_states = checkpoint(
             custom_forward,
@@ -1063,6 +1277,7 @@ class DotProductAttention(torch.nn.Module):
             self.get_rng_state_tracker,
             self.tp_group,
             *forward_args,
+            **forward_kwargs,
         )
 
         return hidden_states
@@ -1073,6 +1288,7 @@ class DotProductAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        attn_mask_type: str = "causal",
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1116,6 +1332,8 @@ class DotProductAttention(torch.nn.Module):
         attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
                         Can be a tuple of 2 masks for cross attention with padding masks.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                       type of attention mask passed into softmax operation.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1132,6 +1350,20 @@ class DotProductAttention(torch.nn.Module):
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), 'DotProductAttention only supports CUDA tensors.'
+
+        if self.attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+            # Keep previous functionality for current users.
+            attn_mask_type = self.attn_mask_type
+        attn_mask_type, causal_mask = _unpack_attn_mask_type(attn_mask_type)
+
+        assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
+                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
+                ), f"Keys and values must have {self.num_gqa_groups} heads!"
 
         # The priority for attention backends (subject to availability and clearing the filters)
         # is: FlashAttention > FusedAttention (cuDNN) > UnfusedDotProductAttention.
@@ -1156,6 +1388,12 @@ class DotProductAttention(torch.nn.Module):
             elif not _flash_attn_2_available and self.device_compute_capability == 8.9:
                 use_flash_attention = False
 
+        if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
+            use_flash_attention = False
+
+        if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
+            use_flash_attention = False
+
         # Filter: ONNX export.
         if is_in_onnx_export_mode():
             use_flash_attention = False
@@ -1170,29 +1408,39 @@ class DotProductAttention(torch.nn.Module):
         #   no_mask              |     All
         #   causal + padding     |     FlashAttention
         #
-        if self.attn_mask_type == "arbitrary":
+        if attn_mask_type == "arbitrary":
             use_flash_attention = False
             use_fused_attention = False
-        elif self.attn_mask_type == "padding" and self.causal_mask:
+        elif attn_mask_type == "padding" and causal_mask:
             assert use_flash_attention, "No attention backend available for causal + padding masks."
-        elif self.attn_mask_type == "padding":
+        elif attn_mask_type == "padding":
             use_fused_attention = False
 
+        qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
+
         if use_fused_attention:
-            qkv_layout = "qkv_interleaved" if self.attention_type == "self" else "kv_interleaved"
             fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype],
                 TE_DType[key_layer.dtype],
                 QKVLayout[qkv_layout],
                 AttnBiasType[core_attention_bias_type],
-                AttnMaskType[self.attn_mask_type],
+                AttnMaskType[attn_mask_type],
                 self.attention_dropout,
                 query_layer.shape[0], key_layer.shape[0],
                 query_layer.shape[-1])
             # DPA does not support FP8; for FP8, use cpp_extensions modules directly
             is_backend_avail = (fused_attention_backend in
                 [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
-            use_fused_attention = is_backend_avail
+            use_fused_attention = (use_fused_attention
+                                  and is_backend_avail
+                                  and self.num_gqa_groups == self.num_attention_heads)
+            if (self.deterministic
+                and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
+                use_fused_attention = False
+                warnings.warn(
+                    "Disabling usage of FusedAttention since the FusedAttention"
+                    "backend does not support deterministic exection."
+                )
 
         if use_flash_attention:
             if checkpoint_core_attention:
@@ -1200,27 +1448,32 @@ class DotProductAttention(torch.nn.Module):
                                                             query_layer,
                                                             key_layer,
                                                             value_layer,
-                                                            attention_mask)
-            return self.flash_attention(query_layer,
-                                        key_layer,
-                                        value_layer,
-                                        attention_mask)
+                                                            attn_mask_type=attn_mask_type,
+                                                            attention_mask=attention_mask)
+            return self.flash_attention(
+                query_layer,
+                key_layer,
+                value_layer,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask)
 
         if use_fused_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            fused_attention_backend,
-                                                            core_attention_bias_type,
-                                                            core_attention_bias,
-                                                            fast_zero_fill)
+                              query_layer,
+                              key_layer,
+                              value_layer,
+                              attn_mask_type=attn_mask_type,
+                              fused_attention_backend=fused_attention_backend,
+                              core_attention_bias_type=core_attention_bias_type,
+                              core_attention_bias=core_attention_bias,
+                              fast_zero_fill=fast_zero_fill)
             return self.fused_attention(query_layer, key_layer, value_layer,
-                                                            fused_attention_backend,
-                                                            core_attention_bias_type,
-                                                            core_attention_bias,
-                                                            fast_zero_fill)
+                              attn_mask_type=attn_mask_type,
+                              fused_attention_backend=fused_attention_backend,
+                              core_attention_bias_type=core_attention_bias_type,
+                              core_attention_bias=core_attention_bias,
+                              fast_zero_fill=fast_zero_fill)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
@@ -1228,33 +1481,160 @@ class DotProductAttention(torch.nn.Module):
                 query_layer,
                 key_layer,
                 value_layer,
-                attention_mask,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
             )
-        return self.unfused_attention(query_layer, key_layer, value_layer, attention_mask)
+        return self.unfused_attention(query_layer,
+                key_layer,
+                value_layer,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
+        )
 
 
-class MultiHeadAttention(torch.nn.Module):
-    """Parallel attention w/o QKV and Proj Gemms
-    BMM1 -> softmax + dropout -> BMM2
+class MultiheadAttention(torch.nn.Module):
+    r"""
+    Multi-head Attention (MHA), including Query,
+    Key, Value and Output projection.
+
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`attn_mask_type` is set to `"causal"`.
+
+    .. warning::
+
+        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
+        is deprecated. It will be fully removed in future releases.
+
+    Parameters
+    ----------
+    hidden_size : int
+                 size of each input sample.
+    num_attention_heads : int
+                         number of attention heads in the transformer layer.
+    kv_channels: int, default = `None`
+                number of key-value channels. defaults to
+                :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
+    attention_dropout: float, default = 0.1
+                      dropout probability for the dropout op during multi-head attention.
+    layernorm_epsilon : float, default = 1e-5
+                       a value added to the denominator of layer normalization
+                       for numerical stability.
+    init_method : Callable, default = `None`
+                 used for initializing weights of QKV and FC1 weights in the following way:
+                 `init_method(weight)`. When set to `None`, defaults to
+                 `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    output_layer_init_method : Callable, default = `None`
+                              used for initializing weights of PROJ and FC2 in the following way:
+                              `output_layer_init_method(weight)`. When set to `None`, defaults to
+                              `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    layer_number: int, default = `None`
+                 layer number of the current `TransformerLayer` when multiple such modules are
+                 concatenated to form a transformer block.
+    num_gqa_groups : int, default = `None`
+                         number of GQA groups in the transformer layer.
+                         Grouped Query Attention is described in
+                         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                         This only affects the keys and values, not the querys.
+                         GQA-1 is equivalent to Multi-Query Attention
+                         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
+    return_layernorm_output : bool, default = `False`
+                             if set to `True`, output of layernorm is returned from the forward
+                             together with the output of the linear transformation.
+                             Example use case: residual connection for transformer module is
+                             taken post layernorm.
+    input_layernorm: bool, default = `True`
+                     if set to `False`, layer normalization to the input is not applied.
+    attention_type: { 'self', 'cross' }, default = 'self'
+                   type of attention applied.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
+    qkv_weight_interleaved : bool, default = `True`
+                            if set to `False`, the QKV weight is interpreted as a concatenation of
+                            query, key, and value weights along the `0th` dimension. The default
+                            interpretation is that the individual `q`, `k`, and `v` weights for each
+                            attention head are interleaved. This parameter is set to `False` when
+                            using :attr:`fuse_qkv_params=False`.
+    bias : bool, default = `True`
+          if set to `False`, the transformer layer will not learn any additive biases.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
+
+    Parallelism parameters
+    ----------------------
+    set_parallel_mode : bool, default = `False`
+                      if set to `True`, QKV and FC1 layers are used as Column Parallel
+                      whereas PROJ and FC2 is used as Row Parallel as described
+                      `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    tp_size : int, default = 1
+             used as TP (tensor parallel) world size when TP groups are not formed during
+             initialization. In this case, users must call the
+             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             forward pass to supply the tensor parallel group needed for tensor and sequence
+             parallel collectives.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+                  it controls the type used to allocate the initial parameters. Useful when
+                  the model is trained with lower precision and the original FP32 parameters
+                  would not fit in GPU memory.
+    return_bias : bool, default = `False`
+                 when set to `True`, this module will not apply the additive bias itself, but
+                 instead return the bias value during the forward pass together with the
+                 output of the linear transformation :math:`y = xA^T`. This is useful when
+                 the bias addition can be fused to subsequent operations.
+    fuse_qkv_params: bool, default = 'False'
+                    if set to `True`, `TransformerLayer` module exposes a single fused
+                    parameter for query-key-value. This enables optimizations such as QKV
+                    fusion without concatentations/splits and also enables the argument
+                    `fuse_wgrad_accumulation`.
     """
 
     def __init__(
         self,
         hidden_size: int,
         num_attention_heads: int,
-        kv_channels: int,
-        attention_dropout: float,
-        layernorm_epsilon: float,
-        init_method: Callable,
-        output_layer_init_method: Callable,
+        kv_channels: Optional[int] = None,
+        attention_dropout: float = 0.1,
+        layernorm_epsilon: float = 1e-5,
+        init_method: Optional[Callable] = None,
+        output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
+        num_gqa_groups: Optional[int] = None,
         fuse_wgrad_accumulation: bool = False,
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
         params_dtype: Optional[torch.dtype] = None,
+        return_bias: bool = False,
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",
@@ -1267,8 +1647,19 @@ class MultiHeadAttention(torch.nn.Module):
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         bias: bool = True,
+        normalization: str = "LayerNorm",
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
+
+        if attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+
+        self.attn_mask_type = attn_mask_type
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -1276,8 +1667,15 @@ class MultiHeadAttention(torch.nn.Module):
         self.tp_group = tp_group
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
-        self.init_method = init_method
-        self.attn_mask_type = attn_mask_type
+        self.num_attention_heads = num_attention_heads
+        self.return_bias = return_bias
+
+        kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
+
+        if init_method is None:
+            init_method = get_default_init_method()
+        if output_layer_init_method is None:
+            output_layer_init_method = get_default_init_method()
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -1293,6 +1691,15 @@ class MultiHeadAttention(torch.nn.Module):
 
         self.hidden_size_per_attention_head = kv_channels
         self.num_attention_heads_per_partition = divide(num_attention_heads, tp_size)
+        self.num_gqa_groups = (
+            num_attention_heads if num_gqa_groups is None else num_gqa_groups
+        )
+        assert (num_attention_heads % self.num_gqa_groups == 0
+                ), "The number of GQA groups must be divisible by the number of attention heads!"
+        assert (num_attention_heads % tp_size == 0
+                ), "The number of GQA groups must be divisible by tensor parallel size!"
+        self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
+        self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // num_attention_heads)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -1301,11 +1708,12 @@ class MultiHeadAttention(torch.nn.Module):
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": sequence_parallel,
             "params_dtype": self.params_dtype,
+            "device": device,
         }
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
-        if self.attention_type == "self":
+        if self.attention_type == "self" and self.num_gqa_groups == self.num_attention_heads:
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
@@ -1321,6 +1729,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:
@@ -1334,7 +1743,9 @@ class MultiHeadAttention(torch.nn.Module):
                     parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
                     **common_gemm_kwargs,
                 )
-        else:
+        elif ((self.attention_type == "cross")
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
                     hidden_size,
@@ -1349,6 +1760,7 @@ class MultiHeadAttention(torch.nn.Module):
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
                     ub_split_ag=ub_split_ag,
+                    normalization=normalization,
                     **common_gemm_kwargs,
                 )
             else:
@@ -1363,7 +1775,7 @@ class MultiHeadAttention(torch.nn.Module):
                 )
             self.key_value = Linear(
                 hidden_size,
-                2 * hidden_size,
+                2 * self.hidden_size_kv,
                 init_method=init_method,
                 bias=bias,
                 return_bias=False,
@@ -1376,10 +1788,10 @@ class MultiHeadAttention(torch.nn.Module):
         self.core_attention = DotProductAttention(
             num_attention_heads,
             kv_channels,
-            attention_dropout,
+            num_gqa_groups=self.num_gqa_groups,
+            attention_dropout=attention_dropout,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
-            attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
             layer_number=self.layer_number,
@@ -1391,7 +1803,7 @@ class MultiHeadAttention(torch.nn.Module):
             hidden_size,
             init_method=output_layer_init_method,
             bias=bias,
-            return_bias=True,
+            return_bias=return_bias,
             parallel_mode="row" if set_parallel_mode else None,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
@@ -1405,7 +1817,7 @@ class MultiHeadAttention(torch.nn.Module):
         return torch.empty(
             inference_max_sequence_len,
             batch_size,
-            self.num_attention_heads_per_partition,
+            self.num_gqa_groups_per_partition,
             self.hidden_size_per_attention_head,
             dtype=dtype,
             device=torch.cuda.current_device(),
@@ -1420,6 +1832,7 @@ class MultiHeadAttention(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         encoder_output: Optional[torch.Tensor] = None,
+        attn_mask_type: str = "causal",
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
@@ -1428,8 +1841,72 @@ class MultiHeadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        """MultiHeadAttention FWD"""
+        """
+        Forward propagation for MultiheadAttention layer.
+
+        .. note::
+
+            Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
+            is set to `"causal"`.
+
+        Parameters
+        ----------
+        hidden_states : torch.Tensor
+             Input tensor.
+        attention_mask : Optional[torch.Tensor], default = `None`
+             Boolean tensor used to mask out self-attention softmax input.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                       type of attention mask passed into softmax operation.
+        encoder_output : Optional[torch.Tensor], default = `None`
+             Output of the encoder block to be fed into the decoder block if using
+             `layer_type="decoder"`.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
+                             * it also allows skipping gradient accumulation during the
+                               first microbatch (since it is the first gradient being
+                               produced)
+        checkpoint_core_attention: bool, default = `False`
+                                  If true, forward activations for core attention are recomputed
+                                  during the backward pass in order to save memory that would
+                                  otherwise be occupied to store the forward activations until
+                                  backprop.
+        rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                       Embeddings for query and key tensors for applying rotary position
+                       embedding. By default no input embedding is applied.
+        core_attention_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        core_attention_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        fast_zero_fill: bool, default = `True`
+                    Whether to set output tensors to 0 or not before use.
+        """
         # hidden_states: [sq, b, h]
+
+
+        if self.attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+            # Keep previous functionality for current users.
+            attn_mask_type = self.attn_mask_type
+
+        if attn_mask_type == "padding" and attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
+
+        assert (core_attention_bias_type in AttnBiasTypes
+                ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         # =================================================
         # Pre-allocate memory for key-values for inference.
@@ -1461,7 +1938,7 @@ class MultiHeadAttention(torch.nn.Module):
         # Query, Key, and Value
         # =====================
 
-        if self.attention_type == "self":
+        if self.attention_type == "self" and self.num_gqa_groups == self.num_attention_heads:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             if self.input_layernorm:
                 layernorm_qkv_outputs = self.layernorm_qkv(
@@ -1504,17 +1981,25 @@ class MultiHeadAttention(torch.nn.Module):
                 query_layer, key_layer, value_layer = split_tensor_along_dim(
                     mixed_x_layer, split_dim, 3
                 )
-        else:
+        elif ((self.attention_type == "cross")
+                or (self.attention_type == "self"
+                    and self.num_gqa_groups != self.num_attention_heads)):
+
+            if self.attention_type == "cross":
+                input_tensor = encoder_output
+            else:
+                input_tensor = hidden_states
+
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer = self.key_value(
-                encoder_output,
+                input_tensor,
                 is_first_microbatch=is_first_microbatch,
             )
 
             if self.qkv_weight_interleaved:
                 # [sq, b, (np * 2 * hn)] --> [sq, b, np, 2 * hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
-                    self.num_attention_heads_per_partition,
+                    self.num_gqa_groups_per_partition,
                     2 * self.hidden_size_per_attention_head,
                 )
                 # split along last dimension
@@ -1522,7 +2007,7 @@ class MultiHeadAttention(torch.nn.Module):
             else:
                 # [sq, b, (np * 2 * hn)] --> [sq, b, 2 * np, hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
-                    2 * self.num_attention_heads_per_partition,
+                    2 * self.num_gqa_groups_per_partition,
                     self.hidden_size_per_attention_head,
                 )
                 # split along second last dimension
@@ -1621,7 +2106,8 @@ class MultiHeadAttention(torch.nn.Module):
             query_layer,
             key_layer,
             value_layer,
-            attention_mask,
+            attention_mask=attention_mask,
+            attn_mask_type=attn_mask_type,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
@@ -1632,10 +2118,18 @@ class MultiHeadAttention(torch.nn.Module):
         # Output. [sq, b, h]
         # =================
 
-        attention_output, attention_bias = self.proj(
+        projection_output = self.proj(
             context_layer, is_first_microbatch=is_first_microbatch
         )
 
+        if self.return_bias:
+            attention_output, attention_bias = projection_output
+        else:
+            attention_output, attention_bias = projection_output, None
+
+        outputs = (attention_output,)
+        if self.return_bias:
+            outputs += (attention_bias,)
         if self.input_layernorm and self.return_layernorm_output:
-            return attention_output, attention_bias, layernorm_output
-        return attention_output, attention_bias
+            outputs += (layernorm_output,)
+        return outputs if len(outputs) > 1 else outputs[0]

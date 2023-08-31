@@ -23,7 +23,7 @@ from .sharding import MajorShardingType, ShardingType
 from .sharding import get_elementwise_sharding_meta
 from .sharding import get_dot_sharding_meta, get_fp8_meta_sharding_meta
 from .sharding import merge_axis_resources, infer_sharding_type
-from .sharding import xmap_runner
+from .sharding import xmap_runner, extend_fsdp_sharding_meta
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8GemmPackage
 
@@ -54,6 +54,7 @@ def geglu(
 
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, None,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
+        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
 
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
 
@@ -133,7 +134,7 @@ def fp8_ln_mlp(
     if major_sharding_type is MajorShardingType.SINGLE:
         res = _fp8_mlp(inputs, ln_scale, ln_bias, kernel_1, kernel_2, fp8_max, amax, scale,
                        scale_inv, layernorm_type, activations, zero_centered_gamma, epsilon,
-                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "")
+                       fwd_dtype, bwd_dtype, contracting_dims, major_sharding_type, "", "", "")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
@@ -143,12 +144,15 @@ def fp8_ln_mlp(
         ln_sharding_meta = get_elementwise_sharding_meta(first_part_st, inputs.shape,
                                                          ln_scale.shape, dp_dim_index, dp_axis_name,
                                                          tp_axis_name)
+        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, {0: dp_dim_index})
 
         input_tp_index = len(inputs.shape) - 1
         first_dot_sharding_meta = get_dot_sharding_meta(first_part_st, inputs.shape, kernel_1.shape,
                                                         dp_dim_index, input_tp_index, 2,
                                                         contracting_dims, dp_axis_name,
                                                         tp_axis_name)
+        first_dot_sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(
+            first_dot_sharding_meta, {0: dp_dim_index})
         second_input_shape = (*first_dot_sharding_meta.output_shapes[0][:-2],
                               first_dot_sharding_meta.output_shapes[0][-1])
         second_dot_sharding_meta = get_dot_sharding_meta(second_part_st, second_input_shape,
@@ -156,6 +160,8 @@ def fp8_ln_mlp(
                                                          len(second_input_shape) - 1, 0,
                                                          contracting_dims, dp_axis_name,
                                                          tp_axis_name)
+        second_dot_sharding_meta, _ = extend_fsdp_sharding_meta(second_dot_sharding_meta,
+                                                                {0: dp_dim_index})
 
         num_of_fp8_meta_kind = 4    # fp8_max, amax, scale, scale_inv
         fp8_sharding_meta = get_fp8_meta_sharding_meta(first_part_st, num_of_fp8_meta_kind,
@@ -187,7 +193,8 @@ def fp8_ln_mlp(
                                   contracting_dims=contracting_dims,
                                   major_sharding_type=major_sharding_type,
                                   dp_axis_name=dp_axis_name,
-                                  tp_axis_name=tp_axis_name)
+                                  tp_axis_name=tp_axis_name,
+                                  fsdp_axis_name=fsdp_axis_name)
         in_axes = (ln_sharding_meta.in_axes[0], ln_sharding_meta.in_axes[1], ln_bias_in_axis,
                    first_dot_sharding_meta.in_axes[1], second_dot_sharding_meta.in_axes[1],
                    *fp8_sharding_meta.in_axes)
@@ -200,14 +207,15 @@ def fp8_ln_mlp(
     return res
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
 def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
              scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str,
              activations: Sequence[Union[str, Callable]], zero_centered_gamma: bool, epsilon: float,
              fwd_dtype: TEDType, bwd_dtype: TEDType, contracting_dims: Tuple[Sequence[int],
                                                                              Sequence[int]],
-             major_sharding_type: MajorShardingType, dp_axis_name: str, tp_axis_name: str):
+             major_sharding_type: MajorShardingType, dp_axis_name: str, tp_axis_name: str,
+             fsdp_axis_name: str):
     res, _ = _fp8_mlp_fwd(inputs,
                           ln_scale,
                           ln_bias,
@@ -226,7 +234,8 @@ def _fp8_mlp(inputs: jnp.ndarray, ln_scale: jnp.ndarray, ln_bias: jnp.ndarray,
                           contracting_dims=contracting_dims,
                           major_sharding_type=major_sharding_type,
                           dp_axis_name=dp_axis_name,
-                          tp_axis_name=tp_axis_name)
+                          tp_axis_name=tp_axis_name,
+                          fsdp_axis_name=fsdp_axis_name)
     return res
 
 
@@ -249,7 +258,8 @@ def _fp8_mlp_fwd(
         contracting_dims,
         major_sharding_type,
         dp_axis_name,    # pylint: disable=unused-argument
-        tp_axis_name):
+        tp_axis_name,
+        fsdp_axis_name):    # pylint: disable=unused-argument
     if activations != ('gelu', 'linear'):
         raise NotImplementedError("activations only support ('gelu', 'linear') for now.")
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
@@ -352,6 +362,7 @@ def _fp8_mlp_bwd(
         major_sharding_type,
         dp_axis_name,
         tp_axis_name,
+        fsdp_axis_name,
         ctx,
         g):
     inputs_, ln_out, mu, rsigma, gamma, \
@@ -430,6 +441,14 @@ def _fp8_mlp_bwd(
         if grad_beta is not None:
             grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
         amax = jax.lax.pmax(amax, dp_axis_name)
+
+    if len(fsdp_axis_name) > 0:
+        wgrad_1 = jax.lax.psum(wgrad_1, fsdp_axis_name)
+        wgrad_2 = jax.lax.psum(wgrad_2, fsdp_axis_name)
+        grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
+        if grad_beta is not None:
+            grad_beta = jax.lax.psum(grad_beta, fsdp_axis_name)
+        amax = jax.lax.pmax(amax, fsdp_axis_name)
 
     if major_sharding_type in (MajorShardingType.TP, MajorShardingType.DPTP):
         amax = jax.lax.pmax(amax, tp_axis_name)

@@ -8,17 +8,16 @@ import numpy as np
 import paddle
 
 import transformer_engine    # pylint: disable=unused-import
-import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
+
+from transformer_engine.paddle.fp8 import FP8TensorMeta
 
 
-def create_fp8_meta(num_fp8_tensors, amax_history_len):
+def create_fp8_meta(num_gemms=1, amax_history_len=10):
     """
     Create and initialize FP8TensorMeta
     """
-    fp8_meta = tex.FP8TensorMeta()
-    fp8_meta.scale = paddle.ones(num_fp8_tensors, dtype='float32')
-    fp8_meta.scale_inv = paddle.ones(num_fp8_tensors, dtype='float32')
-    fp8_meta.amax_history = paddle.zeros((amax_history_len, num_fp8_tensors), dtype='float32')
+    fp8_meta = FP8TensorMeta(is_forward=True)
+    fp8_meta.prepare(num_gemms, amax_history_len)
     return fp8_meta
 
 
@@ -35,3 +34,21 @@ def assert_allclose(actual,
     if isinstance(desired, paddle.Tensor):
         desired = paddle.cast(desired, 'float32').numpy()
     np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
+
+
+def assert_shape(inp, expected_shape):
+    """Assert the shape of input tensor equals to expected shape"""
+    assert inp.shape == expected_shape, f"Expected tensor shape: {expected_shape} != " \
+        f"actual tensor shape: {inp.shape}"
+
+
+def is_devices_enough(required):
+    """If the number of device is enough"""
+    return paddle.device.cuda.device_count() >= required
+
+
+def set_random_seed(seed):
+    """Set random seed for reproducability."""
+    np.random.seed(seed)
+    paddle.seed(seed)
+    paddle.distributed.fleet.meta_parallel.model_parallel_random_seed(seed)

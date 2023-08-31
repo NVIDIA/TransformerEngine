@@ -18,7 +18,7 @@ from .fp8 import FP8Helper, FP8GemmPackage
 from .sharding import ShardingType, get_elementwise_sharding_meta
 from .sharding import get_dot_sharding_meta, get_fp8_meta_sharding_meta
 from .sharding import is_dp_enabled, is_tp_enabled, merge_axis_resources
-from .sharding import xmap_runner
+from .sharding import xmap_runner, extend_fsdp_sharding_meta
 
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
@@ -61,12 +61,15 @@ def layernorm(inputs: jnp.ndarray,
                             zero_centered_gamma=zero_centered_gamma,
                             epsilon=epsilon,
                             sharding_type=sharding_type,
-                            dp_axis_name="")
+                            dp_axis_name="",
+                            fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
         sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, gamma.shape,
                                                       dp_dim_index, dp_axis_name, tp_axis_name)
+
+        sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
         inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
         gamma_ = jnp.reshape(gamma, sharding_meta.input_shapes[1])    # 1 for gamma
         beta_ = beta
@@ -82,7 +85,8 @@ def layernorm(inputs: jnp.ndarray,
                              zero_centered_gamma=zero_centered_gamma,
                              epsilon=epsilon,
                              sharding_type=sharding_type,
-                             dp_axis_name=dp_axis_name)
+                             dp_axis_name=dp_axis_name,
+                             fsdp_axis_name=fsdp_axis_name)
 
         output = xmap_runner(partial_ln, in_axes, sharding_meta.out_axes,
                              sharding_meta.axis_resources, (inputs_, gamma_, beta_))
@@ -92,11 +96,11 @@ def layernorm(inputs: jnp.ndarray,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
 def _layernorm(x, gamma, beta, layernorm_type, zero_centered_gamma, epsilon, sharding_type,
-               dp_axis_name):
+               dp_axis_name, fsdp_axis_name):
     output, _ = _layernorm_fwd(x, gamma, beta, layernorm_type, zero_centered_gamma, epsilon,
-                               sharding_type, dp_axis_name)
+                               sharding_type, dp_axis_name, fsdp_axis_name)
     return output
 
 
@@ -108,7 +112,8 @@ def _layernorm_fwd(
         zero_centered_gamma,
         epsilon,
         sharding_type,    # pylint: disable=unused-argument
-        dp_axis_name    # pylint: disable=unused-argument
+        dp_axis_name,    # pylint: disable=unused-argument
+        fsdp_axis_name    # pylint: disable=unused-argument
 ):
     if layernorm_type == 'layernorm':
         output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
@@ -120,8 +125,8 @@ def _layernorm_fwd(
     return output, (mu, rsigma, x, gamma)
 
 
-def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, dp_axis_name, ctx,
-                   g):
+def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, dp_axis_name,
+                   fsdp_axis_name, ctx, g):
     mu, rsigma, x, gamma = ctx
 
     if layernorm_type == 'layernorm':
@@ -142,6 +147,11 @@ def _layernorm_bwd(layernorm_type, zero_centered_gamma, epsilon, sharding_type, 
         grad_gamma = jax.lax.psum(grad_gamma, dp_axis_name)
         if grad_beta is not None:
             grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
+    if len(fsdp_axis_name) > 0:
+        grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
+        if grad_beta is not None:
+            grad_beta = jax.lax.psum(grad_beta, fsdp_axis_name)
+
     return grad_input, grad_gamma, grad_beta
 
 
@@ -196,13 +206,15 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                     epsilon=epsilon,
                                     sharding_type=sharding_type,
                                     dp_axis_name="",
-                                    tp_axis_name="")
+                                    tp_axis_name="",
+                                    fsdp_axis_name="")
     else:
         dp_axis_name = "batch"
         tp_axis_name = "model"
 
         ln_sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, gamma.shape,
                                                          dp_dim_index, dp_axis_name, tp_axis_name)
+        ln_sharding_meta, _ = extend_fsdp_sharding_meta(ln_sharding_meta, {0: dp_dim_index})
         inputs_ = jnp.reshape(inputs, ln_sharding_meta.input_shapes[0])    # 0 for input
         gamma_ = jnp.reshape(gamma, ln_sharding_meta.input_shapes[1])    # 1 for gamma
         beta_ = beta
@@ -222,6 +234,8 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
         dot_sharding_meta = get_dot_sharding_meta(sharding_type, inputs.shape, kernel.shape,
                                                   dp_dim_index, input_tp_index, kernel_tp_index,
                                                   contracting_dims, dp_axis_name, tp_axis_name)
+        dot_sharding_meta, fsdp_axis_name = extend_fsdp_sharding_meta(dot_sharding_meta,
+                                                                      {0: dp_dim_index})
         kernel_ = jnp.reshape(kernel, dot_sharding_meta.input_shapes[1])    # 1 for kernel
 
         num_of_fp8_meta_kind = 4    # fp8_max, amax, scale, scale_inv
@@ -242,7 +256,8 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
                                      epsilon=epsilon,
                                      sharding_type=sharding_type,
                                      dp_axis_name=dp_axis_name,
-                                     tp_axis_name=tp_axis_name)
+                                     tp_axis_name=tp_axis_name,
+                                     fsdp_axis_name=fsdp_axis_name)
 
         # input, kernel, gamma, beta, fp8_metas
         in_axes = (ln_sharding_meta.in_axes[0], dot_sharding_meta.in_axes[1],
@@ -255,18 +270,18 @@ def layernorm_fp8_dot(fp8_gemm_pkg: FP8GemmPackage,
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16))
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _layernorm_fp8_dot(inputs: jnp.ndarray, kernel: jnp.ndarray, gamma: jnp.ndarray,
                        beta: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
                        scale: jnp.ndarray, scale_inv: jnp.ndarray, layernorm_type: str,
                        fwd_dtype: TEDType, bwd_dtype: TEDType,
                        contracting_dims: Tuple[Sequence[int], Sequence[int]],
                        zero_centered_gamma: bool, epsilon: float, sharding_type: ShardingType,
-                       dp_axis_name: str, tp_axis_name: str) -> jnp.ndarray:
+                       dp_axis_name: str, tp_axis_name: str, fsdp_axis_name: str) -> jnp.ndarray:
     output, _ = _layernorm_fp8_dot_fwd(inputs, kernel, gamma, beta, fp8_maxs, amax, scale,
                                        scale_inv, layernorm_type, fwd_dtype, bwd_dtype,
                                        contracting_dims, zero_centered_gamma, epsilon,
-                                       sharding_type, dp_axis_name, tp_axis_name)
+                                       sharding_type, dp_axis_name, tp_axis_name, fsdp_axis_name)
     return output
 
 
@@ -287,7 +302,8 @@ def _layernorm_fp8_dot_fwd(
         epsilon,
         sharding_type,
         dp_axis_name,    # pylint: disable=unused-argument
-        tp_axis_name):
+        tp_axis_name,
+        fsdp_axis_name):    # pylint: disable=unused-argument
 
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
     input_shape_pre = inputs.shape[:min(lhs_contracting_dims)]
@@ -362,6 +378,7 @@ def _layernorm_fp8_dot_bwd(
         sharding_type,
         dp_axis_name,
         tp_axis_name,
+        fsdp_axis_name,
         ctx,
         g):
     ln_out_, kernel_cast, \
@@ -421,6 +438,13 @@ def _layernorm_fp8_dot_bwd(
         if grad_beta is not None:
             grad_beta = jax.lax.psum(grad_beta, dp_axis_name)
         amax = jax.lax.pmax(amax, dp_axis_name)
+
+    if len(fsdp_axis_name) > 0:
+        wgrad = jax.lax.psum(wgrad, fsdp_axis_name)
+        grad_gamma = jax.lax.psum(grad_gamma, fsdp_axis_name)
+        if grad_beta is not None:
+            grad_beta = jax.lax.psum(grad_beta, fsdp_axis_name)
+        amax = jax.lax.pmax(amax, fsdp_axis_name)
 
     if is_tp_enabled(sharding_type.value[0]):
         amax = jax.lax.pmax(amax, tp_axis_name)

@@ -48,7 +48,7 @@ Highlights
 
 * Easy-to-use modules for building Transformer layers with FP8 support 
 * Optimizations (e.g. fused kernels) for Transformer models 
-* Support for FP8 on NVIDIA Hopper (H100) and NVIDIA Ada (RTX 4 GPUs)
+* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
@@ -190,6 +190,14 @@ From source
 ^^^^^^^^^^^
 
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html>`_.
+
+Compiling with Flash Attention 2
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+TransformerEngine release v0.11.0 adds support for Flash Attention 2.0 for improved performance. It is a known issue that Flash Attention 2.0 compilation is
+resource intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory
+errors during the installation of TransformerEngine. To circumvent the issue, please try setting **MAX_JOBS=1** in the environment. If the errors persist, then
+proceed to install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
 
 Model Support
 ----------

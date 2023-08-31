@@ -11,8 +11,8 @@ from typing import Any, Callable, Optional, Tuple, Union
 import torch
 
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm
-from transformer_engine.pytorch.attention import MultiHeadAttention
+from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
+from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -25,6 +25,7 @@ from transformer_engine.pytorch.utils import (
     get_default_init_method,
 )
 from transformer_engine.pytorch.constants import (
+    AttnMaskTypes,
     LayerTypes,
     dist_group_type,
 )
@@ -72,10 +73,10 @@ class TransformerLayer(torch.nn.Module):
         Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
         are deprecated and will be fully removed in future releases.
 
-    .. note::
+    .. warning::
 
-        Argument :attr:`attention_mask` in the `forward` call is only used when
-        :attr:`self_attn_mask_type` includes `"padding"` or `"arbitrary"`.
+        Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and
+        is deprecated. It will be fully removed in future releases.
 
     Parameters
     ----------
@@ -85,6 +86,14 @@ class TransformerLayer(torch.nn.Module):
                      intermediate size to which input samples are projected.
     num_attention_heads : int
                          number of attention heads in the transformer layer.
+    num_gqa_groups : int, default = `None`
+                         number of GQA groups in the transformer layer.
+                         Grouped Query Attention is described in
+                         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                         This only affects the keys and values, not the querys.
+                         GQA-1 is equivalent to Multi-Query Attention
+                         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     layernorm_epsilon : float, default = 1e-5
                        a value added to the denominator of layer normalization
                        for numerical stability.
@@ -118,9 +127,6 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: str, default = `causal`
-                        type of attention mask passed into softmax operation. For more details
-                        and available mask types, see `DotProductAttention`.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -128,6 +134,8 @@ class TransformerLayer(torch.nn.Module):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
     qkv_weight_interleaved : bool, default = `True`
                             if set to `False`, the QKV weight is interpreted as a concatenation of
                             query, key, and value weights along the `0th` dimension. The default
@@ -139,6 +147,10 @@ class TransformerLayer(torch.nn.Module):
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
           Options are: 'gelu', 'relu', 'reglu', 'geglu' and 'swiglu'.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
 
     Parallelism parameters
     ----------------------
@@ -192,6 +204,7 @@ class TransformerLayer(torch.nn.Module):
         hidden_size: int,
         ffn_hidden_size: int,
         num_attention_heads: int,
+        num_gqa_groups: Optional[int] = None,
         layernorm_epsilon: float = 1e-5,
         hidden_dropout: float = 0.1,
         attention_dropout: float = 0.1,
@@ -199,7 +212,7 @@ class TransformerLayer(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
-        self_attn_mask_type: str = "causal",
+        self_attn_mask_type: Optional[str] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -220,9 +233,18 @@ class TransformerLayer(torch.nn.Module):
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
         bias: bool = True,
-        activation: str = 'gelu'
+        activation: str = 'gelu',
+        normalization: str = "LayerNorm",
+        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
+
+        if self_attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
 
         warnings.warn(
             "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
@@ -235,6 +257,7 @@ class TransformerLayer(torch.nn.Module):
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
 
+        self.self_attn_mask_type = self_attn_mask_type
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
@@ -248,7 +271,6 @@ class TransformerLayer(torch.nn.Module):
         self.apply_residual_connection_post_layernorm = (
             apply_residual_connection_post_layernorm
         )
-        self.self_attn_mask_type = self_attn_mask_type
 
         assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
 
@@ -288,6 +310,7 @@ class TransformerLayer(torch.nn.Module):
             "layer_number": layer_number,
             "tp_group": tp_group,
             "tp_size": self.tp_size,
+            "num_gqa_groups": num_gqa_groups,
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
             "get_rng_state_tracker": get_rng_state_tracker,
             "sequence_parallel": self.sequence_parallel,
@@ -303,23 +326,28 @@ class TransformerLayer(torch.nn.Module):
             "ub_split_rs" : ub_split_rs,
         }
 
-        self.self_attention = MultiHeadAttention(
+        self.self_attention = MultiheadAttention(
             *attention_args,
             **common_attention_kwargs,
-            attn_mask_type=self_attn_mask_type,
             input_layernorm=not output_layernorm,
             attention_type="self",
             bias=bias,
+            return_bias=True,
+            normalization=normalization,
+            device=device,
         )
 
         if layer_type == "decoder":
-            self.inter_attention = MultiHeadAttention(
+            self.inter_attention = MultiheadAttention(
                 *attention_args,
                 **common_attention_kwargs,
                 attn_mask_type="padding",
                 input_layernorm=True,
                 attention_type="cross",
                 bias=bias,
+                return_bias=True,
+                normalization=normalization,
+                device=device,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -351,6 +379,8 @@ class TransformerLayer(torch.nn.Module):
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
             activation=activation,
+            normalization=normalization,
+            device=device,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -374,13 +404,18 @@ class TransformerLayer(torch.nn.Module):
                     hidden_size, seq_length, micro_batch_size
                 )
 
+        norm_module = {
+                "LayerNorm": LayerNorm,
+                "RMSNorm": RMSNorm,
+        }
         if self.output_layernorm:
-            self.layernorm = LayerNorm(
+            self.layernorm = norm_module[normalization](
                 hidden_size,
                 eps=layernorm_epsilon,
                 sequence_parallel=self.sequence_parallel,
                 params_dtype=params_dtype,
-                zero_centered_gamma=zero_centered_gamma
+                zero_centered_gamma=zero_centered_gamma,
+                device=device,
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -396,6 +431,7 @@ class TransformerLayer(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        self_attn_mask_type: str = "causal",
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -421,6 +457,8 @@ class TransformerLayer(torch.nn.Module):
         attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
                         Can be a tuple of 2 masks for cross attention with padding masks.
+        self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+                            type of attention mask passed into softmax operation.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -456,12 +494,30 @@ class TransformerLayer(torch.nn.Module):
                     Whether to set output tensors to 0 or not before use.
         """
 
+        if self.self_attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+            # Keep previous functionality for current users.
+            self_attn_mask_type = self.self_attn_mask_type
+
+        assert (
+            self_attn_mask_type in AttnMaskTypes
+        ), f"self_attn_mask_type {self_attn_mask_type} not supported"
+
         hidden_states = hidden_states.contiguous()
 
         if self.sequence_parallel and self.seq_length is not None:
             assert (
                 hidden_states.shape[0] == self.seq_length // self.tp_size
             ), "Sequence dimension must be split across TP group when using sequence parallel."
+
+        if self_attn_mask_type != "causal" and attention_mask is not None:
+            assert (
+                attention_mask.dtype == torch.bool
+            ), "Attention mask must be a boolean tensor"
 
         # For AMP
         if torch.is_autocast_enabled():
@@ -472,7 +528,8 @@ class TransformerLayer(torch.nn.Module):
         # Self attention.
         self_attention_outputs = self.self_attention(
             hidden_states,
-            attention_mask,
+            attention_mask=attention_mask,
+            attn_mask_type=self_attn_mask_type,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
@@ -519,7 +576,8 @@ class TransformerLayer(torch.nn.Module):
         if self.layer_type == "decoder":
             inter_attention_outputs = self.inter_attention(
                 bda_output,
-                enc_dec_attn_mask,
+                attention_mask=enc_dec_attn_mask,
+                attn_mask_type=self_attn_mask_type,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
