@@ -128,7 +128,7 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
         # Hack for torch dynamo
         params_unpacked = [
             nvte.Tensor(*(tensor_mess[j] for j in range(i, i + 4, 1)))
-            for i in range(0, len(tensor_mess), 4)
+            for i in range(0, len(tensor_mess) - 4, 4)
         ]
         for param_in, param_cur in zip(params_unpacked, OP.require_grad()):
             param_cur.data = param_in.data
@@ -224,6 +224,9 @@ def loop_iteration(
             nvte_tensor
         )  # TODO: change when fp8 optimizer comes along
         exposed_tensors.append(nvte_tensor.data)
+        exposed_tensors.append(nvte_tensor.amax)
+        exposed_tensors.append(nvte_tensor.scale)
+        exposed_tensors.append(nvte_tensor.scale_inv)
 
     x_ = AUTOGRAD_FUNC.apply(  # type: ignore
         x_,
