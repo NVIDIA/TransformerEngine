@@ -1002,7 +1002,12 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
     auto h_q = Q.size(-2);
     auto h_kv = K.size(-2);
     auto d = Q.size(-1);
-    if (set_zero && ((h_q * d) % block_size == 0) && ((h_kv * d) % block_size == 0)) {
+    if (set_zero
+          && ((h_q * d) % block_size == 0)
+          && ((h_kv * d) % block_size == 0)
+          && dQ.is_contiguous()
+          && dK.is_contiguous()
+          && dV.is_contiguous()) {
       mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       mha_fill(dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       mha_fill(dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));

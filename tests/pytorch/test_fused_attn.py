@@ -55,8 +55,7 @@ param_types = [torch.float16]
 #    param_types.append(torch.bfloat16)
 
 #batch_sizes = [1, 2, 32]
-batch_sizes = [1] #, 32]
-#batch_sizes = [2] #, 32]
+batch_sizes = [1] #2, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -69,26 +68,15 @@ def test_dpa_qkv_layout(dtype, bs, model):
     config = model_configs[model]
 
     qkv_layouts = [
-        #'qkv_interleaved',
-        #'sb3hd',
         'sbh3d',
-        #'bs3hd',
-        #'sbhd_sb2hd',
-        #'sbhd_sbh2d',
-        #'sbhd_sbhd_sbhd',
-        #'bshd_bshd_bshd',
-        #'bshd_bs2hd',
-        #'bshd_bsh2d',
-        #'th3d',
-        #'thd_th2d',
-        #'thd_t2hd',
-        #'thd_thd_thd',
         #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
         #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
         #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
         ]
 
     for qkv_layout in qkv_layouts:
+
+        print(f'======================== layout {qkv_layout} =======================')
 
         torch.cuda.synchronize()
         range_flash = nvtx.start_range(f"{qkv_layout}-flash")
@@ -107,12 +95,12 @@ def test_dpa_qkv_layout(dtype, bs, model):
         torch.cuda.synchronize()
         nvtx.end_range(range_unfused)
 
-        atol, rtol = (5e-1, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+        atol, rtol = (5e-2, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
         #print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item(), flash_attn_fwd.view(-1)[:10])
         #print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item(), fused_attn_fwd.view(-1)[:10])
         #print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item(), unfused_attn_fwd.view(-1)[:10])
-        print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
-        print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print('  flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
+        print('  fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
         print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
         #print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
         #print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
@@ -130,8 +118,8 @@ def test_dpa_qkv_layout(dtype, bs, model):
         for i in range(len(flash_attn_bwd)):
             print('xxxxxxxxxxxxxxxx i', i)
             #print('xxxxxxxxxxxxxxxx i', i, flash_attn_bwd[2][0, 1, 9, 7],fused_attn_bwd[2][0, 1, 9, 7],unfused_attn_bwd[2][0, 1, 9, 7])
-            print('flash bwd:',flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item())
-            print('fused bwd:',fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+            print('  flash bwd:',flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item())
+            print('  fused bwd:',fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
             print('unfused bwd:',unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
             torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
@@ -149,7 +137,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+        #os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
         os.environ["NVTE_FUSED_ATTN_USE_FAv2_BWD"] = "0"
 
     dim_to_num = {'b': bs,
@@ -243,6 +231,25 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     nvtx.end_range(range_core)
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)
+
+model_configs = {
+    #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+}
+
+param_types = [torch.float16]
+#if torch.cuda.is_bf16_supported():
+#    param_types.append(torch.bfloat16)
+
+#batch_sizes = [1, 2, 32]
+batch_sizes = [2] # 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -556,6 +563,10 @@ def test_dpa_fp8(dtype, bs, model):
             dtype, bs, config, "UnfusedDotProductAttention")
 
     atol, rtol = (2.5e-2, 2.5e-2)
+    print('  fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+    print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+    print('  fused bwd:',fused_attn_bwd.min().item(), fused_attn_bwd.max().item())
+    print('unfused bwd:',unfused_attn_bwd.min().item(), unfused_attn_bwd.max().item())
     assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
     assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
@@ -760,7 +771,7 @@ class _dpa_fp8(torch.autograd.Function):
                 dropout=p_dropout,
                 fast_zero_fill=fast_zero_fill,
                 #qkv_layout="qkv_interleaved",
-                qkv_layout="bs3hd",
+                qkv_layout="t3hd",
                 attn_bias_type="no_bias",
                 attn_mask_type="padding",
                 rng_gen=None,
@@ -847,7 +858,7 @@ class _dpa_fp8(torch.autograd.Function):
                     ctx.p_dropout,
                     ctx.fast_zero_fill,
                     #"qkv_interleaved",
-                    "bs3hd",
+                    "t3hd",
                     "no_bias",
                     "padding",
                     )
