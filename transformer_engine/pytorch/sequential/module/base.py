@@ -5,8 +5,7 @@ from torch import nn
 from ..compute_pipeline.ops import Op
 from ..recipe import Recipe
 from ..compute_pipeline.compute_pipeline import ComputePipeline
-from ..compute_pipeline_function import make_loop
-from .. import nvte
+from ..compute_pipeline_function import apply
 
 
 class BaseModule(nn.Module, ABC):
@@ -43,14 +42,7 @@ class BaseModule(nn.Module, ABC):
 
     def _run(self, x: torch.Tensor):
         assert self.pipeline is not None
-        nvte_x = nvte.make_nvte_tensor(x)
-        if not self.training:
-            y = self.pipeline.run_inference(nvte_x)
-            assert not nvte.is_fp8(y)
-            return y.data
-        else:
-            self.pipeline.next_iteration()
-            return self.loop(x, nvte_x)[0]
+        return apply(x, self.pipeline, self.training)
 
     @staticmethod
     def _create_seq_lens_tensor(x: torch.Tensor):
@@ -73,7 +65,6 @@ class BaseModule(nn.Module, ABC):
                 [op for op in self._ops() if op is not None], env
             )
             self.compile_env = env
-            self.loop = make_loop(self.pipeline)
 
     def _current_env(self) -> Recipe:
         return Recipe.current()
