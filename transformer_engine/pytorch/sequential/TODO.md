@@ -2,7 +2,7 @@
 - Inplace operations:
     - inplace `nvte.***` for use during inference
     - using those commands in `training` methods of `Op`s
-- Torch compile fullgraph support - requires Meta to first fix
+- Torch compile fullgraph support - requires action from Meta side
 - Attention
 - Residual
 - Type inference
