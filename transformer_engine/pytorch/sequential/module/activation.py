@@ -1,6 +1,6 @@
 from abc import ABC
 from .base import BaseModule
-from .. import ops
+from ..compute_pipeline import ops
 
 
 class Activation(BaseModule, ABC):

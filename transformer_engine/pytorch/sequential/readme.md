@@ -1,5 +1,4 @@
 # `te.Sequential`
-
 While it originally started as just an implementation of an `nn.Sequential`-like module, `te.Sequential` is essentially becoming a reimplementation of the current PyTorch-side Transformer Engine API. The main goals of this refactoring are:
 - **Increased expressivity**. Instead of using configuration flags, you can declare different Transformer architectures, by declaring their structure directly, within a `te.Sequential` module:
     - _Old API:_
@@ -56,7 +55,6 @@ While it originally started as just an implementation of an `nn.Sequential`-like
 - **Improved performance**. Now, using `torch.compile(te.Sequential(...), fullgraph=True)`, you can fuse your model to a single FX graph for accelerated execution by PyTorch. **##NOT WORKING YET due to various issues in Torch Dynamo; see `compute_pipeline_function.py`##**
 
 ## Modules
-
 `Sequential` is meant to be used with Transformer-like models that operate on tokens. As such, provided are modules typically most used when implement such architectures:
 - `te.Linear` - a PyTorch-like linear layer supporting FP8 operations for accelerated performance on Hopper and Ada architectures.
 - `te.LayerNorm` - a PyTorch-like LayerNorm with custom FP8 kernels manually fine-tuned for best performance on Hopper and Ada architectures.
@@ -66,7 +64,6 @@ While it originally started as just an implementation of an `nn.Sequential`-like
 - `te.Residual` - models a residual connection with a model. Its function is analogous to `te.Sequential`, except it adds the incoming activation to its final output. **##NOT YET IMPLEMENTED##**
 
 ## Input format
-
 Usually, the input during the process of training of a Transformer model is composed of multiple sequences, forming a batch. The `te.Sequential` module accepts such a batch as input in one of a few formats.
 
 Usually, batches are processed as rank-3 tensors of the form `(batch_size, seq_len, hidden_dim)`.
@@ -80,3 +77,10 @@ Given any `m: te.Sequential`, it can be invoked in one of three ways:
 ## Notes
 * The GELU activation function is implemented as an approximation. For numerical results equivalent to PyTorch, use `nn.GELU(approximate="tanh")`.
 * Due to limitations of TorchDynamo, some standard modules cannot be used. Some compatible replacements are provided in `utils.py`. Examples include `contextmanager` (replacement for `contextlib.contextmanager`) and `cache` (replacement for `functools.cache`).
+
+## Idea
+The main idea behind `te.Sequential` is that it doesn't have to execute eagerly, contrary to how PyTorch usually works. This is thanks to the fact that usually, its constitutent modules are provided during initialization and do not change since. This allows for performing optimizations such as fusions.
+
+The main limitation of PyTorch that Transformer Engine is dealing with is that PyTorch does not have support for FP8 `dtype`s. Meanwhile, by taking advantage of these optimized formats, performance on the Hopper and Ada architectures can be significantly increased.
+
+`te.Sequential` allows for sidestepping this issue by encapsulating the communications between subsequent modules. A bare `Linear` layer cannot return an FP8 tensor, even if the next operation supports that as an input, as there is no way to express this is PyTorch user code. However, by encapsulating both layers inside the `Sequential`, the communication between them happens in a way oblivious to the user. Only the input and output of the whole `Sequential` need to be representible as PyTorch tensors.

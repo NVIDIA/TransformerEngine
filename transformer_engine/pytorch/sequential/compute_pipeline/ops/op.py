@@ -1,6 +1,9 @@
 from __future__ import annotations
+from ...utils import prevent_import
+
+prevent_import("torch")
 from abc import ABC, abstractmethod
-from .. import nvte
+from ... import nvte
 
 Context = dict[str, nvte.Tensor]
 Grads = list[nvte.Tensor]

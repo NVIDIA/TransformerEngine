@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING
 import torch
 from .dynamic_load import inject_real
 

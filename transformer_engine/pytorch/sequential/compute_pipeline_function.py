@@ -5,8 +5,8 @@ from torch import autograd
 from torch.autograd.function import FunctionCtx
 from .persistent import Persistent
 from . import nvte
-from .ops import Context, Op
-from .compute_pipeline import ComputePipeline, SelfContainedOp
+from .compute_pipeline.ops import Context, Op
+from .compute_pipeline.compute_pipeline import ComputePipeline, SelfContainedOp
 from .utils import macro, MacroVar
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]

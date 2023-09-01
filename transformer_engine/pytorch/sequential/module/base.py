@@ -1,12 +1,10 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Iterator
 import torch
 from torch import nn
-from torch.nn.parameter import Parameter
-from ..ops import Op
+from ..compute_pipeline.ops import Op
 from ..recipe import Recipe
-from ..compute_pipeline import ComputePipeline
+from ..compute_pipeline.compute_pipeline import ComputePipeline
 from ..compute_pipeline_function import make_loop
 from .. import nvte
 

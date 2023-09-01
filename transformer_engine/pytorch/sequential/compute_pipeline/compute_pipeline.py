@@ -1,11 +1,14 @@
 from __future__ import annotations
+from ..utils import prevent_import
+
+prevent_import("torch")
 from functools import reduce
 import operator
-from . import nvte
+from .. import nvte
 from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
-from .recipe import Recipe
-from .meta import PersistentFP8Meta
+from ..recipe import Recipe
+from ..meta import PersistentFP8Meta
 
 
 class SelfContainedOp(Op):

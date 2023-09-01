@@ -1,3 +1,4 @@
+from .compute_pipeline import fusions, ops
 from .module import (
     Activation,
     ReLU,
@@ -10,7 +11,7 @@ from .module import (
     Linear,
     Sequential,
 )
-from . import nvte, ops, fusions, module
+from . import nvte, module
 from .recipe import Recipe
 
 __all__ = [

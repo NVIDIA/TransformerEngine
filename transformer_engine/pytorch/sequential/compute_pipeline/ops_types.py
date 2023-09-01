@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Callable
 from typing_extensions import Unpack
-from . import nvte
+from .. import nvte
 from .ops import Context, Grads
 
 Forward = Callable[[nvte.Tensor], tuple[nvte.Tensor, Context]]

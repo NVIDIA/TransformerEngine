@@ -1,8 +1,10 @@
 from __future__ import annotations
+from ...utils import prevent_import
 
-from .. import nvte
+prevent_import("torch")
+from ... import nvte
 from ..ops import Context, Grads, MMT, Add, GELU, GeGLU
-from .. import nvte
+from ... import nvte
 from ._common import (
     register_fusion_inference,
     register_fusion_backward,

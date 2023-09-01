@@ -405,6 +405,25 @@ def macro(
         return injection_decorator
 
 
+def prevent_import(*names: str):
+    prev_import = __builtins__.__dict__["__import__"]
+
+    def restricted_import(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ):
+        assert (
+            name not in names
+        ), f"Cannot import {name} from this module. See `ARCHITECTURE.md` for more information."
+
+        return prev_import(name, globals, locals, fromlist, level)
+
+    __builtins__.__dict__["__import__"] = restricted_import
+
+
 @overload
 def is_generic(t: type) -> Literal[False]:
     ...

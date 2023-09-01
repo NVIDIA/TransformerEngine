@@ -1,5 +1,8 @@
 from __future__ import annotations
-from .. import nvte
+from ...utils import prevent_import
+
+prevent_import("torch")
+from ... import nvte
 from .op import Op, Context
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from math import sqrt
 import torch
 from torch import nn
-from .. import ops
+from ..compute_pipeline import ops
 from ..nvte import make_nvte_tensor
 from ._common import ParameterInitMethod
 from .base import BaseModule

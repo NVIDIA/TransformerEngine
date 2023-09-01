@@ -2,7 +2,7 @@ from abc import ABC
 import torch
 from torch import nn
 from .base import BaseModule
-from .. import ops
+from ..compute_pipeline import ops
 from ..nvte import make_nvte_tensor
 
 

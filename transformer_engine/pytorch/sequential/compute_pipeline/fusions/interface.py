@@ -1,8 +1,11 @@
 from __future__ import annotations
+from ...utils import prevent_import
+
+prevent_import("torch")
 from functools import partial
 from ..ops import Op
 from typing import Literal
-from .. import nvte
+from ... import nvte
 from ..ops_types import (
     BackwardFused,
     ForwardFused,

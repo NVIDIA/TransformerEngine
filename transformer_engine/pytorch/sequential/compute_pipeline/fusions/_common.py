@@ -1,10 +1,13 @@
 from __future__ import annotations
+from ...utils import prevent_import
+
+prevent_import("torch")
 from typing import Callable
 from typing_extensions import TypeVarTuple, Unpack
 from ..ops import Context, Grads
-from .. import nvte
+from ... import nvte
 from ._storage import FUSIONS_FWD, FUSIONS_BWD, FUSIONS_INF
-from ..utils import get_arg_types
+from ...utils import get_arg_types
 
 _Ops = TypeVarTuple("_Ops")
 _OpsAndCtxs = TypeVarTuple("_OpsAndCtxs")
