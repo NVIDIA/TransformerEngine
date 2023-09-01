@@ -35,6 +35,10 @@ class Tensor:
         else:
             self.dtype = torch_to_te_dtype(data.dtype)
         self.shape = list(data.shape)
+        self.data = data
+        self.amax = amax
+        self.scale = scale
+        self.scale_inv = scale_inv
         self.__raw = RawTensor(
             self.data.data_ptr(),
             self.shape,
@@ -43,10 +47,6 @@ class Tensor:
             self.scale.data_ptr(),
             self.scale_inv.data_ptr(),
         )
-        self.data = data
-        self.amax = amax
-        self.scale = scale
-        self.scale_inv = scale_inv
 
     @property
     def _raw(self) -> RawTensor:
