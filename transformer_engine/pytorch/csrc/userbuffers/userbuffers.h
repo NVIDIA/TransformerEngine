@@ -236,7 +236,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
                       const int peer, cudaStream_t stream = 0);
 void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, cudaStream_t stream=0);
 void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, void *counters, cudaStream_t stream=0);
-void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int nchunks, void *counters, bool shuffle, cudaStream_t stream=0);
+void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, const int nchunks, void *counters, bool shuffle, cudaStream_t stream=0);
 
 
 // alltoall split send and recv to allow for overlap

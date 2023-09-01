@@ -592,7 +592,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
         else if (env_p != nullptr && env_p[0]=='2') {
           if (i==0) {
             userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes, _ub_comm,
-                            _tp_size, counter_ptr, (cudaStream_t)_stream_recv);
+                            _next_rank, _prev_rank, _tp_size, counter_ptr, false, (cudaStream_t)_stream_recv);
           }
         }
         else {

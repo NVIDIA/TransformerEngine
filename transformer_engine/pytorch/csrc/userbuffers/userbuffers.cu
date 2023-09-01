@@ -2229,7 +2229,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, con
     int *arg1=&comm->send_id[send_peer];
     int *arg2=(int*)flagptr_send;
     int4 *arg3=(int4*)((comm->mem_ptr[srchandler])+send_offset);
-    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+recv_offset);
+    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+send_offset);
     int arg5=bytes/16;
     int arg6=comm->myrank;
     int arg7=recv_peer;
@@ -2242,13 +2242,9 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, con
 }
 
 void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_stride, const size_t recv_stride,
-                                      const size_t bytes, communicator* comm, const int nchunks, void *counters, bool shuffle, cudaStream_t stream) {
+                                      const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, const int nchunks, void *counters, bool shuffle, cudaStream_t stream) {
 
     assert(comm->push && comm->use_ce==0);
-
-    const int rank_round = (comm->myrank / comm->nranks) * comm->nranks;
-    const int send_peer = (comm->nranks + comm->myrank + 1) % comm->nranks + rank_round;
-    const int recv_peer = (comm->nranks + comm->myrank - 1) % comm->nranks + rank_round;
 
     int send_peerlocal = send_peer % comm->nvsize;
     int recv_peerlocal = recv_peer % comm->nvsize;
