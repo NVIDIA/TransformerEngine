@@ -401,6 +401,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         zero_centered_gamma: bool = False,
         set_parallel_mode: bool = False,
         tp_group: Optional[dist_group_type] = None,
+        rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
     ) -> None:
         super().__init__()
@@ -422,6 +423,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.num_attention_heads = num_attention_heads
         norm_factor = math.sqrt(self.hidden_size_per_attention_head)
         self.set_parallel_mode = set_parallel_mode
+        self.rng_state_name = rng_state_name
         self.backend = backend
 
         self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
@@ -555,7 +557,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                 0, 0, 3, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
             ])
 
-            with track_rng_state(enable=self.tensor_parallel):
+            with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 context_layer = self.core_attention(
                     query_layer=mixed_qkv_layer,
                     key_value_layer=None,
@@ -584,7 +586,7 @@ class MultiHeadAttention(paddle.nn.Layer):
             query_layer = query_layer.reshape(shape=[
                 0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
             ])
-            with track_rng_state(enable=self.tensor_parallel):
+            with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 context_layer = self.core_attention(
                     query_layer=query_layer,
                     key_value_layer=mixed_kv_layer,

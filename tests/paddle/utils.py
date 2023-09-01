@@ -3,9 +3,12 @@
 # See LICENSE for license information.
 """Utils for testing"""
 
+import random
 import numpy as np
 
 import paddle
+from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 
 import transformer_engine    # pylint: disable=unused-import
 
@@ -49,6 +52,43 @@ def is_devices_enough(required):
 
 def set_random_seed(seed):
     """Set random seed for reproducability."""
-    np.random.seed(seed)
-    paddle.seed(seed)
-    paddle.distributed.fleet.meta_parallel.model_parallel_random_seed(seed)
+
+    hcg = fleet.get_hybrid_communicate_group()
+    if paddle.distributed.get_world_size() > 1:
+        # obtain rank message of hybrid parallel
+
+        mp_rank = hcg.get_model_parallel_rank()
+        mp_size = hcg.get_model_parallel_world_size()
+
+        pp_rank = hcg.get_stage_id()
+        pp_size = hcg.get_pipe_parallel_world_size()
+
+        dp_rank = hcg.get_data_parallel_rank()
+        dp_size = hcg.get_data_parallel_world_size()
+
+        sharding_rank = hcg.get_sharding_parallel_rank()
+    else:
+        mp_rank, mp_size = 0, 1
+        pp_rank, pp_size = 0, 1
+        dp_rank, dp_size = 0, 1
+        sharding_rank, _ = 0, 1
+
+    random.seed(seed + 100 * pp_rank)
+    np.random.seed(seed + 100 * pp_rank)
+
+    seed_offset = seed + 1024 + paddle.distributed.get_world_size()
+    global_seed = (seed_offset + pp_rank * (mp_size) + dp_rank * (mp_size * pp_size) +
+                   sharding_rank * (mp_size * pp_size * dp_size))
+
+    seed_offset += paddle.distributed.get_world_size()
+    local_seed = (seed_offset + mp_rank + pp_rank * (mp_size) + dp_rank * (mp_size * pp_size) +
+                  sharding_rank * (mp_size * pp_size * dp_size))
+
+    tracker = get_rng_state_tracker()
+    # tracker.reset()
+    if "global_seed" not in tracker.states_:
+        tracker.add("global_seed", global_seed)
+    if "local_seed" not in tracker.states_:
+        tracker.add("local_seed", local_seed)
+
+    paddle.seed(global_seed)
