@@ -247,7 +247,7 @@ def {func.__name__}_wrap{outer_sig}:
 def _run_full_code(*codes: str, **namespace: Any):
     source = """\
 import torch
-from .. import cpp_extensions
+from . import cpp_extensions
 import typing
 
 def te_to_torch_tensor(t: cpp_extensions.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
