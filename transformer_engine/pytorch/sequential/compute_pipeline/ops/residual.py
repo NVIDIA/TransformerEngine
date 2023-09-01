@@ -79,6 +79,10 @@ class ResidualEnd(Op):
         return self.residual_forward
 
     @property
+    def bias_dtype(self):
+        return None
+
+    @property
     def fusion_type(self):
         return super().fusion_type | {
             "forward": Add,
