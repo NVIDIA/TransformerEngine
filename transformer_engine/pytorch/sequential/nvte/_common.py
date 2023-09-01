@@ -27,7 +27,7 @@ def _type_name(t: type) -> str:
 
     return (
         result.replace("builtins.", "")
-        .replace("transformer_engine.pytorch.sequential.", "")
+        .replace("transformer_engine.pytorch.sequential.nvte.", "")
         .replace("collections.abc", "typing")
         .replace("__init__.pyi", "cpp_extensions")
         .replace("NoneType", "None")
