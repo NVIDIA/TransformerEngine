@@ -5,7 +5,7 @@ from .. import nvte
 from .ops import Op, Grads, Context
 from .fusions import FusedOp, get_fused_op_list
 from ..recipe import Recipe
-from ..meta import PersistentFP8Meta
+from ..metatensors import PersistentFP8Meta
 
 
 class SelfContainedOp(Op):

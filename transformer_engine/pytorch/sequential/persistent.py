@@ -1,12 +1,14 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
+from typing_extensions import TypeVarTuple, Unpack
 
 
 T = TypeVar("T")
+Ts = TypeVarTuple("Ts")
 
 
-class Persistent(Generic[T], ABC):
+class Persistent(Generic[Unpack[Ts], T], ABC):
     """
     Storage for data that is to be persisted between iterations.
     Examples include fp8 metatensors (during training)
@@ -15,12 +17,17 @@ class Persistent(Generic[T], ABC):
 
     # abstract
     @abstractmethod
-    def _generate(self) -> T:
+    def _generate(self, *args: Unpack[Ts]) -> T:
         ...
 
     # public
-    def __call__(self):
-        result = self._generate()
+    def __call__(self, *args: Unpack[Ts]) -> T:
+        if __debug__:
+            if self._iteration() == 1:
+                self.__arguments.append(args)
+            else:
+                assert self.__arguments[self.__index_within_iteration(False)] == args
+        result = self._generate(*args)
         if __debug__:
             if self._iteration() == 1:
                 self.__values.append(result)
@@ -53,6 +60,7 @@ class Persistent(Generic[T], ABC):
     __derived_seen_iteration: int = 0
     if __debug__:
         __values: list[T] = []
+        __arguments: list[tuple[Unpack[Ts]]] = []
 
     def __is_new_iteration(self, update: bool):
         if self.__derived_seen_iteration == self._iteration() - 1:

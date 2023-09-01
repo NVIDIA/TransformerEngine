@@ -14,9 +14,16 @@ def _default_amax_reduction_method(
 
 
 def _default_scaling_factor_compute_method(
-    per_tensor_amaxes: torch.Tensor, out: torch.Tensor
+    amax: torch.Tensor,
+    fp8_max: torch.Tensor,
+    margin: torch.Tensor,
+    out_scale: torch.Tensor,
 ):
-    out.fill_(1.0)  # TODO
+    exp = torch.floor(torch.log2(fp8_max / amax)) - margin
+    t = torch.round(torch.pow(2, torch.abs(exp)))
+    t = torch.where(amax > 0.0, t, out_scale)
+    t = torch.where(torch.isfinite(amax), t, out_scale)
+    torch.where(exp < 0, 1 / t, t, out=out_scale)
 
 
 _recipe_stack: list[Recipe] = []
@@ -29,7 +36,7 @@ class Recipe(NamedTuple):
         [torch.Tensor], torch.Tensor
     ] = _default_amax_reduction_method
     scaling_factor_compute_method: Callable[
-        [torch.Tensor, torch.Tensor], None
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None
     ] = _default_scaling_factor_compute_method
     lowp: DType = DType.Float32
     world_size: int = 1

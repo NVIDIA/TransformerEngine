@@ -1,12 +1,12 @@
 from __future__ import annotations
-from typing import Callable, TypedDict
+from typing import Callable
 import torch
 from torch import autograd
 from torch.autograd.function import FunctionCtx
 from .persistent import Persistent
 from . import nvte
-from .compute_pipeline.ops import Context, Op
-from .compute_pipeline.compute_pipeline import ComputePipeline, SelfContainedOp
+from .compute_pipeline import Context, Op
+from .compute_pipeline import ComputePipeline, SelfContainedOp
 from .utils import macro, MacroVar
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -88,7 +88,7 @@ class Backward:
             nvte_grad = preceding_backward.nvte_grad_output
         del grad_output
 
-        meta_tensor_provider: Persistent[FP8Meta] = getattr(
+        meta_tensor_provider: Persistent[nvte.DType, FP8Meta] = getattr(
             ctx, "nvte_meta_tensor_provider_bwd"
         )
         nvte.set_execution_state("backward", meta_tensor_provider)

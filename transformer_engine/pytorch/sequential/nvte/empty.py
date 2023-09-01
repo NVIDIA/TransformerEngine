@@ -16,7 +16,12 @@ def empty_like(t: _nvte.Tensor):
 
 def multi_empty_share_metadata(*shapes_dtypes: tuple[Sequence[int], _nvte.DType]):
     if any(is_fp8(dtype) for _, dtype in shapes_dtypes):
-        amax, scale, scale_inv = execution_state.meta_tensor_provider()
+        if len({dtype for _, dtype in shapes_dtypes if is_fp8(dtype)}) != 1:
+            raise ValueError(
+                "All FP8 tensors that share the same metatensors must have the same dtype."
+            )
+        fp8_dtype = next(dtype for _, dtype in shapes_dtypes if is_fp8(dtype))
+        amax, scale, scale_inv = execution_state.meta_tensor_provider(fp8_dtype)
     return tuple(
         _nvte.Tensor(
             torch.empty(shape, dtype=te_to_torch_dtype(dtype), device="cuda")

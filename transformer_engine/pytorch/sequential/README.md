@@ -77,6 +77,8 @@ Given any `m: te.Sequential`, it can be invoked in one of three ways:
 ## Notes
 * The GELU activation function is implemented as an approximation. For numerical results equivalent to PyTorch, use `nn.GELU(approximate="tanh")`.
 * Due to limitations of TorchDynamo, some standard modules cannot be used. Some compatible replacements are provided in `utils.py`. Examples include `contextmanager` (replacement for `contextlib.contextmanager`) and `cache` (replacement for `functools.cache`).
+* For optimized execution (removed assertions, self consistency checks, decreased memory usage) invoke `python` with the `-O` flag.
+* The first iteration cannot be run inside of `torch.compile`, as during it, the FP8 metatensors are created.
 
 ## Idea
 The main idea behind `te.Sequential` is that it doesn't have to execute eagerly, contrary to how PyTorch usually works. This is thanks to the fact that usually, its constitutent modules are provided during initialization and do not change since. This allows for performing optimizations such as fusions.

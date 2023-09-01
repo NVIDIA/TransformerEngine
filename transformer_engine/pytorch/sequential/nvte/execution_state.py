@@ -3,7 +3,8 @@ from typing import Literal
 import torch
 from ..utils import contextmanager
 from ..persistent import Persistent
-from ..meta import PersistentFP8Meta
+from ..metatensors import PersistentFP8Meta
+from .cpp_extensions import DType
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
@@ -15,13 +16,13 @@ def _default_meta_tensor_provider():
 
 
 pass_: Literal["forward", "backward", "inference"] = "inference"
-meta_tensor_provider: Persistent[FP8Meta] = _default_meta_tensor_provider()
+meta_tensor_provider: Persistent[DType, FP8Meta] = _default_meta_tensor_provider()
 
 
 @contextmanager
 def set_execution_state(
     pass__: Literal["forward", "backward", "inference"],
-    meta_tensor_provider_: Persistent[FP8Meta],
+    meta_tensor_provider_: Persistent[DType, FP8Meta],
 ):
     global meta_tensor_provider
     global pass_
