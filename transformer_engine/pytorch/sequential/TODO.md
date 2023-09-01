@@ -1,0 +1,14 @@
+## Not Yet Implemented
+- Inplace operations:
+    - inplace `nvte.***` for use during inference
+    - using those commands in `training` methods of `Op`s
+- Torch compile fullgraph support
+- Attention
+- Residual
+- Type inference
+- Model parallelism
+- User buffers
+- _default_scaling_factor_compute_method
+- Make the sources saved by `exec_saving_source` be garbage collected when there are no references to objects from within the source.
+- Cleanup `compute_pipeline_function.py` and `base.py`. Currently they are both a mess full of hacks around Torch Dynamo issues.
+- ..? Other things supported by current implementation

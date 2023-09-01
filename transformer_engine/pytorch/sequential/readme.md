@@ -79,3 +79,4 @@ Given any `m: te.Sequential`, it can be invoked in one of three ways:
 
 ## Notes
 * The GELU activation function is implemented as an approximation. For numerical results equivalent to PyTorch, use `nn.GELU(approximate="tanh")`.
+* Due to limitations of TorchDynamo, some standard modules cannot be used. Some compatible replacements are provided in `utils.py`. Examples include `contextmanager` (replacement for `contextlib.contextmanager`) and `cache` (replacement for `functools.cache`).

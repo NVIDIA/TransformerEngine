@@ -57,6 +57,8 @@ class _Context(Generic[PS, T]):
 
 
 class contextmanager(Generic[PS, T]):
+    "TorchDynamo-compatible replacement for `contextlib.contextmanager`"
+
     def __init__(self, func: Callable[PS, Generator[T, None, None]]):
         self.func = func
 
@@ -65,6 +67,7 @@ class contextmanager(Generic[PS, T]):
 
 
 def cache(func: Callable[[], T]) -> Callable[[], T]:
+    "TorchDynamo-compatible replacement for `functools.cache`"
     result = func()
 
     def wrapper():
@@ -170,7 +173,10 @@ def get_return_type(f: Callable[..., T]) -> type[T]:
     import typing
     import ast
 
-    return_annotation = typing.get_type_hints(f)["return"]
+    try:
+        return_annotation = typing.get_type_hints(f)["return"]
+    except KeyError as e:
+        raise ValueError(f"{f} must have an annotated return type") from e
 
     return_type = (
         ast.literal_eval(return_annotation)
@@ -240,6 +246,7 @@ def unrolled_for(
 
 
 def get_globals(o: object) -> dict[str, Any]:
+    "Returns the same object that `globals()` would return inside the provided object."
     try:
         return o.__globals__  # type: ignore
     except:
@@ -254,6 +261,8 @@ def get_globals(o: object) -> dict[str, Any]:
 
 
 class MacroVar(Generic[T]):
+    "A `TypeVar`-like object representing a `macro`'s parameter."
+
     def __new__(cls, name: str, type_: type[T] = object) -> T:
         return (name, type_)  # type: ignore
 
@@ -293,6 +302,47 @@ class _MacroTransformer(ast.NodeTransformer):
 def macro(
     *substitutions: Unpack[Ts], textual: bool = True
 ) -> Callable[[T], Callable[[Unpack[Ts]], T]]:
+    """
+    This decorator functions like a C-like macro definition.
+    It can be applied to a function or class definition.
+    It is to be used together with `MacroVar`s - `TypeVar`-like
+    objects representing the macro's parameters.
+
+    Example declaration:
+    ```
+    X = MacroVar("X", int)
+    @macro(X)
+    def f():
+        return X
+    ```
+    The above macro can then be used like this:
+    ```
+    f1 = f(1)
+    assert f1() == 1
+    ```
+
+    The `textual` (default `True`) argument controls if the
+    instantiations of the macro should have their ASTs modified
+    in place (textual) or if they should have the same source,
+    and instead have the provided values injected as constant
+    globals into their namespace.
+
+    For example, with `textual=True`, `inspect.getsource(f1)` outputs:
+    ```
+    def f():
+        return 1
+    ```
+    With `textual=False`, `inspect.getsource(f1)` outputs:
+    ```
+    def f():
+        return X
+    ```
+    The `textual=False` mode is needed when `eval(repr(X))` fails.
+    In this mode, the substituted values `are` (Python `is`) the
+    original provided values.
+
+    It can be used, for example, to sidestep some limitations of TorchDynamo.
+    """
     names: list[str] = [name for name, _ in substitutions]  # type: ignore
     for name in names:
         assert name.isidentifier()
@@ -366,6 +416,11 @@ def is_generic(t: GenericAlias) -> Literal[True]:
 
 
 def is_generic(t: type | GenericAlias):
+    """
+    Returns True if the type is a generic type, False otherwise.
+    This is useful for checking if `isinstance` would fail with
+    a `TypeError` when called with a generic type.
+    """
     from types import GenericAlias
     from typing import _SpecialGenericAlias, _GenericAlias  # type: ignore
 

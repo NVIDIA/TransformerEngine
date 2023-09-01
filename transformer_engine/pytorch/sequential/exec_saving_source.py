@@ -4,7 +4,13 @@
 from typing import Any
 
 
-def exec_saving_source(source: str, globals: dict[str, Any]):
+def exec_saving_source(
+    source: str,
+    globals: dict[str, Any] | None = None,
+    locals: dict[str, Any] | None = None,
+):
+    """Equivalent to exec, but allows for the code to be introspected by,
+    for example, `pdb` or `inspect`"""
     import ast
     import linecache
 
@@ -26,4 +32,5 @@ def exec_saving_source(source: str, globals: dict[str, Any]):
     exec(
         compile(ast.parse(source), filename=f"<exec#{len(sources) - 1}>", mode="exec"),
         globals,
+        locals,
     )
