@@ -63,9 +63,9 @@ Let's say you're adding `XYZLayer`:
 ## Recipe: Adding a new `Op`
 
 Let's say you're adding `XYZLayer`:
-1. In `ops` create `xyz_layer.py`.
-2. In `ops`/`awesomelu.py` create `class XYZLayer(Op)`.
-3. In `ops`/`awesomelu.py` implement `XYZLayer`, analogically to existing operation implementations
+1. In `compute_pipeline`/`ops` create `xyz_layer.py`.
+2. In `compute_pipeline`/`ops`/`awesomelu.py` create `class XYZLayer(Op)`.
+3. In `compute_pipeline`/`ops`/`awesomelu.py` implement `XYZLayer`, analogically to existing operation implementations
     1. In `XYZLayer.__init__`:
         1. Take any secondary inputs to the forward pass as arguments:
             ```
@@ -128,8 +128,8 @@ Let's say you're adding `XYZLayer`:
         3. Return `dy` and a list of the gradients of all tensors returned by `XYZLayer.require_grad` in **the same order** (if `require_grad` returns `[weight, bias]`, `backward` **must** return `dy, [dweight, dbias]`).
         4. If `XYZLayer.require_grad` returns `[]`, return `dy, []`.
     6. Remember to use fused implementations, when possible. For example, in some cases, using a sequence of `nvte.cast_checked` calls may be suboptimal, when, for example, `nvte.multi_cast_transpose` could be used instead, if the tensors are to be later transposed.
-4. In `ops`/`__init__.py` add `from xyz_layer import XYZLayer`.
-5. In `ops`/`__init__.py` insert `XYZLayer` to the module's `__all__` list.
+4. In `compute_pipeline`/`ops`/`__init__.py` add `from xyz_layer import XYZLayer`.
+5. In `compute_pipeline`/`ops`/`__init__.py` insert `XYZLayer` to the module's `__all__` list.
 6. Remember to implement fusions concerning `XYZLayer`.
 
 ## Recipe: Adding a new `nvte.` function
