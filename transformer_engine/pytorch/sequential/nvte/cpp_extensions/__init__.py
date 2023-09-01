@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class Tensor:
-    __raw: RawTensor | None
+    __raw: RawTensor
     dtype: DType
     shape: list[int]
     data: torch.Tensor
@@ -35,7 +35,14 @@ class Tensor:
         else:
             self.dtype = torch_to_te_dtype(data.dtype)
         self.shape = list(data.shape)
-        self.__raw = None
+        self.__raw = RawTensor(
+            self.data.data_ptr(),
+            self.shape,
+            getattr(DType, "__orig_type__")(self.dtype.value),
+            self.amax.data_ptr(),
+            self.scale.data_ptr(),
+            self.scale_inv.data_ptr(),
+        )
         self.data = data
         self.amax = amax
         self.scale = scale
@@ -43,15 +50,6 @@ class Tensor:
 
     @property
     def _raw(self) -> RawTensor:
-        if self.__raw is None:
-            self.__raw = RawTensor(
-                self.data.data_ptr(),
-                self.shape,
-                getattr(DType, "__orig_type__")(self.dtype.value),
-                self.amax.data_ptr(),
-                self.scale.data_ptr(),
-                self.scale_inv.data_ptr(),
-            )
         return self.__raw
 
     def query_shape_dtype(self):
