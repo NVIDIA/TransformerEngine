@@ -1,7 +1,5 @@
 from __future__ import annotations
-from ...utils import prevent_import
 
-prevent_import("torch")
 from typing import Callable
 from abc import ABC
 from ... import nvte

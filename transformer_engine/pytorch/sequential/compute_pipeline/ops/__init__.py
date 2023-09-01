@@ -1,6 +1,3 @@
-from ...utils import prevent_import
-
-prevent_import("torch")
 from .op import Op, Context, Grads
 from .activation import Activation, ReLU, GELU, ReGLU, GeGLU, SwiGLU
 from .layernorm import LayerNorm
