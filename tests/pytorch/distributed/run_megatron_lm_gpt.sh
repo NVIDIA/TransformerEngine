@@ -49,7 +49,7 @@ done
 # Logging.
 DIR=`pwd`
 TENSORBOARD_DIR="${DIR}/tensorboard"
-CHECKPOINT_DIR="/home/ksivamani/fp8/megatron-lm/checkpoints"
+CHECKPOINT_DIR="${DIR}/checkpoints"
 mkdir -p ${TENSORBOARD_DIR}
 mkdir -p ${CHECKPOINT_DIR}
 

@@ -8,7 +8,7 @@ from prettytable import PrettyTable
 
 
 te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-ci_logs_dir = os.path.join(te_path, "ci_logs")
+mlm_log_dir = os.path.join(te_path, "ci_logs")
 
 
 convergence_pattern = (
@@ -18,6 +18,12 @@ convergence_pattern = (
 
 
 perf_pattern = "elapsed time per iteration \(ms\): ([\d.]*)"
+
+
+def get_output_file():
+    te_ci_log_dir = "/data/transformer_engine_ci_logs"
+    fname = f"te_pytorch_distributed_ci_{os.getenv('CI_PIPELINE_ID', 'unknown_id')}.txt"
+    return os.path.join(te_ci_log_dir, fname)
 
 
 def get_run_metrics(filename):
@@ -37,13 +43,26 @@ def get_run_metrics(filename):
     return loss, ppl, avg_step_time
 
 
-for model_config in os.listdir(ci_logs_dir):
-    model_config_dir = os.path.join(ci_logs_dir, model_config)
-    table = PrettyTable()
-    table.title = model_config
-    table.field_names = ["Config", "Loss", "Perplexity", "Avg time per step (ms)"]
-    for exp in os.listdir(model_config_dir):
-        filename = os.path.join(model_config_dir, exp)
-        loss, ppl, time_per_step = get_run_metrics(filename)
-        table.add_row([exp[:-4], loss, ppl, time_per_step])
-    print(table)
+def main():
+    experiments = []
+    for model_config in os.listdir(mlm_log_dir):
+        model_config_dir = os.path.join(mlm_log_dir, model_config)
+        table = PrettyTable()
+        table.title = model_config
+        table.field_names = ["Config", "Loss", "Perplexity", "Avg time per step (ms)"]
+        for exp in os.listdir(model_config_dir):
+            filename = os.path.join(model_config_dir, exp)
+            loss, ppl, time_per_step = get_run_metrics(filename)
+            table.add_row([exp[:-4], loss, ppl, time_per_step])
+        experiments.append(table)
+
+
+    with open(get_output_file(), "w") as f:
+        for table in experiments:
+            f.write(str(table))
+            f.write("\n")
+            print(table)
+
+
+if __name__ == "__main__":
+    main()

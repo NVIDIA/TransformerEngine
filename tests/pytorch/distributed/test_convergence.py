@@ -2,11 +2,14 @@
 #
 # See LICENSE for license information.
 
-from typing import List, Union
+from typing import List, Tuple, Union
 import pytest
 import subprocess
 import os
 from dataclasses import dataclass, asdict
+from functools import lru_cache
+
+import torch
 
 
 @dataclass()
@@ -32,23 +35,30 @@ model_configs = {
 
 dtypes = ["bf16"]
 
-# (TP_SIZE, PP_SIZE)
-# DP_SIZE = 4 / (TP_SIZE * PP_SIZE)
-parallel_configs = [
-    (1, 1), # DP only
-    (1, 4), # PP only
-    (4, 1), # TP only
-    (2, 2), # TP + PP
-    (2, 1), # TP + DP
-    (1, 2), # DP + PP
-]
 
 fp8_recipes = [False, "hybrid"]
 
+
 all_boolean = [True, False]
 
+
 te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-ci_logs_dir = os.path.join(te_path, "ci_logs")
+mlm_log_dir = os.path.join(te_path, "ci_logs")
+
+
+@lru_cache(maxsize=1)
+def get_parallel_configs() -> List[Tuple(int, int)]:
+    """Returns valid combinations of (tp, pp)."""
+    sizes = [1, 2, 4]
+    num_devices = torch.cuda.device_count()
+    parallel_configs = []
+    if num_devices > 1:
+        for dp in sizes:
+            for tp in sizes:
+                for pp in sizes:
+                    if dp * tp * pp == num_devices:
+                        parallel_configs.append((tp, pp))
+    return parallel_configs
 
 
 def get_filename(
@@ -57,7 +67,7 @@ def get_filename(
     dp = 4 // (tp * pp)
     sp = tp if sp else 1
     config = f"gpt3_{model}_dp{dp}_tp{tp}_pp{pp}_sp{sp}"
-    config_dir = os.path.join(ci_logs_dir, config)
+    config_dir = os.path.join(mlm_log_dir, config)
     os.makedirs(config_dir, exist_ok=True)
     fname = f"{'te' if use_te else 'megatron'}" + (f"_fp8_{fp8_recipe}" if fp8_recipe else "") + ".txt"
     return os.path.join(config_dir, fname)
@@ -78,7 +88,7 @@ def get_bash_arguments(filename: str, **kwargs) -> List[str]:
 @pytest.mark.parametrize("use_te", all_boolean)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("tp, pp", parallel_configs)
+@pytest.mark.parametrize("tp, pp", get_parallel_configs())
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_distributed(dtype, fp8_recipe, tp, pp, sp, use_te, model):
     if sp and tp == 1:
