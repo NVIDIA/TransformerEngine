@@ -9,6 +9,7 @@ from .module import (
     RMSNorm,
     Linear,
     Sequential,
+    Residual,
 )
 from .recipe import Recipe
 
@@ -24,6 +25,7 @@ __all__ = [
     "RMSNorm",
     "Linear",
     "Sequential",
+    "Residual",
     # Recipe context manager
     "Recipe",
 ]
