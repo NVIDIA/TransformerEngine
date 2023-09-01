@@ -5,71 +5,80 @@ from torch.autograd.function import FunctionCtx
 from typing import Final
 from .persistent import Persistent
 from . import nvte
-from .compute_pipeline import Context, Op
-from .compute_pipeline import ComputePipeline
+from .compute_pipeline import ComputePipeline, Context, Op
 
 FP8Meta = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-class BackwardComm:
-    nvte_grad_output: nvte.Tensor | None = None
-
-
 class ForwardArgs:
-    is_exposed_x_squished_now: Final[bool]
-    upcoming_backward: Final[BackwardComm | None]
-    next_upcoming_backward: Final[BackwardComm]
+    nvte_x: nvte.Tensor
+    is_exposed_x_squished_now: bool
+    upcoming_backward: BackwardComm | None
     op: Final[Op]
     meta_tensor_provider_fwd: Final[Persistent[nvte.DType, FP8Meta]]
     meta_tensor_provider_bwd: Final[Persistent[nvte.DType, FP8Meta]]
 
     def __init__(
         self,
+        nvte_x: nvte.Tensor,
         is_exposed_x_squished_now: bool,
         upcoming_backward: BackwardComm | None,
         op: Op,
         meta_tensor_provider_fwd: Persistent[nvte.DType, FP8Meta],
         meta_tensor_provider_bwd: Persistent[nvte.DType, FP8Meta],
     ):
+        self.nvte_x = nvte_x
         self.is_exposed_x_squished_now = is_exposed_x_squished_now
         self.upcoming_backward = upcoming_backward
-        self.next_upcoming_backward = BackwardComm()
         self.op = op
         self.meta_tensor_provider_fwd = meta_tensor_provider_fwd
         self.meta_tensor_provider_bwd = meta_tensor_provider_bwd
 
 
-_args: ForwardArgs
+class BackwardComm:
+    nvte_grad_output: nvte.Tensor | None = None
 
 
 class ComputePipelineFunction(autograd.Function):
-    args: ForwardArgs
-
     @staticmethod
     def forward(  # type: ignore[arg-type]
         ctx: FunctionCtx,
         exposed_x: torch.Tensor,
-        *tensor_mess: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        nvte_x = nvte.Tensor(*tensor_mess[-4:])
-        del tensor_mess
+        *exposed_args: torch.Tensor | ForwardArgs,
+    ):
+        """
+        exposed_x is used only to let autograd construct the computation graph
+        real input and output is in list, as nvte.Tensor is immutable
+        exposed_tensors are exposed for the optimizer to later apply gradients
+        """
+        exposed_tensors, args = exposed_args[:-1], exposed_args[-1]
+        del exposed_tensors
+        assert isinstance(args, ForwardArgs)
 
-        nvte.set_execution_state("forward", _args.meta_tensor_provider_fwd)
-        nvte_y, to_save = _args.op.forward(nvte_x)
+        nvte_x = args.nvte_x
+
+        nvte.set_execution_state("forward", args.meta_tensor_provider_fwd)
+        y, to_save = args.op.forward(nvte_x)
 
         # Expose backward context for tracing
-        bwd_ctx: list[torch.Tensor] = []
+        bwd_ctx = list[torch.Tensor]()
         for _, tensor in to_save.items():
             bwd_ctx.append(tensor.data)
-            bwd_ctx.append(tensor.amax)
-            bwd_ctx.append(tensor.scale)
-            bwd_ctx.append(tensor.scale_inv)
+            if tensor.amax.numel():
+                bwd_ctx.append(tensor.amax)
+            if tensor.scale.numel():
+                bwd_ctx.append(tensor.scale)
+            if tensor.scale_inv.numel():
+                bwd_ctx.append(tensor.scale_inv)
         ctx.save_for_backward(*bwd_ctx)
 
         # Save real context
         setattr(ctx, "nvte_ctx", to_save)
-        setattr(ctx, "nvte_op", _args.op)
-        setattr(ctx, "nvte_meta_tensor_provider_bwd", _args.meta_tensor_provider_bwd)
+        setattr(ctx, "nvte_op", args.op)
+        setattr(ctx, "nvte_meta_tensor_provider_bwd", args.meta_tensor_provider_bwd)
+
+        # Actually store the result
+        args.nvte_x = y
 
         # Pytorch will break the computation graph
         # if it will see an output tensor of an integer type.
@@ -82,13 +91,15 @@ class ComputePipelineFunction(autograd.Function):
         # won't run at inference anyway.
 
         # Unsquish x if needed:
-        if _args.is_exposed_x_squished_now:
+        if args.is_exposed_x_squished_now:
             # Intentionally commented out - _unsquish(exposed_x)
             # We don't need to perform the unsquish itself, as this
             # data will not be read anyway.
+            # Actually, we cannot do that, as x,
+            # cannot be modified in place.
             # It is only really neccesarry to notify
             # the backward.
-            #
+            args.is_exposed_x_squished_now = False
             # If the input to the forward was squished,
             # Pytorch will expect its gradient to be squished
             # as well. The backward of this forward will be
@@ -104,7 +115,7 @@ class ComputePipelineFunction(autograd.Function):
         exposed_x.data = torch.Tensor().cuda()  # avoid copy
         exposed_y = exposed_x.clone()  # copy history
         exposed_x.data = x_data
-        exposed_y.data = nvte_y.data
+        exposed_y.data = y.data
 
         # Squish y if fp8:
         if exposed_y.data.dtype == torch.int8:
@@ -115,18 +126,21 @@ class ComputePipelineFunction(autograd.Function):
             # to squish it, while the backward coresponding to this
             # forward needs to unsquish it.
             setattr(ctx, "nvte_unsquish_incoming_dgrad", True)
+            args.is_exposed_x_squished_now = True
         else:
             setattr(ctx, "nvte_unsquish_incoming_dgrad", False)
+            args.is_exposed_x_squished_now = False
 
         # Save backward comm
         # This object is allows for the current backward to
         # pass data to the next backward (the backward of the
         # preceding operation). This is needed to pass
         # fp8 gradients properly.
-        setattr(ctx, "nvte_upcoming_backward_comm", _args.upcoming_backward)
-        setattr(ctx, "nvte_preceding_backward_comm", _args.next_upcoming_backward)
+        setattr(ctx, "nvte_upcoming_backward_comm", args.upcoming_backward)
+        args.upcoming_backward = BackwardComm()
+        setattr(ctx, "nvte_preceding_backward_comm", args.upcoming_backward)
 
-        return (exposed_y, nvte_y.data, nvte_y.amax, nvte_y.scale, nvte_y.scale_inv)
+        return exposed_y
 
     @staticmethod
     def backward(ctx: FunctionCtx, grad_output: torch.Tensor):  # type: ignore[arg-type]
@@ -185,47 +199,37 @@ class ComputePipelineFunction(autograd.Function):
 
 
 def apply(x: torch.Tensor, pipeline: ComputePipeline, training: bool) -> torch.Tensor:
-    nvte_x = nvte.make_nvte_tensor(x)
     if not training:
-        y = pipeline.run_inference(nvte_x)
+        y = pipeline.run_inference(nvte.make_nvte_tensor(x))
         assert not nvte.is_fp8(y)
         return y.data
     else:
         pipeline.next_iteration()
-        for i, contained_op in enumerate(pipeline.functions):
-            global _args
-            if i == 0:
-                _args = ForwardArgs(
-                    False,
-                    None,
-                    contained_op,
-                    pipeline.meta_fwd,
-                    pipeline.meta_bwd,
-                )
-            else:
-                _args = ForwardArgs(
-                    x.dtype != nvte_x.data.dtype,
-                    _args.next_upcoming_backward,
-                    contained_op,
-                    pipeline.meta_fwd,
-                    pipeline.meta_bwd,
-                )
-
+        nvte_x = nvte.make_nvte_tensor(x)
+        is_exposed_x_squished_now = False
+        upcoming_backward = None
+        for contained_op in pipeline.functions:
             nvte_tensors = contained_op.require_grad()
-            exposed_tensors: list[torch.Tensor] = []
+            exposed_tensors = list[torch.Tensor]()
             for nvte_tensor in nvte_tensors:
                 assert not nvte.is_fp8(
                     nvte_tensor
                 )  # TODO: change when fp8 optimizer comes along
                 exposed_tensors.append(nvte_tensor.data)
-
-            (x, nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv) = ComputePipelineFunction.apply(  # type: ignore
-                x,
-                *exposed_tensors,
-                *(nvte_x.data, nvte_x.amax, nvte_x.scale, nvte_x.scale_inv),
+            args = ForwardArgs(
+                nvte_x,
+                is_exposed_x_squished_now,
+                upcoming_backward,
+                contained_op,
+                pipeline.meta_fwd,
+                pipeline.meta_bwd,
             )
-            assert isinstance(x, torch.Tensor)
-            nvte_x = nvte.Tensor(nvte_x_data, nvte_x_amax, nvte_x_scale, nvte_x_scale_inv)  # type: ignore
+            x = ComputePipelineFunction.apply(x, *exposed_tensors, args)  # type: ignore
+            nvte_x, is_exposed_x_squished_now, upcoming_backward = (
+                args.nvte_x,
+                args.is_exposed_x_squished_now,
+                args.upcoming_backward,
+            )
         return x
 
 
