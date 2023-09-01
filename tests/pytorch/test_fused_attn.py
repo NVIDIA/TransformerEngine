@@ -232,24 +232,24 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)
 
-model_configs = {
-    #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
-}
-
-param_types = [torch.float16]
-#if torch.cuda.is_bf16_supported():
-#    param_types.append(torch.bfloat16)
-
-#batch_sizes = [1, 2, 32]
-batch_sizes = [2] # 32]
+#model_configs = {
+#    #"test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+#    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+#    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+#    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+#    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+#    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+#    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+#    "test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+#    "test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+#}
+#
+#param_types = [torch.float16]
+##if torch.cuda.is_bf16_supported():
+##    param_types.append(torch.bfloat16)
+#
+##batch_sizes = [1, 2, 32]
+#batch_sizes = [2] # 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
