@@ -83,7 +83,10 @@ def get_fused_op_list(
     for cnt, arg_types, f in fusions:
         startPos = 0
         while startPos < len(ops) - cnt + 1:
-            if all(isinstance(ops[startPos + i], arg_types[i]) for i in range(cnt)):
+            if all(
+                ops[startPos + i].fusion_type[fuse_by] is arg_types[i]
+                for i in range(cnt)
+            ):
                 fused_ops = ops[startPos : startPos + cnt]
                 func = partial(f, *fused_ops)
                 fused_op = FusedOp(fused_ops, **{fuse_by: func})

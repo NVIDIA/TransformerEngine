@@ -4,6 +4,7 @@ from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
 from .mmt import MMT
 from .add import Add
+from .residual import ResidualBegin, ResidualEnd
 
 __all__ = [
     "Op",
@@ -19,4 +20,6 @@ __all__ = [
     "RMSNorm",
     "MMT",
     "Add",
+    "ResidualBegin",
+    "ResidualEnd",
 ]

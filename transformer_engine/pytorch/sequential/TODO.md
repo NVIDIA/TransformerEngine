@@ -4,7 +4,7 @@
     - using those commands in `training` methods of `Op`s
 - Torch compile fullgraph support - requires action from Meta side
 - Attention
-- Residual
+- Dropout
 - Type inference
 - Model parallelism
 - User buffers

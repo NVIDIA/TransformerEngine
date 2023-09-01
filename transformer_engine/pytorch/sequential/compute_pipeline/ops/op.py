@@ -58,5 +58,13 @@ class Op(ABC):
     _dy_dtype: nvte.DType | None
     _dx_dtype: nvte.DType | None
 
+    @property
+    def fusion_type(self):
+        return {
+            "forward": type(self),
+            "backward": type(self),
+            "inference": type(self),
+        }
+
 
 __all__ = ["Op", "Context", "Grads"]
