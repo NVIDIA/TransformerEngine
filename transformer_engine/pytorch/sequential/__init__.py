@@ -1,4 +1,3 @@
-from .compute_pipeline import fusions, ops
 from .module import (
     Activation,
     ReLU,
@@ -11,7 +10,6 @@ from .module import (
     Linear,
     Sequential,
 )
-from . import nvte, module
 from .recipe import Recipe
 
 __all__ = [
@@ -26,11 +24,6 @@ __all__ = [
     "RMSNorm",
     "Linear",
     "Sequential",
-    # Python modules
-    "nvte",
-    "ops",
-    "fusions",
-    "module",
     # Recipe context manager
     "Recipe",
 ]
