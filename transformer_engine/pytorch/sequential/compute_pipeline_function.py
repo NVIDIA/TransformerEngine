@@ -128,24 +128,6 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
         nvte_x = nvte.Tensor(*tensor_mess[-4:])
         del tensor_mess
 
-        nvte.set_execution_state("forward", PIPELINE.meta_fwd)
-        with torch.no_grad():
-            nvte_y, to_save = OP.forward(nvte_x)
-
-        # Expose backward context for tracing
-        bwd_ctx: list[torch.Tensor] = []
-        for _, tensor in to_save.items():
-            bwd_ctx.append(tensor.data)
-            bwd_ctx.append(tensor.amax)
-            bwd_ctx.append(tensor.scale)
-            bwd_ctx.append(tensor.scale_inv)
-        ctx.save_for_backward(*bwd_ctx)
-
-        # Save real context
-        setattr(ctx, "nvte_ctx", to_save)
-        setattr(ctx, "nvte_op", OP)
-        setattr(ctx, "nvte_meta_tensor_provider_bwd", PIPELINE.meta_bwd)
-
         # Pytorch will break the computation graph
         # if it will see an output tensor of an integer type.
         # As fp8 tensors internally have dtype int8,
@@ -155,7 +137,6 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
         # the numel() gets smaller).
         # This doesn't work in TorchScript, but this code
         # won't run at inference anyway.
-
         # Unsquish x if needed:
         is_exposed_x_squished_now = exposed_x.dtype != nvte_x.data.dtype
         if is_exposed_x_squished_now:
@@ -174,6 +155,24 @@ class ComputePipelineFunction(Backward, autograd.Function):  # type: ignore[misc
             setattr(ctx, "nvte_squish_outgoing_dgrad", True)
         else:
             setattr(ctx, "nvte_squish_outgoing_dgrad", False)
+
+        nvte.set_execution_state("forward", PIPELINE.meta_fwd)
+        with torch.no_grad():
+            nvte_y, to_save = OP.forward(nvte_x)
+
+        # Expose backward context for tracing
+        bwd_ctx: list[torch.Tensor] = []
+        for _, tensor in to_save.items():
+            bwd_ctx.append(tensor.data)
+            bwd_ctx.append(tensor.amax)
+            bwd_ctx.append(tensor.scale)
+            bwd_ctx.append(tensor.scale_inv)
+        ctx.save_for_backward(*bwd_ctx)
+
+        # Save real context
+        setattr(ctx, "nvte_ctx", to_save)
+        setattr(ctx, "nvte_op", OP)
+        setattr(ctx, "nvte_meta_tensor_provider_bwd", PIPELINE.meta_bwd)
 
         # Expose result for Pytorch
         exposed_y = get_exposed_y_saving_nvte_y(exposed_x, nvte_y)
