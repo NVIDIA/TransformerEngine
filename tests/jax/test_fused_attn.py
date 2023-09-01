@@ -147,6 +147,8 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
 
 
+@pytest.mark.skipif(get_device_compute_capability(0) not in [80, 90],
+                    reason="Fused attention kernel is not supported.")
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
 @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
 @pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
