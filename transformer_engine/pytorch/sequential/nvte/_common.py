@@ -388,6 +388,9 @@ def torch_op(
         return _make_wrapper(func, None, None)
 
 
+torch_op = lambda x: x
+
+
 def make_nvte_tensor(t: torch.Tensor) -> _nvte.Tensor:
     return _nvte.Tensor(
         t.data,
