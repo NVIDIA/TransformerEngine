@@ -14,11 +14,10 @@ m = seq.Sequential(
 )
 torch.set_printoptions(precision=4, sci_mode=False)
 
-
-torch.compile(m.precompiled_for(x), fullgraph=True)(x)
+m(x)
 
 with seq.Recipe(lowp=seq.nvte.DType.Float8E4M3):
-    opt: nn.Module = torch.compile(m.precompiled_for(x), fullgraph=True, dynamic=True)
+    opt: nn.Module = torch.compile(m, fullgraph=True, dynamic=True)
     for _ in range(100):
         y: torch.Tensor = opt(x)
         y.sum().backward()

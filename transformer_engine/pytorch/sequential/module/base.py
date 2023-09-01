@@ -25,10 +25,10 @@ class BaseModule(nn.Module, ABC):
     def forward(
         self, x: torch.Tensor, seq_lens: torch.Tensor | None = None
     ) -> torch.Tensor:
-        self.precompiled_for(x, seq_lens)
+        self._precompiled_for(x, seq_lens)
         return self._run(x)
 
-    def precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
+    def _precompiled_for(self, x: torch.Tensor, seq_lens: torch.Tensor | None = None):
         with torch.no_grad():
             assert x.is_cuda
             assert x.is_contiguous()
