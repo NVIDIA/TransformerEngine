@@ -39,7 +39,7 @@ class Tensor:
         self.amax = amax
         self.scale = scale
         self.scale_inv = scale_inv
-        self.__raw = RawTensor(
+        self._raw = RawTensor(
             self.data.data_ptr(),
             self.shape,
             getattr(DType, "__orig_type__")(self.dtype.value),
@@ -47,10 +47,6 @@ class Tensor:
             self.scale.data_ptr(),
             self.scale_inv.data_ptr(),
         )
-
-    @property
-    def _raw(self) -> RawTensor:
-        return self.__raw
 
     def query_shape_dtype(self):
         self.dtype = DType(self._raw.dtype.value)
