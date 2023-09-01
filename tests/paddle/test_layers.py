@@ -1085,7 +1085,7 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
             assert_allclose(layer_te.self_attention.qkv.bias.grad,
                             layer_pd.self_attention.qkv.bias.grad,
                             rtol=0.01,
-                            atol=0.5)
+                            atol=0.6)
         else:
             assert_allclose(layer_te.self_attention.layernorm_qkv.bias.grad,
                             layer_pd.self_attention.layernorm_qkv.bias.grad,

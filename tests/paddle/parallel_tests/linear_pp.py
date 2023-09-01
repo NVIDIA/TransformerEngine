@@ -107,6 +107,7 @@ class TestLinearPipelineParallel(unittest.TestCase):
     def test_pipeline_train(self):
         """Test pipeline parallel training"""
         set_random_seed(1024)
+        np.random.seed(1024)
 
         weight1_np = np.random.normal(size=[self.in_features, self.hidden_features])
         weight2_np = np.random.normal(size=[self.hidden_features, self.in_features])
