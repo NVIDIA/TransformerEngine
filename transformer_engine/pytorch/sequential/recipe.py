@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Callable, TypeVar, NamedTuple
 from types import TracebackType
-from .cpp_extensions import DType
+from .nvte import DType
 import torch
 
 T = TypeVar("T")
