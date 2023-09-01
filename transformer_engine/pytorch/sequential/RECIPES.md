@@ -164,7 +164,7 @@ Let's say you're adding support for `nvte_xyz`.
         * Manually implement a C++ wrapper over `nvte_xyz`
         * Register the wrapper to pybind using `m.def`.
     * In `nvte`/`_nvte.pyi` describe the Python-side interface to `nvte_xyz`, by replacing the C++ types with their Python-side equivalents - either types defined in `nvte`/`_nvte.pyi` or according to [builtin Pybind11 conversions](https://pybind11.readthedocs.io/en/stable/advanced/cast/overview.html#conversion-table), and template specializations of `wrapped_arg`.
-2. In `nvte` create `xyz.py` importing `_nvte` using `from .. import cpp_extensions as _nvte`.
+2. In `nvte` create `xyz.py` importing `_nvte` using `from . import cpp_extensions as _nvte`.
 3. In `nvte`/`xyz.py` implement function `xyz`.
     * Note: usually, if `nvtexyz` requires temporary tensors, such as `workspace` or `barrier`, construct them inside of `xyz`, rather than take them as parameters.
     * Note: allow the user to specify the type of the output, if `nvte_xyz` supports that.

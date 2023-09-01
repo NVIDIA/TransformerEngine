@@ -1,6 +1,6 @@
 from __future__ import annotations
 import subprocess
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from ..utils import cache
 from ._common import torch_op
 import torch

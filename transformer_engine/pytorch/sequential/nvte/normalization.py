@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import torch
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from ..utils import contextmanager, cache
 from ._common import torch_op
 from . import execution_state

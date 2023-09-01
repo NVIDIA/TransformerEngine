@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from ._common import torch_op
 
 from .dtype import is_fp8

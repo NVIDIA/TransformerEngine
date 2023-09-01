@@ -2,7 +2,7 @@ from enum import Enum
 import functools
 import inspect
 from typing import Any, Callable, TypeVar
-from ..utils import import_file_as_module
+from ...utils import import_file_as_module
 import torch
 import transformer_engine_cuda  # type: ignore
 

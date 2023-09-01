@@ -1,6 +1,6 @@
 from __future__ import annotations
 import torch
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 
 from ._common import make_nvte_tensor
 from .dtype import is_fp8, te_to_torch_dtype

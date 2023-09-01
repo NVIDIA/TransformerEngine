@@ -9,7 +9,7 @@ from enum import Enum
 
 import torch
 from torch.autograd.function import FunctionCtx
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from ..utils import (
     get_arg_names,
     get_arg_types,

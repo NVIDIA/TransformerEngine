@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from .empty import empty
 
 

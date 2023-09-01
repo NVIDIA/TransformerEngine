@@ -1,5 +1,5 @@
 from ._common import make_nvte_tensor, torch_op
-from ..cpp_extensions import (
+from .cpp_extensions import (
     QKVLayout,
     BiasType,
     MaskType,

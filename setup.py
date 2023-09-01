@@ -538,7 +538,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
 
 def setup_sequential_extension() -> setuptools.Extension:
     # Source files
-    src_dir = root_path / "transformer_engine" / "pytorch" / "sequential" / "cppsrc"
+    src_dir = root_path / "transformer_engine" / "pytorch" / "sequential" / "nvte" / "cppsrc"
     sources = [
         src_dir / "pybind.cpp"
     ]

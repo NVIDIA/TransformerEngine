@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Sequence
 import torch
-from .. import cpp_extensions as _nvte
+from . import cpp_extensions as _nvte
 from .dtype import te_to_torch_dtype, is_fp8
 from . import execution_state
 
