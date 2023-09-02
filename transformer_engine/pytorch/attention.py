@@ -30,6 +30,7 @@ from transformer_engine.pytorch.utils import (
     attention_mask_func,
     split_tensor_along_dim,
     get_device_compute_capability,
+    get_default_init_method,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -56,7 +57,7 @@ else:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 
 
-__all__ = ["DotProductAttention"]
+__all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -195,23 +196,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
-
-        assert (
-            attn_mask_type in AttnMaskTypes
-        ), f"attn_mask_type {attn_mask_type} not supported"
 
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            attn_mask_type,
-            attention_mask_func,
-        )
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(attention_mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -227,11 +220,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attn_mask_type: str = "causal",
         attention_mask: Optional[torch.Tensor] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """core attention fprop"""
+
+        assert (
+            attn_mask_type in AttnMaskTypes
+        ), f"attn_mask_type {attn_mask_type} not supported"
+
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
@@ -320,7 +319,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask, softmax_scale)
+        attention_probs = self.scale_mask_softmax(
+            attention_scores, attention_mask, attn_mask_type, softmax_scale)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -463,7 +463,6 @@ class FlashAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         deterministic: bool = False,
     ) -> None:
         super().__init__()
@@ -472,7 +471,6 @@ class FlashAttention(torch.nn.Module):
             _flash_attn_version >= _flash_attn_version_required
         ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
 
-        self.attn_causal_mask = attn_mask_type == "causal"
         self.norm_factor = norm_factor
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_dropout = attention_dropout
@@ -483,6 +481,7 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attn_mask_type: str = "causal",
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -530,7 +529,7 @@ class FlashAttention(torch.nn.Module):
             output = flash_attn_forward_func(
                 query_layer, key_layer, value_layer, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
                 self.attention_dropout if self.training else 0.0,
-                softmax_scale=1.0/self.norm_factor, causal=self.attn_causal_mask,
+                softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
                 **fa_optional_forward_kwargs
             )
 
@@ -702,7 +701,6 @@ class FusedAttention(torch.nn.Module):
         norm_factor: float,
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
-        attn_mask_type: str = "causal",
         attention_type: str = "self",
     ) -> None:
         super().__init__()
@@ -710,7 +708,6 @@ class FusedAttention(torch.nn.Module):
         self.norm_factor = norm_factor
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
-        self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
         self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
                         and _flash_attn_2_available
@@ -721,6 +718,7 @@ class FusedAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
+        attn_mask_type: str = "causal",
         fused_attention_backend:
             tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
@@ -796,7 +794,7 @@ class FusedAttention(torch.nn.Module):
                     fast_zero_fill,
                     qkv_layout,
                     core_attention_bias_type,
-                    self.attn_mask_type,
+                    attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd
@@ -857,7 +855,7 @@ class FusedAttention(torch.nn.Module):
                     fast_zero_fill,
                     qkv_layout,
                     core_attention_bias_type,
-                    self.attn_mask_type,
+                    attn_mask_type,
                     None, # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd
@@ -885,6 +883,11 @@ class DotProductAttention(torch.nn.Module):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
+    .. warning::
+
+        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
+        is deprecated. It will be fully removed in future releases.
+
     Parameters
     ----------
     num_attention_heads : int
@@ -901,8 +904,6 @@ class DotProductAttention(torch.nn.Module):
                     is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     attention_dropout: float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                   type of attention mask passed into softmax operation.
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
@@ -923,7 +924,7 @@ class DotProductAttention(torch.nn.Module):
         kv_channels: int,
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -933,6 +934,14 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+
+        self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -977,10 +986,8 @@ class DotProductAttention(torch.nn.Module):
         attn_kwargs = {
             "attention_dropout": attention_dropout,
             "attention_dropout_ctx": attention_dropout_ctx,
-            "attn_mask_type": attn_mask_type,
         }
         self.attention_type = attention_type
-        self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
 
         if self.use_flash_attention:
@@ -1024,6 +1031,7 @@ class DotProductAttention(torch.nn.Module):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        attn_mask_type: str = "causal",
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1066,6 +1074,8 @@ class DotProductAttention(torch.nn.Module):
                      Value tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                       type of attention mask passed into softmax operation.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1078,6 +1088,15 @@ class DotProductAttention(torch.nn.Module):
         fast_zero_fill: bool, defautl = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         """
+
+        if self.attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+            # Keep previous functionality for current users.
+            attn_mask_type = self.attn_mask_type
 
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
                 and value_layer.shape[-2] == self.num_gqa_groups_per_partition
@@ -1101,7 +1120,7 @@ class DotProductAttention(torch.nn.Module):
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
             use_flash_attention = False
 
-        if self.attn_mask_type == "padding" and attention_mask is not None:
+        if attn_mask_type == "padding" and attention_mask is not None:
             use_flash_attention = False
             use_fused_attention = False
 
@@ -1120,7 +1139,7 @@ class DotProductAttention(torch.nn.Module):
                 TE_DType[key_layer.dtype],
                 QKVLayout[qkv_layout],
                 AttnBiasType[core_attention_bias_type],
-                AttnMaskType[self.attn_mask_type],
+                AttnMaskType[attn_mask_type],
                 self.attention_dropout,
                 query_layer.shape[0], key_layer.shape[0],
                 query_layer.shape[-1])
@@ -1143,8 +1162,10 @@ class DotProductAttention(torch.nn.Module):
                 return self._checkpointed_attention_forward(self.flash_attention,
                                                             query_layer,
                                                             key_layer,
-                                                            value_layer)
-            return self.flash_attention(query_layer, key_layer, value_layer)
+                                                            value_layer,
+                                                            attn_mask_type=attn_mask_type)
+            return self.flash_attention(
+                query_layer, key_layer, value_layer, attn_mask_type=attn_mask_type)
 
         if use_fused_attention:
             if checkpoint_core_attention:
@@ -1152,15 +1173,17 @@ class DotProductAttention(torch.nn.Module):
                               query_layer,
                               key_layer,
                               value_layer,
-                              fused_attention_backend = fused_attention_backend,
-                              core_attention_bias_type = core_attention_bias_type,
-                              core_attention_bias = core_attention_bias,
-                              fast_zero_fill = fast_zero_fill)
+                              attn_mask_type=attn_mask_type,
+                              fused_attention_backend=fused_attention_backend,
+                              core_attention_bias_type=core_attention_bias_type,
+                              core_attention_bias=core_attention_bias,
+                              fast_zero_fill=fast_zero_fill)
             return self.fused_attention(query_layer, key_layer, value_layer,
-                              fused_attention_backend = fused_attention_backend,
-                              core_attention_bias_type = core_attention_bias_type,
-                              core_attention_bias = core_attention_bias,
-                              fast_zero_fill = fast_zero_fill)
+                              attn_mask_type=attn_mask_type,
+                              fused_attention_backend=fused_attention_backend,
+                              core_attention_bias_type=core_attention_bias_type,
+                              core_attention_bias=core_attention_bias,
+                              fast_zero_fill=fast_zero_fill)
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
@@ -1168,35 +1191,152 @@ class DotProductAttention(torch.nn.Module):
                 query_layer,
                 key_layer,
                 value_layer,
-                attention_mask = attention_mask,
-                core_attention_bias_type = core_attention_bias_type,
-                core_attention_bias = core_attention_bias,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
             )
         return self.unfused_attention(query_layer,
                 key_layer,
                 value_layer,
-                attention_mask = attention_mask,
-                core_attention_bias_type = core_attention_bias_type,
-                core_attention_bias = core_attention_bias,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
         )
 
 
-class MultiHeadAttention(torch.nn.Module):
-    """Parallel attention w/o QKV and Proj Gemms
-    BMM1 -> softmax + dropout -> BMM2
+class MultiheadAttention(torch.nn.Module):
+    r"""
+    Multi-head Attention (MHA), including Query,
+    Key, Value and Output projection.
+
+    .. note::
+
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`attn_mask_type` is set to `"causal"`.
+
+    .. warning::
+
+        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
+        is deprecated. It will be fully removed in future releases.
+
+    Parameters
+    ----------
+    hidden_size : int
+                 size of each input sample.
+    num_attention_heads : int
+                         number of attention heads in the transformer layer.
+    kv_channels: int, default = `None`
+                number of key-value channels. defaults to
+                :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
+    attention_dropout: float, default = 0.1
+                      dropout probability for the dropout op during multi-head attention.
+    layernorm_epsilon : float, default = 1e-5
+                       a value added to the denominator of layer normalization
+                       for numerical stability.
+    init_method : Callable, default = `None`
+                 used for initializing weights of QKV and FC1 weights in the following way:
+                 `init_method(weight)`. When set to `None`, defaults to
+                 `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    output_layer_init_method : Callable, default = `None`
+                              used for initializing weights of PROJ and FC2 in the following way:
+                              `output_layer_init_method(weight)`. When set to `None`, defaults to
+                              `torch.nn.init.normal_(mean=0.0, std=0.023)`.
+    layer_number: int, default = `None`
+                 layer number of the current `TransformerLayer` when multiple such modules are
+                 concatenated to form a transformer block.
+    num_gqa_groups : int, default = `None`
+                         number of GQA groups in the transformer layer.
+                         Grouped Query Attention is described in
+                         `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+                         This only affects the keys and values, not the querys.
+                         GQA-1 is equivalent to Multi-Query Attention
+                         (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+                         is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
+    return_layernorm_output : bool, default = `False`
+                             if set to `True`, output of layernorm is returned from the forward
+                             together with the output of the linear transformation.
+                             Example use case: residual connection for transformer module is
+                             taken post layernorm.
+    input_layernorm: bool, default = `True`
+                     if set to `False`, layer normalization to the input is not applied.
+    attention_type: { 'self', 'cross' }, default = 'self'
+                   type of attention applied.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
+    normalization : { 'LayerNorm', 'RMSNorm' }, default = 'LayerNorm'
+                   type of normalization applied.
+    qkv_weight_interleaved : bool, default = `True`
+                            if set to `False`, the QKV weight is interpreted as a concatenation of
+                            query, key, and value weights along the `0th` dimension. The default
+                            interpretation is that the individual `q`, `k`, and `v` weights for each
+                            attention head are interleaved. This parameter is set to `False` when
+                            using :attr:`fuse_qkv_params=False`.
+    bias : bool, default = `True`
+          if set to `False`, the transformer layer will not learn any additive biases.
+    device : Union[torch.device, str], default = "cuda"
+          The device on which the parameters of the model will allocated. It is the user's
+          responsibility to ensure all parameters are moved to the GPU before running the
+          forward pass.
+
+    Parallelism parameters
+    ----------------------
+    set_parallel_mode : bool, default = `False`
+                      if set to `True`, QKV and FC1 layers are used as Column Parallel
+                      whereas PROJ and FC2 is used as Row Parallel as described
+                      `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    tp_size : int, default = 1
+             used as TP (tensor parallel) world size when TP groups are not formed during
+             initialization. In this case, users must call the
+             `set_tensor_parallel_group(tp_group)` method on the initialized module before the
+             forward pass to supply the tensor parallel group needed for tensor and sequence
+             parallel collectives.
+
+    Optimization parameters
+    -----------------------
+    fuse_wgrad_accumulation : bool, default = 'False'
+                             if set to `True`, enables fusing of creation and accumulation of
+                             the weight gradient. When enabled, it is assumed that the weights
+                             have an additional `main_grad` attribute (used instead of the
+                             regular `grad`) which is a pre-allocated buffer of the correct
+                             size to accumulate gradients in.
+    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
+                  it controls the type used to allocate the initial parameters. Useful when
+                  the model is trained with lower precision and the original FP32 parameters
+                  would not fit in GPU memory.
+    return_bias : bool, default = `False`
+                 when set to `True`, this module will not apply the additive bias itself, but
+                 instead return the bias value during the forward pass together with the
+                 output of the linear transformation :math:`y = xA^T`. This is useful when
+                 the bias addition can be fused to subsequent operations.
+    fuse_qkv_params: bool, default = 'False'
+                    if set to `True`, `TransformerLayer` module exposes a single fused
+                    parameter for query-key-value. This enables optimizations such as QKV
+                    fusion without concatentations/splits and also enables the argument
+                    `fuse_wgrad_accumulation`.
     """
 
     def __init__(
         self,
         hidden_size: int,
         num_attention_heads: int,
-        kv_channels: int,
-        attention_dropout: float,
-        layernorm_epsilon: float,
-        init_method: Callable,
-        output_layer_init_method: Callable,
+        kv_channels: Optional[int] = None,
+        attention_dropout: float = 0.1,
+        layernorm_epsilon: float = 1e-5,
+        init_method: Optional[Callable] = None,
+        output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -1204,6 +1344,7 @@ class MultiHeadAttention(torch.nn.Module):
         get_rng_state_tracker: Optional[Callable] = None,
         sequence_parallel: bool = False,
         params_dtype: Optional[torch.dtype] = None,
+        return_bias: bool = False,
         return_layernorm_output: bool = False,
         input_layernorm: bool = False,
         attention_type: str = "self",
@@ -1220,6 +1361,15 @@ class MultiHeadAttention(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
+
+        if attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+
+        self.attn_mask_type = attn_mask_type
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -1227,9 +1377,15 @@ class MultiHeadAttention(torch.nn.Module):
         self.tp_group = tp_group
         self.return_layernorm_output = return_layernorm_output
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
-        self.init_method = init_method
-        self.attn_mask_type = attn_mask_type
         self.num_attention_heads = num_attention_heads
+        self.return_bias = return_bias
+
+        kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
+
+        if init_method is None:
+            init_method = get_default_init_method()
+        if output_layer_init_method is None:
+            output_layer_init_method = get_default_init_method()
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -1346,7 +1502,6 @@ class MultiHeadAttention(torch.nn.Module):
             attention_dropout=attention_dropout,
             tp_size=tp_size,
             get_rng_state_tracker=get_rng_state_tracker,
-            attn_mask_type=attn_mask_type,
             sequence_parallel=sequence_parallel,
             tp_group=tp_group,
             layer_number=self.layer_number,
@@ -1358,7 +1513,7 @@ class MultiHeadAttention(torch.nn.Module):
             hidden_size,
             init_method=output_layer_init_method,
             bias=bias,
-            return_bias=True,
+            return_bias=return_bias,
             parallel_mode="row" if set_parallel_mode else None,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
@@ -1387,6 +1542,7 @@ class MultiHeadAttention(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
+        attn_mask_type: str = "causal",
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
@@ -1395,10 +1551,65 @@ class MultiHeadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        """MultiHeadAttention FWD"""
+        """
+        Forward propagation for MultiheadAttention layer.
+
+        .. note::
+
+            Argument :attr:`attention_mask` will be ignored when :attr:`attn_mask_type`
+            is set to `"causal"`.
+
+        Parameters
+        ----------
+        hidden_states : torch.Tensor
+             Input tensor.
+        attention_mask : Optional[torch.Tensor], default = `None`
+             Boolean tensor used to mask out self-attention softmax input.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                       type of attention mask passed into softmax operation.
+        encoder_output : Optional[torch.Tensor], default = `None`
+             Output of the encoder block to be fed into the decoder block if using
+             `layer_type="decoder"`.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
+                             * it also allows skipping gradient accumulation during the
+                               first microbatch (since it is the first gradient being
+                               produced)
+        checkpoint_core_attention: bool, default = `False`
+                                  If true, forward activations for core attention are recomputed
+                                  during the backward pass in order to save memory that would
+                                  otherwise be occupied to store the forward activations until
+                                  backprop.
+        rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                       Embeddings for query and key tensors for applying rotary position
+                       embedding. By default no input embedding is applied.
+        core_attention_bias_type: str, default = `no_bias`
+                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+        core_attention_bias: Optional[torch.Tensor], default = `None`
+                    Bias tensor for Q * K.T
+        fast_zero_fill: bool, default = `True`
+                    Whether to set output tensors to 0 or not before use.
+        """
         # hidden_states: [sq, b, h]
 
-        if self.attn_mask_type != "causal" and attention_mask is not None:
+        if self.attn_mask_type is not None:
+            warnings.warn(
+                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
+                "is deprecated. It will be fully removed in future releases.",
+                category=DeprecationWarning,
+            )
+            # Keep previous functionality for current users.
+            attn_mask_type = self.attn_mask_type
+
+        if attn_mask_type == "padding" and attention_mask is not None:
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
@@ -1603,21 +1814,30 @@ class MultiHeadAttention(torch.nn.Module):
             query_layer,
             key_layer,
             value_layer,
-            attention_mask,
-            checkpoint_core_attention = checkpoint_core_attention,
-            core_attention_bias_type = core_attention_bias_type,
-            core_attention_bias = core_attention_bias,
-            fast_zero_fill = fast_zero_fill,
+            attention_mask=attention_mask,
+            attn_mask_type=attn_mask_type,
+            checkpoint_core_attention=checkpoint_core_attention,
+            core_attention_bias_type=core_attention_bias_type,
+            core_attention_bias=core_attention_bias,
+            fast_zero_fill=fast_zero_fill,
         )
 
         # =================
         # Output. [sq, b, h]
         # =================
 
-        attention_output, attention_bias = self.proj(
+        projection_output = self.proj(
             context_layer, is_first_microbatch=is_first_microbatch
         )
 
+        if self.return_bias:
+            attention_output, attention_bias = projection_output
+        else:
+            attention_output, attention_bias = projection_output, None
+
+        outputs = (attention_output,)
+        if self.return_bias:
+            outputs += (attention_bias,)
         if self.input_layernorm and self.return_layernorm_output:
-            return attention_output, attention_bias, layernorm_output
-        return attention_output, attention_bias
+            outputs += (layernorm_output,)
+        return outputs if len(outputs) > 1 else outputs[0]
