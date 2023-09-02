@@ -11,6 +11,7 @@
 #include <cublasLt.h>
 #include "paddle/extension.h"
 
+#include "common/util/logging.h"
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
@@ -20,7 +21,6 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
-#include "logging.h"
 
 namespace transformer_engine {
 namespace paddle_ext {

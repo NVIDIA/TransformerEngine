@@ -16,9 +16,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "common/util/logging.h"
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
-#include "logging.h"
 
 namespace transformer_engine {
 namespace jax {

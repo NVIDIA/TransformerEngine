@@ -5,8 +5,9 @@
  ************************************************************************/
 
 #include <vector>
-#include "../common.h"
+
 #include "common.h"
+#include "common/common.h"
 
 namespace transformer_engine {
 namespace paddle_ext {

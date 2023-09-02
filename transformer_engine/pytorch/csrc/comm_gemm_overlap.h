@@ -16,8 +16,8 @@
 #include <torch/extension.h>
 #include <torch/types.h>
 
+#include "common/util/logging.h"
 #include "userbuffers/userbuffers.h"
-#include "logging.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
