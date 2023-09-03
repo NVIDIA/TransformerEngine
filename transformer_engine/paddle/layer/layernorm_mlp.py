@@ -436,6 +436,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.requires_fc1_bgrad = use_fc1_bias and not fc1_bias.stop_gradient
             ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
+            ctx.requires_ln_wgrad = not ln_weight.stop_gradient
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
@@ -537,11 +538,11 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
 
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma if not ln_weight.stop_gradient else None,
+                dgamma if ctx.requires_ln_wgrad else None,
                 dbeta if ctx.requires_ln_bgrad else None,
-                fc1_wgrad if not fc1_weight.stop_gradient else None,
+                fc1_wgrad if ctx.requires_fc1_wgrad else None,
                 *fc1_bgrad_out,
-                fc2_wgrad if not fc2_weight.stop_gradient else None,
+                fc2_wgrad if ctx.requires_fc2_wgrad else None,
                 *fc2_bgrad_out,
             )
 

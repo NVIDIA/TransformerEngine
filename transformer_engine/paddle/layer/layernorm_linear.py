@@ -223,6 +223,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
+            ctx.requires_ln_wgrad = not ln_weight.stop_gradient
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         out = out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
 
@@ -262,7 +263,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
             if ctx.fp8_enabled:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_wgrad = not ctx.fp8_meta["recipe"].override_linear_precision.wgrad
-                if not weight.stop_gradient:
+                if ctx.requires_wgrad:
                     if fp8_wgrad:
                         ln_out_t = transpose(ln_out, fp8_dtype_forward)
                     else:
@@ -320,9 +321,9 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
 
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma if not ln_weight.stop_gradient else None,
+                dgamma if ctx.requires_ln_wgrad else None,
                 dbeta if ctx.requires_ln_bgrad else None,
-                wgrad if not weight.stop_gradient else None,
+                wgrad if ctx.requires_wgrad else None,
                 *bgrad_out,
             )
 

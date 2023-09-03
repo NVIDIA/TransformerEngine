@@ -567,12 +567,12 @@ class MultiHeadAttention(paddle.nn.Layer):
                 if recompute_core_attention:
                     context_layer = recompute(
                         self.core_attention,
-                        query_layer=mixed_qkv_layer,
-                        key_value_layer=None,
-                        attention_mask=attention_mask,
-                        core_attention_bias_type=core_attention_bias_type,
-                        core_attention_bias=core_attention_bias,
-                        set_zero=set_zero,
+                        mixed_qkv_layer,
+                        None,
+                        attention_mask,
+                        core_attention_bias_type,
+                        core_attention_bias,
+                        set_zero,
                         use_reentrant=False,
                     )
                 else:
@@ -608,12 +608,12 @@ class MultiHeadAttention(paddle.nn.Layer):
                 if recompute_core_attention:
                     context_layer = recompute(
                         self.core_attention,
-                        query_layer=query_layer,
-                        key_value_layer=mixed_kv_layer,
-                        attention_mask=attention_mask,
-                        core_attention_bias_type=core_attention_bias_type,
-                        core_attention_bias=core_attention_bias,
-                        set_zero=set_zero,
+                        query_layer,
+                        mixed_kv_layer,
+                        attention_mask,
+                        core_attention_bias_type,
+                        core_attention_bias,
+                        set_zero,
                         use_reentrant=False,
                     )
                 else:
