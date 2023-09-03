@@ -23,10 +23,11 @@ def is_in_recompute_phase():
     (2) Use paddle.autograd.saved_tensors_hooks. The recompute function is called from `unpack`."""
     if _DISABLE_RECOMPUTE:
         return False
-    stack = inspect.stack()
-    for frame_info in stack[1:]:
-        if frame_info.function in RecomputeFunctionNames:
+    frame = inspect.currentframe().f_back
+    while frame:
+        if frame.f_code.co_name in RecomputeFunctionNames:
             return True
+        frame = frame.f_back
     return False
 
 
