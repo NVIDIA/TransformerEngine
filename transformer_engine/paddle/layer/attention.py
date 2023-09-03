@@ -384,6 +384,22 @@ class MultiHeadAttention(paddle.nn.Layer):
                     whether to zero initialize the gamma of the layernorm operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
                 backend to use for attention operation.
+
+    Parallelism parameters
+    ----------------------
+    set_parallel_mode : bool, default = `False`
+                      if set to `True`, QKV and FC1 layers are used as Column Parallel
+                      whereas PROJ and FC2 is used as Row Parallel as described
+                      `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    rng_state_name : str, default = `local_seed`
+                   Controls the rng state used for dropout on attention probs. The
+                   specified rng should be set different seeds for different TP ranks.
+                   It will be ignored if `set_parallel_mode` is False. The specified
+                   name should be registered through
+                   `paddle.distributed.fleet.meta_parallel.get_rng_state_tracker()
+                   .add(rng_state_name, seed)`.
     """
 
     def __init__(

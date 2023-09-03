@@ -70,7 +70,17 @@ class TransformerLayer(paddle.nn.Layer):
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
-
+    attention_dropout_rng_state_name : str, default = `local_seed`
+                   Controls the rng state used for dropout on attention probs. The
+                   specified rng should be set different seeds for different TP ranks.
+                   It will be ignored if `set_parallel_mode` is False.
+    hidden_dropout_rng_state_name : str, default = `global_seed`
+                   Controls the rng state used for dropout on hidden states. The
+                   specified rng should be given the same seeds for different TP
+                   ranks. It will be ignored if `set_parallel_mode` is False. The
+                   specified name should be registered through
+                   `paddle.distributed.fleet.meta_parallel.get_rng_state_tracker()
+                   .add(rng_state_name, seed)`.
     """
 
     def __init__(self,
