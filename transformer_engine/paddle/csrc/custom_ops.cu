@@ -1060,39 +1060,36 @@ std::vector<paddle::Tensor> update_scale(const paddle::Tensor &amax, const paddl
 __global__ __launch_bounds__(BLOCK_SIZE) void mask_to_actual_seqlens_kernel(
     const bool *mask, int32_t *q_actual_seqlen, int32_t *kv_actual_seqlen, int q_seqlen,
     int kv_seqlen, bool need_kv) {
-    __shared__ int q_smem[BLOCK_SIZE];
-    __shared__ int kv_smem[BLOCK_SIZE];
+    typedef cub::BlockReduce<int, BLOCK_SIZE> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage q_smem;
+    __shared__ typename BlockReduce::TempStorage kv_smem;
     unsigned int tid = threadIdx.x;
     unsigned int batch_offset = blockIdx.x * q_seqlen * kv_seqlen;
 
-    // load mask, convert to 1/0, add to shared mem
-    q_smem[tid] = 0;
+    // load mask, convert to 1/0, do accumulation
+    int q = 0, kv = 0;
     for (unsigned int q_idx = tid * kv_seqlen; q_idx < q_seqlen * kv_seqlen;
          q_idx += BLOCK_SIZE * kv_seqlen) {
-        q_smem[tid] += (mask[q_idx + batch_offset] ? 0 : 1);
+        q += (mask[q_idx + batch_offset] ? 0 : 1);
     }
+
     if (need_kv) {
-        kv_smem[tid] = 0;
         for (unsigned int kv_idx = tid; kv_idx < kv_seqlen; kv_idx += BLOCK_SIZE) {
-            kv_smem[tid] += (mask[kv_idx + batch_offset] ? 0 : 1);
+            kv += (mask[kv_idx + batch_offset] ? 0 : 1);
         }
     }
     __syncthreads();
 
-    // do reduction in shared mem
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            q_smem[tid] += q_smem[tid + s];
-            if (need_kv) kv_smem[tid] += kv_smem[tid + s];
-        }
-        __syncthreads();
-    }
+    // compute cub::BlockReduce
+    int q_sum, kv_sum;
+    q_sum = BlockReduce(q_smem).Sum(q);
+    if (need_kv) kv_sum = BlockReduce(kv_smem).Sum(kv);
 
     // write result for this block to global mem
     if (tid == 0) {
-        q_actual_seqlen[blockIdx.x + 1] = q_smem[0];
+        q_actual_seqlen[blockIdx.x + 1] = q_sum;
         if (need_kv) {
-            kv_actual_seqlen[blockIdx.x + 1] = kv_smem[0];
+            kv_actual_seqlen[blockIdx.x + 1] = kv_sum;
         }
     }
 }
