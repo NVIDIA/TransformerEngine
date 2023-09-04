@@ -28,14 +28,13 @@ def test_transformer_encoder_recompute(use_reentrant):
     def launch_subprocess_and_check_output(enable_recompute):
         """Launch training in subprocess and check output"""
         try:
-            result = subprocess.check_output([
+            cmd = [
                 'python',
                 str(test_root / 'recompute_tests' / 'recompute_transformer_encoder.py'),
                 str(int(enable_recompute)),
                 str(int(use_reentrant))
-            ],
-                                             stderr=subprocess.STDOUT,
-                                             universal_newlines=True)
+            ]
+            result = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
 
             print(result)
 
