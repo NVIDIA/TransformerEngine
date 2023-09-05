@@ -19,6 +19,7 @@ do
 done
 
 # Set defaults for all arguments.
+: ${DP_SIZE:="1"}
 : ${TP_SIZE:="1"}
 : ${PP_SIZE:="1"}
 : ${NUM_LAYERS:="12"}
@@ -115,7 +116,8 @@ if [[ "$DTYPE" != "fp32" ]]; then
 fi
 
 # Run GPT3.
-NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=4 ${DIR}/pretrain_gpt.py ${options} 2>&1 | tee $FILENAME
+NUM_GPUS=$((${DP_SIZE}*${TP_SIZE}*${PP_SIZE}))
+NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN=1 NVTE_FWD_LAYERNORM_SM_MARGIN=0 NVTE_BWD_LAYERNORM_SM_MARGIN=0 CUDA_DEVICE_MAX_CONNECTIONS=1 NVTE_BIAS_GELU_NVFUSION=0 NVTE_BIAS_DROPOUT_FUSION=0 python -m torch.distributed.launch --use_env --nnodes=1 --nproc_per_node=${NUM_GPUS} ${DIR}/pretrain_gpt.py ${options} 2>&1 | tee $FILENAME
 
 # Remove checkpoints.
 rm -rf ${CHECKPOINT_DIR}/*

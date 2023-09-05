@@ -47,7 +47,7 @@ mlm_log_dir = os.path.join(te_path, "ci_logs")
 
 
 @lru_cache(maxsize=1)
-def get_parallel_configs() -> List[Tuple(int, int)]:
+def get_parallel_configs() -> List[Tuple[int, int]]:
     """Returns valid combinations of (tp, pp)."""
     sizes = [1, 2, 4]
     num_devices = torch.cuda.device_count()
@@ -57,14 +57,13 @@ def get_parallel_configs() -> List[Tuple(int, int)]:
             for tp in sizes:
                 for pp in sizes:
                     if dp * tp * pp == num_devices:
-                        parallel_configs.append((tp, pp))
+                        parallel_configs.append((dp, tp, pp))
     return parallel_configs
 
 
 def get_filename(
-    model: str, tp: str, pp: str, sp: bool, use_te: bool, fp8_recipe: Union[bool, str]
+    model: str, dp: int, tp: int, pp: int, sp: bool, use_te: bool, fp8_recipe: Union[bool, str]
 ) -> str:
-    dp = 4 // (tp * pp)
     sp = tp if sp else 1
     config = f"gpt3_{model}_dp{dp}_tp{tp}_pp{pp}_sp{sp}"
     config_dir = os.path.join(mlm_log_dir, config)
@@ -88,19 +87,20 @@ def get_bash_arguments(filename: str, **kwargs) -> List[str]:
 @pytest.mark.parametrize("use_te", all_boolean)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("tp, pp", get_parallel_configs())
+@pytest.mark.parametrize("dp, tp, pp", get_parallel_configs())
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_distributed(dtype, fp8_recipe, tp, pp, sp, use_te, model):
+def test_distributed(dtype, fp8_recipe, dp, tp, pp, sp, use_te, model):
     if sp and tp == 1:
         pytest.skip("No tensor parallel.")
     if fp8_recipe and not use_te:
         pytest.skip("TransformerEngine needed for FP8.")
     subprocess.run(
         get_bash_arguments(
-            get_filename(model, tp, pp, sp, use_te, fp8_recipe),
+            get_filename(model, dp, tp, pp, sp, use_te, fp8_recipe),
             DTYPE=dtype,
             FP8=fp8_recipe,
             SP=sp,
+            DP_SIZE=dp,
             TP_SIZE=tp,
             PP_SIZE=pp,
             TRANSFORMER_IMPL="transformer_engine" if use_te else "local",
