@@ -8,7 +8,7 @@ variables:
     PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
     JAX_IMAGE: ghcr.io/nvidia/jax:latest
     TENSORFLOW_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/tensorflow:master-py3-base
-    PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:rjeng..ci-2.5-py3.8995081-base
+    PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
 
     # variables that may be overridden by the pipeline vars
     BUILD_PYTORCH: 1
