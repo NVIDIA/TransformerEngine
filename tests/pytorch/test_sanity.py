@@ -791,7 +791,7 @@ def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_
 
 def test_model_multiple_cast():
     a = torch.zeros((16,16)).cuda()
-    m = te.Linear(16,32)
+    m = Linear(16,32)
 
     y = m(a)
     assert y.dtype == torch.float32
