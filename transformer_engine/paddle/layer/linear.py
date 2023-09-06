@@ -34,6 +34,8 @@ from ..utils import (
     cast_if_needed_inplace,
     divide,
     get_bias_dtype,
+    save_for_backward_allow_none,
+    saved_tensor_allow_none,
 )
 
 __all__ = ["Linear", "_linear_fwd", "_linear_fwd_fp8", "_linear_bwd", "_linear_fwd_non_fp8"]
@@ -272,6 +274,7 @@ def _linear_bwd_non_fp8(
     grad_output: paddle.Tensor,
     requires_bgrad: bool,
     requires_dgrad: bool,
+    requires_wgrad: bool,
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
@@ -283,7 +286,6 @@ def _linear_bwd_non_fp8(
     Performs Linear Backward. Optionally, fuses GELU backward and dbias.
     """
     dgrad, wgrad, bgrad = None, None, None
-    requires_wgrad = not weight.stop_gradient
     if requires_dgrad:
         dgrad, _, _ = gemm(
             weight,
@@ -330,13 +332,13 @@ def _linear_bwd(
     fp8_enabled: bool,
     fp8_meta: Dict[str, Any],
     requires_dgrad: bool,
+    requires_wgrad: bool,
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
     dgrad, wgrad, bgrad = None, None, None
-    requires_wgrad = not weight.stop_gradient
     if fp8_enabled:
         dgrad, wgrad = _linear_bwd_fp8(
             inputmat,
@@ -364,6 +366,7 @@ def _linear_bwd(
             grad_output,
             requires_bgrad,
             requires_dgrad,
+            requires_wgrad,
             activation_dtype,
             parallel_mode,
             tensor_parallel,
@@ -449,7 +452,8 @@ class _Linear(paddle.autograd.PyLayer):
 
         if is_grad_enabled:
             fp8_wgrad = fp8_enabled and not fp8_meta["recipe"].override_linear_precision.wgrad
-            ctx.save_for_backward(
+            save_for_backward_allow_none(
+                ctx,
                 inputmat_no_fp8 if not weight.stop_gradient and not fp8_wgrad else None,
                 inputmat_t if not weight.stop_gradient and fp8_wgrad else None,
                 weight,
@@ -466,6 +470,7 @@ class _Linear(paddle.autograd.PyLayer):
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
+            ctx.requires_wgrad = not weight.stop_gradient
             ctx.requires_bgrad = use_bias and not bias.stop_gradient
 
         return out.reshape((-1, *inp.shape[1:-1], out.shape[-1]))
@@ -477,13 +482,14 @@ class _Linear(paddle.autograd.PyLayer):
                                                          ctx.tp_group,
                                                          ctx.tp_size,
                                                          name="_Linear"):
-            (
+
+            (    # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 inputmat_t,
                 weight,
                 weight_t_fp8,
                 fwd_scale_inverses,
-            ) = ctx.saved_tensor()
+            ) = saved_tensor_allow_none(ctx)
 
             (
                 grad_output,
@@ -508,6 +514,7 @@ class _Linear(paddle.autograd.PyLayer):
                 ctx.fp8_enabled,
                 ctx.fp8_meta,
                 ctx.requires_dgrad,
+                ctx.requires_wgrad,
                 ctx.activation_dtype,
                 ctx.parallel_mode,
                 ctx.tensor_parallel,
@@ -520,12 +527,12 @@ class _Linear(paddle.autograd.PyLayer):
 
             if not ctx.use_bias:
                 return (
-                    wgrad if not weight.stop_gradient else None,
+                    wgrad if ctx.requires_wgrad else None,
                     dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 )
 
             return (
-                wgrad if not weight.stop_gradient else None,
+                wgrad if ctx.requires_wgrad else None,
                 dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
                 bgrad if ctx.requires_bgrad else None,
             )
