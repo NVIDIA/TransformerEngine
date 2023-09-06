@@ -787,7 +787,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         out = F.linear(act_out, self.fc2_weight,
                        self.fc2_bias if self.gemm_bias_fused_add else None)
         if self.set_parallel_mode and self.tensor_parallel:
-            out = allreduce(out, self.tp_group)
+            out, _ = allreduce(out, self.tp_group)
             out = out + self.fc2_bias if self.fc2_bias is not None else out
         if self.return_layernorm_output:
             return out, ln_out

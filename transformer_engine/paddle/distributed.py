@@ -4,7 +4,7 @@
 """Methods needed for distributed training."""
 
 from contextlib import contextmanager
-from typing import Optional, Union, Tuple
+from typing import Any, Optional, Union, Tuple
 
 import paddle
 
@@ -69,7 +69,8 @@ def set_weight_tensor_dist_attr(tensor: paddle.Tensor, is_parallel: bool,
 def allreduce(
     input_: paddle.Tensor,
     tp_group: Optional[dist_group_type] = None,
-) -> paddle.Tensor:
+    sync_op: bool = True,
+) -> Tuple[paddle.Tensor, Any]:
     """All-reduce the input tensor across model parallel group."""
 
     # Bypass the function if we are using only 1 GPU.
@@ -77,14 +78,25 @@ def allreduce(
         return input_
 
     # All-reduce.
-    output = mp_ops._mp_allreduce(
+    if sync_op:
+        output = mp_ops._mp_allreduce(
+            input_,
+            group=tp_group,
+            use_calc_stream=True,
+            use_model_parallel=True,
+        )
+        return output, None
+
+    wait_handle = paddle.distributed.all_reduce(
         input_,
+        op=paddle.distributed.ReduceOp.SUM,
         group=tp_group,
-        use_calc_stream=True,
-        use_model_parallel=True,
+        sync_op=False,
     )
 
-    return output
+    output = input_
+
+    return output, wait_handle
 
 
 def identity(
