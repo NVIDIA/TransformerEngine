@@ -35,6 +35,8 @@ from ..utils import (
     cast_if_needed_inplace,
     divide,
     get_paddle_act_func,
+    save_for_backward_allow_none,
+    saved_tensor_allow_none,
 )
 
 __all__ = ["LayerNormMLP"]
@@ -147,6 +149,7 @@ def _mlp_backward(
     fc1_weight_t_fp8: paddle.Tensor,
     fc1_weight_fp8_index: FP8FwdTensors,
     fc1_grad_output_fp8_index: FP8BwdTensors,    # FP8BwdTensors.GRAD_OUTPUT2
+    requires_fc1_wgrad: bool,
     requires_fc1_bgrad: bool,
     fc1_out: paddle.Tensor,
     fc2_input: paddle.Tensor,    # gelu_out
@@ -154,6 +157,7 @@ def _mlp_backward(
     fc2_weight: paddle.Tensor,
     fc2_weight_t_fp8: paddle.Tensor,
     fc2_weight_fp8_index: FP8FwdTensors,
+    requires_fc2_wgrad: bool,
     requires_fc2_bgrad: bool,
     grad_output: paddle.Tensor,
     grad_output_c: paddle.Tensor,
@@ -183,7 +187,6 @@ def _mlp_backward(
         # FC2 Bwd
         fc2_input_no_fp8, fc2_input_t = None, None
         fp8_wgrad = not fp8_meta["recipe"].override_linear_precision.wgrad
-        requires_fc2_wgrad = not fc2_weight.stop_gradient
         if requires_fc2_wgrad:
             if fp8_wgrad:
                 fc2_input_t = transpose(fc2_input, fp8_dtype_forward)
@@ -229,7 +232,6 @@ def _mlp_backward(
             fc1_bgrad = fc1_bgrad_
 
         # FC1 Bwd
-        requires_fc1_wgrad = not fc1_weight.stop_gradient
         dgelu_no_fp8, fc1_input_no_fp8, fc1_input_t = None, None, None
         if requires_fc1_wgrad:
             if fp8_wgrad:
@@ -277,6 +279,7 @@ def _mlp_backward(
             grad_output,
             requires_fc2_bgrad,
             True,
+            requires_fc2_wgrad,
             activation_dtype,
             'row' if set_parallel_mode else None,
             tensor_parallel,
@@ -290,6 +293,7 @@ def _mlp_backward(
             dgelu,
             requires_fc1_bgrad,
             requires_dgrad,
+            requires_fc1_wgrad,
             activation_dtype,
             'column' if set_parallel_mode else None,
             tensor_parallel,
@@ -397,7 +401,8 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         )
 
         if is_grad_enabled:
-            ctx.save_for_backward(
+            save_for_backward_allow_none(
+                ctx,
                 inputmat,
                 ln_weight,
                 mu,
@@ -426,9 +431,12 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
+            ctx.requires_fc1_wgrad = not fc1_weight.stop_gradient
+            ctx.requires_fc2_wgrad = not fc2_weight.stop_gradient
             ctx.requires_fc1_bgrad = use_fc1_bias and not fc1_bias.stop_gradient
             ctx.requires_fc2_bgrad = use_fc2_bias and not fc2_bias.stop_gradient
             ctx.requires_ln_bgrad = not ln_bias.stop_gradient
+            ctx.requires_ln_wgrad = not ln_weight.stop_gradient
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.reshape((-1, *inp.shape[1:-1], fc2_out.shape[-1]))
@@ -446,7 +454,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                                                          ctx.tp_group,
                                                          ctx.tp_size,
                                                          name="_LayerNormMLP"):
-            (
+            (    # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 ln_weight,
                 mu,
@@ -459,7 +467,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc2_weight,
                 fc2_weight_t_fp8,
                 fwd_scale_inverses,
-            ) = ctx.saved_tensor()
+            ) = saved_tensor_allow_none(ctx)
 
             ctx.use_bias = ctx.use_fc2_bias    # For grad_output_preprocess
             (
@@ -482,6 +490,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc1_weight_t_fp8,
                 FP8FwdTensors.GEMM1_WEIGHT,
                 FP8BwdTensors.GRAD_OUTPUT2,
+                ctx.requires_fc1_wgrad,
                 ctx.requires_fc1_bgrad,
                 fc1_out,
                 gelu_out,
@@ -489,6 +498,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 fc2_weight,
                 fc2_weight_t_fp8,
                 FP8FwdTensors.GEMM2_WEIGHT,
+                ctx.requires_fc2_wgrad,
                 ctx.requires_fc2_bgrad,
                 grad_output,
                 grad_output_c,
@@ -528,11 +538,11 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
 
             return (
                 dxmat.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
-                dgamma if not ln_weight.stop_gradient else None,
+                dgamma if ctx.requires_ln_wgrad else None,
                 dbeta if ctx.requires_ln_bgrad else None,
-                fc1_wgrad if not fc1_weight.stop_gradient else None,
+                fc1_wgrad if ctx.requires_fc1_wgrad else None,
                 *fc1_bgrad_out,
-                fc2_wgrad if not fc2_weight.stop_gradient else None,
+                fc2_wgrad if ctx.requires_fc2_wgrad else None,
                 *fc2_bgrad_out,
             )
 

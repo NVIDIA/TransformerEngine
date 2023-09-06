@@ -14,10 +14,16 @@ import transformer_engine.paddle as te
 from transformer_engine.paddle.fp8 import is_fp8_available, fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling
 
-paddle.seed(10)
 is_fp8_supported, reason = is_fp8_available()
 LINEAR_CASES = [(16, 16, 32), (32, 32, 64)]
 NORM_CASES = [(16, 32), (256, 1024)]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    paddle.seed(10)
+    yield
 
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -897,9 +903,11 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
 @pytest.mark.parametrize('math_dtype', ['bfloat16', 'float16'])
 @pytest.mark.parametrize('output_layernorm', [True, False])
 @pytest.mark.parametrize('return_layernorm_output', [True, False])
+@pytest.mark.parametrize('recompute_core_attention', [True, False])
 def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, has_bias, no_dbias,
                                    no_wgrad, q_seqlen, kv_seqlen, mask_type, math_dtype,
-                                   output_layernorm, return_layernorm_output):
+                                   output_layernorm, return_layernorm_output,
+                                   recompute_core_attention):
     """
     Test Transformer Decoder Layer
     """
@@ -1049,18 +1057,33 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
         layer_te.layernorm.weight.stop_gradient = no_wgrad
         layer_te.layernorm.bias.stop_gradient = no_dbias
 
-    def calc_transformer_output_and_grad(layer, encoder_input, mask, encoder_output,
-                                         enc_dec_attn_mask, dout):
+    def calc_transformer_output_and_grad(layer,
+                                         encoder_input,
+                                         mask,
+                                         encoder_output,
+                                         enc_dec_attn_mask,
+                                         dout,
+                                         recompute_core_attention=False):
         _encoder_input = paddle.to_tensor(encoder_input, stop_gradient=False)
         _encoder_output = paddle.to_tensor(encoder_output, stop_gradient=False)
-        out = layer(_encoder_input, mask, _encoder_output, enc_dec_attn_mask)
+        out = layer(_encoder_input,
+                    mask,
+                    _encoder_output,
+                    enc_dec_attn_mask,
+                    recompute_core_attention=recompute_core_attention)
         out.backward(dout)
         return out, _encoder_input.grad, _encoder_output.grad
 
     out_ref, grad_encoder_input_ref, grad_encoder_output_ref = calc_transformer_output_and_grad(
         layer_pd, encoder_input, attn_mask, encoder_output, attn_mask, grad_out)
     out, grad_encoder_input, grad_encoder_output = calc_transformer_output_and_grad(
-        layer_te, encoder_input, attn_mask, encoder_output, attn_mask, grad_out)
+        layer_te,
+        encoder_input,
+        attn_mask,
+        encoder_output,
+        attn_mask,
+        grad_out,
+        recompute_core_attention=recompute_core_attention)
 
     assert_allclose(out, out_ref, rtol=rtol, atol=atol)
     assert_allclose(grad_encoder_input, grad_encoder_input_ref, rtol=rtol, atol=atol)
