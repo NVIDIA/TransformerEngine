@@ -47,6 +47,7 @@ before_script:
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
     - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-${FRAMEWORK}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
     - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
+    - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
     - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
     - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
     - export DEVEL_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-devel"               && echo "${DEVEL_IMAGE_NAME_VERSIONED}"
@@ -606,6 +607,15 @@ upload_logs:
       CI_SLURM_TIME: 240
       DATADIR: /mnt/nvdl
 
+.H100_4GPU:
+    tags:
+      - dlcluster_h100x4
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
+      CI_SLURM_TIME: 240
+      DATADIR: /mnt/nvdl/datasets
+
 ######################################################
 ##
 ## Test definitions.
@@ -707,6 +717,14 @@ L0_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+
+L1_pytorch_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_4GPU
 
 L0_jax_unittest--V100_1GPU:
     variables:
