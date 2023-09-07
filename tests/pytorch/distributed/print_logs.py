@@ -8,6 +8,8 @@ import glob
 from prettytable import PrettyTable
 from matplotlib import pyplot as plt
 
+NUM_MOST_RECENT_RUNS = 100
+
 
 te_path = os.getenv("TE_PATH", "/opt/transformerengine")
 mlm_log_dir = os.path.join(te_path, "ci_logs")
@@ -69,19 +71,22 @@ def print_run_logs():
         print(table)
 
 
-def save_plot(title, legend, data, filename):
+def save_plot(title, legend, data, filename, ylabel):
     x = list(range(1, len(data[0]) + 1))
     plt.figure()
     for label, y in zip(legend, data):
         plt.plot(x, y, "-o", label=label)
     plt.title(title)
     plt.legend()
+    plt.xlabel(f"Last {NUM_MOST_RECENT_RUNS} runs")
+    plt.ylabel(ylabel)
     plt.savefig(os.path.join(te_ci_plot_dir, filename))
 
 
 def perf_and_loss_plots():
     files = glob.glob(os.path.join(te_ci_log_dir, "*.txt"))
     files.sort(key=os.path.getctime)
+    files = files[-NUM_MOST_RECENT_RUNS:]
     data = {}
     for filename in files:
         with open(filename) as file:
@@ -104,12 +109,14 @@ def perf_and_loss_plots():
             lm_loss_data.append(lm_data["loss"])
             lm_perf_data.append(lm_data["perf"])
         save_plot(
-            model_config + " LM-Loss", legend,
+            model_config + " loss", legend,
             lm_loss_data, model_config + "_loss.png",
+            "LM-Loss",
         )
         save_plot(
-            model_config + " Time per iteration (ms)",
+            model_config + " perf",
             legend, lm_perf_data, model_config + "_perf.png",
+            "Time per step (ms)",
         )
 
 
