@@ -1405,8 +1405,8 @@ class MultiheadAttention(torch.nn.Module):
             num_attention_heads if num_gqa_groups is None else num_gqa_groups
         )
         assert (num_attention_heads % self.num_gqa_groups == 0
-                ), "The number of GQA groups must be divisible by the number of attention heads!"
-        assert (num_attention_heads % tp_size == 0
+                ), "The number of attention heads must be divisible by the number of GQA groups!"
+        assert (self.num_gqa_groups % tp_size == 0
                 ), "The number of GQA groups must be divisible by tensor parallel size!"
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // tp_size)
         self.hidden_size_kv = int(hidden_size * self.num_gqa_groups // num_attention_heads)
@@ -1424,6 +1424,9 @@ class MultiheadAttention(torch.nn.Module):
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
         if self.attention_type == "self":
+            parameters_split = {"query_": hidden_size,
+                                "key_": self.hidden_size_kv,
+                                "value_": self.hidden_size_kv} if not fuse_qkv_params else None
             if self.input_layernorm:
                 self.layernorm_qkv = LayerNormLinear(
                     hidden_size,
@@ -1434,7 +1437,7 @@ class MultiheadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     return_layernorm_output=return_layernorm_output,
-                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
+                    parameters_split=parameters_split,
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
                     ub_bulk_dgrad=ub_bulk_dgrad,
@@ -1450,7 +1453,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    parameters_split=("query_", "key_", "value_") if not fuse_qkv_params else None,
+                    parameters_split=parameters_split,
                     **common_gemm_kwargs,
                 )
         elif self.attention_type == "cross":

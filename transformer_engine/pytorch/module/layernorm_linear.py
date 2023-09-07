@@ -536,11 +536,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    parameters_split : Tuple[str, ...], default = None
-                      if a tuple of strings is provided, the weight and bias parameters of the
-                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                      split along the first dimension, where `N` is the length of the argument
-                      and the strings contained are the names of the split parameters.
+    parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
+                      if a tuple of strings or a dict of strings to integers is provided,
+                      the weight and bias parameters of the module are exposed as `N` separate
+                      `torch.nn.parameter.Parameter`s each, split along the first dimension,
+                      where `N` is the length of the argument and the strings contained are the
+                      names of the split parameters. In the case of a tuple, each parameter
+                      has the same shape. In the case of a dict, the values give the
+                      `out_features` for each projection.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -607,7 +610,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
         skip_weight_param_allocation: bool = False,
-        parameters_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -707,23 +710,34 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.bias_tensor.zero_()
 
         if parameters_split is None:
-            parameters_split = ("",)
-
-        assert (
-            self.out_features % len(parameters_split) == 0
-        ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
-
-        split_size = self.out_features // len(parameters_split)
+            parameters_split = {"": self.out_features}
+        elif isinstance(parameters_split, tuple):
+            assert (
+                self.out_features % len(parameters_split) == 0
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
+            split_size = self.out_features // len(parameters_split)
+            parameters_split = {key: split_size for key in parameters_split}
+        elif isinstance(parameters_split, dict):
+            overall_split_size = sum(parameters_split.values())
+            assert(
+                self.out_features == overall_split_size
+            ), f"Overall sum of parameters_split (={overall_split_size}) does not match "\
+               f"to out features (={self.out_features})"
+        else:
+            assert False, "Type of 'parameters_split' is not None, tuple or dict"
 
         self.weight_names = []
         self.bias_names = []
 
-        for i, pname in enumerate(parameters_split):
+        slice_begin = 0
+        for pname, slice_size in parameters_split.items():
             wname = pname + "weight"
             bname = pname + "bias"
 
+            slice_end = slice_begin + slice_size
+
             self.register_parameter(
-                wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                wname, Parameter(self.weight_tensor[slice_begin:slice_end])
             )
 
             set_tensor_model_parallel_attributes(
@@ -735,7 +749,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             if self.use_bias:
                 self.register_parameter(
-                    bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    bname, Parameter(self.bias_tensor[slice_begin:slice_end])
                 )
             else:
                 setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
@@ -745,6 +759,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             self.weight_names.append(wname)
             self.bias_names.append(bname)
+
+            slice_begin += slice_size
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
