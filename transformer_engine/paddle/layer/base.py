@@ -25,6 +25,8 @@ from ..fp8 import (
     get_fp8_te_dtype,
 )
 from ..profile import nvtx_range
+from ..recompute import is_in_recompute_phase
+from ..fp8_buffer import FP8RecomputeBuffer
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -199,6 +201,9 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = self.fp8_meta["scaling_fwd"].amax_history.shape[
             0]
+        recompute_buffer_pos_key = FP8RecomputeBuffer.get_buffer_position_key()
+        if recompute_buffer_pos_key in self.fp8_meta:
+            del self.fp8_meta[recompute_buffer_pos_key]
 
     @paddle.no_grad()
     def set_state_dict(self, state_dict, use_structured_name=True):
@@ -221,33 +226,47 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         just in case. The autocast exit will pick up the most recent one.
         """
 
-        self.set_activation_dtype(inp)
-        self.fp8_init(num_gemms=num_gemms)
-
-        # Previous iteration was grad_enabled
-        if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
-            global_fp8_fwd_buffer.wait()
-            if self.fp8_meta["recipe"].reduce_amax:
-                global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
-                amax_and_scale_update(self.fp8_meta, True)
-                global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
-            else:
-                amax_and_scale_update(self.fp8_meta, True)
-
-        if self.fp8_enabled and self.training:
-            # Setup for amax reduction
-            if self.fp8_meta["recipe"].reduce_amax:
-                global_fp8_state = get_global_fp8_state()
-                self.fp8_meta["first_module"] = global_fp8_state.is_first_fp8_module()
-                self.fp8_meta["autocast_id_fwd"] = global_fp8_state.get_autocast_id()
-                self.fp8_meta["autocast_id_fwd_stack"].append(self.fp8_meta["autocast_id_fwd"])
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
+        if self.fp8_enabled and is_in_recompute_phase():
+            global_recompute_buffer = get_global_fp8_state().get_fp8_recompute_buffer()
+            global_recompute_buffer.retrieve_fp8_meta_tensors(self.fp8_meta)
         else:
-            self.fp8_meta["update_amax_and_scale_fwd"] = False
+            self.set_activation_dtype(inp)
+            self.fp8_init(num_gemms=num_gemms)
+
+            # Previous iteration was grad_enabled
+            if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+                global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
+                global_fp8_fwd_buffer.wait()
+                if self.fp8_meta["recipe"].reduce_amax:
+                    global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
+                    amax_and_scale_update(self.fp8_meta, True)
+                    global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
+                else:
+                    amax_and_scale_update(self.fp8_meta, True)
+
+            if self.fp8_enabled and self.training:
+                # Setup for amax reduction
+                if self.fp8_meta["recipe"].reduce_amax:
+                    global_fp8_state = get_global_fp8_state()
+                    self.fp8_meta["first_module"] = global_fp8_state.is_first_fp8_module()
+                    self.fp8_meta["autocast_id_fwd"] = global_fp8_state.get_autocast_id()
+                    self.fp8_meta["autocast_id_fwd_stack"].append(self.fp8_meta["autocast_id_fwd"])
+                self.fp8_meta["update_amax_and_scale_fwd"] = True
+            else:
+                self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+            # Activation recomputation is used and this is the first forward phase.
+            if (self.fp8_enabled and self.training
+                    and get_global_fp8_state().is_fp8_recompute_enabled()):
+                global_recompute_buffer = get_global_fp8_state().get_fp8_recompute_buffer()
+                global_recompute_buffer.stash_fp8_meta_tensors(self.fp8_meta)
 
         with nvtx_range(self.__class__.__name__ + " forward"):
             yield inp
+
+        if self.fp8_enabled and is_in_recompute_phase():
+            FP8RecomputeBuffer.restore_fp8_meta_tensors(self.fp8_meta)
+            return
 
         if self.fp8_enabled and self.training and self.fp8_meta["recipe"].reduce_amax:
             global_fp8_state = get_global_fp8_state()
