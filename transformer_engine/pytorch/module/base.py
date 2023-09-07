@@ -671,7 +671,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R4: bias gradient on R1.
 
         """
-        grad_output = grad_output.contiguous()
+        grad_output = grad_output.to(
+            device="cuda",
+            memory_format=torch.contiguous_format,
+        )
         grad_output_mat = grad_output.view((-1, grad_output.shape[-1]))
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 

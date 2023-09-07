@@ -111,10 +111,39 @@ class _LayerNormMLP(torch.autograd.Function):
         activation: str,
         normalization: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
-        # Make sure input dimensions are compatible
+        # Make sure tensor dimensions are compatible
         in_features = ln_weight.numel()
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        if ln_bias is not None and ln_bias.numel() != in_features:
+            raise ValueError(
+                "Layer norm weight and bias shapes are not compatible "
+                f"(weight shape = {list(ln_weight.size())}, "
+                f"bias shape = {list(ln_bias.size())})"
+            )
+        if inp.shape[-1] != in_features:
+            raise ValueError(
+                "Layer norm and input shapes are not compatible "
+                f"(layer norm weight shape = {list(ln_weight.size())}, "
+                f"input shape = {list(inp.size())})"
+            )
+
+        # Make sure tensors are in expected format
+        to_kwargs = dict(
+            device="cuda",
+            memory_format=torch.contiguous_format,
+        )
+        inp = inp.to(dtype=activation_dtype, **to_kwargs)
         inputmat = inp.view((-1, in_features))
+        ln_weight = ln_weight.to(dtype=activation_dtype, **to_kwargs)
+        if ln_bias is not None:
+            ln_bias = ln_bias.to(dtype=activation_dtype, **to_kwargs)
+        fc1_weight = fc1_weight.to(**to_kwargs)
+        if use_fc1_bias:
+            fc1_bias = fc1_bias.to(**to_kwargs)
+        fc2_weight = fc2_weight.to(**to_kwargs)
+        if use_fc2_bias:
+            fc2_bias = fc2_bias.to(**to_kwargs)
+
+        # Make sure tensor dimensions are compatible with FP8
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(fc1_weight)
@@ -123,12 +152,6 @@ class _LayerNormMLP(torch.autograd.Function):
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
         activation_func = _act_func(activation)[0]
-
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        ln_weight = cast_if_needed(ln_weight, activation_dtype)
-        if ln_bias is not None:
-            ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if ub_split_ag:
             tp_world_size = get_distributed_world_size(tp_group)
