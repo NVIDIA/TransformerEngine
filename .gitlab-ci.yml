@@ -612,7 +612,7 @@ upload_logs:
       - dlcluster_h100x4
     variables:
       CI_SCHEDULER_TYPE: docker
-      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
       CI_SLURM_TIME: 240
       DATADIR: /mnt/nvdl/datasets
 
