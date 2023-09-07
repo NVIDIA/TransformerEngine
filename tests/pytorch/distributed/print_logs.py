@@ -5,6 +5,7 @@
 import os
 import re
 import glob
+import datetime
 from prettytable import PrettyTable
 from matplotlib import pyplot as plt
 
@@ -27,7 +28,9 @@ perf_pattern = "elapsed time per iteration \(ms\): ([\d.]*)"
 
 
 def get_output_file():
-    fname = f"{os.getenv('CI_PIPELINE_ID', 'unknown_id')}.txt"
+    now = datetime.datetime.now()
+    default_fname = f"unknown_pipeline_id_{now.month}_{now.day}_{now.year}_{now.hour}_{now.minute}"
+    fname = f"{os.getenv('CI_PIPELINE_ID', default_fname)}.txt"
     return os.path.join(te_ci_log_dir, fname)
 
 
