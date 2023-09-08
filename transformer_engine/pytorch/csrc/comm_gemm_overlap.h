@@ -572,7 +572,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
 
     assert(pre_gelu_out.numel() == 0);
     // Catch up the default torch stream
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
 
     torch::Tensor output_chunk = torch::from_blob(
         output_ptr, {_ubuf.size(0), m}, D.options());
@@ -589,11 +591,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
       int recv_offset = comm_bytes * recv_chunk_id;
 
       if (i < _tp_size - 1) {
-        // P2P communication
-        //userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
-        //                 _next_rank, (cudaStream_t)_stream_send);
-        //userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-        //                 _prev_rank, (cudaStream_t)_stream_recv);
         const char* env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
         if (env_p != nullptr && env_p[0]=='1') {
           userbuffers_sendrecv_atomic(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
@@ -612,34 +609,50 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder {
           }
         }
         else {
+        // P2P communication
+          //userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
+          //                 _next_rank, (cudaStream_t)_stream_send);
+          //userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
+          //                 _prev_rank, (cudaStream_t)_stream_recv);
+          //CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
+          //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
           userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
                             _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
-          producer(counter_ptr, /*i+1*/recv_chunk_id, (cudaStream_t)_stream_recv);
+          producer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_recv);
+        }
+        if (i==0) {
+          at::cuda::setCurrentCUDAStream(_stream_compute[0]);
+          te_gemm(A, A_scale_inverse, A_type, transa, _ubuf, B_scale_inverse, B_type,
+              transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+              workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
+              _math_sms, /*0, 0, false, _empty_tensor);*/ 0, _tp_size, false, counter);
+        }
+      }
+      else {
+        // GEMM
+        //userbuffers_send_multiatomic(_ub_reg, 0, _ub_reg, 0, comm_bytes, _ub_comm,
+        //               _next_rank, _tp_size, comm_bytes, comm_bytes, (cudaStream_t)_stream_send);
+        //userbuffers_recv_multiatomic(_ub_reg, 0, _ub_reg, 0, comm_bytes, _ub_comm,
+        //             _prev_rank, _tp_size, counter_ptr, (cudaStream_t)_stream_recv);
+        if (B_copy.numel() > 0) {
+          assert(B_copy.numel() == _ubufs[_tp_id].numel());
+          assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
+          CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
+                                     _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                     cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
     }
-    // GEMM
-    at::cuda::setCurrentCUDAStream(stream_main); //_stream_compute[0]);
-    te_gemm(A, A_scale_inverse, A_type, transa, _ubuf, B_scale_inverse, B_type,
-            transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
-            workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
-            _math_sms, 0 /*m_split*/, _tp_size /*n_split*/, false /*gemm_producer*/, counter);
-    if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
-                                   _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
-                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_recv));
-    }
     for (int i = 0; i < _tp_size; i++) {
-      //int recv_chunk_id = (_tp_size + _tp_id - i - 1) % _tp_size;
-      //consumer(counter_ptr, recv_chunk_id, (cudaStream_t)stream_main);
       if (i != _self_chunk_id) {
-          consumer(counter_ptr, i, (cudaStream_t)stream_main);
+          consumer(counter_ptr, i, (cudaStream_t)_stream_compute[0]);
       }
     }
+    at::cuda::setCurrentCUDAStream(stream_main);
     CHECK_CUDA(
-          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_recv));
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
 
     return D;

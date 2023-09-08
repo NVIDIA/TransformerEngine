@@ -28,6 +28,7 @@
     }                                                                                       \
   } while (0)
 
+
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_rw(const int op, const int flagoffset, const int firstrank,
@@ -2218,24 +2219,28 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, con
 		                 const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, void *counters, cudaStream_t stream) {
 
     assert(comm->push && comm->use_ce==0);
+    bool signalonly = (bytes/16==0) || (comm->use_ce!=0);
 
     int send_peerlocal = send_peer % comm->nvsize;
     int recv_peerlocal = recv_peer % comm->nvsize;
     void* flagptr_send = (comm->peer_ptr[0][send_peerlocal])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+comm->myrank*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
     void *flagptr_recv = (comm->mem_ptr[0])+((NVTE_REG0_OFFSET(comm)+NVTE_REG0_RECV+recv_peer*NVTE_MAX_REGIONS+dsthandler)*sizeof(int));
 
-    SETUP_LAUNCH_CONFIG(comm->sms,1024,stream);
+    void *send_srcptr = (comm->mem_ptr[srchandler])+send_offset;
+    void *send_dstptr = (comm->peer_ptr[dsthandler][send_peerlocal])+send_offset;
+    if(comm->use_ce) CUDACHECK(cudaMemcpyAsync(send_dstptr,send_srcptr,bytes,cudaMemcpyDeviceToDevice,stream));
+    SETUP_LAUNCH_CONFIG(signalonly?1:comm->sms,signalonly?1:1024,stream);
 
     int *arg1=&comm->send_id[send_peer];
     int *arg2=(int*)flagptr_send;
-    int4 *arg3=(int4*)((comm->mem_ptr[srchandler])+send_offset);
-    int4 *arg4=(int4*)((comm->peer_ptr[dsthandler][send_peerlocal])+send_offset);
-    int arg5=bytes/16;
+    int4 *arg3=(int4*)send_srcptr;
+    int4 *arg4=(int4*)send_dstptr;
+    int arg5=signalonly?0:bytes/16;
     int arg6=comm->myrank;
     int arg7=recv_peer;
     int *arg8=&comm->recv_id[recv_peer*NVTE_MAX_REGIONS+dsthandler];
     int *arg9=(int*)flagptr_recv;
-    int arg10=comm->sms;
+    int arg10=signalonly ? 1:comm->sms;
     void *arg11=counters;
     void *kernelArgs[] = { (void*)&arg1,(void*)&arg2,(void*)&arg3,(void*)&arg4,(void*)&arg5,(void*)&arg6,(void*)&arg7,(void*)&arg8,(void*)&arg9,(void*)&arg10,(void*)&arg11};
     CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)kuserbuffers_pushsendrecv_atomic, kernelArgs));
