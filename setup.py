@@ -290,12 +290,12 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if "pytorch" in frameworks():
-        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6"])
+        add_unique(install_reqs, ["torch", "flash-attn>=1.0.6, <=2.0.4"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, ["jax", "flax"])
+        add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
     if "tensorflow" in frameworks():
         if not found_pybind11():

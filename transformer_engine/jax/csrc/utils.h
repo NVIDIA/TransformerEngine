@@ -10,9 +10,11 @@
 #include <pybind11/pybind11.h>
 
 #include <cstdint>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/logging.h"
 
 namespace transformer_engine {
@@ -22,26 +24,46 @@ int GetCudaRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, cudaStream_t stream);
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream);
 
-class cublasLtMetaManager {
+class WorkspaceManager {
  public:
-    static cublasLtMetaManager &Instance() {
-        static thread_local cublasLtMetaManager instance;
+    static WorkspaceManager &Instance() {
+        static thread_local WorkspaceManager instance;
         return instance;
     }
 
-    cublasLtMetaManager() {}
-    ~cublasLtMetaManager() { Clear_(); }
+    WorkspaceManager() {}
+    ~WorkspaceManager() { Clear_(); }
 
     void *GetWorkspace(size_t size = 4194304) {
         ReallocateIfNeed_(size);
         return workspace_;
     }
 
+    template <typename... Args>
+    inline auto GetWorkspace(Args... args) {
+        auto asks = std::array<size_t, sizeof...(Args)>{args...};
+        std::array<size_t, sizeof...(Args) + 1> offsets = {0};
+        std::array<void *, sizeof...(Args)> workspaces = {nullptr};
+        std::transform_inclusive_scan(
+            asks.cbegin(), asks.cend(), offsets.begin() + 1, std::plus<size_t>{},
+            [=](auto x) { return PadSize_(x); }, 0);
+        auto *workspace = GetWorkspace(offsets.back());
+        std::transform(offsets.cbegin(), offsets.cend() - 1, workspaces.begin(),
+                       [workspace](auto x) { return static_cast<char *>(workspace) + x; });
+        return workspaces;
+    }
+
  private:
     void *workspace_ = nullptr;
     size_t size_ = 0;
+
+    size_t PadSize_(size_t size) {
+        constexpr size_t alignment = 128;
+        return ((size + alignment - 1) / alignment) * alignment;
+    }
 
     void Clear_() {
         if (workspace_ != nullptr) {
@@ -52,6 +74,7 @@ class cublasLtMetaManager {
     }
 
     void Allocate_(size_t new_size) {
+        new_size = PadSize_(new_size);
         NVTE_CHECK_CUDA(cudaMalloc(&workspace_, new_size));
         size_ = new_size;
     }

@@ -6,6 +6,7 @@ import argparse
 import unittest
 from functools import partial
 
+import flax
 import jax
 import jax.numpy as jnp
 import nltk
@@ -13,7 +14,6 @@ import numpy as np
 import optax
 from datasets import load_dataset
 from flax import linen as nn
-from flax.core.frozen_dict import FrozenDict
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
@@ -71,12 +71,12 @@ def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
-    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    var_collect = {**var_collect, PARAMS_KEY: state.params}
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, logits), grads = grad_fn(var_collect)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
 
-    var_collect, grads = grads.pop(PARAMS_KEY)
+    var_collect, grads = flax.core.pop(grads, PARAMS_KEY)
     state = state.apply_gradients(grads=grads)
     if use_fp8:
         var_collect = te.update_fp8_metas(var_collect)
@@ -117,7 +117,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
-    var_collect = FrozenDict({**var_collect, PARAMS_KEY: state.params})
+    var_collect = {**var_collect, PARAMS_KEY: state.params}
     loss, logits = loss_fn(var_collect, disable_dropout=True)
     accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
     return loss, accuracy
@@ -214,8 +214,9 @@ def get_params_pspec(sharding_rules, abs_var_collect):
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
     params_axes_pspec = jax.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
+    params_axes_pspec = flax.core.unfreeze(params_axes_pspec)
     params_pspec = jax.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
-    params_pspec = FrozenDict({**params_pspec, **params_axes_pspec})
+    params_pspec = {**params_pspec, **params_axes_pspec}
     return params_pspec
 
 
@@ -223,9 +224,9 @@ def get_state_pspec(state, params_pspec):
     """Refer params_pspec to create state partition spec"""
 
     def replace_params(x):
-        return params_pspec if isinstance(x, FrozenDict) else None
+        return params_pspec if isinstance(x, dict) else None
 
-    state_pspec = jax.tree_map(replace_params, state, is_leaf=lambda x: isinstance(x, FrozenDict))
+    state_pspec = jax.tree_map(replace_params, state, is_leaf=lambda x: isinstance(x, dict))
     return state_pspec
 
 
@@ -263,13 +264,13 @@ def train_and_evaluate(args):
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
 
             in_shardings = (None, inputs_pspec, masks_pspec)
-            out_shardings = FrozenDict({key: params_pspec if key is PARAMS_KEY else None \
-                                        for key in abs_var_collect})
+            out_shardings = {key: params_pspec if key is PARAMS_KEY else None \
+                                        for key in abs_var_collect}
             pjit_encoder_init = pjit(encoder.init, in_shardings, out_shardings)
             var_collect = pjit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
-            var_collect, params = var_collect.pop(PARAMS_KEY)
+            var_collect, params = flax.core.pop(var_collect, PARAMS_KEY)
             state = train_state.TrainState.create(apply_fn=encoder.apply,
                                                   params=params,
                                                   tx=optimizer)

@@ -5,6 +5,7 @@
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+import os
 import pickle
 from typing import Generator, Dict, Tuple, Union, Any
 
@@ -14,19 +15,18 @@ import paddle
 from paddle.fluid import core
 from paddle.fluid.framework import _dygraph_tracer
 
-from ..constants import FP8BwdTensors
+from ..constants import FP8BwdTensors, dist_group_type
 from ..cpp_extensions import cast_transpose, cast_transpose_bgrad, cast_to_fp8
 from ..fp8 import (
-    get_fp8_recipe,
-    get_default_fp8_recipe,
-    is_fp8_enabled,
-    is_fp8_calibration,
-    amax_and_scale_update,
-    get_fp8_te_dtype,
+    FP8State,
     FP8TensorMeta,
+    amax_and_scale_update,
+    get_global_fp8_state,
+    get_fp8_te_dtype,
 )
 from ..profile import nvtx_range
-from ..utils import get_bias_dtype, cast_if_needed
+from ..recompute import is_in_recompute_phase
+from ..fp8_buffer import FP8RecomputeBuffer
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -63,9 +63,15 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_calibration = False
         self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
-        self.fp8_meta["recipe"] = get_default_fp8_recipe()
+        self.fp8_meta["fp8_group"] = None
+        self.fp8_meta["recipe"] = FP8State.get_default_fp8_recipe()
         self.fp8_meta["scaling_fwd"] = FP8TensorMeta(is_forward=True)
         self.fp8_meta["scaling_bwd"] = FP8TensorMeta(is_forward=False)
+        self.tp_group = None
+        self.tp_size = 1
+        self.fp8_meta["autocast_id_fwd_stack"] = []
+        self.fp8_meta["async_amax_reduction"] = bool(
+            int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0")))
 
     def set_activation_dtype(self, inp: paddle.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -104,17 +110,20 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
     # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8_enabled = is_fp8_enabled()
-        self.fp8_calibration = is_fp8_calibration()
+        global_fp8_state = get_global_fp8_state()
+        self.fp8_enabled = global_fp8_state.is_fp8_enabled()
+        self.fp8_calibration = global_fp8_state.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8_enabled or self.fp8_calibration
 
         if self.fp8_enabled or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
-            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+            if self.fp8_initialized and global_fp8_state.get_fp8_recipe(
+            ) == self.fp8_meta["recipe"]:
                 return
 
             # Set FP8, recipe, and other FP8 metadata
-            self.fp8_meta["recipe"] = get_fp8_recipe()
+            self.fp8_meta["recipe"] = global_fp8_state.get_fp8_recipe()
+            self.fp8_meta["fp8_group"] = global_fp8_state.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
             self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
@@ -137,6 +146,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             state = {}
             state["scaling_fwd"] = self.fp8_meta["scaling_fwd"].to_numpy()
             state["scaling_bwd"] = self.fp8_meta["scaling_bwd"].to_numpy()
+            state["global_fp8_fwd_buffer"] = get_global_fp8_state().get_fp8_fwd_buffer().to_numpy()
+            state["global_fp8_bwd_buffer"] = get_global_fp8_state().get_fp8_bwd_buffer().to_numpy()
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
@@ -180,10 +191,19 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         self.fp8_meta["scaling_fwd"].from_numpy(state["scaling_fwd"])
         self.fp8_meta["scaling_bwd"].from_numpy(state["scaling_bwd"])
 
+        # Restore global FP8 buffer states.
+        global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
+        global_fp8_bwd_buffer = get_global_fp8_state().get_fp8_bwd_buffer()
+        global_fp8_fwd_buffer.from_numpy(state["global_fp8_fwd_buffer"])
+        global_fp8_bwd_buffer.from_numpy(state["global_fp8_bwd_buffer"])
+
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = self.fp8_meta["scaling_fwd"].amax_history.shape[
             0]
+        recompute_buffer_pos_key = FP8RecomputeBuffer.get_buffer_position_key()
+        if recompute_buffer_pos_key in self.fp8_meta:
+            del self.fp8_meta[recompute_buffer_pos_key]
 
     @paddle.no_grad()
     def set_state_dict(self, state_dict, use_structured_name=True):
@@ -206,32 +226,88 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         just in case. The autocast exit will pick up the most recent one.
         """
 
-        self.set_activation_dtype(inp)
-        self.fp8_init(num_gemms=num_gemms)
-
-        # Previous iteration was grad_enabled
-        if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-            amax_and_scale_update(self.fp8_meta, True)
-
-        if self.fp8_enabled and self.training:
-            self.fp8_meta["update_amax_and_scale_fwd"] = True
+        if self.fp8_enabled and is_in_recompute_phase():
+            global_recompute_buffer = get_global_fp8_state().get_fp8_recompute_buffer()
+            global_recompute_buffer.retrieve_fp8_meta_tensors(self.fp8_meta)
         else:
-            self.fp8_meta["update_amax_and_scale_fwd"] = False
+            self.set_activation_dtype(inp)
+            self.fp8_init(num_gemms=num_gemms)
+
+            # Previous iteration was grad_enabled
+            if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+                global_fp8_fwd_buffer = get_global_fp8_state().get_fp8_fwd_buffer()
+                global_fp8_fwd_buffer.wait()
+                if self.fp8_meta["recipe"].reduce_amax:
+                    global_fp8_fwd_buffer.copy_amax_from_buffer(self.fp8_meta)
+                    amax_and_scale_update(self.fp8_meta, True)
+                    global_fp8_fwd_buffer.set_for_deletion(self.fp8_meta)
+                else:
+                    amax_and_scale_update(self.fp8_meta, True)
+
+            if self.fp8_enabled and self.training:
+                # Setup for amax reduction
+                if self.fp8_meta["recipe"].reduce_amax:
+                    global_fp8_state = get_global_fp8_state()
+                    self.fp8_meta["first_module"] = global_fp8_state.is_first_fp8_module()
+                    self.fp8_meta["autocast_id_fwd"] = global_fp8_state.get_autocast_id()
+                    self.fp8_meta["autocast_id_fwd_stack"].append(self.fp8_meta["autocast_id_fwd"])
+                self.fp8_meta["update_amax_and_scale_fwd"] = True
+            else:
+                self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+            # Activation recomputation is used and this is the first forward phase.
+            if (self.fp8_enabled and self.training
+                    and get_global_fp8_state().is_fp8_recompute_enabled()):
+                global_recompute_buffer = get_global_fp8_state().get_fp8_recompute_buffer()
+                global_recompute_buffer.stash_fp8_meta_tensors(self.fp8_meta)
 
         with nvtx_range(self.__class__.__name__ + " forward"):
             yield inp
+
+        if self.fp8_enabled and is_in_recompute_phase():
+            FP8RecomputeBuffer.restore_fp8_meta_tensors(self.fp8_meta)
+            return
+
+        if self.fp8_enabled and self.training and self.fp8_meta["recipe"].reduce_amax:
+            global_fp8_state = get_global_fp8_state()
+            global_fp8_fwd_buffer = global_fp8_state.get_fp8_fwd_buffer()
+            global_fp8_fwd_buffer.add_amax(self.fp8_meta)
+            global_fp8_fwd_buffer.set_for_amax_reduction(
+                self.fp8_meta,
+                self.tp_group,
+                self.tp_size,
+            )
 
     @staticmethod
     @contextmanager
     def prepare_backward(fp8_enabled: bool,
                          fp8_meta: Dict[str, Any],
+                         tp_group: dist_group_type,
+                         tp_size: int,
                          name: str = "") -> Generator[None, None, None]:
         """Checks and prep for BWD."""
         if fp8_enabled:
-            amax_and_scale_update(fp8_meta, False)
+            global_fp8_state = get_global_fp8_state()
+            global_fp8_bwd_buffer = global_fp8_state.get_fp8_bwd_buffer()
+            global_fp8_bwd_buffer.wait()
+
+            if fp8_meta["recipe"].reduce_amax:
+                global_fp8_bwd_buffer.copy_amax_from_buffer(fp8_meta)
+                amax_and_scale_update(fp8_meta, False)
+                global_fp8_bwd_buffer.set_for_deletion(fp8_meta)
+
+                # Get new backward key.
+                fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
+            else:
+                amax_and_scale_update(fp8_meta, False)
 
         with nvtx_range(name + " backward"):
             yield
+
+        if fp8_enabled and fp8_meta["recipe"].reduce_amax:
+            global_fp8_bwd_buffer.add_amax(fp8_meta)
+            if fp8_meta["first_module"]:
+                global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
 
     @staticmethod
     def grad_output_preprocess(
@@ -259,8 +335,6 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
                 FP8BwdTensors.GRAD_OUTPUT1,
                 fp8_dtype_backward,
             )
-            bias_dtype = get_bias_dtype(ctx.activation_dtype)
-            bgrad = cast_if_needed(bgrad, bias_dtype)
         else:
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                 grad_output_c, grad_output_t = cast_transpose(

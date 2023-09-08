@@ -40,3 +40,15 @@ TE_DType = {
     paddle.float16: tex.DType.kFloat16,
     paddle.bfloat16: tex.DType.kBFloat16,
 }
+
+AttnMaskTypes = ("causal", "padding", "no_mask")
+
+AttnTypes = ("self", "cross")
+
+LayerTypes = ("encoder", "decoder")
+
+GemmParallelModes = ("row", "column", None)
+
+dist_group_type = paddle.distributed.collective.Group
+
+RecomputeFunctionNames = ('unpack', 'backward')

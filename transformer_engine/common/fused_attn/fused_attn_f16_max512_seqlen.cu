@@ -1275,6 +1275,8 @@ void fused_attn_max_512_fwd_qkvpacked(
     } else if (Aux_CTX_Tensors->size == 1) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
 
     void *devPtrCuSeqlen = cu_seqlens->data.dptr;
@@ -1304,6 +1306,8 @@ void fused_attn_max_512_fwd_qkvpacked(
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 
@@ -1351,6 +1355,8 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
     } else if (Aux_CTX_Tensors->size == 1) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
 
     void *devQCuSeqlen = q_cu_seqlens->data.dptr;
@@ -1380,6 +1386,8 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 
@@ -1440,6 +1448,8 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 
@@ -1503,6 +1513,8 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         workspace->data.shape = {1};
         workspace->data.dtype = DType::kByte;
         return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
     }
 }
 }  // namespace transformer_engine

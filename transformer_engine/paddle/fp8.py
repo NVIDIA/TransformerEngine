@@ -4,7 +4,7 @@
 """FP8 utilities for TransformerEngine"""
 
 from contextlib import contextmanager
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, Union
 
 import numpy as np
 
@@ -12,13 +12,12 @@ import paddle
 import transformer_engine_paddle as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
+from .constants import dist_group_type
+from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
+
 # FP8 support
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
-# FP8 status
-_FP8_ENABLED = False
-_FP8_CALIBRATION = False
-_FP8_RECIPE = None
 
 
 def _check_fp8_support() -> Tuple[bool, str]:
@@ -49,27 +48,113 @@ def is_fp8_available() -> Tuple[bool, str]:
     return _is_fp8_available, _reason_for_no_fp8
 
 
-# Functions used to access fp8 status
-def is_fp8_enabled() -> bool:
-    """Is FP8 enabled"""
-    return _FP8_ENABLED
+class FP8State:
+    """Stores FP8 state"""
+
+    def __init__(self):
+        self._fp8_enabled = False
+        self._fp8_calibration = False
+        self._fp8_recipe = None
+        self._fp8_distributed_group = None
+        self._is_first_fp8_module = False
+        self._fp8_autocast_counter = 0
+        self._fp8_autocast_depth = 0
+        self._fp8_recompute_enabled = False
+        self._fp8_fwd_buffer = FP8MetaFwdBuffer()
+        self._fp8_bwd_buffer = FP8MetaBwdBuffer()
+        self._fp8_recompute_buffer = FP8RecomputeBuffer()
+
+    def is_fp8_enabled(self) -> bool:
+        """Is FP8 enabled"""
+        return self._fp8_enabled
+
+    def is_fp8_calibration(self) -> bool:
+        """Is FP8 calibration"""
+        return self._fp8_calibration
+
+    def get_fp8_recipe(self) -> DelayedScaling:
+        """Return the fp8 recipe"""
+        return self._fp8_recipe
+
+    @staticmethod
+    def get_default_fp8_recipe() -> DelayedScaling:
+        """FP8 recipe if not provided by user
+        Margin = 0, interval = 1, E4M3
+        """
+        return DelayedScaling()
+
+    def get_autocast_id(self) -> int:
+        """Returns the number of times of entering the `fp8_autocast` context.
+        as a unique ID for different training steps."""
+        return self._fp8_autocast_counter
+
+    def is_first_fp8_module(self):
+        """Returns `True` only the first time when called multiple
+        times from within the same `fp8_autocast` context.
+        """
+        tmp = self._is_first_fp8_module
+        self._is_first_fp8_module = False
+        return tmp
+
+    def get_fp8_group(self) -> Union[dist_group_type, None]:
+        """Return the fp8 group for scale/amax comm"""
+        return self._fp8_distributed_group
+
+    def get_fp8_fwd_buffer(self) -> FP8MetaFwdBuffer:
+        """Returns global fp8 forward buffer."""
+        return self._fp8_fwd_buffer
+
+    def get_fp8_bwd_buffer(self) -> FP8MetaBwdBuffer:
+        """Returns global fp8 backward buffer."""
+        return self._fp8_bwd_buffer
+
+    def is_fp8_recompute_enabled(self) -> bool:
+        """Is FP8 recompute enabled"""
+        return self._fp8_recompute_enabled
+
+    def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
+        """Returns global fp8 recompute buffer."""
+        return self._fp8_recompute_buffer
+
+    def enter(
+        self,
+        enabled: bool,
+        calibrating: bool,
+        fp8_recipe: Optional[DelayedScaling],
+        fp8_group: Optional[dist_group_type],
+    ) -> None:
+        """Called when entering 'fp8_autocast'"""
+        self.saved_states = (self._fp8_enabled, self._fp8_calibration, self._fp8_recipe,
+                             self._fp8_distributed_group, self._is_first_fp8_module)
+
+        self._fp8_enabled = enabled
+        self._fp8_calibration = calibrating
+        self._fp8_recipe = self.get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        self._fp8_distributed_group = fp8_group
+
+        if self._fp8_autocast_depth == 0:
+            self._is_first_fp8_module = True
+            self._fp8_autocast_counter += 1
+        self._fp8_autocast_depth += 1
+
+    def exit(self):
+        """Called when exiting 'fp8_autocast'"""
+        # Restore saved states
+        (self._fp8_enabled, self._fp8_calibration, self._fp8_recipe, self._fp8_distributed_group,
+         self._is_first_fp8_module) = self.saved_states
+
+        self._fp8_autocast_depth -= 1
+
+        if self._fp8_autocast_depth == 0:
+            self._fp8_fwd_buffer.finalize()
 
 
-def is_fp8_calibration() -> bool:
-    """Is FP8 calibration"""
-    return _FP8_CALIBRATION
+_global_fp8_state = FP8State()
 
 
-def get_fp8_recipe() -> DelayedScaling:
-    """Return the fp8 recipe"""
-    return _FP8_RECIPE
-
-
-def get_default_fp8_recipe() -> DelayedScaling:
-    """FP8 recipe if not provided by user
-    Margin = 0, interval = 1, E4M3
-    """
-    return DelayedScaling()
+def get_global_fp8_state() -> FP8State:
+    """Get global fp8 state"""
+    return _global_fp8_state
 
 
 @contextmanager
@@ -77,24 +162,20 @@ def fp8_autocast(
     enabled: bool = False,
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
+    fp8_group: Optional[dist_group_type] = None,
 ) -> None:
     """
     Context manager for FP8 usage.
     """
-
-    global _FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE
-    fp8_state = (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE)
     try:
-        _FP8_ENABLED = enabled
-        _FP8_CALIBRATION = calibrating
-        _FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        _global_fp8_state.enter(enabled, calibrating, fp8_recipe, fp8_group)
 
         if enabled:
             fp8_available, reason_for_no_fp8 = is_fp8_available()
             assert fp8_available, reason_for_no_fp8
         yield
     finally:
-        (_FP8_ENABLED, _FP8_CALIBRATION, _FP8_RECIPE) = fp8_state
+        _global_fp8_state.exit()
 
 
 def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:

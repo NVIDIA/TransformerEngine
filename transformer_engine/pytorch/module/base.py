@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import io
 import os
 import pickle
 import warnings
@@ -11,36 +12,17 @@ from typing import Generator, Union, Optional, Tuple, Dict, Any, List
 from functools import partial
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
+from ..export import is_in_onnx_export_mode
 from ..fp8 import (
-    is_fp8_enabled,
-    is_fp8_calibration,
-    get_fp8_recipe,
-    get_fp8_group,
     get_default_fp8_recipe,
     get_fp8_te_dtype,
-    is_first_fp8_module,
-    new_fp8_context_id,
-    get_fp8_context_id,
-    set_fp8_context_id,
-    add_amax_to_global_buffer,
-    copy_amax_from_global_buffer,
-    global_amax_reduction,
-    setup_amax_forward_global_reduce_func,
+    FP8GlobalStateManager,
     amax_and_scale_update,
-    get_global_fp8_buffer,
-    set_global_fp8_buffer,
-    set_amax_buffer_key_deletion,
-    delete_key_from_amax_buffer,
-    copy_forward_fp8_meta_tensors_for_recompute,
-    get_old_fp8_meta_tensors_for_recompute,
-    restore_fp8_meta_tensors,
-    get_amax_reduce_handle_fwd,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -99,27 +81,27 @@ def _prepare_backward(
             amax_and_scale_update(fp8_meta, False)
         else:
             # From previous iteration
-            copy_amax_from_global_buffer(fp8_meta, forward=False)
+            FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
             amax_and_scale_update(fp8_meta, False)
-            set_amax_buffer_key_deletion(fp8_meta, forward=False)
+            FP8GlobalStateManager.set_amax_buffer_key_deletion(fp8_meta, forward=False)
 
             # Get new backward key.
             fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
-            add_amax_to_global_buffer(fp8_meta, forward=False)
+            FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
 
     if fp8 and fp8_meta["recipe"].reduce_amax:
         if fp8_meta["first_module"]:
-            _amax_reduce_handle_bwd = global_amax_reduction(
+            _amax_reduce_handle_bwd = FP8GlobalStateManager.global_amax_reduction(
                 fp8_meta,
                 tp_group,
                 tp_size,
                 forward=False
             )
-            delete_key_from_amax_buffer(forward=False)
+            FP8GlobalStateManager.delete_key_from_amax_buffer(forward=False)
 
 
 def initialize_ub(
@@ -355,19 +337,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
             state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
             state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
-            state["global_fp8_buffer"] = get_global_fp8_buffer()
+            state["global_fp8_buffer"] = FP8GlobalStateManager.get_global_fp8_buffer_checkpoint()
+            state["global_fp8_state"] = FP8GlobalStateManager.get_global_fp8_state_checkpoint()
 
             # Store other pickelable values.
             extra = {}
             for k, v in self.fp8_meta.items():
-                if isinstance(v, (bool, int, float, str)):
+                if isinstance(v, (bool, int, float, str, list)):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
-        state_serialized = pickle.dumps(state)
-        state_tensor = torch.tensor(np.frombuffer(state_serialized, dtype=np.uint8))
+        if is_in_onnx_export_mode():
+            state_serialized = torch.frombuffer(pickle.dumps(state), dtype=torch.uint8)
+        else:
+            state_serialized = io.BytesIO()
+            torch.save(state, state_serialized)
 
-        return state_tensor
+        return state_serialized
 
     def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
@@ -399,7 +385,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
 
             # Restore global FP8 buffer state.
-            set_global_fp8_buffer(state[4])
+            FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state[4])
             self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
             self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
             self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
@@ -409,11 +395,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if isinstance(state, torch.Tensor):
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
-            if state is None:
-                return
+        elif isinstance(state, io.BytesIO):
+            state.seek(0)
+            state = torch.load(state, map_location='cuda')
 
-        # Restore global FP8 buffer states.
-        set_global_fp8_buffer(state["global_fp8_buffer"])
+        if state is None:
+            return
+
+        # Restore global FP8 amax buffer.
+        FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffer"])
+        # Restore global FP8 state.
+        if "global_fp8_state" in state:
+            FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
+        else:
+            warnings.warn(
+                "This checkpoint format is deprecated and will be"
+                "removed in a future release of Transformer Engine"
+            )
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
@@ -517,19 +515,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8 = is_fp8_enabled()
-        self.fp8_calibration = is_fp8_calibration()
+        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
-            if self.fp8_initialized and get_fp8_recipe() == self.fp8_meta["recipe"]:
+            if (self.fp8_initialized
+                and FP8GlobalStateManager.get_fp8_recipe() == self.fp8_meta["recipe"]):
                 return
 
             # Set FP8, recipe, and other FP8 metadata
-            self.fp8_meta["recipe"] = get_fp8_recipe()
+            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
             self.fp8_meta["num_gemms"] = num_gemms
-            self.fp8_meta["fp8_group"] = get_fp8_group()
+            self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
             self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
@@ -559,7 +558,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             assert inp.is_cuda, "TransformerEngine needs CUDA."
 
@@ -583,11 +582,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
                 if self.fp8_meta["recipe"].reduce_amax:
-                    copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+                    FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
                     )
-                    set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+                    FP8GlobalStateManager.set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
                 else:
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -596,20 +595,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.fp8 and self.training:
                 # Setup for amax reduction
                 if self.fp8_meta["recipe"].reduce_amax:
-                    self.fp8_meta["first_module"] = is_first_fp8_module()
+                    self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
                         # Wait for the prior AMAX reduction to finish
-                        amax_reduce_handle_fwd = get_amax_reduce_handle_fwd()
+                        amax_reduce_handle_fwd = FP8GlobalStateManager.get_amax_reduce_handle_fwd()
                         if amax_reduce_handle_fwd is not None:
                             amax_reduce_handle_fwd.wait()
-                        self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-                        set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+                        self.fp8_meta["autocast_id_fwd"] = (
+                            FP8GlobalStateManager.new_fp8_context_id())
+                        FP8GlobalStateManager.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
                     else:
-                        self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+                        self.fp8_meta["autocast_id_fwd"] = (
+                            FP8GlobalStateManager.get_fp8_context_id())
                     self.fp8_meta["autocast_id_fwd_stack"].append(
                         self.fp8_meta["autocast_id_fwd"]
                     )
-                    add_amax_to_global_buffer(self.fp8_meta, forward=True)
+                    FP8GlobalStateManager.add_amax_to_global_buffer(self.fp8_meta, forward=True)
                 self.fp8_meta["update_amax_and_scale_fwd"] = True
             else:
                 self.fp8_meta["update_amax_and_scale_fwd"] = False
@@ -621,25 +622,25 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 and is_fp8_activation_recompute_enabled()
                 and not in_fp8_activation_recompute_phase()
             ):
-                copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
             yield inp.contiguous()
 
         if self.fp8 and in_fp8_activation_recompute_phase():
-            restore_fp8_meta_tensors(self.fp8_meta)
+            FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
             return
 
         if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
-            set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+            FP8GlobalStateManager.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
-                global_amax_reduction,
+                FP8GlobalStateManager.global_amax_reduction,
                 self.fp8_meta,
                 self.tp_group,
                 self.tp_size,
                 forward=True
             )
-            setup_amax_forward_global_reduce_func(reduce_func)
+            FP8GlobalStateManager.setup_amax_forward_global_reduce_func(reduce_func)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
