@@ -26,7 +26,11 @@ void te_gemm(at::Tensor A,
              size_t workspaceSize,
              bool accumulate,
              bool use_split_accumulator,
-             int math_sm_count
+             int math_sm_count,
+             int m_split,
+             int n_split,
+             bool gemm_producer,
+             at::Tensor counter
 ) {
   using namespace transformer_engine;
   auto te_A = makeTransformerEngineTensor(A.data_ptr(),
@@ -46,6 +50,8 @@ void te_gemm(at::Tensor A,
                                           D_scale.data_ptr(), nullptr);
   auto te_bias = makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))},
                                              bias_type);
+  auto te_counter = makeTransformerEngineTensor(counter.data_ptr(), {static_cast<size_t>(counter.size(0))},
+                                             DType::kInt32);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                           ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
@@ -71,5 +77,9 @@ void te_gemm(at::Tensor A,
                    accumulate,
                    use_split_accumulator,
                    math_sm_count,
+                   m_split,
+                   n_split,
+                   gemm_producer,
+                   te_counter.data(),
                    at::cuda::getCurrentCUDAStream());
 }
