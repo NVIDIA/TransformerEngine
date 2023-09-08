@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """Utility functions for Transformer Engine modules"""
 
-from typing import Union
+from typing import Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
@@ -86,3 +86,38 @@ def divide(numerator: int, denominator: int) -> int:
     the division value."""
     assert (numerator % denominator == 0), f"{numerator} is not divisible by {denominator}"
     return numerator // denominator
+
+
+def save_for_backward_allow_none(ctx, *args) -> None:
+    """Save tensors for backward. Args could be None"""
+    indices_mapping = []
+    tensors_to_save = []
+    for x in args:
+        if isinstance(x, paddle.Tensor):
+            indices_mapping.append(len(tensors_to_save))
+            tensors_to_save.append(x)
+        elif x is None:
+            indices_mapping.append(-1)
+        else:
+            raise ValueError(f"Type {type(x)} is not allowed.")
+
+    ctx._indices_mapping = indices_mapping
+    ctx.save_for_backward(*tensors_to_save)
+
+
+def saved_tensor_allow_none(ctx) -> Tuple[Optional[paddle.Tensor]]:
+    """Used with `save_for_backward_allow_none` in pair. Get saved tensors from ctx."""
+    assert hasattr(ctx, '_indices_mapping'), "`saved_tensor_allow_none` must be used " \
+        "with `save_for_backward_allow_none` in pair."
+
+    indices_mapping = ctx._indices_mapping
+    outputs = []
+    saved_tensors = ctx.saved_tensor()
+
+    for index in indices_mapping:
+        if index < 0:
+            outputs.append(None)
+        else:
+            outputs.append(saved_tensors[index])
+
+    return tuple(outputs)
