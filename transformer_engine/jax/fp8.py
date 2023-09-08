@@ -310,11 +310,9 @@ class FP8Helper:
                 amax = fp8_meta_arrays[fp8_amax_idx][..., 0:1]
             scale = fp8_meta_arrays[fp8_scale_idx]
 
-            exp = jnp.floor(jnp.log2(fp8_max / amax)) - FP8Helper.MARGIN
-            sf = jnp.round(jnp.power(2, jnp.abs(exp)))
+            sf = fp8_max / amax
             sf = jnp.where(amax > 0.0, sf, scale)
             sf = jnp.where(jnp.isfinite(amax), sf, scale)
-            scale = jnp.where(exp < 0, 1 / sf, sf)
             fp8_meta_arrays[fp8_scale_idx] = scale
             fp8_meta_arrays[fp8_scale_inv_idx] = 1 / scale
 
