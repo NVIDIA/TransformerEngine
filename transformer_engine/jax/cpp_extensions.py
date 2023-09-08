@@ -190,14 +190,27 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
     """
     XLA custom call warpper
     """
-    out = custom_call(name,
-                      args.output_types,
-                      args.operands,
-                      operand_layouts=args.operand_layouts,
-                      result_layouts=args.output_layouts,
-                      backend_config=opaque,
-                      has_side_effect=has_side_effect,
-                      **kwargs)
+    if hasattr(mlir, "custom_call"):
+        out = mlir.custom_call(name,
+                               result_types=args.output_types,
+                               operands=args.operands,
+                               operand_layouts=args.operand_layouts,
+                               result_layouts=args.output_layouts,
+                               backend_config=opaque,
+                               has_side_effect=has_side_effect,
+                               **kwargs).results
+    else:
+        # Need to disable one pylint error as the second function
+        # parameter name recenctly in JAX. Otherwise we won't be
+        # compatible with multiple JAX version.
+        out = custom_call(name,    # pylint: disable=too-many-function-args
+                          args.output_types,
+                          operands=args.operands,
+                          operand_layouts=args.operand_layouts,
+                          result_layouts=args.output_layouts,
+                          backend_config=opaque,
+                          has_side_effect=has_side_effect,
+                          **kwargs)
     return out
 
 

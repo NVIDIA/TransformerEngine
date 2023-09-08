@@ -50,3 +50,5 @@ LayerTypes = ("encoder", "decoder")
 GemmParallelModes = ("row", "column", None)
 
 dist_group_type = paddle.distributed.collective.Group
+
+RecomputeFunctionNames = ('unpack', 'backward')
