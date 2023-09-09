@@ -1330,19 +1330,31 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
-        // quick estimate of workspace size for qkv, dqkv, o, do, softmaxStats, softmaxSum, dp
-        size_t free_byte;
-        size_t total_byte;
-        NVTE_CHECK_CUDA(cudaMemGetInfo(&free_byte, &total_byte));
-        size_t max_seqlen_div_up = ((max_seqlen + 64 - 1) / 64) * 64;
-        size_t wkspace_size = 8 * batch * num_head * max_seqlen_div_up * head_dim * 2
-                        + 2 * batch * num_head * max_seqlen_div_up * sizeof(float)
-                        + batch * num_head * max_seqlen_div_up * max_seqlen_div_up * 2;
-        size_t max_allowed = 1024 * 1024 * 1024;
-
-        use_workspace_opt = (free_byte > wkspace_size) && (wkspace_size < max_allowed);
+        // quick estimate of dp workspace size
+        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        size_t required_dp_workspace =
+        (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
+        // default upper limit for dp workspace 256MB
+        size_t max_allowed_dp_workspace = 256;
+        std::string env_dp_workspace_limit(std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT"));
+        if (!env_dp_workspace_limit.empty()) {
+            try {
+                int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
+                if (dp_workspace_limit > max_allowed_dp_workspace) {
+                    max_allowed_dp_workspace = dp_workspace_limit;
+                }
+            } catch {
+                NVTE_ERROR(
+                "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
+            }
+        }
+        if (required_dp_workspace < max_allowed_dp_workspace) {
+                use_workspace_opt = true;
+        }
     }
 #endif
+    std::cout << "use opt: " << (int)use_workspace_opt << std::endl;
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
