@@ -1326,6 +1326,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     size_t workspace_size = 0;
 
     bool use_workspace_opt = false;
+    std::cout << "enter danger zone: " << std::endl;
 #if (CUDNN_VERSION >= 8905)
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
@@ -1337,12 +1338,16 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
-        std::string env_dp_workspace_limit(std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT"));
-        if (!env_dp_workspace_limit.empty()) {
+        const char* env_workspace_limit_char = std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT");
+        if (env_workspace_limit_char != nullptr) {
+    std::cout << "const char is not nullptr: " << std::endl;
             try {
+                std::string env_dp_workspace_limit(env_workspace_limit_char);
                 int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
+    std::cout << "dp limit is: " << dp_workspace_limit << std::endl;
                 if (dp_workspace_limit > max_allowed_dp_workspace) {
                     max_allowed_dp_workspace = dp_workspace_limit;
+    std::cout << "max is updated: " << std::endl;
                 }
             } catch (...) {
                 NVTE_ERROR(
