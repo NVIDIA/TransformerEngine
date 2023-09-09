@@ -1331,8 +1331,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
         // quick estimate of dp workspace size
-        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
-        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_q = ((max_seqlen + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_kv = ((max_seqlen + 64 - 1) / 64) * 64;
         size_t required_dp_workspace =
         (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
         // default upper limit for dp workspace 256MB
@@ -1344,7 +1344,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                 if (dp_workspace_limit > max_allowed_dp_workspace) {
                     max_allowed_dp_workspace = dp_workspace_limit;
                 }
-            } catch {
+            } catch (...) {
                 NVTE_ERROR(
                 "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
             }
