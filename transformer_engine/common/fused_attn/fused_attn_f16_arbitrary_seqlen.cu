@@ -1354,7 +1354,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         }
     }
 #endif
-    std::cout << "use opt: " << (int)use_workspace_opt << std::endl;
+    std::cout << "use opt: " << static_cast<int>(use_workspace_opt) << std::endl;
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
