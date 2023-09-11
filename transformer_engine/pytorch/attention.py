@@ -963,8 +963,6 @@ class FlashAttention(torch.nn.Module):
                     **fa_optional_forward_kwargs
                 )
         else:
-            if _flash_attn_2_available:
-                assert False, "Context parallelism is only implemented with Flash Attention v1!"
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
                     query_layer, key_layer, value_layer,
