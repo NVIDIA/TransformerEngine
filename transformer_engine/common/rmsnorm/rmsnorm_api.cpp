@@ -146,7 +146,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     params.rows = rows;
     params.cols = cols;
     params.x = x.data.dptr;
-    params.mu = nullptr;
     params.rs = rsigma->data.dptr;
     params.gamma = gamma.data.dptr;
     params.beta = nullptr;
@@ -194,18 +193,19 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     return;
 }
 
-void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const Tensor &gamma,
-                 Tensor *dx, Tensor *dgamma, Tensor *dgamma_part, cudaStream_t stream,
-                 const int multiprocessorCount, Tensor *workspace, Tensor *barrier) {
+void rmsnorm_bwd(const Tensor &dz, const Tensor &z, const Tensor &x, const Tensor &rsigma,
+                 const Tensor &gamma, Tensor *dx, Tensor *dgamma, Tensor *dgamma_part,
+                 const float epsilon, cudaStream_t stream, const int multiprocessorCount,
+                 Tensor *workspace, Tensor *barrier) {
     using namespace transformer_engine;
 
     auto itype = x.data.dtype;
     auto wtype = gamma.data.dtype;
-    auto otype = wtype;
+    auto otype = z.data.dtype;
     auto ctype = DType::kFloat32;
 
     CheckInputTensor(dz, "dz");
-    CheckInputTensor(x, "x");
+    CheckInputTensor(z, "z");
     CheckInputTensor(rsigma, "rsigma");
     CheckInputTensor(gamma, "gamma");
     CheckOutputTensor(*dx, "dx");
@@ -214,20 +214,22 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     NVTE_CHECK(dz.data.dtype == otype);
     NVTE_CHECK(rsigma.data.dtype == ctype);
 
-    NVTE_CHECK(x.data.shape.size() == 2);
-    NVTE_CHECK(dz.data.shape == x.data.shape);
+    NVTE_CHECK(z.data.shape.size() == 2);
+    NVTE_CHECK(dz.data.shape == z.data.shape);
 
-    const auto rows = x.data.shape[0];
-    const auto cols = x.data.shape[1];
+    const auto rows = z.data.shape[0];
+    const auto cols = z.data.shape[1];
     const auto hidden_size = gamma.data.shape[0];
 
     NVTE_CHECK(gamma.data.shape[0] == cols);
 
-    NVTE_CHECK(dx->data.shape == x.data.shape);
+    NVTE_CHECK(dx->data.shape == z.data.shape);
     NVTE_CHECK(dx->data.dtype == x.data.dtype);
 
     NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
     NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
+
+    NVTE_CHECK(epsilon >= 0.f);
 
     rmsnorm::LaunchParams<rmsnorm::BwdParams> launch_params;
     launch_params.stream = stream;
@@ -239,8 +241,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     rmsnorm::BwdParams &params = launch_params.params;
     params.rows = rows;
     params.cols = cols;
-    params.x = x.data.dptr;
-    params.mu = nullptr;
+    params.z = z.data.dptr;
     params.rs = rsigma.data.dptr;
     params.gamma = gamma.data.dptr;
     params.dz = dz.data.dptr;
@@ -249,6 +250,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     params.dgamma = dgamma->data.dptr;
     params.dbeta_part = nullptr;
     params.dgamma_part = dgamma_part->data.dptr;
+    params.epsilon = epsilon;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -295,16 +297,19 @@ void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
 }
 
 void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
-                      const NVTETensor x,       // Nxhidden_size
+                      const NVTETensor z,       // Nxhidden_size
+                      const NVTETensor x,       // Only needed for dtype
                       const NVTETensor rsigma,  // N, FP32!
                       const NVTETensor gamma,   // hidden_size
-                      NVTETensor dx, NVTETensor dgamma, NVTETensor dgamma_part, cudaStream_t stream,
-                      const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
+                      NVTETensor dx, NVTETensor dgamma, NVTETensor dgamma_part, const float epsilon,
+                      cudaStream_t stream, const int multiprocessorCount, NVTETensor workspace,
+                      NVTETensor barrier) {
   NVTE_API_CALL(nvte_rmsnorm_bwd);
   using namespace transformer_engine;
-  rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
+  rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(z),
+              *reinterpret_cast<const Tensor *>(x),
               *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
               reinterpret_cast<Tensor *>(dx), reinterpret_cast<Tensor *>(dgamma),
-              reinterpret_cast<Tensor *>(dgamma_part), stream, multiprocessorCount,
+              reinterpret_cast<Tensor *>(dgamma_part), epsilon, stream, multiprocessorCount,
               reinterpret_cast<Tensor *>(workspace), reinterpret_cast<Tensor *>(barrier));
 }

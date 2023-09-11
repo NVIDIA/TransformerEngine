@@ -39,12 +39,13 @@ struct ParamsBase {
         : ctas_per_col(0)
         , rows(0)
         , cols(0)
-        , x(nullptr)
-        , mu(nullptr)
+        , z(nullptr)
         , rs(nullptr)
         , gamma(nullptr)
+        , beta(nullptr)
         , workspace(nullptr)
         , barrier(nullptr)
+        , epsilon(0.f)
         , zero_centered_gamma(false) {}
 
 
@@ -58,10 +59,10 @@ struct ParamsBase {
     int cols;
 
     // Common data pointers.
-    void *x;
-    void *mu;
+    void *z;
     void *rs;
     void *gamma;
+    void *beta;
 
     // Multi-CTA workspace in gmem.
     void *workspace;
@@ -71,6 +72,8 @@ struct ParamsBase {
 
     // Whether gamma is centered around 0
     bool zero_centered_gamma;
+    // small constant for numerical stability
+    float epsilon;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -78,15 +81,11 @@ struct ParamsBase {
 struct FwdParams : public ParamsBase {
     FwdParams()
         : ParamsBase()
-        , z(nullptr)
-        , beta(nullptr)
-        , epsilon(0.f)
+        , x(nullptr)
         , fp8_out(false) {}
 
-    // Output of LN FWD.
-    void *z;
-    void *beta;
-    float epsilon;
+    // Input of LN FWD.
+    void *x;
 
     // Scaling factor
     void *scale;

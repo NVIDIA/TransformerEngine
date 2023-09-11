@@ -14,6 +14,19 @@ namespace transformer_engine {
 namespace layer_norm {
 using namespace transformer_engine;
 
+template<typename V> __device__
+V clamp_by_magnitude(V curr_gamma, float eps) {
+  const V kMinGamma = V(eps);
+  if (curr_gamma >= 0) {
+        if (curr_gamma < kMinGamma) {
+            return kMinGamma;
+        }
+    } else if  (curr_gamma > -kMinGamma) {
+        return -kMinGamma;
+    }
+    return curr_gamma;
+}
+
 template<typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA)
 void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
@@ -68,10 +81,12 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
 
     constexpr float rn = 1.f / static_cast<float>(COLS);
     Wvec gamma[LDGS];
+    Wvec beta[LDGS];
     index_t idx = c;
     #pragma unroll
     for ( int it = 0; it < LDGS; it++ ) {
         gamma[it].load_from(params.gamma, idx);
+        beta[it].load_from(params.beta, idx);
         idx += Ktraits::VEC_COLS_PER_LDG;
     }
     // TODO if ROWS_PER_CTA does not divide rows, we might get divergence in the
@@ -79,15 +94,14 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
     // grid stride over rows
     #pragma unroll 1
     for ( int row = r; row < params.rows; row += params.ctas_per_col * ROWS_PER_CTA ) {
-        const compute_t mu_r = static_cast<const compute_t *>(params.mu)[row];
         const compute_t rs_r = static_cast<const compute_t *>(params.rs)[row];
-        Ivec x[LDGS];
+        Ovec z[LDGS];
         Ovec dz[LDGS];
         index_t idx = row * Ktraits::VEC_COLS + c;
         #pragma unroll
         for ( int it = 0; it < LDGS; it++ ) {
             dz[it].load_from(params.dz, idx);
-            x[it].load_from(params.x, idx);
+            z[it].load_from(params.z, idx);
             idx += Ktraits::VEC_COLS_PER_LDG;
         }
 
@@ -100,11 +114,13 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
         for ( int it = 0; it < LDGS; it++ ) {
             #pragma unroll
             for ( int jt = 0; jt < NUM_ELTS; jt++ ) {
-                const compute_t x_tmp = x[it].data.elt[jt];
-                const compute_t y_tmp = rs_r * (x_tmp - mu_r);
                 const compute_t dy_tmp_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
-                compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]) + dy_tmp_shift;
-                dy_tmp *= compute_t(dz[it].data.elt[jt]);
+                compute_t gamma_tmp = compute_t(gamma[it].data.elt[jt]) + dy_tmp_shift;
+                compute_t beta_tmp = compute_t(beta[it].data.elt[jt]);
+                const compute_t z_tmp = z[it].data.elt[jt];
+                const compute_t y_tmp = (z_tmp - beta_tmp) / clamp_by_magnitude(
+                    gamma_tmp, params.epsilon);
+                compute_t dy_tmp = compute_t(dz[it].data.elt[jt]) * gamma_tmp;
                 compute_t dz_tmp = dz[it].data.elt[jt];
 
                 mdy_local += dy_tmp;
@@ -377,6 +393,7 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
 
     // Load weights
     Cvec gamma[LDGS];
+    Cvec beta[LDGS];
     #pragma unroll
     for ( int it = 0, col = gidn * NUM_ELTS;
           it < LDGS && col < params.cols;
@@ -384,6 +401,9 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
         Wvec gamma_in;
         gamma_in.load_from_elts(params.gamma, col, params.cols - col);
         gamma_in.to(gamma[it]);
+        Wvec beta_in;
+        beta_in.load_from_elts(params.beta, col, params.cols - col);
+        beta_in.to(beta[it]);
     }
 
     for ( int cta_row = bidm * bdimm;
@@ -393,7 +413,6 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
         compute_t mu = 0.f;
         compute_t rs = 0.f;
         if ( row < params.rows ) {
-            mu = static_cast<const compute_t *>(params.mu)[row];
             rs = static_cast<const compute_t *>(params.rs)[row];
         }
 
@@ -406,16 +425,17 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
         for ( int it = 0, col = gidn * NUM_ELTS;
               it < LDGS && row < params.rows && col < params.cols;
               it++, col += gdimn * NUM_ELTS ) {
-            Ivec x;
+            Ovec z;
             Ovec dz;
-            x.load_from_elts(params.x, row * params.cols + col, params.cols - col);
+            z.load_from_elts(params.z, row * params.cols + col, params.cols - col);
             dz.load_from_elts(params.dz, row * params.cols + col, params.cols - col);
             #pragma unroll
             for ( int jt = 0; jt < NUM_ELTS; jt++ ) {
-                const compute_t x_ij = x.data.elt[jt];
-                const compute_t y_ij = rs * (x_ij - mu);
+                const compute_t z_ij = z.data.elt[jt];
                 const compute_t g_ij_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
                 const compute_t g_ij = gamma[it].data.elt[jt] + g_ij_shift;
+                const compute_t b_ij = beta[it].data.elt[jt];
+                const compute_t y_ij = (z_ij - b_ij) / clamp_by_magnitude(g_ij, params.epsilon);
                 const compute_t dz_ij = dz.data.elt[jt];
                 const compute_t dy_ij = g_ij * dz_ij;
 

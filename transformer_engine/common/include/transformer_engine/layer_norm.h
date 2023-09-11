@@ -33,8 +33,6 @@ extern "C" {
  *  \param[in]     beta                Beta tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
  *  \param[in,out] z                   Output tensor of shape [N, H].
- *  \param[out]    mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     stream              CUDA stream used for the operation.
@@ -47,7 +45,6 @@ void nvte_layernorm_fwd(const NVTETensor x,
                         const NVTETensor beta,
                         const float epsilon,
                         NVTETensor z,
-                        NVTETensor mu,
                         NVTETensor rsigma,
                         cudaStream_t stream,
                         const int multiprocessorCount,
@@ -70,8 +67,6 @@ void nvte_layernorm_fwd(const NVTETensor x,
  *  \param[in]     beta                Beta tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
  *  \param[in,out] z                   Output tensor of shape [N, H].
- *  \param[out]    mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     stream              CUDA stream used for the operation.
@@ -84,7 +79,6 @@ void nvte_layernorm1p_fwd(const NVTETensor x,
                           const NVTETensor beta,
                           const float epsilon,
                           NVTETensor z,
-                          NVTETensor mu,
                           NVTETensor rsigma,
                           cudaStream_t stream,
                           const int multiprocessorCount,
@@ -105,9 +99,8 @@ void nvte_layernorm1p_fwd(const NVTETensor x,
  * of these tensors to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
- *  \param[in]     mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
+ *  \param[in]     z                   Forward output tensor of shape [N, H].
+ *  \param[in]     x                   Tensor that shares the same type as the forward input tensor.
  *  \param[in]     rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
@@ -116,21 +109,24 @@ void nvte_layernorm1p_fwd(const NVTETensor x,
  *  \param[out]    dbeta               Gradient for beta tensor of shape [H].
  *  \param[out]    dgamma_part         Storage for partial gamma gradient.
  *  \param[out]    dbeta_part          Storage for partial bias gradient.
+ *  \param[in]     epsilon             Small constant to avoid numerical instability when dividing
  *  \param[in]     stream              CUDA stream used for the operation.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
 void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
-                        const NVTETensor x,        // BxSxhidden_size
-                        const NVTETensor mu,       // BxS, FP32!
+                        const NVTETensor z,        // BxSxhidden_size
+                        const NVTETensor x,        // Only needed for dtype
                         const NVTETensor rsigma,   // BxS, FP32!
                         const NVTETensor gamma,    // hidden_size
+                        const NVTETensor beta,     // hidden_size
                         NVTETensor dx,
                         NVTETensor dgamma,
                         NVTETensor dbeta,
                         NVTETensor dgamma_part,
                         NVTETensor dbeta_part,
+                        float epsilon,
                         cudaStream_t stream,
                         const int multiprocessorCount,
                         NVTETensor workspace,
@@ -149,9 +145,8 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
  * of these tensors to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
- *  \param[in]     mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
+ *  \param[in]     z                   Forward output tensor of shape [N, H].
+ *  \param[in]     x                   Tensor that shares the same type as the forward input tensor.
  *  \param[in]     rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
@@ -160,21 +155,24 @@ void nvte_layernorm_bwd(const NVTETensor dz,       // BxSxhidden_size
  *  \param[out]    dbeta               Gradient for beta tensor of shape [H].
  *  \param[out]    dgamma_part         Storage for partial gamma gradient.
  *  \param[out]    dbeta_part          Storage for partial bias gradient.
+ *  \param[in]     epsilon             Small constant to avoid numerical instability when dividing
  *  \param[in]     stream              CUDA stream used for the operation.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
  *  \param[out]    workspace           Workspace tensor.
  *  \param[out]    barrier             Barrier tensor.
  */
 void nvte_layernorm1p_bwd(const NVTETensor dz,       // BxSxhidden_size
-                          const NVTETensor x,        // BxSxhidden_size
-                          const NVTETensor mu,       // BxS, FP32!
+                          const NVTETensor z,        // BxSxhidden_size
+                          const NVTETensor x,        // Only needed for dtype
                           const NVTETensor rsigma,   // BxS, FP32!
                           const NVTETensor gamma,    // hidden_size
+                          const NVTETensor beta,    // hidden_size
                           NVTETensor dx,
                           NVTETensor dgamma,
                           NVTETensor dbeta,
                           NVTETensor dgamma_part,
                           NVTETensor dbeta_part,
+                          float epsilon,
                           cudaStream_t stream,
                           const int multiprocessorCount,
                           NVTETensor workspace,
