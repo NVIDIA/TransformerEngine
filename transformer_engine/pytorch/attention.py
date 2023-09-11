@@ -329,6 +329,10 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         p2p_comm_buffers[0][0].copy_(kv)
         send_recv_reqs = []
 
+        fa_optional_backward_kwargs = {}
+        if not _flash_attn_2_available:
+            fa_optional_backward_kwargs["num_splits"] = 1 if ctx.deterministic else 0
+
         for i in range(cp_size):
             # wait until KV is received
             for req in send_recv_reqs:
@@ -370,7 +374,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, True,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 elif i >= (cp_size-rank-1):
                     # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -388,7 +392,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q, ctx.max_seqlen_k//2,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
                 else:
                     # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -406,7 +410,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False,
                         rng_state=ctx.rng_states[cp_size-i-1],
-                        num_splits=1 if ctx.deterministic else 0,
+                        **fa_optional_backward_kwargs
                     )
 
                 if i >= (cp_size-rank-1):
