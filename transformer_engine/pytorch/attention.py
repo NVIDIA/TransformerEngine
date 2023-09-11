@@ -148,6 +148,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
         # [b, s, np, hn] -> [b, 2, s//2, np, hn]
         q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
+        if _flash_attn_2_available:
+            assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
         # Flash Attn inputs
         q_inputs = [None, None]
         kv_inputs = [None, None]
