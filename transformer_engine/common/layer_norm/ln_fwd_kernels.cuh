@@ -54,7 +54,6 @@ void ln_fwd_tuned_kernel(FwdParams params) {
 
     Stats stats(params, bidm, bidn, warp_m, warp_n, lane, smem_);
 
-    compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
     compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
 
     Wvec gamma[LDGS];
@@ -94,10 +93,6 @@ void ln_fwd_tuned_kernel(FwdParams params) {
 
         compute_t mu = layer_norm::Get<0>::of<stats_t, compute_t>(s);
         compute_t m2 = layer_norm::Get<1>::of<stats_t, compute_t>(s);
-
-        if ( bidn == 0 && warp_n == 0 && lane == 0 ) {
-            mu_ptr[row] = mu;
-        }
 
         compute_t rs = rsqrtf(rn * m2 + params.epsilon);
 
@@ -255,9 +250,7 @@ void ln_fwd_general_kernel(FwdParams params) {
 
         // Write statistics
         if ( gidn == 0 && row < params.rows ) {
-            compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
             compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
-            mu_ptr[row] = mu;
             rs_ptr[row] = rs;
         }
 

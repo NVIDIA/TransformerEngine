@@ -146,7 +146,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
                    const Tensor& beta,     // hidden_size
                    const float epsilon,
                    Tensor* z,
-                   Tensor* mu,
                    Tensor* rsigma,
                    cudaStream_t stream,
                    const int multiprocessorCount,
@@ -164,7 +163,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     CheckInputTensor(beta, "beta");
 
     CheckOutputTensor(*z, "z");
-    CheckOutputTensor(*mu, "mu");
     CheckOutputTensor(*rsigma, "rsigma");
 
     NVTE_CHECK(x.data.shape.size() == 2);
@@ -179,9 +177,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     NVTE_CHECK(epsilon >= 0.f);
 
     NVTE_CHECK(z->data.shape == x.data.shape);
-
-    NVTE_CHECK(mu->data.shape == std::vector<size_t>{ rows });
-    NVTE_CHECK(mu->data.dtype == ctype);
 
     NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{ rows });
     NVTE_CHECK(rsigma->data.dtype == ctype);
@@ -200,7 +195,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     params.rows = rows;
     params.cols = cols;
     params.x = x.data.dptr;
-    params.mu = mu->data.dptr;
     params.rs = rsigma->data.dptr;
     params.gamma = gamma.data.dptr;
     params.beta = beta.data.dptr;
@@ -374,7 +368,6 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                         const NVTETensor beta,    // hidden_size
                         const float epsilon,
                         NVTETensor z,
-                        NVTETensor mu,
                         NVTETensor rsigma,
                         cudaStream_t stream,
                         const int multiprocessorCount,
@@ -387,7 +380,6 @@ void nvte_layernorm_fwd(const NVTETensor x,       // BxSxhidden_size
                 *reinterpret_cast<const Tensor*>(beta),
                 epsilon,
                 reinterpret_cast<Tensor*>(z),
-                reinterpret_cast<Tensor*>(mu),
                 reinterpret_cast<Tensor*>(rsigma),
                 stream,
                 multiprocessorCount,
@@ -438,7 +430,6 @@ void nvte_layernorm1p_fwd(const NVTETensor x,       // BxSxhidden_size
                           const NVTETensor beta,    // hidden_size
                           const float epsilon,
                           NVTETensor z,
-                          NVTETensor mu,
                           NVTETensor rsigma,
                           cudaStream_t stream,
                           const int multiprocessorCount,
@@ -451,7 +442,6 @@ void nvte_layernorm1p_fwd(const NVTETensor x,       // BxSxhidden_size
                 *reinterpret_cast<const Tensor*>(beta),
                 epsilon,
                 reinterpret_cast<Tensor*>(z),
-                reinterpret_cast<Tensor*>(mu),
                 reinterpret_cast<Tensor*>(rsigma),
                 stream,
                 multiprocessorCount,

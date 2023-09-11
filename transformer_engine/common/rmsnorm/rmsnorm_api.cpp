@@ -146,7 +146,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     params.rows = rows;
     params.cols = cols;
     params.x = x.data.dptr;
-    params.mu = nullptr;
     params.rs = rsigma->data.dptr;
     params.gamma = gamma.data.dptr;
     params.beta = nullptr;
@@ -243,7 +242,6 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &z, const Tensor &x, const Tenso
     params.rows = rows;
     params.cols = cols;
     params.z = z.data.dptr;
-    params.mu = nullptr;
     params.rs = rsigma.data.dptr;
     params.gamma = gamma.data.dptr;
     params.dz = dz.data.dptr;

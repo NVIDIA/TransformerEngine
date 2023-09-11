@@ -9,7 +9,6 @@
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const at::Tensor &z,
                                       const at::Tensor &x,
-                                      const at::Tensor &mu,
                                       const at::Tensor &rsigma,
                                       const at::Tensor &gamma,
                                       const at::Tensor &beta,
@@ -26,7 +25,6 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
     auto dz_cu      = makeTransformerEngineTensor(dz);
     auto z_cu       = makeTransformerEngineTensor(z);
     auto x_cu       = makeTransformerEngineTensor(x);
-    auto mu_cu      = makeTransformerEngineTensor(mu);
     auto rsigma_cu  = makeTransformerEngineTensor(rsigma);
     auto gamma_cu   = makeTransformerEngineTensor(gamma);
     auto beta_cu    = makeTransformerEngineTensor(beta);
@@ -112,7 +110,6 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
 
     DType itype = GetTransformerEngineDType(input.scalar_type());
 
-    auto mu = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
     auto input_cu     = makeTransformerEngineTensor(input);
     auto gamma_cu     = makeTransformerEngineTensor(weight);
@@ -120,14 +117,13 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
     auto z_cu         = makeTransformerEngineTensor(ln_out.data_ptr(), {N, H}, otype,
                                                     getDataPtr(amax), getDataPtr(scale),
                                                     getDataPtr(scale_inv));
-    auto mu_cu        = makeTransformerEngineTensor(mu);
     auto rsigma_cu    = makeTransformerEngineTensor(rsigma);
     transformer_engine::TensorWrapper workspace, barrier;
 
     // This call populates workspace and barrier tensors with the required config
     const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
     func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
          workspace.data(), barrier.data());
 
@@ -146,11 +142,11 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(const at::Tensor &input,
 
     // Actual call to fwd kernel
     func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
-         mu_cu.data(), rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
+         rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
          workspace.data(), barrier.data());
 
-    return {ln_out, mu, rsigma};
+    return {ln_out, rsigma};
 }
 
 

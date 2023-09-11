@@ -33,8 +33,6 @@ extern "C" {
  *  \param[in]     beta                Beta tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
  *  \param[in,out] z                   Output tensor of shape [N, H].
- *  \param[out]    mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     stream              CUDA stream used for the operation.
@@ -47,7 +45,6 @@ void nvte_layernorm_fwd(const NVTETensor x,
                         const NVTETensor beta,
                         const float epsilon,
                         NVTETensor z,
-                        NVTETensor mu,
                         NVTETensor rsigma,
                         cudaStream_t stream,
                         const int multiprocessorCount,
@@ -70,8 +67,6 @@ void nvte_layernorm_fwd(const NVTETensor x,
  *  \param[in]     beta                Beta tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
  *  \param[in,out] z                   Output tensor of shape [N, H].
- *  \param[out]    mu                  Mean of the input calculated over the last dimension.
- *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     stream              CUDA stream used for the operation.
@@ -84,7 +79,6 @@ void nvte_layernorm1p_fwd(const NVTETensor x,
                           const NVTETensor beta,
                           const float epsilon,
                           NVTETensor z,
-                          NVTETensor mu,
                           NVTETensor rsigma,
                           cudaStream_t stream,
                           const int multiprocessorCount,

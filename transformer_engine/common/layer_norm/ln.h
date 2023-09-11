@@ -40,7 +40,6 @@ struct ParamsBase {
         , rows(0)
         , cols(0)
         , z(nullptr)
-        , mu(nullptr)
         , rs(nullptr)
         , gamma(nullptr)
         , beta(nullptr)
@@ -61,7 +60,6 @@ struct ParamsBase {
 
     // Common data pointers.
     void *z;
-    void *mu;
     void *rs;
     void *gamma;
     void *beta;
@@ -86,7 +84,7 @@ struct FwdParams : public ParamsBase {
         , x(nullptr)
         , fp8_out(false) {}
 
-    // Output of LN FWD.
+    // Input of LN FWD.
     void *x;
 
     // Scaling factor

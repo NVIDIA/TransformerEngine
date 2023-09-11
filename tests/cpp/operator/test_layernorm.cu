@@ -45,8 +45,8 @@ void compute_ref_stats(const InputType *data, float *mu, float *rsigma,
   }
 }
 
-template <typename InputType, typename OutputType>
-void compute_ref_output(const InputType *data, const InputType *gamma, const InputType *beta,
+template <typename InputType, typename WeightType, typename OutputType>
+void compute_ref_output(const InputType *data, const WeightType *gamma, const WeightType *beta,
                  OutputType *output, const float *mu, const float *rsigma,
                  const size_t N, const size_t H,
                  float *amax, float scale, const bool zero_centered_gamma) {
@@ -67,7 +67,8 @@ void compute_ref_output(const InputType *data, const InputType *gamma, const Inp
   *amax = current_max;
 }
 
-float clamp_by_magnitude(float g, float eps) {
+template <typename ComputeType>
+ComputeType clamp_by_magnitude(ComputeType g, const float eps) {
   if (g < 0 && g > - eps) {
     return - eps;
   }
@@ -78,12 +79,14 @@ float clamp_by_magnitude(float g, float eps) {
 }
 
 template <typename InputType, typename WeightType, typename OutputType>
-void compute_ref_backward(const OutputType *output_grad, const OutputType *data,
-                          const float *mu, const float *rsigma,
+void compute_ref_backward(const OutputType *output_grad, 
+                          const OutputType *data,
+                          const float *rsigma,
                           const WeightType *gamma,
                           const WeightType *beta,
                           InputType *data_grad,
-                          WeightType *gamma_grad, WeightType *beta_grad,
+                          WeightType *gamma_grad,
+                          WeightType *beta_grad,
                           const float eps,
                           const size_t N, const size_t H,
                           const bool zero_centered_gamma) {
@@ -130,8 +133,8 @@ void compute_ref_backward(const OutputType *output_grad, const OutputType *data,
 
   // Weight grads
   for (size_t j = 0; j < H; ++j) {
-    gamma_grad[j] = static_cast<InputType>(dgamma[j]);
-    beta_grad[j] = static_cast<InputType>(dbeta[j]);
+    gamma_grad[j] = static_cast<WeightType>(dgamma[j]);
+    beta_grad[j] = static_cast<WeightType>(dbeta[j]);
   }
 }
 
@@ -174,8 +177,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   std::unique_ptr<float[]> ref_mu = std::make_unique<float[]>(N);
   std::unique_ptr<float[]> ref_rsigma = std::make_unique<float[]>(N);
   std::unique_ptr<InputType[]> ref_dx = std::make_unique<InputType[]>(N * H);
-  std::unique_ptr<WeightType[]> ref_dgamma = std::make_unique<InputType[]>(H);
-  std::unique_ptr<WeightType[]> ref_dbeta = std::make_unique<InputType[]>(H);
+  std::unique_ptr<WeightType[]> ref_dgamma = std::make_unique<WeightType[]>(H);
+  std::unique_ptr<WeightType[]> ref_dbeta = std::make_unique<WeightType[]>(H);
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
@@ -230,7 +233,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                      ref_scale,
                      zero_centered_gamma);
   compute_ref_backward(dz.cpu_dptr<OutputType>(), ref_output.get(),
-                       mu.cpu_dptr<float>(), rsigma.cpu_dptr<float>(),
+                       rsigma.cpu_dptr<float>(),
                        gamma.cpu_dptr<WeightType>(),
                        beta.cpu_dptr<WeightType>(),
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(), epsilon,
@@ -261,7 +264,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   switch (otype) {
     case DType::kBFloat16:
       // only for one case: bfloat16Xbfloat16X256X65536X1
-      atol_bwd = 1e-1;  
+      atol_bwd = 4e-2;
       rtol_bwd = 1e-1;
       break;
     case DType::kFloat16:
