@@ -39,13 +39,13 @@ def get_tp_group_and_world_size(tp_group: Union[dist_group_type, None],
 
 
 @contextmanager
-def track_rng_state(enable: bool) -> None:
+def track_rng_state(enable: bool, **kwargs) -> None:
     """
     Applies get_rng_state_tracker().rng_state() to the context.
     If not enabled, it does nothing.
     """
     if enable:
-        with get_rng_state_tracker().rng_state():
+        with get_rng_state_tracker().rng_state(**kwargs):
             yield
     else:
         yield
