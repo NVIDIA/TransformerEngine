@@ -1350,7 +1350,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                 "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
             }
         }
-        if (required_dp_workspace < max_allowed_dp_workspace) {
+        if (required_dp_workspace <= max_allowed_dp_workspace) {
                 use_workspace_opt = true;
         }
     }
