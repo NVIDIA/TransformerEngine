@@ -90,8 +90,8 @@ struct FADescriptor {
                       rhs.b, rhs.h, rhs.s_q, rhs.s_kv, rhs.d,
                       rhs.attnScale, rhs.isTraining,
                       rhs.dropoutProbability, rhs.layout,
-                      rhs.mask_type, rhs.bias_type, rhs.tensor_type,
-                      rhs.use_workspace_opt);
+                      rhs.mask_type, rhs.bias_type,
+                      rhs.tensor_type, rhs.use_workspace_opt);
   }
 };
 

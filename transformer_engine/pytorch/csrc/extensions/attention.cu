@@ -113,7 +113,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero && (h * d % block_size == 0)) {
       mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       O.fill_(0);
@@ -414,7 +414,7 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   TensorWrapper te_Q, te_KV, te_S, te_O, te_Bias, te_cu_seqlens_q, te_cu_seqlens_kv;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    if (set_zero && ((h * d) % block_size == 0)) {
+    if (set_zero && (h * d % block_size == 0)) {
       mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
     } else {
       O.fill_(0);
