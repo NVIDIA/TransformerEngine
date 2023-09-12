@@ -284,9 +284,9 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
             out_ = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
             if i <= rank:
                 flash_attn_fwd_out_correction(out.view(*out_.shape),
-                                                       out_,
-                                                       softmax_lse,
-                                                       softmax_lse_per_step[i])
+                                              out_,
+                                              softmax_lse,
+                                              softmax_lse_per_step[i])
             else:
                 flash_attn_fwd_out_correction(out[:, 1, ...],
                                               out_,
