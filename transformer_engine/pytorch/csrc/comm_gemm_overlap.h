@@ -15,6 +15,7 @@
 #include <torch/extension.h>
 #include <torch/types.h>
 #include "userbuffers/userbuffers.h"
+#include <cuda_fp8.h>
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
@@ -54,6 +55,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
   torch::Tensor output_tensor;
   torch::Tensor counter;
   torch::Tensor _empty_tensor;
+  torch::Tensor _ubuf_scale_inv;
+  bool _ubuf_scale_inv_initialized;
   at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
   std::vector<at::cuda::CUDAStream> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
@@ -96,6 +99,7 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     _num_splits = num_splits;
     _tp_size = tp_size;
     _tp_id = (rank % tp_size);
+    _ubuf_scale_inv_initialized = false;
 
     // Set the number of SMs for GEMM with margin
     cudaDeviceProp prop;
@@ -124,7 +128,8 @@ struct UbufCommOverlap : torch::CustomClassHolder {
       int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
       at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
       transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-      size_t workspaceSize, bool accumulate, bool use_split_accumulator, int comm_type) {
+      size_t workspaceSize, bool accumulate, bool use_split_accumulator, int comm_type,
+      at::Tensor rs_output) {
     // Get the current userbuf offset
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
@@ -142,8 +147,21 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     if (_comm_type == COMM_TYPE::AG) {
       allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, (cudaStream_t)_stream_comm);
     } else if (_comm_type == COMM_TYPE::RS) {
-      reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm,
+      if (_ubuf.element_size() == 1) {
+        assert (_ubuf_scale_inv_initialized);
+        comm_elements *= 2;
+        float *scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+        assert(rs_output.numel() == _ubuf.numel() / _tp_size);
+        assert(rs_output.size(0) == _ubuf.size(0) / _tp_size);
+        assert(rs_output.element_size() == 2);
+        char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
+        reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, scale_inv_ptr, _ub_reg,
+            0, comm_elements, _ub_comm, (cudaStream_t)_stream_comm);
+      }
+      else {
+        reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm,
                                       (cudaStream_t)_stream_comm);
+      }
     } else {
       NVTE_ERROR("Not supported communication type.");
     }
@@ -228,28 +246,34 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     //CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
     for (int i = 0; i < _num_splits; i++) {
       const char* env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
-      if (env_p != nullptr && env_p[0]=='1') {
-//        if (i == _num_splits-1) {
-//          _ub_comm->sms = UB_MAX_SM;
-//        }
-        reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i*m_chunk,
-                                            m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
-      }
-      else if (env_p != nullptr && env_p[0]=='2') {
-        reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
-                                            m_chunk, n, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+      if (env_p != nullptr && env_p[0]=='2') {
+        if (_ubuf.element_size() == 1) {
+          assert (_ubuf_scale_inv_initialized);
+          std::cout << "_ubuf_scale_inv_initialized " << _ubuf_scale_inv_initialized << " _ubuf_scale_inv " << _ubuf_scale_inv << "\n";
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk,
+                                            m_chunk, n, m, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+          reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
+                                            m_chunk, n, m, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        }
         break;
       }
       else {
-        consumer(counter_ptr, i, (cudaStream_t)_stream_comm);
-//        if (i == _num_splits-1) {
-//           _ub_comm->sms = UB_MAX_SM;
-//        }
-        reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i*m_chunk,
-                                            m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        if (i == _num_splits-1) {
+          _ub_comm->sms = UB_MAX_SM;
+        }
+        if (_ubuf.element_size() == 1) {
+          assert (_ubuf_scale_inv_initialized);
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg, i*m_chunk,
+                                          m_chunk, n, m, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+          reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i*m_chunk,
+                                          m_chunk, n, m, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        }
       }
-
-      rs_output_ptr += m_chunk * _ubuf.element_size();
+      rs_output_ptr += m_chunk * rs_output.element_size();
     }
  
 //    _ub_comm->sms = ori_sms;
@@ -339,10 +363,17 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
         // Communication chunk
-        reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, (i - 1) * output_chunk_size,
-                                              m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
-
-        rs_output_ptr += m_chunk * _ubuf.element_size();
+        if (_ubuf.element_size() == 1) {
+            assert (_ubuf_scale_inv_initialized);
+            float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+            reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg,
+                (i - 1) * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        }
+        else {
+            reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
+                (i - 1) * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        }
+        rs_output_ptr += m_chunk * rs_output.element_size();
       }
       int last_compute_stream_id =
           (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
@@ -352,9 +383,16 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
       // Last communication chunk with max SM
       _ub_comm->sms = UB_MAX_SM;
-      reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
-                                            (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
-                                            _ub_comm, (cudaStream_t)_stream_comm);
+      if (_ubuf.element_size() == 1) {
+          assert (_ubuf_scale_inv_initialized);
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg,
+              (_num_splits - 1) * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+      }
+      else {
+          reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
+              (_num_splits - 1) * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+      }
     } else {
       for (int i = 0; i < _num_splits; i++) {
         torch::Tensor input_a_chunk =
@@ -378,10 +416,18 @@ struct UbufCommOverlap : torch::CustomClassHolder {
         if (i == _num_splits-1) {
           _ub_comm->sms = UB_MAX_SM;
         }
-        reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
-                                              m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        if (_ubuf.element_size() == 1) {
+            assert (_ubuf_scale_inv_initialized);
+            float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+            reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg,
+                i * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        }
+        else {
+            reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
+                i * output_chunk_size, m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        }
 
-        rs_output_ptr += m_chunk * _ubuf.element_size();
+        rs_output_ptr += m_chunk * rs_output.element_size();
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
         output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
       }
@@ -398,6 +444,11 @@ struct UbufCommOverlap : torch::CustomClassHolder {
 
     return;
   }  // split_overlap_rs
+
+  void set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
+    _ubuf_scale_inv = scale_inv;
+    _ubuf_scale_inv_initialized = true;
+  }
 
   /*
   ** Helper function to copy input to _ubuf
@@ -434,6 +485,10 @@ struct UbufCommOverlap : torch::CustomClassHolder {
     int output_c_dim1 = _ubuf.size(1);
     output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
     return output_tensor;
+  }
+
+  bool is_fp8_ubuf () {
+    return (_ubuf.element_size() == 1);
   }
 };  // UbufCommOverlap
 

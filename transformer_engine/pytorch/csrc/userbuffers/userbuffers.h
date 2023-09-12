@@ -212,11 +212,22 @@ void reducescatter2_userbuff(void *output, const int handler, const int offset, 
                              communicator *comm, cudaStream_t stream = 0);
 void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
                                            const int rowelements, const int colelements,
-                                           const int strideelements, communicator *comm,
+                                           const int strideelements_out, communicator *comm,
                                            cudaStream_t stream = 0);
-void reducescatter2_userbuff_strided(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
-void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
-void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+template<typename fp8type>
+void reducescatter2_userbuff_stridedoutput_fp8(void* output, float* scale, const int handler,
+                                               const int offset,const int rowelements, const int colelements,
+                                               const int strideelements_out, communicator* comm, cudaStream_t stream=0);
+template<typename fp8type>
+ void reducescatter2_userbuff_strided_atomic_fp8(void* output, float* scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out,const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+template<typename fp8type>
+ void reducescatter2_userbuff_strided_multiatomic_fp8(void* output, float* scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out,const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+
+template<typename fp8type>
+void reducescatter2_userbuff_fp8(void* output, float* scale, const int handler,const int offset,
+                                 const int strideelements_out, communicator* comm, cudaStream_t stream=0);
 /* everything should be 16byte aligned = 8 elts aligned
 output is strided: row starts separated by stride elements*/
 
