@@ -89,7 +89,8 @@ void compute_ref_backward(const OutputType *output_grad,
                           WeightType *beta_grad,
                           const float eps,
                           const size_t N, const size_t H,
-                          const bool zero_centered_gamma) {
+                          const bool zero_centered_gamma,
+                          const float scale) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
   std::vector<compute_t> dbeta(H, 0.f);
@@ -98,7 +99,7 @@ void compute_ref_backward(const OutputType *output_grad,
     // Reductions
     compute_t mdy = 0, mdyy = 0;
     for (size_t j = 0; j < H; ++j) {
-      const compute_t z = static_cast<compute_t>(data[i * H + j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
       const compute_t b = static_cast<compute_t>(beta[j]);
       compute_t g = static_cast<compute_t>(gamma[j]);
       if (zero_centered_gamma) {
@@ -117,7 +118,7 @@ void compute_ref_backward(const OutputType *output_grad,
 
     // Input grads
     for (size_t j = 0; j < H; ++j) {
-      const compute_t z = static_cast<compute_t>(data[i * H + j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
       compute_t g = static_cast<compute_t>(gamma[j]);
       const compute_t b = static_cast<compute_t>(beta[j]);
       if (zero_centered_gamma) {
@@ -187,12 +188,12 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   float epsilon = 1e-5;
   auto fwd_function = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
-               z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
+               z.data(), rsigma.data(), 0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
-               z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
+               z.data(), rsigma.data(), 0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
 
   // Backward kernel
@@ -226,7 +227,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                      gamma.cpu_dptr<WeightType>(),
                      beta.cpu_dptr<WeightType>(),
                      ref_output.get(),
-                     mu.cpu_dptr<float>(),
+                     ref_mu.get(),
                      rsigma.cpu_dptr<float>(),
                      N, H,
                      &ref_amax,
@@ -237,7 +238,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                        gamma.cpu_dptr<WeightType>(),
                        beta.cpu_dptr<WeightType>(),
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(), epsilon,
-                       N, H, zero_centered_gamma);
+                       N, H, zero_centered_gamma, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -250,12 +251,26 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
 
   auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
   rtol_stats = 5e-5;
-  compareResults("mu", mu, ref_mu.get(), atol_stats, rtol_stats);
   compareResults("rsigma", rsigma, ref_rsigma.get(), atol_stats, rtol_stats);
 
-  auto [atol, rtol] = getTolerances(otype);
-  if (otype == DType::kFloat32) {
-    atol = 5e-7;
+  // This is because we no longer write mu tensor into gmem
+  double atol, rtol;
+  switch (otype) {
+    case DType::kBFloat16:
+      atol = 2e-5;
+      rtol = 1e-4;
+      break;
+    case DType::kFloat16:
+      atol = 2e-5;
+      rtol = 1e-3;
+      break;
+    case DType::kFloat8E4M3:
+      atol = 1e-2;
+      rtol = 1e-2;
+      break;
+    default:
+      atol = 2e-5;
+      rtol = 1e-4;
   }
   compareResults("output", z, ref_output.get(), atol, rtol);
 
@@ -263,21 +278,54 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   double rtol_bwd;
   switch (otype) {
     case DType::kBFloat16:
-      // only for one case: bfloat16Xbfloat16X256X65536X1
-      atol_bwd = 4e-2;
-      rtol_bwd = 1e-1;
+      atol_bwd = 2e-2;
+      rtol_bwd = 5e-2;
       break;
     case DType::kFloat16:
-      atol_bwd = 1e-2;
-      rtol_bwd = 1e-2;
+      atol_bwd = 2e-3;
+      rtol_bwd = 1e-3;
+      break;
+    case DType::kFloat8E4M3:
+      atol_bwd = 5e-2;
+      rtol_bwd = 5e-2;
       break;
     default:
-      atol_bwd = 1e-4;
+      atol_bwd = 2e-5;
       rtol_bwd = 1e-4;
   }
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
-  compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
-  compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
+
+  double atol_bwd_reduce;
+  double rtol_bwd_reduce;
+  switch (otype) {
+    case DType::kBFloat16:
+      if (H >= 65536) {
+        atol_bwd_reduce = 2e-1;
+        rtol_bwd_reduce = 2e-1;
+      } else {
+        atol_bwd_reduce = 1e-1;
+        rtol_bwd_reduce = 5e-2;
+      }
+      break;
+    case DType::kFloat16:
+      atol_bwd_reduce = 5e-2;
+      rtol_bwd_reduce = 1e-2;
+      break;
+    case DType::kFloat8E4M3:
+      if (H >= 12288) {
+        atol_bwd_reduce = 8e-1;
+        rtol_bwd_reduce = 8e-1;
+      } else {
+        atol_bwd_reduce = 2e-1;
+        rtol_bwd_reduce = 1e-1;
+      }
+      break;
+    default:
+      atol_bwd_reduce = 5e-4;
+      rtol_bwd_reduce = 2e-4;
+  }
+  compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd_reduce, rtol_bwd_reduce);
+  compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd_reduce, rtol_bwd_reduce);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
@@ -317,7 +365,7 @@ INSTANTIATE_TEST_SUITE_P(
     LNTestSuite,
     ::testing::Combine(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<LNTestSuite::ParamType>& info) {

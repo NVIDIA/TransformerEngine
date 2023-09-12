@@ -203,6 +203,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &z, const Tensor &x, const Tenso
     auto wtype = gamma.data.dtype;
     auto otype = z.data.dtype;
     auto ctype = DType::kFloat32;
+    const bool fp8_out = is_fp8_dtype(otype);
 
     CheckInputTensor(dz, "dz");
     CheckInputTensor(z, "z");
@@ -251,6 +252,8 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &z, const Tensor &x, const Tenso
     params.dbeta_part = nullptr;
     params.dgamma_part = dgamma_part->data.dptr;
     params.epsilon = epsilon;
+    params.scale = z.scale.dptr;
+    params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);

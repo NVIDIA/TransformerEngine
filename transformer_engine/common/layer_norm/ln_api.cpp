@@ -267,6 +267,7 @@ void layernorm_bwd(const Tensor& dz,
     auto itype = x.data.dtype;
     auto wtype = gamma.data.dtype;
     auto otype = z.data.dtype;
+    const bool fp8_out = is_fp8_dtype(otype);
     auto ctype = DType::kFloat32;
 
     CheckInputTensor(dz, "dz");
@@ -325,6 +326,8 @@ void layernorm_bwd(const Tensor& dz,
     params.dgamma_part = dgamma_part->data.dptr;
     params.zero_centered_gamma = zero_centered_gamma;
     params.epsilon = epsilon;
+    params.scale = z.scale.dptr;
+    params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);

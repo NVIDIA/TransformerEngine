@@ -104,15 +104,22 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         compute_t y[LDGS * NUM_ELTS];
 
         compute_t mdyy_local = 0.f;
+
+        compute_t scale;
+        if (params.fp8_out) {
+            scale = clamp_by_magnitude(*reinterpret_cast<compute_t *>(params.scale), params.epsilon);
+        } else {
+            scale = 1.f;
+        }
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
-                compute_t x_tmp = z[it].data.elt[jt];
+                compute_t z_tmp = static_cast<compute_t> (z[it].data.elt[jt]) / scale;
                 compute_t gamma_tmp = compute_t(gamma[it].data.elt[jt]);
-                compute_t y_tmp = (x_tmp) / clamp_by_magnitude(gamma_tmp, params.epsilon);
+                compute_t y_tmp = (z_tmp) / clamp_by_magnitude(gamma_tmp, params.epsilon);
                 compute_t dy_tmp = gamma_tmp * compute_t(dz[it].data.elt[jt]);
-                compute_t dz_tmp = dz[it].data.elt[jt];
+                compute_t dz_tmp = static_cast<compute_t> (dz[it].data.elt[jt]);
 
                 mdyy_local += dy_tmp * y_tmp;
 
@@ -358,6 +365,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
         compute_t mdy = 0.f;
         compute_t mdyy = 0.f;
 
+        compute_t scale;
+        if (params.fp8_out) {
+            scale = clamp_by_magnitude(*reinterpret_cast<compute_t *>(params.scale), params.epsilon);
+        } else {
+            scale = 1.f;
+        }
 #pragma unroll
         for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
              it++, col += gdimn * NUM_ELTS) {
@@ -368,9 +381,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
                 compute_t g_ij = gamma[it].data.elt[jt];
-                compute_t x_ij = z.data.elt[jt];
+                compute_t x_ij = static_cast<compute_t> (z.data.elt[jt]) / scale;
                 compute_t y_ij = (x_ij) / clamp_by_magnitude(g_ij, params.epsilon);
-                compute_t dz_ij = dz.data.elt[jt];
+                compute_t dz_ij = static_cast<compute_t> (dz.data.elt[jt]);
                 compute_t dy_ij = g_ij * dz_ij;
 
                 y[it].data.elt[jt] = y_ij;

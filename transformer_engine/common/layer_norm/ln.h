@@ -46,7 +46,8 @@ struct ParamsBase {
         , workspace(nullptr)
         , barrier(nullptr)
         , epsilon(0.f)
-        , zero_centered_gamma(false) {}
+        , zero_centered_gamma(false)
+        , fp8_out(false) {}
 
 
     // For Multi-CTA, number of different CTA groups. Otherwise same as gridDim.x.
@@ -74,6 +75,11 @@ struct ParamsBase {
     bool zero_centered_gamma;
     // small constant for numerical stability
     float epsilon;
+
+    // Whether to compute scale and amax
+    bool fp8_out;
+    // Scaling factor
+    void *scale;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -81,20 +87,14 @@ struct ParamsBase {
 struct FwdParams : public ParamsBase {
     FwdParams()
         : ParamsBase()
-        , x(nullptr)
-        , fp8_out(false) {}
+        , x(nullptr) {}
 
     // Input of LN FWD.
     void *x;
 
-    // Scaling factor
-    void *scale;
-
     // AMax output
     void *amax;
 
-    // Whether to compute scale and amax
-    bool fp8_out;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

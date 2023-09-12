@@ -55,7 +55,8 @@ void compute_ref_output(const InputType *data, const InputType *gamma, OutputTyp
   *amax = current_max;
 }
 
-float clamp_by_magnitude(float g, float eps) {
+template <typename ComputeType>
+ComputeType clamp_by_magnitude(ComputeType g, const float eps) {
   if (g < 0 && g > - eps) {
     return - eps;
   }
@@ -69,7 +70,7 @@ template <typename InputType, typename WeightType, typename OutputType>
 void compute_ref_backward(const OutputType *output_grad, const OutputType *data, const float *rsigma,
                           const WeightType *gamma, InputType *data_grad, WeightType *gamma_grad,
                           const float eps,
-                          const size_t N, const size_t H) {
+                          const size_t N, const size_t H, float scale) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
 
@@ -77,7 +78,7 @@ void compute_ref_backward(const OutputType *output_grad, const OutputType *data,
     // Reductions
     compute_t mdyy = 0;
     for (size_t j = 0; j < H; ++j) {
-      const compute_t z = static_cast<compute_t>(data[i * H + j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
       compute_t g = static_cast<compute_t>(gamma[j]);
       const compute_t y = z / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
@@ -89,7 +90,7 @@ void compute_ref_backward(const OutputType *output_grad, const OutputType *data,
 
     // Input grads
     for (size_t j = 0; j < H; ++j) {
-      const compute_t z = static_cast<compute_t>(data[i * H + j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
       compute_t g = static_cast<compute_t>(gamma[j]);
       const compute_t y = z / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
@@ -174,7 +175,7 @@ void performTest(const size_t N, const size_t H) {
                      rsigma.cpu_dptr<float>(), N, H, &ref_amax, ref_scale);
   compute_ref_backward(dz.cpu_dptr<OutputType>(), ref_output.get(),
                        rsigma.cpu_dptr<float>(), gamma.cpu_dptr<WeightType>(), ref_dx.get(),
-                       ref_dgamma.get(), epsilon, N, H);
+                       ref_dgamma.get(), epsilon, N, H, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -228,7 +229,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, RMSNormTestSuite,
                          ::testing::Combine(::testing::Values(DType::kFloat32, DType::kBFloat16,
                                                               DType::kFloat16),
                                             ::testing::Values(DType::kFloat32, DType::kBFloat16,
-                                                              DType::kFloat16),
+                                                              DType::kFloat16, DType::kFloat8E4M3),
                                             ::testing::ValuesIn(test_cases)),
                          [](const testing::TestParamInfo<RMSNormTestSuite::ParamType> &info) {
                            std::string name = test::typeName(std::get<0>(info.param)) + "X" +
