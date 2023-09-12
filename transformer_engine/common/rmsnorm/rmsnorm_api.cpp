@@ -252,7 +252,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &z, const Tensor &x, const Tenso
     params.dbeta_part = nullptr;
     params.dgamma_part = dgamma_part->data.dptr;
     params.epsilon = epsilon;
-    params.scale = z.scale.dptr;
+    params.scale_inv = z.scale_inv.dptr;
     params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.

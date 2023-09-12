@@ -26,15 +26,17 @@ def _get_normalization_func(normalization: str,
             ('RMSNorm', False, False):   tex.rmsnorm_fwd_inf,
     }
     bwd_normalization_funcs = {
-            'LayerNorm':  tex.layernorm_bwd,
-            'RMSNorm':    tex.rmsnorm_bwd,
+            ('LayerNorm', True):  tex.layernorm_bwd_fp8,
+            ('LayerNorm', False):  tex.layernorm_bwd,
+            ('RMSNorm', True): tex.rmsnorm_bwd_fp8,
+            ('RMSNorm', False): tex.rmsnorm_bwd,
     }
 
     if forward:
         return fwd_normalization_funcs[(normalization, fp8_output, is_grad_enabled)]
     assert not fp8_output, "FP8 output is not supported in backward normalization!"
     assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
-    return bwd_normalization_funcs[normalization]
+    return bwd_normalization_funcs[(normalization, fp8_output)]
 
 def _apply_normalization(inputmat:torch.Tensor,
                          ln_out: torch.Tensor,
@@ -77,7 +79,7 @@ def _apply_normalization(inputmat:torch.Tensor,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
                 zero_centered_gamma,
-            ), None, None
+            ), None
     else:
         if is_grad_enabled:
             output = normalization_func(
@@ -87,9 +89,47 @@ def _apply_normalization(inputmat:torch.Tensor,
         else:
             return normalization_func(
                     *inputs, eps, zero_centered_gamma
-            ), None, None
-    if normalization == "RMSNorm":
-        output = (ln_out, None, output[1])
-    elif normalization == "LayerNorm":
-        output = (ln_out, output[1], output[2])
-    return output
+            ), None
+    return (ln_out, output[1])
+
+
+def _get_normalization_grad(d_ln_out: torch.Tensor,
+                            fake_input: torch.Tensor,
+                            ln_out: torch.Tensor,
+                            ln_weight: torch.Tensor,
+                            ln_bias: Union[torch.Tensor, None],
+                            rsigma: torch.Tensor,
+                            eps: float,
+                            fwd_scale_inverse: torch.Tensor,
+                            fp8_out: bool,
+                            normalization: str,
+                            bwd_ln_sm_margin: int,
+                            zero_centered_gamma: bool):
+    normalization_func = _get_normalization_func(normalization,
+                                                 fp8_out,
+                                                 True,
+                                                 False)
+
+    inputs = [d_ln_out, ln_out, fake_input, rsigma, ln_weight]
+    if ln_bias is not None:
+        inputs.append(ln_bias)
+
+    if fp8_out:
+        output = normalization_func(
+            *inputs,
+            eps,
+            torch.Tensor(),  # scale unused
+            torch.Tensor(),  # amax unused
+            fwd_scale_inverse,
+            bwd_ln_sm_margin,
+            zero_centered_gamma,
+        )
+    else:
+        output = normalization_func(
+            *inputs,
+            eps,
+            bwd_ln_sm_margin,
+            zero_centered_gamma,
+        )
+
+    return output[0], output[1], None if ln_bias is None else output[2]

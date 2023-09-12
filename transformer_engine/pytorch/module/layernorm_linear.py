@@ -41,7 +41,7 @@ from ..distributed import (
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 
-from ._common import _apply_normalization
+from ._common import _apply_normalization, _get_normalization_grad
 
 
 __all__ = ["LayerNormLinear"]
@@ -115,17 +115,19 @@ class _LayerNormLinear(torch.autograd.Function):
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
-        ln_out, mu, rsigma = _apply_normalization(inputmat,
-                                                  ln_out,
-                                                  ln_weight,
-                                                  ln_bias,
-                                                  eps,
-                                                  fp8 and not return_layernorm_output,
-                                                  fp8_meta,
-                                                  normalization,
-                                                  fwd_ln_sm_margin,
-                                                  zero_centered_gamma,
-                                                  is_grad_enabled)
+        ln_out_direct_fp8 = fp8 and not return_layernorm_output
+        ln_out, rsigma = _apply_normalization(inputmat,
+                                              ln_out,
+                                              ln_weight,
+                                              ln_bias,
+                                              eps,
+                                              ln_out_direct_fp8,
+                                              fp8_meta,
+                                              normalization,
+                                              fwd_ln_sm_margin,
+                                              zero_centered_gamma,
+                                              is_grad_enabled)
+        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() if ln_out_direct_fp8 else None
         # If residual connection is after LN, we need `ln_out_return`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
@@ -218,13 +220,14 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.save_for_backward(
-                inputmat,
+                torch.empty(0, dtype=inputmat.dtype, device=inputmat.device),
                 ln_weight,
-                mu,
+                ln_bias,
                 rsigma,
                 weight,
                 weight_t_fp8,
                 ln_out,
+                fwd_scale_inverses_ln,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
 
@@ -241,12 +244,14 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.return_layernorm_output = return_layernorm_output
+            ctx.ln_out_direct_fp8 = ln_out_direct_fp8
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.eps = eps
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -270,14 +275,15 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
         ):
             (
-                inputmat,
+                fake_input,
                 ln_weight,
-                mu,
+                ln_bias,
                 rsigma,
                 weight,
                 weight_t_fp8,
                 ln_out,
-                fwd_scale_inverses,
+                fwd_scale_inverses_ln,
+                fwd_scale_inverses_gemm,
             ) = ctx.saved_tensors
 
             if ctx.ub_bulk_dgrad:
@@ -343,7 +349,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
                     weight_t_fp8,
-                    fwd_scale_inverses,
+                    fwd_scale_inverses_gemm,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
                     grad_output_c,
@@ -391,7 +397,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         wgrad = tex.fp8_gemm(
                             ln_out_total_t,
-                            fwd_scale_inverses,
+                            fwd_scale_inverses_gemm,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
                             grad_output_t,
@@ -452,24 +458,20 @@ class _LayerNormLinear(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            d_ln_out = dgrad.view(inputmat.shape)
+            d_ln_out = dgrad.view(ln_out.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output:
                 d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
 
-            if ctx.normalization == "LayerNorm":
-                dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                    d_ln_out, inputmat, mu, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
-                )
-            elif ctx.normalization == "RMSNorm":
-                dxmat, dgamma = tex.rmsnorm_bwd(
-                    d_ln_out, inputmat, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
-                )
-                dbeta = None
+            if fwd_scale_inverses_ln is not None:
+                fwd_scale_inverses_ln = fwd_scale_inverses_ln[tex.FP8FwdTensors.GEMM1_INPUT]
 
+            dxmat, dgamma, dbeta = _get_normalization_grad(
+                d_ln_out, fake_input, ln_out, ln_weight, ln_bias, rsigma, ctx.eps,
+                fwd_scale_inverses_ln, ctx.ln_out_direct_fp8,
+                ctx.normalization, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+            )
 
             if not ctx.use_bias:
                 grad_bias = None

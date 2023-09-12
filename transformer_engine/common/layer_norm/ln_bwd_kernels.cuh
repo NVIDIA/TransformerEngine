@@ -110,11 +110,11 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
 
         compute_t mdy_local = 0.f;
         compute_t mdyy_local = 0.f;
-        compute_t scale;
+        compute_t scale_inv;
         if (params.fp8_out) {
-            scale = clamp_by_magnitude(*reinterpret_cast<compute_t *>(params.scale), params.epsilon);
+            scale_inv = *reinterpret_cast<compute_t *>(params.scale_inv);
         } else {
-            scale = 1.f;
+            scale_inv = 1.f;
         }
         #pragma unroll
         for ( int it = 0; it < LDGS; it++ ) {
@@ -123,7 +123,7 @@ void ln_bwd_tuned_kernel(layer_norm::BwdParams params) {
                 const compute_t dy_tmp_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
                 compute_t gamma_tmp = compute_t(gamma[it].data.elt[jt]) + dy_tmp_shift;
                 compute_t beta_tmp = compute_t(beta[it].data.elt[jt]);
-                const compute_t z_tmp = static_cast<compute_t> (z[it].data.elt[jt]) / scale;
+                const compute_t z_tmp = static_cast<compute_t> (z[it].data.elt[jt]) * scale_inv;
                 const compute_t y_tmp = (z_tmp - beta_tmp) / clamp_by_magnitude(
                     gamma_tmp, params.epsilon);
                 compute_t dy_tmp = static_cast<compute_t>(dz[it].data.elt[jt]) * gamma_tmp;
@@ -427,11 +427,11 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
         compute_t mdy = 0.f;
         compute_t mdyy = 0.f;
 
-        compute_t scale;
+        compute_t scale_inv;
         if (params.fp8_out) {
-            scale = clamp_by_magnitude(*reinterpret_cast<compute_t *>(params.scale), params.epsilon);
+            scale_inv = *reinterpret_cast<compute_t *>(params.scale_inv);
         } else {
-            scale = 1.f;
+            scale_inv = 1.f;
         }
         #pragma unroll
         for ( int it = 0, col = gidn * NUM_ELTS;
@@ -443,7 +443,7 @@ void ln_bwd_general_kernel(layer_norm::BwdParams params) {
             dz.load_from_elts(params.dz, row * params.cols + col, params.cols - col);
             #pragma unroll
             for ( int jt = 0; jt < NUM_ELTS; jt++ ) {
-                const compute_t z_ij = static_cast<compute_t> (z.data.elt[jt]) / scale;
+                const compute_t z_ij = static_cast<compute_t> (z.data.elt[jt]) * scale_inv;
                 const compute_t g_ij_shift = (params.zero_centered_gamma) ? 1.0f : 0.f;
                 const compute_t g_ij = gamma[it].data.elt[jt] + g_ij_shift;
                 const compute_t b_ij = beta[it].data.elt[jt];

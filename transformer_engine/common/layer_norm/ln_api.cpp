@@ -326,7 +326,7 @@ void layernorm_bwd(const Tensor& dz,
     params.dgamma_part = dgamma_part->data.dptr;
     params.zero_centered_gamma = zero_centered_gamma;
     params.epsilon = epsilon;
-    params.scale = z.scale.dptr;
+    params.scale_inv = z.scale_inv.dptr;
     params.fp8_out = fp8_out;
 
     // Query the kernel-specific launch parameters.
