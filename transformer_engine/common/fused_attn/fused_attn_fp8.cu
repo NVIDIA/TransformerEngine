@@ -173,6 +173,7 @@ static cudnn_frontend::Tensor createScale(
 static cudnn_frontend::Tensor createScaleWithOffset(
             const cudnn_frontend::Tensor& prevBlockOutputTensor,
             const std::string& scale_tensor_name,
+            NVTE_QKV_Layout layout,
             cudnnDataType_t tensorType,
             bool isOutputVirtual,
             bool isScaleByValue,
@@ -192,7 +193,7 @@ static cudnn_frontend::Tensor createScaleWithOffset(
       generateMatrixStrides(output_dim[0], output_dim[1], output_dim[2],
                       0  /*s_kv = 0 for placeholder*/,
                       output_dim[3], output_stride,
-                      NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED, NVTE_QKV_Matrix::NVTE_Q_Matrix);
+                      layout, NVTE_QKV_Matrix::NVTE_Q_Matrix);
   } else {
       // Otherwise output dim and stride should be the same as prev block dim and stride
       for (int i = 0; i < 4; i++) {
@@ -1163,6 +1164,7 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
           auto OTensor = createScaleWithOffset(
                           OTensor_before_quan_O_tensor,  // input tensor
                           "scaleO",  // scale tensor
+                          layout,  // qkv layout
                           tensorType,  // output tensor type
                           false,  // output not virtual
                           false,  // scale is by value
@@ -1515,6 +1517,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
           auto dVTensor = createScaleWithOffset(
                           dVTensor_before_quan_dV,  // input tensor
                           "scaledV",  // scale tensor
+                          layout,  // qkv layout
                           CUDNN_DATA_FP8_E5M2,  // output tensor type
                           false,  // output not virtual
                           false,  // scale is by value
@@ -1631,7 +1634,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS * K) * descale dS
           auto After_dS_K_before_dequan_K = createScale(
-              After_dS_K,  // input tensor
+                          After_dS_K,  // input tensor
                           descaledSTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1641,7 +1644,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS * K) * descale dS * descale K
           auto After_dS_K_before_quan_dQ = createScale(
-              After_dS_K_before_dequan_K,  // input tensor
+                          After_dS_K_before_dequan_K,  // input tensor
                           descaleKTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1651,8 +1654,9 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS * K) * descale dS * descale K * scale dQ
           auto dQ = createScaleWithOffset(
-              After_dS_K_before_quan_dQ,  // input tensor
+                          After_dS_K_before_quan_dQ,  // input tensor
                           "scaledQ",  // scale tensor
+                          layout,  // qkv layout
                           CUDNN_DATA_FP8_E5M2,  // output tensor type
                           false,  // output not virtual
                           false,  // scale is by value
@@ -1671,7 +1675,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS.T * Q) * descale dS
           auto After_dSTranspose_Q_before_dequan_Q = createScale(
-              After_dSTranspose_Q,  // input tensor
+                          After_dSTranspose_Q,  // input tensor
                           descaledSTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1681,7 +1685,7 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS.T * Q) * descale dS * descale Q
           auto After_dSTranspose_Q_before_quan_dK = createScale(
-              After_dSTranspose_Q_before_dequan_Q,  // input tensor
+                          After_dSTranspose_Q_before_dequan_Q,  // input tensor
                           descaleQTensor,  // scale tensor
                           CUDNN_DATA_FLOAT,  // output tensor type
                           true,  // output is virtual
@@ -1691,8 +1695,9 @@ void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 
           // (dS.T * Q) * descale dS * descale Q * scale dK
           auto dK = createScaleWithOffset(
-              After_dSTranspose_Q_before_quan_dK,  // input tensor
+                          After_dSTranspose_Q_before_quan_dK,  // input tensor
                           "scaledK",  // scale tensor
+                          layout,  // qkv layout
                           CUDNN_DATA_FP8_E5M2,  // output tensor type
                           false,  // output not virtual
                           false,  // scale is by value

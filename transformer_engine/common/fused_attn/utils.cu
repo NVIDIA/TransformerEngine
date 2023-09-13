@@ -38,7 +38,8 @@ void generateMatrixStrides(
                 strideA[seqlen_dim_idx] = 3 * h * d;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_q * 3 * h * d;
-            } else {
+            } else if ((layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
+                || (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)) {
                 strideA[hidden_dim_idx] = 1;
                 strideA[seqlen_dim_idx] = h * d;
                 strideA[head_dim_idx] = d;
@@ -56,7 +57,7 @@ void generateMatrixStrides(
                 strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else {
+            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
                 strideA[seqlen_dim_idx] = h * d;
                 strideA[hidden_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
@@ -74,7 +75,7 @@ void generateMatrixStrides(
                 strideA[hidden_transpose_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else {
+            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
                 strideA[seqlen_transpose_dim_idx] = h * d;
                 strideA[hidden_transpose_dim_idx] = 1;
                 strideA[head_dim_idx] = d;
@@ -92,7 +93,7 @@ void generateMatrixStrides(
                 strideA[seqlen_dim_idx] = 2* h * d;
                 strideA[head_dim_idx] = d;
                 strideA[batch_dim_idx] = s_kv * 2 * h * d;
-            } else {
+            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
                 strideA[hidden_dim_idx] = 1;
                 strideA[seqlen_dim_idx] = h * d;
                 strideA[head_dim_idx] = d;
@@ -101,21 +102,21 @@ void generateMatrixStrides(
             break;
         case NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose:
             if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
-                    strideA[hidden_transpose_dim_idx] = 1;
-                    strideA[seqlen_transpose_dim_idx] = 3 * h * d;
-                    strideA[head_dim_idx] = d;
-                    strideA[batch_dim_idx] = s_kv * 3 * h * d;
-                } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
-                    strideA[hidden_transpose_dim_idx] = 1;
-                    strideA[seqlen_transpose_dim_idx] = 2* h * d;
-                    strideA[head_dim_idx] = d;
-                    strideA[batch_dim_idx] = s_kv * 2 * h * d;
-                } else {
-                    strideA[hidden_transpose_dim_idx] = 1;
-                    strideA[seqlen_transpose_dim_idx] = h * d;
-                    strideA[head_dim_idx] = d;
-                    strideA[batch_dim_idx] = s_kv * h * d;
-                }
+                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_transpose_dim_idx] = 3 * h * d;
+                strideA[head_dim_idx] = d;
+                strideA[batch_dim_idx] = s_kv * 3 * h * d;
+            } else if (layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED) {
+                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_transpose_dim_idx] = 2* h * d;
+                strideA[head_dim_idx] = d;
+                strideA[batch_dim_idx] = s_kv * 2 * h * d;
+            } else if (layout == NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED) {
+                strideA[hidden_transpose_dim_idx] = 1;
+                strideA[seqlen_transpose_dim_idx] = h * d;
+                strideA[head_dim_idx] = d;
+                strideA[batch_dim_idx] = s_kv * h * d;
+            }
             break;
         case NVTE_QKV_Matrix::NVTE_S_Matrix:
             strideA[seqlen_kv_dim_idx] = 1;
@@ -129,10 +130,9 @@ void generateMatrixStrides(
             strideA[head_dim_idx] = d;
             strideA[batch_dim_idx] = s_q * h * d;
             break;
-        default:
-            NVTE_ERROR("Invalid qkv layout or qkv matrix selection. \n");
     }
 
+    // new way of getting strides
     switch (layout) {
         case NVTE_QKV_Layout::NVTE_SB3HD:
             if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix)
@@ -345,8 +345,6 @@ void generateMatrixStrides(
                     strideA[hidden_transpose_dim_idx] = 1;
             }
             break;
-        default:
-            NVTE_ERROR("Invalid qkv layout or qkv matrix selection. \n");
     }
 
     if (matrix == NVTE_QKV_Matrix::NVTE_S_Matrix) {
