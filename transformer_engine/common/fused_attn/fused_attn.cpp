@@ -107,7 +107,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   return backend;
 }
 
-// NVTE fused attention FWD FP8 with packed QKV
+// NVTE fused attention FWD with packed QKV
 void nvte_fused_attn_fwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor Bias,
@@ -192,7 +192,7 @@ void nvte_fused_attn_fwd_qkvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention BWD FP8 with packed QKV
+// NVTE fused attention BWD with packed QKV
 void nvte_fused_attn_bwd_qkvpacked(
             const NVTETensor QKV,
             const NVTETensor O,
@@ -291,7 +291,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention FWD FP8 with packed KV
+// NVTE fused attention FWD with packed KV
 void nvte_fused_attn_fwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,
@@ -361,7 +361,7 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
-// NVTE fused attention BWD FP8 with packed KV
+// NVTE fused attention BWD with packed KV
 void nvte_fused_attn_bwd_kvpacked(
             const NVTETensor Q,
             const NVTETensor KV,

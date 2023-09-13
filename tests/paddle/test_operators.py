@@ -45,8 +45,6 @@ from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
 
-np.random.seed(10)
-paddle.seed(11)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
@@ -55,6 +53,14 @@ SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
 FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    np.random.seed(10)
+    paddle.seed(11)
+    yield
 
 
 def test_quantize_dequantize():
