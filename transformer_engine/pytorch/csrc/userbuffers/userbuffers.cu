@@ -738,7 +738,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride(const int op,const int flagoff
         half *s = reinterpret_cast<half*>(&sum);
 
         #pragma unroll
-        for(int i=0;i<RANKS;i++) {
+        for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
           #pragma unroll
           for(int j=0;j<8;j++) s[j]+=x[j];
@@ -910,7 +910,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic(const int op,const int 
         half *s = reinterpret_cast<half*>(&sum);
 
         #pragma unroll
-        for(int i=0;i<RANKS;i++) {
+        for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
           #pragma unroll
           for(int j=0;j<8;j++) s[j]+=x[j];
@@ -993,7 +993,7 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_multiatomic(const int op,const
         half *s = reinterpret_cast<half*>(&sum);
 
         #pragma unroll
-        for(int i=0;i<RANKS;i++) {
+        for(int i=1;i<RANKS;i++) {
           half *x = reinterpret_cast<half*>(&val[i]);
           #pragma unroll
           for(int j=0;j<8;j++) s[j]+=x[j];
