@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Union
 
 import numpy as np
 import paddle
+import transformer_engine_paddle as tex
 
 from .constants import dist_group_type, RecomputeFunctionNames
 
@@ -152,8 +153,10 @@ class FP8MetaBufferBase(ABC):
         amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         assert amax_buffer_key in self._data, "TE internal error."
 
-        fp8_meta[fp8_meta_tensor_key].amax_history[0] = self._data[amax_buffer_key][
-            fp8_meta[buffer_position_key]]
+        # Copy amax to amax_history[0]
+        tex.update_latest_amax_history_inplace(
+            _history=fp8_meta[fp8_meta_tensor_key].amax_history,
+            amax=self._data[amax_buffer_key][fp8_meta[buffer_position_key]])
 
     def set_for_deletion(self, fp8_meta: Dict[str, Any]) -> None:
         """Delete this amax key from global buffer during autocast end."""
