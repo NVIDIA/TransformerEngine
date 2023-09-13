@@ -855,11 +855,11 @@ class FusedAttention(torch.nn.Module):
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
         if qkv_format in ['sbhd', 'bshd']:
             if qkv_format == 'sbhd':
-                batch_size, max_seqlen_q, max_seqlen_kv =
-                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0]
+                batch_size, max_seqlen_q, max_seqlen_kv = (
+                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0])
             if qkv_format == 'bshd':
-                batch_size, max_seqlen_q, max_seqlen_kv =
-                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1]
+                batch_size, max_seqlen_q, max_seqlen_kv = (
+                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.arange(
                         0,
@@ -1216,11 +1216,11 @@ class DotProductAttention(torch.nn.Module):
             assert (all(len(x.shape) == 4 for x in (query_layer, key_layer, value_layer))
                 ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
             if qkv_format == 'sbhd':
-                batch_size, max_seqlen_q, max_seqlen_kv =
-                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0]
+                batch_size, max_seqlen_q, max_seqlen_kv = (
+                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0])
             if qkv_format == 'bshd':
-                batch_size, max_seqlen_q, max_seqlen_kv =
-                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1]
+                batch_size, max_seqlen_q, max_seqlen_kv = (
+                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                 assert (all(seqlens_q <= max_seqlen_q)
