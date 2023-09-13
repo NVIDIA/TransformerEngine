@@ -1338,21 +1338,17 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
-        const char* env_workspace_limit_char = std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT");
-        if (env_workspace_limit_char != nullptr) {
-            try {
-                std::string env_dp_workspace_limit(env_workspace_limit_char);
-                int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
-                if (dp_workspace_limit > max_allowed_dp_workspace) {
-                    max_allowed_dp_workspace = dp_workspace_limit;
-                }
-            } catch (...) {
-                NVTE_ERROR(
-                "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
-            }
-        }
         if (required_dp_workspace <= max_allowed_dp_workspace) {
                 use_workspace_opt = true;
+        }
+        const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
+        if (env_workspace_opt != nullptr) {
+            if (strcmp(env_workspace_opt, "1") == 0) {
+                use_workspace_opt = true;
+            }
+            if (strcmp(env_workspace_opt, "0") == 0) {
+                use_workspace_opt = false;
+            }
         }
     }
 #endif
@@ -1490,21 +1486,17 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
         (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
-        const char* env_workspace_limit_char = std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT");
-        if (env_workspace_limit_char != nullptr) {
-            try {
-                std::string env_dp_workspace_limit(env_workspace_limit_char);
-                int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
-                if (dp_workspace_limit > max_allowed_dp_workspace) {
-                    max_allowed_dp_workspace = dp_workspace_limit;
-                }
-            } catch (...) {
-                NVTE_ERROR(
-                "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
-            }
-        }
         if (required_dp_workspace <= max_allowed_dp_workspace) {
                 use_workspace_opt = true;
+        }
+        const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
+        if (env_workspace_opt != nullptr) {
+            if (strcmp(env_workspace_opt, "1") == 0) {
+                use_workspace_opt = true;
+            }
+            if (strcmp(env_workspace_opt, "0") == 0) {
+                use_workspace_opt = false;
+            }
         }
     }
     std::cout << "use opt: " << static_cast<int>(use_workspace_opt) << std::endl;

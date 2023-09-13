@@ -1120,9 +1120,11 @@ class DotProductAttention(torch.nn.Module):
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
-            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT`
-            can be used to enable the workspace related optimizations in FusedAttention
-            (default: 256MB; raise the limit to enable these performance optimizations).
+            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
+            can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
+            optimizations in FusedAttention. When unset, TransformerEngine determines the code path
+            based on its internal logic. These optimizations trade memory for performance
+            and should be used with care.
 
         Parameters
         ----------
