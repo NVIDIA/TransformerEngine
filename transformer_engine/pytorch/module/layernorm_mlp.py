@@ -260,6 +260,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_forward,
             )
 
+            fc2_out_index, fc2_meta_tensor, fc2_te_type, out_type = None, None, None, activation_dtype
             if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
@@ -267,6 +268,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = fc2_weight.size(0)
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
+
+                if ub_obj_fc2out.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                    fc2_out_index = tex.FP8FwdTensors.GEMM2_OUTPUT
+                    fc2_meta_tensor = fp8_meta["scaling_fwd"]
+                    fc2_te_type = fp8_dtype_forward
+                    out_type = torch.uint8
+                    ub_obj_fc2out.set_ubuf_scale_inv(fc2_meta_tensor.scale_inv[fc2_out_index])
             else:
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
@@ -283,7 +291,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM2_INPUT,
                 fp8_dtype_forward,
-                activation_dtype,
+                out_type,
                 get_workspace(),
                 bias=fc2_bias,
                 use_bias=use_fc2_bias,
@@ -292,6 +300,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_algo=ub_algo,
                 ub=ub_obj_fc2out if ub_split_rs or ub_atomic_gemm_rs else None,
                 extra_output_tensor=rs_out if ub_split_rs or ub_atomic_gemm_rs else None,
+                out_index=fc2_out_index,
+                fp8_meta_tensor = fc2_meta_tensor,
+                D_dtype = fc2_te_type,
             )
             if bool(int(os.getenv("PRINT_SHAPE", "0"))):
                 print (f"fc2 fprop {fc2_out.size(1)}x{fc2_out.size(0)}x{fc2_weight_fp8.size(1)}")
@@ -619,11 +630,18 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
                     dgelu_t = None
 
+                out_index, meta_tensor, out_te_type, out_type = None, None, None, ctx.activation_dtype
                 fc1_dgrad_size = list(dgelu.size())
                 fc1_dgrad_size[1] = fc1_weight.size(1)
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
                     ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
+                    if ub_obj_dgrad.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                        out_index = tex.FP8BwdTensors.GRAD_INPUT2
+                        meta_tensor = ctx.fp8_meta["scaling_bwd"]
+                        out_te_type = fp8_dtype_backward
+                        out_type = torch.uint8
+                        ub_obj_dgrad.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
                 else:
                     fc1_dgrad = torch.empty(
                         fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
@@ -638,12 +656,15 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.fp8_meta["scaling_bwd"].scale_inv,
                     tex.FP8BwdTensors.GRAD_OUTPUT2,
                     fp8_dtype_backward,
-                    ctx.activation_dtype,
+                    out_type,
                     get_workspace(),
                     out=fc1_dgrad,
                     use_split_accumulator=_2X_ACC_DGRAD,
                     ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_AG if ctx.ub_bulk_dgrad else None,
-                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None
+                    ub=ub_obj_lnout if ctx.ub_bulk_dgrad else None,
+                    out_index=out_index,
+                    fp8_meta_tensor = meta_tensor,
+                    D_dtype = out_te_type,
                 )
             else:
                 # FC2 DGRAD; Unconditional
@@ -727,6 +748,14 @@ class _LayerNormMLP(torch.autograd.Function):
             if fc1_weight.requires_grad:
                 if ctx.fp8:
                     # FC1 WGRAD
+                    extra_output_tensor = None
+                    if ctx.ub_bulk_wgrad:
+                        if ub_obj_dgrad.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # Reduce-scatter output
+                            extra_output_tensor = torch.empty(dim_size, dtype=ctx.activation_dtype, device=fc1_dgrad.device)
+                            fc1_dgrad = extra_output_tensor
+                        else:
+                            fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         fc1_wgrad = tex.fp8_gemm(
@@ -748,6 +777,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
                             if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
+                            extra_output_tensor=extra_output_tensor,
                         )
                     else:
                         ln_out_total_c = tex.cast_from_fp8(
@@ -771,6 +801,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS
                             if ctx.ub_bulk_wgrad else None,
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
+                            extra_output_tensor=extra_output_tensor,
                         )
                 else:
                     # FC1 WGRAD
@@ -792,11 +823,11 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_wgrad, _, _ = fc1_wgrad_outputs
                     else:
                         fc1_wgrad, fc1_bias_grad, _ = fc1_wgrad_outputs
+                    if ctx.ub_bulk_wgrad:
+                        fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
 
             # Column Parallel Linear
-            if ctx.ub_bulk_wgrad:
-                fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
-            elif ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
+            if (not ctx.ub_bulk_wgrad) and ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
                 handle.wait()
 
             # LayerNorm gradient

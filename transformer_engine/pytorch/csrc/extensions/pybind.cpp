@@ -99,7 +99,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int, torch::Tensor>())
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
+    .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
     .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs)
+    .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
 

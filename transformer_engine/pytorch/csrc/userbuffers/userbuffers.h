@@ -24,6 +24,10 @@
 #define NVTE_LAUNCH_CPU 2
 #define NVTE_MAX_NVLINK 8
 
+#define UB_MEM_UC_CONTIG 1
+#define UB_MEM_MC_CREATED 2
+#define UB_MEM_ALLOCATED 4
+
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
 #define NVTE_UB_MEM_ALLOCATED 4
@@ -43,6 +47,10 @@
 #define NVTE_REG0_IBRS 32
 #define NVTE_REG0_IBAG 512
 
+#if defined(UCP) || !defined(NOSHARP)
+#undef REG0_COMMBUFFER
+#define REG0_COMMBUFFER (1024*1024*16)
+#endif
 // gpuflags map offsets
 #define NVTE_GF_STATE 16000
 #define NVTE_GF_IBSHARPDONE 0
@@ -214,6 +222,14 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
                                            cudaStream_t stream = 0);
+template<typename fp8type>
+void reducescatter2_userbuff_stridedoutput_fp8(void* output, float* scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
+template<typename fp8type>
+void reducescatter2_userbuff_fp8(void* output, float* scale, const int handler,const int offset,const int elements, communicator* comm, cudaStream_t stream=0);
+#if 0
+template<typename fp8type>
+void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+#endif
 void reducescatter2_userbuff_strided(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
 void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
 void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
