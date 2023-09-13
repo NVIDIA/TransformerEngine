@@ -927,7 +927,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   at::Tensor dK;
   at::Tensor dV;
   at::Tensor dQKV, dKV;
-  NVTE_QKV_Layout_Group layout_group = map_layout_to_group(qkv_layout);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   std::vector<int64_t> tmp_shape;
   switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_3HD:

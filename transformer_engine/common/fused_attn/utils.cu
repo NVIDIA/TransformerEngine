@@ -30,6 +30,7 @@ void generateMatrixStrides(
     constexpr int seqlen_q_dim_idx = 2;
     constexpr int seqlen_kv_dim_idx = 3;
 
+    // to be deprecated in the future
     switch (matrix) {
         case NVTE_QKV_Matrix::NVTE_Q_Matrix:
             if (layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED) {
@@ -129,7 +130,7 @@ void generateMatrixStrides(
             strideA[batch_dim_idx] = s_q * h * d;
             break;
         default:
-            break;
+            NVTE_ERROR("Invalid qkv layout or qkv matrix selection. \n");
     }
 
     switch (layout) {
@@ -344,6 +345,8 @@ void generateMatrixStrides(
                     strideA[hidden_transpose_dim_idx] = 1;
             }
             break;
+        default:
+            NVTE_ERROR("Invalid qkv layout or qkv matrix selection. \n");
     }
 
     if (matrix == NVTE_QKV_Matrix::NVTE_S_Matrix) {

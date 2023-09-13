@@ -18,16 +18,19 @@ extern "C" {
 #endif
 
 /*! \enum NVTE_QKV_Layout
- *  \brief QKV matrix layouts
- *  `S`, `B`, `H`, and `D` stand for the sequence length, batch size, number of heads,
-    and the head size. `SBHD` and `BSHD` based layouts are used when sequences in a batch
-    are of equal length or padded to the same length, while `THD` based layouts are
-    used when sequences in a batch have different lengths. `T` is the total number
-    of sequences in the batch, `t = sum(s_i) for i = 0...b-1`. `QKV_INTERLEAVED`,
-    `KV_INTERLEAVED` and `NOT_INTERLEAVED` are to be deprecated soon.
+ *  \brief Memory layouts of QKV tensors 
+ *  `S`, `B`, `H`, `D`, and `T` stand for sequence length, batch size, the number of heads,
+    head size, and the total number of sequences in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
+    `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
+    or padded to the same length, and `THD`-based layouts are used when sequences have
+    different lengths in a batch.
+ *  \note {`NVTE_QKV_INTERLEAVED`, `NVTE_KV_INTERLEAVED` and `NVTE_NOT_INTERLEAVED`
+    are going to be deprecated. Please use their equivalent enums instead: `NVTE_T3HD`,
+    `NVTE_THD_T2HD` and `NVTE_THD_THD_THD` if sequences are of variable lengths, or `NVTE_BS3HD`,
+    `NVTE_BSHD_BS2HD` and `NVTE_BSHD_BSHD_BSHD` if sequences are of equal length or padded
+    to equal length.}
  */
 enum NVTE_QKV_Layout {
-
 /*! Separate Q, K, V tensors.
     \verbatim
       Q: [total_seqs_q, num_heads, head_dim]
@@ -75,7 +78,7 @@ enum NVTE_QKV_Layout {
     \endverbatim
  */
     NVTE_KV_INTERLEAVED = 2,
- 
+
     NVTE_SB3HD = 3,
     NVTE_SBH3D = 4,
     NVTE_SBHD_SB2HD = 5,
@@ -94,22 +97,30 @@ enum NVTE_QKV_Layout {
 };
 
 /*! \enum NVTE_QKV_Layout_Group
- *  \brief QKV matrix layout groups
+ *  \brief Grouping of QKV layouts 
  */
 enum NVTE_QKV_Layout_Group {
+    /*! 3HD QKV layouts, e.g. BS3HD */
     NVTE_3HD = 0,
+    /*! H3D QKV layouts, e.g. BSH3D */
     NVTE_H3D = 1,
+    /*! HD_2HD QKV layouts, e.g. BSHD_BS2HD */
     NVTE_HD_2HD = 2,
+    /*! HD_H2D QKV layouts, e.g. BSHD_BSH2D */
     NVTE_HD_H2D = 3,
+    /*! HD_HD_HD QKV layouts, e.g. BSHD_BSHD_BSHD */
     NVTE_HD_HD_HD = 4,
 };
 
 /*! \enum NVTE_QKV_Format
- *  \brief QKV matrix layout groups
+ *  \brief Dimension formats for QKV tensors
  */
 enum NVTE_QKV_Format {
+    /*! SBHD QKV format */
     NVTE_SBHD = 0,
+    /*! BSHD QKV format */
     NVTE_BSHD = 1,
+    /*! THD QKV format */
     NVTE_THD = 2,
 };
 
@@ -137,6 +148,9 @@ enum NVTE_Mask_Type {
     NVTE_CAUSAL_MASK = 2,
 };
 
+/*! \enum NVTE_Fused_Attn_Backend
+ *  \brief Fused attention backends
+ */
 enum NVTE_Fused_Attn_Backend {
     /*! No supported backend */
     NVTE_No_Backend = -1,
@@ -148,21 +162,21 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_FP8 = 2,
 };
 
-/*!  \brief Map QKV tensor layout to layout group
+/*!  \brief Get layout group for a given QKV layout
  *
  *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
  *
  *  \return        qkv layout group, e.g. h3d.
  */
-NVTE_QKV_Layout_Group map_layout_to_group(NVTE_QKV_Layout qkv_layout);
+NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout);
 
-/*!  \brief Map QKV tensor layout to qkv format
+/*!  \brief Get QKV format for a given QKV layout
  *
  *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
  *
  *  \return        qkv format, e.g. sbhd.
  */
-NVTE_QKV_Format map_layout_to_format(NVTE_QKV_Layout qkv_layout);
+NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
@@ -211,7 +225,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(cu_seqlens).
+ *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -258,7 +272,7 @@ void nvte_fused_attn_fwd_qkvpacked(
  *  \param[out]    dBias                    The gradient of the Bias tensor.
  *  \param[in]     cu_seqlens               Accumulative sequence lengths, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(cu_seqlens).
+ *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensor's layout.
@@ -309,9 +323,9 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
- *                                          it may be >= max(cu_seqlens_q).
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.
- *                                          it may be >= max(cu_seqlens_kv).
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -360,9 +374,9 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     cu_seqlens_q             Accumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Accumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
- *                                          it may be >= max(cu_seqlens_q).
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv            Max sequence length used for computing for KV.
- *                                          it may be >= max(cu_seqlens_kv).
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensor's layout.
@@ -401,10 +415,10 @@ void nvte_fused_attn_bwd_kvpacked(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision |    qkv layout   |       bias         |      mask           | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | SBHD, BSHD, THD | NO/POST_SCALE_BIAS | PADDING/CAUSAL_MASK |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | SBHD, BSHD      | NO/POST_SCALE_BIAS | CAUSAL_MASK         |   Yes   |      > 512      |  64, 128 |
-   | 2       | FP8       | THD             | NO_BIAS            | PADDING_MASK        |   Yes   |     <= 512      |    64    |
+   | backend | precision | qkv format |       bias         |      mask           | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | PADDING/CAUSAL_MASK |   Yes   |     <= 512      |    64    |
+   | 1       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | CAUSAL_MASK         |   Yes   |      > 512      |  64, 128 |
+   | 2       | FP8       | THD        | NO_BIAS            | PADDING_MASK        |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor.
@@ -419,9 +433,9 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
- *                                          it may be >= max(cu_seqlens_q).
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
- *                                          it may be >= max(cu_seqlens_kv).
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training              Whether this is in training mode or inference.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
@@ -453,10 +467,10 @@ void nvte_fused_attn_fwd_q_k_v(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision |    qkv layout   |          bias           |      mask      | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | SBHD, BSHD, THD | NO/POST_SCALE_BIAS | PADDING/CAUSAL_MASK |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | SBHD, BSHD      | NO/POST_SCALE_BIAS | CAUSAL_MASK         |   Yes   |      > 512      |  64, 128 |
-   | 2       | FP8       | THD             | NO_BIAS            | PADDING_MASK        |   Yes   |     <= 512      |    64    |
+   | backend | precision | qkv format |       bias         |      mask           | dropout | sequence length | head_dim |
+   | 0       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | PADDING/CAUSAL_MASK |   Yes   |     <= 512      |    64    |
+   | 1       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | CAUSAL_MASK         |   Yes   |      > 512      |  64, 128 |
+   | 2       | FP8       | THD        | NO_BIAS            | PADDING_MASK        |   Yes   |     <= 512      |    64    |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor.
@@ -475,9 +489,9 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[in]     cu_seqlens_q             Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv            Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     max_seqlen_q             Max sequence length used for computing for Q.
- *                                          it may be >= max(cu_seqlens_q).
+ *                                          it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
  *  \param[in]     max_seqlen_kv            Max sequence length used for computing for K and V.
- *                                          it may be >= max(cu_seqlens_kv).
+ *                                          it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     attn_scale               Scaling factor for Q * K.T.
  *  \param[in]     dropout                  Dropout probability.
  *  \param[in]     qkv_layout               QKV tensors' layout.

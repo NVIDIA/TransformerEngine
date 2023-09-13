@@ -13,76 +13,62 @@
 #include "../util/cuda_runtime.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
-NVTE_QKV_Layout_Group map_layout_to_group(NVTE_QKV_Layout qkv_layout) {
+NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
     switch (qkv_layout) {
         case NVTE_QKV_Layout::NVTE_SB3HD:
         case NVTE_QKV_Layout::NVTE_BS3HD:
         case NVTE_QKV_Layout::NVTE_T3HD:
-            {
-                return NVTE_QKV_Layout_Group::NVTE_3HD;
-            }
+        case NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED:
+            return NVTE_QKV_Layout_Group::NVTE_3HD;
         case NVTE_QKV_Layout::NVTE_SBH3D:
         case NVTE_QKV_Layout::NVTE_BSH3D:
         case NVTE_QKV_Layout::NVTE_TH3D:
-            {
-                return NVTE_QKV_Layout_Group::NVTE_H3D;
-            }
+            return NVTE_QKV_Layout_Group::NVTE_H3D;
         case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
         case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
         case NVTE_QKV_Layout::NVTE_THD_T2HD:
-            {
-                return NVTE_QKV_Layout_Group::NVTE_HD_2HD;
-            }
+        case NVTE_QKV_Layout::NVTE_KV_INTERLEAVED:
+            return NVTE_QKV_Layout_Group::NVTE_HD_2HD;
         case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
         case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
         case NVTE_QKV_Layout::NVTE_THD_TH2D:
-            {
-                return NVTE_QKV_Layout_Group::NVTE_HD_H2D;
-            }
+            return NVTE_QKV_Layout_Group::NVTE_HD_H2D;
         case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
         case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
         case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-            {
-                return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
-            }
+        case NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED:
+            return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
         default:
-            {
-                NVTE_ERROR("qkv_layout not supported!");
-            }
+            NVTE_ERROR("qkv_layout not supported!");
     }
 }
 
 // map NVTE_QKV_Layout to NVTE_QKV_Format
-NVTE_QKV_Format map_layout_to_format(NVTE_QKV_Layout qkv_layout) {
+NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
     switch (qkv_layout) {
         case NVTE_QKV_Layout::NVTE_SB3HD:
         case NVTE_QKV_Layout::NVTE_SBH3D:
         case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
         case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
         case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
-            {
-                return NVTE_QKV_Format::NVTE_SBHD;
-            }
+            return NVTE_QKV_Format::NVTE_SBHD;
         case NVTE_QKV_Layout::NVTE_BS3HD:
         case NVTE_QKV_Layout::NVTE_BSH3D:
         case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
         case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
         case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
-            {
-                return NVTE_QKV_Format::NVTE_BSHD;
-            }
+            return NVTE_QKV_Format::NVTE_BSHD;
         case NVTE_QKV_Layout::NVTE_T3HD:
         case NVTE_QKV_Layout::NVTE_TH3D:
         case NVTE_QKV_Layout::NVTE_THD_T2HD:
         case NVTE_QKV_Layout::NVTE_THD_TH2D:
         case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-            {
-                return NVTE_QKV_Format::NVTE_THD;
-            }
+        case NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED:
+        case NVTE_QKV_Layout::NVTE_KV_INTERLEAVED:
+        case NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED:
+            return NVTE_QKV_Format::NVTE_THD;
         default:
-            {
-                NVTE_ERROR("qkv_layout not supported!");
-            }
+            NVTE_ERROR("qkv_layout not supported!");
     }
 }
 
@@ -128,8 +114,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
-                || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
-                || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
+                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_m512 = true;
     }
     if (
@@ -143,8 +129,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
-                || (map_layout_to_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
+                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))

@@ -632,5 +632,5 @@ class TransformerLayer(torch.nn.Module):
         if self.output_layernorm:
             output = self.layernorm(output)
 
-        # output: [b, s, h]
+        # output: [s, b, h]
         return output

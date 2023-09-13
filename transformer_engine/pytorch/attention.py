@@ -59,6 +59,7 @@ if _flash_attn_2_available:
 else:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func as flash_attn_forward_func # pylint: disable=no-name-in-module,ungrouped-imports
 
+
 __all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
@@ -164,7 +165,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        qkv_layout: str = "sb3hd",
+        qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
         cu_seqlens_kv: Optional[torch.Tensor] = None, # pylint: disable=unused-argument
         attn_mask_type: str = "causal",
@@ -174,14 +175,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """core attention fprop"""
 
-        qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
-        assert (
-            qkv_layout in QKVLayouts
+        assert (qkv_layout in QKVLayouts
             ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
+        qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
         assert (qkv_format != 'thd'
-            ), """UnfusedDotProductAttention currently does not support inputs
-            with variable sequence lengths!"""
+            ), """UnfusedDotProductAttention does not support variable sequence lengths!"""
         if qkv_format == 'bshd':
+            # convert to sbhd and use sbhd implementation for now
             query_layer, key_layer, value_layer = [x.transpose(0, 1)
                 for x in [query_layer, key_layer, value_layer]]
         assert (
@@ -372,16 +372,21 @@ def _get_qkv_layout(
     v: torch.Tensor
         Value tensor.
     qkv_format: str, default = `sbhd`
-        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` is
-        the sequence length dimension, `b` the batch size, `h` the number of heads,
-        `d` the head size, and `t` the total number of sequences in a batch,
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for 
+        the sequence length dimension, `b` batch size, `h` the number of attention heads,
+        `d` head size, and `t` the total number of sequences in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
 
     Returns
     ----------
     qkv_layout: str
-       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped into one of five
-       memory layouts:
+       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped to one of five
+       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk 
+       of memory and that they are interleaved in the `2`nd dimension. `sbhd_sbh2d` means
+       `q` and `kv` are created in two chunks and that `q` itself is contiguous and `k`, `v`
+       are interleaved with each other in the `3`rd dimension, `k = kv[:,:,:,0,:]` and
+       `v = kv[:,:,:,1,:]`.
+       Mapping:
        `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
        `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
        `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
@@ -474,7 +479,7 @@ class FlashAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        qkv_layout: str = "sb3hd",
+        qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         attn_mask_type: str = "causal",
@@ -491,7 +496,7 @@ class FlashAttention(torch.nn.Module):
             ), "FlashAttention currently only supports CUDA tensors."
         assert (
             qkv_layout in QKVLayouts
-            ), f"FlashAttention does not support {qkv_layout} qkv_layout!"
+            ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
 
@@ -513,7 +518,6 @@ class FlashAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [x.contiguous()
                 for x in (query_layer, key_layer, value_layer)]
 
-        # qkv layout at this point is all bshd_bshd_bshd
         if qkv_format in ['sbhd', 'bshd']:
             batch_size = query_layer.shape[0]
             max_seqlen_q = query_layer.shape[1]
@@ -532,15 +536,16 @@ class FlashAttention(torch.nn.Module):
                         step=max_seqlen_kv,
                         dtype=torch.int32,
                         device=key_layer.device)
+            # [b * s, h, d]
             query_layer, key_layer, value_layer = [x.view(x.shape[0] * x.shape[1], *x.shape[2:])
                 for x in [query_layer, key_layer, value_layer]
-            ]
+                ]
 
         if qkv_format == 'thd':
             assert (_flash_attn_2_available
-                ), "flash-attn v2 is required to process inputs with variable sequence lengths!"
+                ), "flash-attn v2 is required for variable sequence length support!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
-                ), "cu_seqlens_q and cu_seqlens_kv are required for qkv_format = thd!"
+                ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             max_seqlen_q = seqlens_q.max().item()
@@ -559,11 +564,12 @@ class FlashAttention(torch.nn.Module):
             )
 
         if qkv_format == 'sbhd':
-            # bshd -> bs(hd) -> sb(hd)
+            # (bs)hd -> bs(hd) -> sb(hd)
             output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
         if qkv_format == 'bshd':
-            # bshd -> bs(hd)
+            # (bs)hd -> bs(hd)
             output = output.view(batch_size, max_seqlen_q, -1).contiguous()
+
         return output
 
 
@@ -701,13 +707,13 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None, None, None, None, None, None)
 
 class FusedAttnFunc_q_k_v(torch.autograd.Function):
-    """Function for FusedAttention with separate QKV input"""
+    """Function for FusedAttention with separate Q, K, V tensors"""
 
     @staticmethod
     def forward(ctx, is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
-                rng_gen, fused_attention_backend):
+                rng_gen, fused_attention_backend, use_FAv2_bwd):
         out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
@@ -727,30 +733,45 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.fused_attention_backend = fused_attention_backend
+        ctx.use_FAv2_bwd = use_FAv2_bwd
 
         return out
 
     @staticmethod
     def backward(ctx, d_out):
         q, k, v, out, cu_seqlens_q, cu_seqlens_kv = ctx.saved_tensors
-        dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
-            ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
-            q, k, v, out, d_out,
-            ctx.qkv_dtype, ctx.aux_ctx_tensors,
-            ctx.fused_attention_backend,
-            None, None, None, None, None, None, None, None, None,
-            ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
-            ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
+        if ctx.use_FAv2_bwd:
+            softmax_lse, rng_state = ctx.aux_ctx_tensors
+            dq = torch.empty_like(q)
+            dk = torch.empty_like(k)
+            dv = torch.empty_like(v)
+            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+            d_out, q, k, v, out = [maybe_contiguous(x)
+                for x in (d_out, q, k, v, out)]
+            flash_attn_cuda_bwd(
+                d_out, q, k, v, out, softmax_lse, dq, dk, dv,
+                cu_seqlens_q, cu_seqlens_kv, ctx.max_seqlen_q, ctx.max_seqlen_kv,
+                ctx.dropout_p, ctx.attn_scale, False,
+                ctx.attn_mask_type == "causal", None, rng_state
+            )
+            dq = dq[..., :d_out.shape[-1]]
+            dk = dk[..., :d_out.shape[-1]]
+            dv = dv[..., :d_out.shape[-1]]
+        else:
+            dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
+                ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
+                q, k, v, out, d_out,
+                ctx.qkv_dtype, ctx.aux_ctx_tensors,
+                ctx.fused_attention_backend,
+                None, None, None, None, None, None, None, None, None,
+                ctx.attn_scale, ctx.dropout_p, ctx.fast_zero_fill,
+                ctx.qkv_layout, ctx.attn_bias_type, ctx.attn_mask_type)
 
         # if no_bias, return dqkv
         if ctx.attn_bias_type == "no_bias":
-            ret = (None, None, None, None, None, dq, dk, dv, None, None, None,
+            return (None, None, None, None, None, dq, dk, dv, None, None, None,
                     None, None, None, None, None, None,
                     None, None, None, None, None, None)
-            return ret
-            #return (None, None, None, None, None, dq, dk, dv, None, None, None, None,
-            #        None, None, None, None, None, None,
-            #        None, None, None, None, None, None)
         # else, return (dqkv, dbias)
         return (None, None, None, None, None, dq, dk, dv, None, rest[0], None,
                 None, None, None, None, None, None,
@@ -804,7 +825,7 @@ class FusedAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        qkv_layout: str = "sb3hd",
+        qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         attn_mask_type: str = "causal",
@@ -817,8 +838,8 @@ class FusedAttention(torch.nn.Module):
         """fused attention fprop"""
 
         assert (fused_attention_backend
-                != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
-                ), 'No fused attention backend supports this input combination!'
+            != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+            ), 'No fused attention backend supports this input combination!'
         assert (
             (query_layer.dtype in [torch.float16, torch.bfloat16])
             and (key_layer.dtype in [torch.float16, torch.bfloat16])
@@ -833,9 +854,12 @@ class FusedAttention(torch.nn.Module):
 
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
         if qkv_format in ['sbhd', 'bshd']:
-            batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
-            max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
-            max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
+            if qkv_format == 'sbhd':
+                batch_size, max_seqlen_q, max_seqlen_kv =
+                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0]
+            if qkv_format == 'bshd':
+                batch_size, max_seqlen_q, max_seqlen_kv =
+                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1]
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.arange(
                         0,
@@ -860,6 +884,9 @@ class FusedAttention(torch.nn.Module):
 
         qkv_dtype = TE_DType[query_layer.dtype]
 
+        use_FAv2_bwd = (self.use_FAv2_bwd
+                and (fused_attention_backend
+                    == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
         with self.attention_dropout_ctx():
             output = FusedAttnFunc_q_k_v.apply(
                 self.training,
@@ -876,9 +903,10 @@ class FusedAttention(torch.nn.Module):
                 attn_mask_type,
                 None, # rng_gen
                 fused_attention_backend,
+                use_FAv2_bwd,
             )
 
-        # bshd -> bs(hd) or sbhd -> sb(hd)
+        # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
 
 
@@ -1106,14 +1134,14 @@ class DotProductAttention(torch.nn.Module):
                      Value tensor.
         qkv_format: str, default = `sbhd`
                    Dimension format for `query_layer`, `key_layer` and `value_layer`,
-                   {`sbhd`, `bshd`, `thd`}. `s` is the sequence length dimension,
-                   `b` the batch size, `h` the number of heads, `d` the head size,
-                   and `t` the total number of sequences in a batch, `t = sum(s_i) for i = 0...b-1`.
-                   `sbhd` and `bshd` are used for cases where sequences in a batch are
-                   of equal length or padded to the same length, and `thd` is used for when
-                   sequence lengths in a batch are different. These formats do not describe
-                   how `query_layer`, `key_layer` and `value_layer`
-                   are laid out in memory, for which, please see `_get_qkv_layout`.
+                   {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
+                   `h` the number of heads, `d` head size, and `t` the total number of sequences
+                   in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
+                   are used for when sequences in a batch are of equal length or padded to
+                   equal length, and the `thd` format is used for when sequences in a batch
+                   have different lengths. Please note that these formats do not reflect how
+                   tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
+                   For that, please use `_get_qkv_layout` to gain the layout information.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths in a batch for `query_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
@@ -1165,7 +1193,7 @@ class DotProductAttention(torch.nn.Module):
                 ), "cu_seqlens_q and cu_seqlens_q must both have shape [batch_size + 1]!"
             assert (cu_seqlens_q.dtype == torch.int32
                 and cu_seqlens_kv.dtype == torch.int32
-                ), "cu_seqlens_q and cu_seqlens_q must have dtype torch.int32!"
+                ), "cu_seqlens_q and cu_seqlens_q must both be in dtype torch.int32!"
             batch_size = len(cu_seqlens_q) - 1
             seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
@@ -1180,30 +1208,31 @@ class DotProductAttention(torch.nn.Module):
                 key_layer, value_layer = [x.view(batch_size, seqlens_kv[0], *x.shape[-2:])
                     for x in (key_layer, value_layer)]
                 warnings.warn(
-                    """Please use qkv_format bshd instead of thd when sequences in a batch
-                    are of equal length."""
+                    """Please use qkv_format 'bshd' instead of 'thd' when sequences have the same
+                    length or are padded to the same length in a batch."""
                     )
 
         if qkv_format in ['sbhd', 'bshd']:
             assert (all(len(x.shape) == 4 for x in (query_layer, key_layer, value_layer))
                 ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
-            batch_size = query_layer.shape[1] if qkv_format == 'sbhd' else query_layer.shape[0]
-            max_seqlen_q = query_layer.shape[0] if qkv_format == 'sbhd' else query_layer.shape[1]
-            max_seqlen_kv = key_layer.shape[0] if qkv_format == 'sbhd' else key_layer.shape[1]
+            if qkv_format == 'sbhd':
+                batch_size, max_seqlen_q, max_seqlen_kv =
+                    query_layer.shape[1], query_layer.shape[0], key_layer.shape[0]
+            if qkv_format == 'bshd':
+                batch_size, max_seqlen_q, max_seqlen_kv =
+                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1]
             if cu_seqlens_q is not None:
                 seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                 assert (all(seqlens_q <= max_seqlen_q)
-                    ), """Sequence lengths indicated by cu_seqlens_q must not be greater than
-                    the sequence dimention in the query tensor!"""
+                    ), """Sequence lengths indicated by cu_seqlens_q must be no greater than
+                    the sequence dimention in 'query_layer'!"""
             if cu_seqlens_kv is not None:
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                 assert (all(seqlens_kv <= max_seqlen_kv)
-                    ), """Sequence lengths indicated by cu_seqlens_kv must not be greater than
-                    the sequence dimention in the key and value tensors!"""
+                    ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
+                    the sequence dimention in 'key_layer' and 'value_layer'!"""
 
-        qkv_layout = _get_qkv_layout(query_layer,
-            key_layer,
-            value_layer,
+        qkv_layout = _get_qkv_layout(query_layer, key_layer, value_layer,
             qkv_format = qkv_format)
 
         use_flash_attention = self.use_flash_attention
@@ -1932,6 +1961,9 @@ class MultiheadAttention(torch.nn.Module):
             query_layer,
             key_layer,
             value_layer,
+            qkv_format='sbhd',
+            cu_seqlens_q=None,
+            cu_seqlens_kv=None,
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             checkpoint_core_attention=checkpoint_core_attention,

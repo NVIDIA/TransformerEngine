@@ -354,7 +354,8 @@ def fused_attn_bwd_qkvpacked(
     Parameters
     ----------
     max_seqlen: int
-                max sequence length for QKV, used for padding; may be larger than max(seqlens_q)
+                max sequence length for QKV, used for padding; may be larger than max(seqlens)
+                seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
     cu_seqlens: torch.Tensor
                 cumulative sequence lengths for QKV; shape [batch_size + 1]
     qkv: torch.Tensor
@@ -855,7 +856,7 @@ def fused_attn_fwd_q_k_v(
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
-    qkv_layout: str = "sb3hd",
+    qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     rng_gen: torch.Generator = None,
@@ -923,7 +924,7 @@ def fused_attn_fwd_q_k_v(
     fast_zero_fill: bool, default = True
                 if True, initializes the output tensor O to zero using the fast filling method;
                 if False, uses PyTorch's .fill_() method
-    qkv_layout: str, default = "sb3hd"
+    qkv_layout: str, default = "sbh3d"
                 layout of Q, K and V;
                 {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
                 "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
@@ -1040,7 +1041,7 @@ def fused_attn_bwd_q_k_v(
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
-    qkv_layout: str = "sb3hd",
+    qkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -1118,7 +1119,7 @@ def fused_attn_bwd_q_k_v(
     fast_zero_fill: bool, default = True
                 if True, initializes the output tensor O to zero using the fast filling method;
                 if False, uses PyTorch's .fill_() method
-    qkv_layout: str, default = "sb3hd"
+    qkv_layout: str, default = "sbh3d"
                 layout of Q, K and V;
                 {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
                 "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",

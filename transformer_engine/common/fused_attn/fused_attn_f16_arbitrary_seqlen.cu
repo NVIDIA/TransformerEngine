@@ -540,8 +540,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 NVTE_QKV_Layout layout,
                                 void *devPtrQ, void *devPtrK, void *devPtrV,
                                 void *devPtrSoftmaxStats, void *devPtrO,
-                                void* devPtrDropoutSeed,
-                                void* devPtrDropoutOffset, cudnnDataType_t tensorType,
+                                void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+                                cudnnDataType_t tensorType,
                                 void *workspace, size_t *workspace_size,
                                 cudaStream_t stream, cudnnHandle_t handle) {
     try {
@@ -1364,7 +1364,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(qkv_type), workspace->data.dptr,
                                 &workspace_size, stream, handle, use_workspace_opt);
-  
+
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
             workspace->data.shape = {workspace_size};
@@ -1483,21 +1483,31 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
     const int device_id = cuda::current_device();
     const int sm_arch_ = cuda::sm_arch(device_id);
     if (sm_arch_ >= 90) {
-        //// quick estimate of dp workspace size
-        //size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
-        //size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
-        //size_t wkspace_size = batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2;
-        //// default upper limit for dp workspace 256MB
-        //size_t max_allowed = 256 * 1024 * 1024;
-        //if {wkspace_size < max_allowed) {
-            const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
-            if ((env_workspace_opt != nullptr)
-                && (strcmp(env_workspace_opt, "1") == 0)) {
-                    use_workspace_opt = true;
+        // quick estimate of dp workspace size
+        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        size_t required_dp_workspace =
+        (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
+        // default upper limit for dp workspace 256MB
+        size_t max_allowed_dp_workspace = 256;
+        const char* env_workspace_limit_char = std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT");
+        if (env_workspace_limit_char != nullptr) {
+            try {
+                std::string env_dp_workspace_limit(env_workspace_limit_char);
+                int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
+                if (dp_workspace_limit > max_allowed_dp_workspace) {
+                    max_allowed_dp_workspace = dp_workspace_limit;
+                }
+            } catch (...) {
+                NVTE_ERROR(
+                "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
             }
-        //}
+        }
+        if (required_dp_workspace <= max_allowed_dp_workspace) {
+                use_workspace_opt = true;
+        }
     }
-    //std::cout << "use opt: " << (int)use_workspace_opt << std::endl;
+    std::cout << "use opt: " << static_cast<int>(use_workspace_opt) << std::endl;
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
