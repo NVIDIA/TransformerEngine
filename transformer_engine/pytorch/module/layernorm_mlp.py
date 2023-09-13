@@ -4,50 +4,28 @@
 
 """LayerNormMLP API"""
 import os
-from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
 from torch.nn import init
+from torch.nn.parameter import Parameter
 
+from ._common import _apply_normalization, _get_normalization_grad
 from .base import (
-    get_workspace,
-    _prepare_backward,
-    get_ub,
-    TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule, _2X_ACC_DGRAD, _2X_ACC_FPROP, _2X_ACC_WGRAD, _prepare_backward, get_ub, get_workspace,
+)
+from .. import cpp_extensions as tex
+from ..constants import TE_DType, dist_group_type
+from ..distributed import (
+    allreduce, gather_along_first_dim, get_distributed_world_size, initialize_affine_weight_gpu,
+    reduce_scatter_along_first_dim, set_tensor_model_parallel_attributes,
 )
 from ..fp8 import get_fp8_te_dtype
 from ..jit import (
-    bias_gelu_fused,
-    bgrad_dgelu_fused,
-    set_jit_fusion_options,
+    bgrad_dgelu_fused, bias_gelu_fused, no_torch_dynamo, set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
-from ..utils import (
-    divide,
-    get_default_init_method,
-    cast_if_needed,
-    assert_dim_for_fp8_exec,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    initialize_affine_weight_gpu,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-)
-
-from .. import cpp_extensions as tex
-
-from ..constants import dist_group_type, TE_DType
-from ..jit import no_torch_dynamo
-
-from ._common import _apply_normalization
-
+from ..utils import (assert_dim_for_fp8_exec, cast_if_needed, divide, get_default_init_method)
 
 __all__ = ["LayerNormMLP"]
 
@@ -147,17 +125,19 @@ class _LayerNormMLP(torch.autograd.Function):
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
-        ln_out, mu, rsigma = _apply_normalization(inputmat,
-                                                  ln_out,
-                                                  ln_weight,
-                                                  ln_bias,
-                                                  eps,
-                                                  fp8 and not return_layernorm_output,
-                                                  fp8_meta,
-                                                  normalization,
-                                                  fwd_ln_sm_margin,
-                                                  zero_centered_gamma,
-                                                  is_grad_enabled)
+        ln_out_direct_fp8 = fp8 and not return_layernorm_output
+        ln_out, rsigma = _apply_normalization(inputmat,
+                                              ln_out,
+                                              ln_weight,
+                                              ln_bias,
+                                              eps,
+                                              ln_out_direct_fp8,
+                                              fp8_meta,
+                                              normalization,
+                                              fwd_ln_sm_margin,
+                                              zero_centered_gamma,
+                                              is_grad_enabled)
+        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() if ln_out_direct_fp8 else None
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
@@ -359,9 +339,9 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.save_for_backward(
-                inputmat,
+                torch.empty(0, device=inputmat.device, dtype=inputmat.dtype),
                 ln_weight,
-                mu,
+                ln_bias,
                 rsigma,
                 ln_out,
                 fc1_out,
@@ -371,6 +351,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight,
                 fc2_weight_t_fp8,
                 fc1_bias,
+                fwd_scale_inverses_ln,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
             ctx.activation_dtype = activation_dtype
@@ -388,6 +369,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
             ctx.return_layernorm_output = return_layernorm_output
+            ctx.ln_out_direct_fp8 = ln_out_direct_fp8
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
@@ -396,6 +378,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_split_ag = ub_split_ag
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
+            ctx.eps = eps
 
         # Row Parallel Linear
         if ub_split_rs:
@@ -421,9 +404,9 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormMLP"
         ):
             (
-                inputmat,
+                fake_input,
                 ln_weight,
-                mu,
+                ln_bias,
                 rsigma,
                 ln_out,
                 fc1_out,
@@ -433,7 +416,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight,
                 fc2_weight_t_fp8,
                 fc1_bias,
-                fwd_scale_inverses,
+                fwd_scale_inverses_ln,
+                fwd_scale_inverses_gemm,
             ) = ctx.saved_tensors
 
             activation_func = _act_func(ctx.activation)[1]
@@ -500,7 +484,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 # FC2 DGRAD; Unconditional
                 fc2_dgrad = tex.fp8_gemm(
                     fc2_weight_t_fp8,
-                    fwd_scale_inverses,
+                    fwd_scale_inverses_gemm,
                     tex.FP8FwdTensors.GEMM2_WEIGHT,
                     fp8_dtype_forward,
                     grad_output_c,
@@ -521,7 +505,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
                         fc2_wgrad = tex.fp8_gemm(
                             gelu_out_t,
-                            fwd_scale_inverses,
+                            fwd_scale_inverses_gemm,
                             tex.FP8FwdTensors.GEMM2_INPUT,
                             fp8_dtype_forward,
                             grad_output_t,
@@ -607,7 +591,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
                     fc1_weight_t_fp8,
-                    fwd_scale_inverses,
+                    fwd_scale_inverses_gemm,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
                     dgelu,
@@ -707,7 +691,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         fc1_wgrad = tex.fp8_gemm(
                             ln_out_total_t,
-                            fwd_scale_inverses,
+                            fwd_scale_inverses_gemm,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
                             dgelu_t,
@@ -776,23 +760,16 @@ class _LayerNormMLP(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            d_ln_out = fc1_dgrad.view(inputmat.shape)
+            d_ln_out = fc1_dgrad.view(ln_out.shape)
 
-            # Residual gradient
-            if ctx.return_layernorm_output:
-                d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
+            if fwd_scale_inverses_ln is not None:
+                fwd_scale_inverses_ln = fwd_scale_inverses_ln[tex.FP8FwdTensors.GEMM1_INPUT]
 
-            if ctx.normalization == "LayerNorm":
-                dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                    d_ln_out, inputmat, mu, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
-                )
-            elif ctx.normalization == "RMSNorm":
-                dxmat, dgamma = tex.rmsnorm_bwd(
-                    d_ln_out, inputmat, rsigma, ln_weight,
-                    ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
-                )
-                dbeta = None
+            dxmat, dgamma, dbeta = _get_normalization_grad(
+                d_ln_out, fake_input, ln_out, ln_weight, ln_bias, rsigma, ctx.eps,
+                fwd_scale_inverses_ln, ctx.ln_out_direct_fp8,
+                ctx.normalization, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+            )
 
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,

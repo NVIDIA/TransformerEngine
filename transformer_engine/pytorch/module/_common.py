@@ -118,8 +118,6 @@ def _get_normalization_grad(d_ln_out: torch.Tensor,
         output = normalization_func(
             *inputs,
             eps,
-            torch.Tensor(),  # scale unused
-            torch.Tensor(),  # amax unused
             fwd_scale_inverse,
             bwd_ln_sm_margin,
             zero_centered_gamma,
