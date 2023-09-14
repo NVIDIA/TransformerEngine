@@ -508,7 +508,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     else:
         if version >= (11, 2):
             nvcc_flags.extend(["--threads", "4"])
-        if version >= (11, 0) and version < (11, 8):
+        if version >= (11, 0):
             nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
@@ -579,7 +579,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     else:
         if version >= (11, 2):
             nvcc_flags.extend(["--threads", "4"])
-        if version >= (11, 0) and version < (11, 8):
+        if version >= (11, 0):
             nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
         if version >= (11, 8):
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
