@@ -212,8 +212,11 @@ class _NoopCat(torch.autograd.Function):
                 *params_split: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
         assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
+        sum_params_shape = 0
+        for i in range(len(params_split)):
+            sum_params_shape += params_split[i].shape[0]
         assert (
-            full_param_buffer.shape[0] % len(params_split) == 0
+            full_param_buffer.shape[0] == sum_params_shape
         ), "Dimensions not compatible for concatenation"
 
         param_temp = full_param_buffer.new()
@@ -230,11 +233,14 @@ class _NoopCat(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         full_param_buffer, *params_split = ctx.saved_tensors
 
-        split_size = full_param_buffer.shape[0] // len(params_split)
         grads = []
 
+        slice_begin = 0
         for i, _ in enumerate(params_split):
-            grads.append(grad_output[i * split_size : (i+1) * split_size])
+            slice_size = params_split[i].shape[0]
+            slice_end = slice_begin + slice_size
+            grads.append(grad_output[slice_begin:slice_end])
+            slice_begin = slice_end
 
         return None, *grads
 
@@ -754,7 +760,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self, buffer_name: str, pnames: List[str]) -> torch.Tensor:
+    def noop_cat(self,
+        buffer_name: str,
+        pnames: List[str],
+        parameters_split: Dict[str, int]
+        ) -> torch.Tensor:
         """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
            the same memory region. If this is not the case, then the split parameters
            are concatenated and the buffer is overwritten. The parameters' memory is then
@@ -763,17 +773,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
         full_param_buffer = getattr(self, buffer_name)
-        split_size = full_param_buffer.shape[0] // len(pnames)
         params = [getattr(self, name) for name in pnames]
+        slice_begin = 0
         for i, p in enumerate(params):
-            if p.data.data_ptr() != full_param_buffer[i*split_size : (i+1)*split_size].data_ptr():
+            slice_size = list(parameters_split.values())[i]
+            slice_end = slice_begin + slice_size
+            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
                 with torch.no_grad():
                     setattr(self, buffer_name, torch.cat(params))
                     for j, pname in enumerate(pnames):
                         full_param_buffer = getattr(self, buffer_name)
                         setattr(self, pname,
-                                Parameter(full_param_buffer[j*split_size : (j+1)*split_size]))
+                                Parameter(full_param_buffer[slice_begin:slice_end]))
                 break
+            slice_begin = slice_end
 
         return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
