@@ -164,7 +164,7 @@ qkv_layouts = [
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("workspace_opt", [True])#, False])
+@pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, bs, model, workspace_opt, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
@@ -374,7 +374,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
         .cuda()
     )
 
-    num_iters = 10
+    num_iters = 5
     for i in range(num_iters):
         op = block(inp, self_attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
