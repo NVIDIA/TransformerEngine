@@ -372,7 +372,7 @@ def _get_qkv_layout(
     v: torch.Tensor
         Value tensor.
     qkv_format: str, default = `sbhd`
-        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for 
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
         the sequence length dimension, `b` batch size, `h` the number of attention heads,
         `d` head size, and `t` the total number of sequences in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
@@ -381,7 +381,7 @@ def _get_qkv_layout(
     ----------
     qkv_layout: str
        Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped to one of five
-       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk 
+       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk
        of memory and that they are interleaved in the `2`nd dimension. `sbhd_sbh2d` means
        `q` and `kv` are created in two chunks and that `q` itself is contiguous and `k`, `v`
        are interleaved with each other in the `3`rd dimension, `k = kv[:,:,:,0,:]` and
