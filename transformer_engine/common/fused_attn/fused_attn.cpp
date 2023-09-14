@@ -117,7 +117,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {

@@ -1350,6 +1350,12 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                 use_workspace_opt = false;
             }
         }
+        // will not be needed in cuDNN 8.9.6
+        NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+        if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
+            || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
+                use_workspace_opt = false;
+        }
     }
 #endif
 
