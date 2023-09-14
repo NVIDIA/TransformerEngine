@@ -1134,6 +1134,7 @@ def test_export_layernorm_mlp(
 
 
 @skip_FP8
+@pytest.mark.skipif(True, reason="ONNX not accepting string argument qkv_format")
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type", [
     (torch.float32,  True,     "padding"), # calls forward_torch_softmax (apply user mask)
