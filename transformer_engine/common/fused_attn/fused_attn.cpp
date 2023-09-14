@@ -86,6 +86,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
           && (sm_arch_ >= 90)
           && (max_seqlen_q == max_seqlen_kv)
@@ -114,8 +115,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
-                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
-                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {
       flag_m512 = true;
     }
     if (
@@ -129,8 +134,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_SBHD)
-                || (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
+                || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))

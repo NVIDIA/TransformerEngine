@@ -1498,8 +1498,13 @@ void fused_attn_arbitrary_seqlen_bwd_q_k_v(size_t batch, size_t max_seqlen_q, si
                 use_workspace_opt = false;
             }
         }
+        // will not be needed in cuDNN 8.9.6
+        NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+        if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
+            || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
+                use_workspace_opt = false;
+        }
     }
-    std::cout << "use opt: " << static_cast<int>(use_workspace_opt) << std::endl;
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
