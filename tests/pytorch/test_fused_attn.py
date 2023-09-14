@@ -39,15 +39,17 @@ class ModelConfig:
 
 model_configs = {
     "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    "test7": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    "test8": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    "test9": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test2": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    "test3": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    "test4": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    "test5": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
 }
+
+if os.getenv('NVTE_ADDITIONAL_TESTS', '0') == '1':
+    model_configs["test6"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal")
+    model_configs["test7"] = ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal")
+    model_configs["test8"] = ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal")
+    model_configs["test9"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask")
 
 param_types = [torch.float16]
 if torch.cuda.is_bf16_supported():
@@ -142,17 +144,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
 
     return op, inp.grad
 
-def get_new_qkv_layout(layout):
-    if layout == 'qkv_interleaved':
-        return 'bs3hd'
-    if layout == 'kv_interleaved':
-        return 'bshd_bs2hd'
-    if layout == 'not_interleaved':
-        return 'bshd_bshd_bshd'
-    return layout
-
 qkv_layouts = [
-    'qkv_interleaved', 'kv_interleaved', 'not_interleaved',
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
     # will add tests for thd layouts later when the support is available in fused attention
@@ -208,8 +200,6 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
         '3': 3,
         '2': 2}
 
-    qkv_layout_old = qkv_layout
-    qkv_layout = get_new_qkv_layout(qkv_layout)
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
