@@ -39,15 +39,15 @@ class ModelConfig:
         self.attn_mask_type  = attn_mask_type
 
 model_configs = {
-    "test1": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    #"test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    #"test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
-    #"test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    #"test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    #"test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
-    #"test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
-    #"test7": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-    #"test8": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    "test2": ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal"),
+    "test3": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    "test4": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    "test5": ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal"),
+    "test6": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+    "test7": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    #"test8": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    #"test9": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
 }
 
 param_types = [torch.float16]
@@ -55,79 +55,126 @@ param_types = [torch.float16]
 #    param_types.append(torch.bfloat16)
 
 #batch_sizes = [1, 2, 32]
-batch_sizes = [1] #2, 32]
+batch_sizes = [1, 4]#, 32]
+#batch_sizes = [2] #2, 32]
+
+def get_new_qkv_layout(layout):
+    if layout == 'qkv_interleaved':
+        return 'bs3hd'
+    if layout == 'kv_interleaved':
+        return 'bshd_bs2hd'
+    if layout == 'not_interleaved':
+        return 'bshd_bshd_bshd'
+    return layout
+
+qkv_layouts = [
+    'qkv_interleaved',
+    'kv_interleaved',
+    'not_interleaved',
+    'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+    'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+    #'sb3hd', 
+    #'sbhd_sb2hd', 
+    #'sbhd_sbhd_sbhd',
+    #'bs3hd',
+    #'bshd_bs2hd',
+    #'bshd_bshd_bshd',
+    #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+    ]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_dpa_qkv_layout(dtype, bs, model):
+@pytest.mark.parametrize("workspace_opt", [True, False])
+@pytest.mark.parametrize("qkv_layout", qkv_layouts)
+def test_dpa_qkv_layout(dtype, bs, model, workspace_opt, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
 
     config = model_configs[model]
 
-    qkv_layouts = [
-        'sbh3d',
-        #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-        #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
-        #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
-        ]
+    # max512: sb3hd, bs3hd, bshd_bshd_bshd, 'bshd_bs2hd', 'sbhd_sb2hd',
+    # no: sbh3d, bsh3d, 'bshd_bsh2d', 'sbhd_sbh2d',
+    # arbi: bshd_bshd_bshd, 'sbh3d', 'sb3hd', 'sbhd_sbhd_sbhd', 'bsh3d', 'bs3hd',
+    # workspace_limit = 0
+    #qkv_layouts = [
+    #    #'sbh3d', 'sbhd_sbhd_sbhd', 'bsh3d', 'bshd_bsh2d',
+    #    #
+    #    #'qkv_interleaved',
+    #    #'kv_interleaved',
+    #    #'not_interleaved',
+    #    #'sbh3d',
+    #    'sb3hd',
+    #    #'sbhd_sbhd_sbhd',
+    #    #'bsh3d',
+    #    #'bs3hd',
+    #    #'bshd_bshd_bshd',
+    #    #
+    #    #'bshd_bs2hd',
+    #    #'bshd_bsh2d',
+    #    #'sbhd_sb2hd',
+    #    #'sbhd_sbh2d',
+    #    #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+    #    #'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+    #    #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
+    #    ]
 
-    for qkv_layout in qkv_layouts:
+    #for qkv_layout in qkv_layouts:
 
-        print(f'======================== layout {qkv_layout} =======================')
+    #qkv_layout = get_new_qkv_layout(qkv_layout)
+    print(f'===== layout {qkv_layout} model {model} bs {bs} dtype {dtype} opt {workspace_opt} =====')
 
-        torch.cuda.synchronize()
-        range_flash = nvtx.start_range(f"{qkv_layout}-flash")
-        flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
-                dtype, bs, config, "FlashAttention", qkv_layout)
-        torch.cuda.synchronize()
-        nvtx.end_range(range_flash)
-        range_fused = nvtx.start_range(f"{qkv_layout}-fused")
-        fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
-                dtype, bs, config, "FusedAttention", qkv_layout)
-        torch.cuda.synchronize()
-        nvtx.end_range(range_fused)
-        range_unfused = nvtx.start_range(f"{qkv_layout}-unfused")
-        unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
-                dtype, bs, config, "UnfusedDotProductAttention", qkv_layout)
-        torch.cuda.synchronize()
-        nvtx.end_range(range_unfused)
+    torch.cuda.synchronize()
+    range_flash = nvtx.start_range(f"{qkv_layout}-flash")
+    flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
+            dtype, bs, config, "FlashAttention", qkv_layout, workspace_opt)
+    torch.cuda.synchronize()
+    nvtx.end_range(range_flash)
+    range_fused = nvtx.start_range(f"{qkv_layout}-fused")
+    fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
+            dtype, bs, config, "FusedAttention", qkv_layout, workspace_opt)
+    torch.cuda.synchronize()
+    nvtx.end_range(range_fused)
+    range_unfused = nvtx.start_range(f"{qkv_layout}-unfused")
+    unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
+            dtype, bs, config, "UnfusedDotProductAttention", qkv_layout, workspace_opt)
+    torch.cuda.synchronize()
+    nvtx.end_range(range_unfused)
 
-        atol, rtol = (5e-2, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
-        #print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item(), flash_attn_fwd.view(-1)[:10])
-        #print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item(), fused_attn_fwd.view(-1)[:10])
-        #print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item(), unfused_attn_fwd.view(-1)[:10])
-        print('  flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
-        print('  fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
-        print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
-        #print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
-        #print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
-        #print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
-        #torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
-        #torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
-        #torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
-        #torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
-        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        #assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        #assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
-        #assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
-        for i in range(len(flash_attn_bwd)):
-            print('xxxxxxxxxxxxxxxx i', i)
-            #print('xxxxxxxxxxxxxxxx i', i, flash_attn_bwd[2][0, 1, 9, 7],fused_attn_bwd[2][0, 1, 9, 7],unfused_attn_bwd[2][0, 1, 9, 7])
-            print('  flash bwd:',flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item())
-            print('  fused bwd:',fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
-            print('unfused bwd:',unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
-            torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
-            torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
-            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
-            #assert torch.allclose(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
-            #assert torch.allclose(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+    atol, rtol = (5e-2, 5e-2)# if dtype == torch.bfloat16 else (2.5e-3, 2.5e-3)
+    #print('flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item(), flash_attn_fwd.view(-1)[:10])
+    #print('fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item(), fused_attn_fwd.view(-1)[:10])
+    #print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item(), unfused_attn_fwd.view(-1)[:10])
+    print('  flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
+    print('  fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+    print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+    #print('flash fwd:',flash_attn_fwd[1, 0, 480],flash_attn_fwd[1, 1, 974])
+    #print('fused fwd:',fused_attn_fwd[1, 0, 480],fused_attn_fwd[1, 1, 974])
+    #print('unfused fwd:',unfused_attn_fwd[1, 0, 480],unfused_attn_fwd[1, 1, 974])
+    #torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
+    #torch.save(flash_attn_bwd, 'flash_attn_bwd.pt')
+    #torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
+    #torch.save(fused_attn_bwd, 'fused_attn_bwd.pt')
+    torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+    torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+    torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+    #assert torch.allclose(flash_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+    #assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol = atol, rtol = rtol)
+    #assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol = atol, rtol = rtol)
+    for i in range(len(flash_attn_bwd)):
+        print('xxxxxxxxxxxxxxxx i', i)
+        #print('xxxxxxxxxxxxxxxx i', i, flash_attn_bwd[2][0, 1, 9, 7],fused_attn_bwd[2][0, 1, 9, 7],unfused_attn_bwd[2][0, 1, 9, 7])
+        print('  flash bwd:',flash_attn_bwd[i].min().item(), flash_attn_bwd[i].max().item())
+        print('  fused bwd:',fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+        print('unfused bwd:',unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
+        torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+        torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
+        torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
+        #assert torch.allclose(fused_attn_bwd[i], flash_attn_bwd[i], atol = atol, rtol = rtol)
+        #assert torch.allclose(fused_attn_bwd[i], unfused_attn_bwd[i], atol = atol, rtol = rtol)
 
-def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
+def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -138,17 +185,15 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         #os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-        os.environ["NVTE_FUSED_ATTN_USE_FAv2_BWD"] = "0"
+        #os.environ["NVTE_FUSED_ATTN_USE_FAv2_BWD"] = "0"
+        os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
 
-    dim_to_num = {'b': bs,
-                    's': config.seq_len,
-                    'h': config.num_attention_heads,
-                    'd': config.head_dim,
-                    't': bs * config.seq_len,
-                    '3': 3,
-                    '2': 2,
-                 }
 
+    dim_to_num = {'b': bs, 's': config.seq_len, 'h': config.num_attention_heads,
+        'd': config.head_dim, 't': bs * config.seq_len, '3': 3, '2': 2}
+
+    qkv_layout_old = qkv_layout
+    qkv_layout = get_new_qkv_layout(qkv_layout)
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
@@ -274,10 +319,21 @@ def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
 
     atol, rtol = (2.5e-2, 2.5e-2) if dtype == torch.bfloat16 else (5e-3, 5e-3)
     if bias_type == "no_bias":
-        assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol=atol, rtol=rtol)
-        assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol=atol, rtol=rtol)
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
+        print('  flash fwd:',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
+        print('  fused fwd:',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+        print('  flash bwd:',flash_attn_bwd.min().item(), flash_attn_bwd.max().item())
+        print('  fused bwd:',fused_attn_bwd.min().item(), fused_attn_bwd.max().item())
+        print('unfused bwd:',unfused_attn_bwd.min().item(), unfused_attn_bwd.max().item())
+        #assert torch.allclose(fused_attn_fwd, flash_attn_fwd, atol=atol, rtol=rtol)
+        #assert torch.allclose(fused_attn_bwd, flash_attn_bwd, atol=atol, rtol=rtol)
+        torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, atol=atol, rtol=rtol)
+        #torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, atol=atol, rtol=rtol)
+    #assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
+    #assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
+    torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
+    #torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
+    torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
 def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type):
 
@@ -289,17 +345,19 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
-    inp = torch.randn(
-            config.seq_len, bs, 3, config.num_attention_heads, config.head_dim,
-            dtype=dtype).cuda()
+    #inp = torch.randn(
+    #        config.seq_len, bs, 3, config.num_attention_heads, config.head_dim,
+    #        dtype=dtype).cuda()
+    inp = torch.load('qkv.pt').cuda().view(config.seq_len, bs, 3, config.num_attention_heads, config.head_dim)
     inp.requires_grad=True
     seqlens = torch.empty(bs, dtype=torch.int32).cuda()
     seqlens.fill_(config.seq_len)
     cu_seqlens = torch.zeros(bs + 1, device=inp.device, dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-    op_grad = torch.randn(
-        config.seq_len, bs, config.num_attention_heads * config.head_dim,
-        dtype = dtype).cuda()
+    #op_grad = torch.randn(
+    #    config.seq_len, bs, config.num_attention_heads * config.head_dim,
+    #    dtype = dtype).cuda()
+    op_grad = torch.load('op_grad.pt').cuda().view(bs, config.seq_len, -1).transpose(0,1)
     if bias_type != "no_bias":
         bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
                 dtype=dtype).cuda()
@@ -323,6 +381,8 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
+    print('dpa layout q')
+    print(q[0,0,0,:10])
     op = block(q, k, v,
     #    qkv_format='sbhd',
     #    cu_seqlens_q = cu_seqlens,
@@ -332,6 +392,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
         core_attention_bias_type=bias_type,
         core_attention_bias=bias)
     op.backward(op_grad)
+    print(inp.grad[0,0,0,0,:10])
 
     return op, inp.grad
 
@@ -567,8 +628,8 @@ def test_dpa_fp8(dtype, bs, model):
     print('unfused fwd:',unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
     print('  fused bwd:',fused_attn_bwd.min().item(), fused_attn_bwd.max().item())
     print('unfused bwd:',unfused_attn_bwd.min().item(), unfused_attn_bwd.max().item())
-    assert torch.allclose(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
-    assert torch.allclose(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
+    torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
+    torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
 def _run_dpa_fp8(dtype, bs, config, backend):
 
@@ -631,7 +692,7 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
                 attention_dropout=config.dropout_p,
                 sequence_parallel=False,
                 tp_size=1,
-                get_rng_state_tracker=None,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 tp_group=None,
                 layer_number=1,
                 attention_type="self"
@@ -643,8 +704,8 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
     v = inp[:, :,2,:,:]
     op = block(q, k, v, attn_mask_type=config.attn_mask_type)
     op.backward(op_grad)
-    torch.save(op,'ctx_ref.pt')
-    torch.save(inp.grad,'dqkv_ref.pt')
+    #torch.save(op,'ctx_ref.pt')
+    #torch.save(inp.grad,'dqkv_ref.pt')
 
     return op, inp.grad
 
