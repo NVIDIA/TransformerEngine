@@ -1738,7 +1738,7 @@ class MultiheadAttention(torch.nn.Module):
                 )
             else:
                 query_layer, key_layer, value_layer = torch.split(
-                    mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+                    mixed_x_layer, (num_queries_per_key_value, 1, 1), dim = split_dim,
                  )
 
             # query: -> [sq, b, np, hn]
@@ -1780,7 +1780,7 @@ class MultiheadAttention(torch.nn.Module):
                 )
             else:
                 key_layer, value_layer = torch.split(
-                    mixed_kv_layer, split_dim, mixed_kv_layer.shape[split_dim] // 2,
+                    mixed_kv_layer, mixed_kv_layer.shape[split_dim] // 2, dim = split_dim,
                 )
 
             # Attention head [sq, b, h] --> [sq, b, hp]
