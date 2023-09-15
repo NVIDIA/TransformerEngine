@@ -616,6 +616,7 @@ class Linear(TransformerEngineBaseModule):
                f"to out features (={self.out_features})"
         else:
             assert False, "Type of 'parameters_split' is not None, tuple or dict"
+        self.updated_parameters_split = parameters_split
 
         self.weight_names = []
         self.bias_names = []
@@ -651,7 +652,7 @@ class Linear(TransformerEngineBaseModule):
             self.weight_names.append(wname)
             self.bias_names.append(bname)
 
-            slice_begin += slice_size
+            slice_begin = slice_end
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -731,12 +732,14 @@ class Linear(TransformerEngineBaseModule):
             bias_tensor = (
                 self.bias if self.parameters_split is None
                 else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names)
+                else self.noop_cat("bias_tensor", self.bias_names,
+                    self.updated_parameters_split)
             )
             weight_tensor = (
                 self.weight if self.parameters_split is None
                 else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names)
+                else self.noop_cat("weight_tensor", self.weight_names,
+                    self.updated_parameters_split)
             )
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
