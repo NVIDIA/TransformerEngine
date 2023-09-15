@@ -8,7 +8,7 @@ import warnings
 import math
 from importlib.metadata import version
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union, Dict
+from typing import Any, Callable, Optional, Tuple, Union, Dict, List
 from pkg_resources import packaging
 
 import torch
@@ -84,48 +84,73 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     return torch.cat((t, t_pass), dim=-1)
 
 
-class _SplitLastDim(torch.autograd.Function):
+class _SplitAlongDim(torch.autograd.Function):
     """"""
 
     @staticmethod
     def forward(ctx,
                 mixed_x_layer: torch.Tensor,
-                num_parts: int
+                split_dim: int,
+                split_size_or_sections: Union[int, List[int], Tuple[int]],
     ) -> Tuple[torch.Tensor, ...]:
-        return split_tensor_along_dim(mixed_x_layer, -1, num_parts)
+        ctx.split_dim = split_dim
+        ctx.split_size_or_sections = split_size_or_sections
+        return torch.split(mixed_x_layer, split_size_or_sections, dim = split_dim)
 
     @staticmethod
     def backward(ctx,
                  *grad_outputs):
         assert len(grad_outputs) > 0, "No gradients received for backprop!"
 
+        if isinstance(ctx.split_size_or_sections, (list, tuple)):
+            split_sizes = ctx.split_size_or_sections
+            assert (len(grad_outputs) == len(split_sizes)
+                ), "Unequal number of gradients vs split sections for backprop!"
+        if isinstance(ctx.split_size_or_sections, int):
+            split_sizes = [ctx.split_size_or_sections] * len(grad_outputs)
+        dims = len(grad_outputs[0].shape)
+        split_dim = (ctx.split_dim + dims) % dims
+
         noop_ok = True
         strides = grad_outputs[0].stride()
         data_ptr = grad_outputs[0].storage().data_ptr()
-        shape = grad_outputs[0].shape
-        last_dim_size = grad_outputs[0].shape[-1]
+        shape = list(grad_outputs[0].shape)
         for i, tensor in enumerate(grad_outputs):
-            if (tensor.stride() != strides or
-                tensor.shape != shape or
+            strides_i = []
+            for j,s in enumerate(strides):
+                if j <= split_dim:
+                    strides_i.append(s / split_sizes[0] * split_sizes[i])
+                else:
+                    strides_i.append(s)
+            shape_i = shape
+            shape_i[split_dim] = split_sizes[i]
+            offset_size = sum(split_sizes[:i]) * shape[split_dim+1:]
+            if (tensor.stride() != strides_i or
+                list(tensor.shape) != shape_i or
                 tensor.storage().data_ptr() != data_ptr or
-                tensor.storage_offset() != i * last_dim_size):
+                tensor.storage_offset() != offset_size):
                 noop_ok = False
                 break
 
         if noop_ok:
-            ret = torch.Tensor().to(grad_outputs[0].dtype)
             ret = torch.Tensor().to(device=grad_outputs[0].device,
                                     dtype=grad_outputs[0].dtype)
             new_shape = list(shape)
-            new_shape[-1] = new_shape[-1] * len(grad_outputs)
-            ret.set_(grad_outputs[0].storage(),
+            new_shape[split_dim] = sum(split_sizes)
+            new_strides = []
+            for j in strides:
+                if j <= split_dim:
+                    strides_i.append(strides[j] / split_sizes[0] * sum(split_sizes))
+                else:
+                    strides_i.append(strides[j])
+            ret.set_(grad_outputs[0].untyped_storage(),
                      grad_outputs[0].storage_offset(),
                      new_shape,
-                     grad_outputs[0].stride()
+                     new_strides
             )
-            return ret, None
+            return ret, None, None
 
-        return torch.cat(grad_outputs, dim = -1), None
+        return torch.cat(grad_outputs, dim = split_dim), None, None
 
 class _CombineQKV(torch.autograd.Function):
     """"""
@@ -1479,6 +1504,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
+                    parameters_split=("query_",) if not fuse_qkv_params else None,
                     return_layernorm_output=return_layernorm_output,
                     zero_centered_gamma=zero_centered_gamma,
                     ub_bulk_wgrad=ub_bulk_wgrad,
@@ -1706,13 +1732,14 @@ class MultiheadAttention(torch.nn.Module):
             # not qkv_weight_interleaved:
             #  [sq, b, (np/ng + 2), ng, hn]
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = torch.split(
-                mixed_x_layer,
-                (
-                    num_queries_per_key_value, 1, 1
-                ),
-                dim=split_dim,
-            )
+            if not is_in_onnx_export_mode():
+                query_layer, key_layer, value_layer = _SplitAlongDim.apply(
+                    mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+                )
+            else:
+                query_layer, key_layer, value_layer = torch.split(
+                    mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+                 )
 
             # query: -> [sq, b, np, hn]
             # key, value: -> [sq, b, ng, hn]
@@ -1721,14 +1748,14 @@ class MultiheadAttention(torch.nn.Module):
                                                    for x in (query_layer, key_layer, value_layer))
 
         elif self.attention_type == "cross":
-            # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
+            # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
             )
 
             if self.qkv_weight_interleaved:
-                # [sq, b, (np * 2 * hn)] --> [sq, b, np, 2 * hn]
+                # [sq, b, (ng * 2 * hn)] --> [sq, b, ng, 2 * hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
                     self.num_gqa_groups_per_partition,
                     2 * self.hidden_size_per_attention_head,
@@ -1736,7 +1763,7 @@ class MultiheadAttention(torch.nn.Module):
                 # split along last dimension
                 split_dim = -1
             else:
-                # [sq, b, (np * 2 * hn)] --> [sq, b, 2 * np, hn]
+                # [sq, b, (ng * 2 * hn)] --> [sq, b, 2 * ng, hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
                     2 * self.num_gqa_groups_per_partition,
                     self.hidden_size_per_attention_head,
@@ -1746,11 +1773,15 @@ class MultiheadAttention(torch.nn.Module):
 
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
-            # mixed_kv_layer --> 2 [sk, b, np, hn]
-            if split_dim == -1 and not is_in_onnx_export_mode():
-                key_layer, value_layer = _SplitLastDim.apply(mixed_kv_layer, 2)
+            # mixed_kv_layer --> 2 [sk, b, ng, hn]
+            if not is_in_onnx_export_mode():
+                key_layer, value_layer = _SplitAlongDim.apply(
+                    mixed_kv_layer, split_dim, mixed_kv_layer.shape[split_dim] // 2,
+                )
             else:
-                key_layer, value_layer = split_tensor_along_dim(mixed_kv_layer, split_dim, 2)
+                key_layer, value_layer = torch.split(
+                    mixed_kv_layer, split_dim, mixed_kv_layer.shape[split_dim] // 2,
+                )
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
