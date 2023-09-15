@@ -774,15 +774,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         params = [getattr(self, name) for name in pnames]
         slice_begin = 0
         for i, p in enumerate(params):
-            slice_size = list(parameters_split.values())[i]
+            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
             slice_end = slice_begin + slice_size
             if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
                 with torch.no_grad():
                     setattr(self, buffer_name, torch.cat(params))
-                    for _, pname in enumerate(pnames):
+                    slice_begin_j = 0
+                    for j, pname in enumerate(pnames):
+                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
+                        slice_end_j = slice_begin_j + slice_size_j
                         full_param_buffer = getattr(self, buffer_name)
                         setattr(self, pname,
-                                Parameter(full_param_buffer[slice_begin:slice_end]))
+                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
+                        slice_begin_j = slice_end_j
                 break
             slice_begin = slice_end
 
