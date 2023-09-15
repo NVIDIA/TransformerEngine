@@ -235,7 +235,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int *counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
     int ubuf_offset = 0;
-//    int ori_sms = _ub_comm->sms;
+    int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
@@ -270,23 +270,26 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         if (i == _num_splits-1) {
           _ub_comm->sms = UB_MAX_SM;
         }
-#if 0
         if (_ubuf.element_size() == 1) {
             assert (_ubuf_scale_inv_initialized);
             float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
             reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg, i*m_chunk,
-                                            m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+                                            m_chunk, n, m, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
         } else {
-#endif
             reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i*m_chunk,
                                             m_chunk, n, m, _num_splits, &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
-#if 0
         }
-#endif
       }
       else if (env_p != nullptr && env_p[0]=='2') {
-        reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
+        if (_ubuf.element_size() == 1) {
+            assert (_ubuf_scale_inv_initialized);
+            float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+            reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk,
+                                            m_chunk, n, m, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+            reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk,
                                             m_chunk, n, m, _num_splits, counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        }
         break;
       }
       else {
@@ -301,7 +304,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       rs_output_ptr += m_chunk * rs_output.element_size();
     }
  
-//    _ub_comm->sms = ori_sms;
+    _ub_comm->sms = ori_sms;
     CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));

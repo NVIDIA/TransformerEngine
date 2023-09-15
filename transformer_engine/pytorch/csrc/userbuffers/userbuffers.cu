@@ -29,6 +29,27 @@
     }                                                                                       \
   } while (0)
 
+#define ATOMIC_CONSUMER(chunk)                                                 \
+  if (counters) {                                                              \
+    if (threadIdx.x == 0 && blockIdx.x == 0) {                                 \
+      int old_val;                                                             \
+      while (0 != (old_val =                                                   \
+                       atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
+      }                                                                        \
+      ((unsigned int *)counters)[chunk] = 1;                                   \
+      asm volatile("fence.sc.gpu;\n");                                         \
+    }                                                                          \
+    if (blockIdx.x == 0)                                                       \
+      __syncthreads();                                                         \
+  }
+
+#define ATOMIC_PRODUCER(chunk)                                                 \
+  if (counters) {                                                              \
+    ((unsigned int *)counters)[chunk] = 0;                                     \
+    asm volatile("fence.sc.gpu;\n");                                           \
+  }
+
+
 
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
@@ -687,6 +708,104 @@ userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8(const int op,const int flagoffset
 
   if (threadIdx.x == 0 && lastSM) *reduceidptr = reduce_id;
 } //fp16 reduce-scatter kernel (out of place) (fp8->fp16)
+
+template <int RANKS, typename fp8type>
+__global__ void __launch_bounds__(MAX_THREADS)
+    userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_atomic_fp8(
+        const int op, const int flagoffset, const int firstrank,
+        const int myrank, const int gpustep, const int mylineoffset,
+        const int totallines, const int rowlines, const int skiplines_out,
+        const int skiplines_in, void **commbuff, const int handleridx,
+        void *outbuf, float *scale, void *counters, const int numchunks,
+        const int atomicindex) {
+  __shared__ int4 *userptr[RANKS];
+  volatile int *flagptr;
+  int physgpu, targetgpu, *myptr;
+  int *reduceidptr, reduce_id;
+  int lastSM = 0;
+  half hscale = (half)*scale;
+
+  if (threadIdx.x < RANKS) {
+    physgpu = myrank * gpustep + firstrank;
+    targetgpu = threadIdx.x * gpustep + firstrank;
+    // const int blockflagoffset = MAX_NVLINK * 2 * blockIdx.x;
+    myptr = (reinterpret_cast<int *>(commbuff[physgpu])) + flagoffset;
+    reduceidptr = myptr - NVTE_MAX_OPS; //+op;
+    reduce_id = (*reduceidptr);
+    flagptr = (reinterpret_cast<int *>(commbuff[targetgpu])) +
+              flagoffset; // + blockflagoffset;
+    // myptr += blockflagoffset;
+  }
+  // if(blockIdx.x==0 && threadIdx.x==0) printf("%d/%d(phys %d gpustep %d
+  // firstrank %d):RRkernel(d) start, size
+  // %lld\n",myrank,RANKS,gpustep*myrank+firstrank,gpustep,firstrank,numlines*16ull);
+  for (int chunk_i = 0; chunk_i < numchunks; chunk_i++) {
+    ATOMIC_CONSUMER(chunk_i);
+
+    lastSM = 0;
+    if (threadIdx.x < RANKS) {
+      reduce_id++;
+      if(blockIdx.x==0) flagptr[physgpu] = reduce_id;
+      volatile int *flag = (volatile int *)&(myptr[targetgpu]);
+      userptr[threadIdx.x] =
+          reinterpret_cast<int4 *>(commbuff[targetgpu + handleridx]);
+      clock_t s = clock64();
+      while (*flag < reduce_id) {
+        if (clock64() - s > TIMEOUT) {
+          printf("[%d] NVONLY RSBAR:SM %d [%d]:expecting %d got %d\n", myrank,
+                 blockIdx.x, threadIdx.x, reduce_id, *flag);
+          break;
+        }
+      }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      const int adder = blockIdx.x == 0 ? NVTE_MAX_SMS - gridDim.x + 1 : 1;
+      int old_val = atomicAdd(myptr + (NVTE_MAX_NVLINK * 2), /*numchunks * */adder);
+      if (old_val + adder == NVTE_MAX_SMS * (reduce_id/* + numchunks*/))
+        lastSM = 1;
+    }
+
+    int warp = blockIdx.x + (threadIdx.x >> 5);
+    int dest[RANKS];
+#pragma unroll
+    for (int i = 0; i < RANKS; i++)
+      dest[i] = (i + myrank + warp) & (RANKS - 1);
+
+    __syncthreads();
+    for (int line = threadIdx.x + blockDim.x * blockIdx.x; line < totallines;
+         line += blockDim.x * gridDim.x) {
+      int4 val[RANKS];
+      const int rowlines_in = rowlines / 2;
+      const int index_in = skiplines_in == 0 ? mylineoffset + myrank * totallines + line
+                                        : (numchunks <= 1 ? 1 : chunk_i) * mylineoffset + myrank * (totallines * skiplines_in / rowlines_in) + (line / rowlines_in) * skiplines_in + (line % rowlines_in);
+      const int index1_out = chunk_i*mylineoffset*2 + ((2*line)   / rowlines) * skiplines_out + ((2*line)   % rowlines);
+      const int index2_out = chunk_i*mylineoffset*2 + ((2*line+1) / rowlines) * skiplines_out + ((2*line+1) % rowlines);
+
+#pragma unroll
+      for (int i = 0; i < RANKS; i++) {
+        // int dest = (i+myrank+warp)&(RANKS-1);
+        val[i] = userptr[dest[i]][index_in];
+      }
+
+      int4 sum[2] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+      half *s = reinterpret_cast<half *>(&sum);
+
+#pragma unroll
+      for (int i = 0; i < RANKS; i++) {
+        fp8type *x = reinterpret_cast<fp8type *>(&val[i]);
+#pragma unroll
+        for (int j = 0; j < sizeof(int4) / sizeof(fp8type); j++)
+          s[j] += hscale * (half)(x[j]);
+      }
+      ((int4 *) outbuf)[index1_out] = sum[0];
+      ((int4 *) outbuf)[index2_out] = sum[1];
+    }
+  }
+  if (threadIdx.x == 0 && lastSM)
+    *reduceidptr = reduce_id;
+} // fp16 reduce-scatter kernel (out of place) (fp8->fp16)
+
 
 template<int RANKS>
 __global__ void
@@ -2095,6 +2214,34 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
   CUDACHECK(cudaLaunchKernelExC(&cfg, (void*)userbuffers_fp16_sum_inplace_gpu_mc_rs_oop<x>, kernelArgs)); \
 }
 
+#define callranks_rs_oop_atomic_fp8(x)                                                \
+  if (ar_nvsize == x) {                                                        \
+    int arg1 = op - NVTE_MAX_OPS,                                                   \
+        arg2 = NVTE_REG0_OFFSET(comm) -                                             \
+               (op == userbuffers_allreduceop_nonsharp ? 2 : 1) *              \
+                   NVTE_REG0_SINGLENODE +                                           \
+               NVTE_MAX_OPS,                                                        \
+        arg3 = ar_firstgpu, arg4 = ar_nvrank, arg5 = ar_step,                  \
+        arg7 = elements / 16 / x, arg6 = offset / 16, arg8 = rowelements / 8,  \
+        arg9 = strideelements_out / 8, arg10 = strideelements_in / 16;         \
+    void **arg11 = (void **)(comm->gpu_ptrs);                                  \
+    int arg12 = handler * comm->nvsize;                                        \
+    void *arg13 = output;                                                      \
+    float *arg14 = scale;                                                      \
+    void *arg15 = counters;                                                    \
+    int arg16 = numchunks, arg17 = atomicindex;                                \
+    void *kernelArgs[] = {(void *)&arg1,  (void *)&arg2,  (void *)&arg3,       \
+                          (void *)&arg4,  (void *)&arg5,  (void *)&arg6,       \
+                          (void *)&arg7,  (void *)&arg8,  (void *)&arg9,       \
+                          (void *)&arg10, (void *)&arg11, (void *)&arg12,      \
+                          (void *)&arg13, (void *)&arg14, (void *)&arg15,      \
+                          (void *)&arg16, (void *)&arg17};                     \
+    CUDACHECK(cudaLaunchKernelExC(                                             \
+        &cfg,                                                                  \
+        (void *)userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_atomic_fp8<x, fp8type>,    \
+        kernelArgs));                                                          \
+  }
+
 #define callranks_rs_oop_stride(x)   if(ar_nvsize==x) { \
   int arg1=op-NVTE_MAX_OPS,arg2=NVTE_REG0_OFFSET(comm)-(op==userbuffers_allreduceop_nonsharp?2:1)*NVTE_REG0_SINGLENODE+NVTE_MAX_OPS,\
       arg3=ar_firstgpu,arg4=ar_nvrank,arg5=ar_step,arg7=elements/8/x,arg6=offset/8,arg8=rowelements/8,arg9=strideelements/8;\
@@ -2251,6 +2398,61 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
       callranks_rs_oop_stride_atomic_fp8(8)
   }
 #endif
+template <typename fp8type>
+void reducescatter2_userbuff_strided_universal_fp8(
+    void *output, float *scale, const int handler, const int offset,
+    const int rowelements, const int colelements, const int strideelements_out,
+    const int strideelements_in, const int numchunks, const int atomicindex,
+    void *counters, communicator *comm, cudaStream_t stream) {
+  const int elements = rowelements * colelements;
+  const int op = userbuffers_allreduceop_nonsharp2;
+  const int blocksize = elements;
+  const int ar_firstgpu = op == userbuffers_allreduceop_nonsharp
+                              ? comm->ar_firstgpu
+                              : comm->ar2_firstgpu;
+  const int ar_step =
+      op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
+  const int ar_nvsize = op == userbuffers_allreduceop_nonsharp
+                            ? comm->ar_nvsize
+                            : comm->ar2_nvsize;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp
+                            ? comm->ar_nvrank
+                            : comm->ar2_nvrank;
+  assert(comm->sm_arch >= 9);
+  if (elements < 128)
+    return;
+  int sms = ar_nvsize == 1 ? 2 : comm->sms;
+  int warps = comm->threads / 32;
+  if (warps < ar_nvsize)
+    warps = ar_nvsize;
+
+  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+  callranks_rs_oop_atomic_fp8(2) callranks_rs_oop_atomic_fp8(4) callranks_rs_oop_atomic_fp8(8)
+}
+
+template <typename fp8type>
+void reducescatter2_userbuff_strided_atomic_fp8(
+    void *output, float *scale, const int handler, const int offset,
+    const int rowelements, const int colelements, const int strideelements_out,
+    const int strideelements_in, const int numchunks, void *counters,
+    communicator *comm, cudaStream_t stream) {
+  reducescatter2_userbuff_strided_universal_fp8<fp8type>(
+      output, scale, handler, offset, rowelements, colelements,
+      strideelements_out, strideelements_in, 1, numchunks, counters/*nullptr*/, comm,
+      stream);
+}
+template <typename fp8type>
+void reducescatter2_userbuff_strided_multiatomic_fp8(
+    void *output, float *scale, const int handler, const int offset,
+    const int rowelements, const int colelements, const int strideelements_out,
+    const int strideelements_in, const int numchunks, void *counters,
+    communicator *comm, cudaStream_t stream) {
+  reducescatter2_userbuff_strided_universal_fp8<fp8type>(
+      output, scale, handler, offset, rowelements, colelements,
+      strideelements_out, strideelements_in, numchunks, 0, counters/*nullptr*/,
+      comm, stream);
+}
+
 
   void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream) {
     const int elements = rowelements*colelements;
@@ -2443,6 +2645,8 @@ template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void* output, float* sc
 #if 0
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
 #endif
+template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
 __global__ void __launch_bounds__(MAX_THREADS)
 kuserbuffers_pullsendrecv(int myrank, int peer, int* recv_id, int *send_flagptr, int* recv_flagptr,int4 *srcptr,int4* dstptr, const int lines) {
 
