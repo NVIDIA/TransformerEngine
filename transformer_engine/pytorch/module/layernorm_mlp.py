@@ -1031,7 +1031,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
 
-        print (f'!!!LNMLP ub_bulk_wgrad {ub_bulk_wgrad} ub_bulk_dgrad {ub_bulk_dgrad} ub_split_rs {ub_split_rs} ub_atomic_gemm_rs {ub_atomic_gemm_rs} ub_split_ag {ub_split_ag}')
         if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag or ub_atomic_gemm_rs or ub_atomic_gemm_ag:
             assert (
                 tex.userbuf_comm_available()
