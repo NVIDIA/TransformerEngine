@@ -455,7 +455,7 @@ def _check_kv_layout(k, v):
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
-    https://github.com/HazyResearch/flash-attention
+    https://github.com/Dao-AILab/flash-attention
     """
 
     def __init__(
@@ -709,7 +709,7 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_type = attention_type
-        self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "1") == "1"
+        self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
                         and _flash_attn_2_available
                         and get_device_compute_capability() == 9.0)
 
@@ -1055,14 +1055,27 @@ class DotProductAttention(torch.nn.Module):
 
         .. note::
 
-            `DotProductAttention` supports three backends: 1) `FlashAttention` which calls
-            HazyResearch's FlashAttention PyTorch API, 2) `FusedAttention` which has multiple
-            fused attention implementations as its backends (see `FusedAttention` for
-            more details), and 3) `UnfusedDotProductAttention` which is the native PyTorch
-            implementation with fused scaled masked softmax. Users can use environment variables
-            `NVTE_FLASH_ATTN`, `NVTE_FUSED_ATTN`, and `NVTE_FUSED_ATTN_BACKEND` to control
-            which DotProductAttention backend, and FusedAttention backend if applicable, to use.
-            The default DotProductAttention backend is 1.
+            DotProductAttention supports three backends: 1) FlashAttention which calls
+            HazyResearch/Dao-AILab's `flash-attn <https://arxiv.org/pdf/2305.13245.pdf>`_
+            PyTorch API, 2) FusedAttention which has multiple fused attention implementations
+            based on `cuDNN Graph API
+            <https://docs.nvidia.com/deeplearning/cudnn/developer-guide/index.html#op-fusion>`_
+            (see :attr:`FusedAttention` for more details on FusedAttention backends), and 3)
+            UnfusedDotProductAttention which is the native PyTorch implementation
+            with fused scaled masked softmax.
+
+        .. note::
+
+            Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
+            and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
+            and FusedAttention backend if applicable, to use. TransformerEngine prioritizes
+            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            If FusedAttention is being used, users can also choose to switch to flash-attn's
+            implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
+            (default: 0), because of the performance differences between various versions of
+            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT`
+            can be used to enable the workspace related optimizations in FusedAttention
+            (default: 256MB; raise the limit to enable these performance optimizations).
 
         Parameters
         ----------
@@ -1085,7 +1098,7 @@ class DotProductAttention(torch.nn.Module):
                     Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T
-        fast_zero_fill: bool, defautl = `True`
+        fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         """
 

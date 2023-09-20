@@ -13,7 +13,7 @@ import transformer_engine_paddle as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
-from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer
+from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
 
 # FP8 support
 _is_fp8_available = None
@@ -59,8 +59,10 @@ class FP8State:
         self._is_first_fp8_module = False
         self._fp8_autocast_counter = 0
         self._fp8_autocast_depth = 0
+        self._fp8_recompute_enabled = False
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
+        self._fp8_recompute_buffer = FP8RecomputeBuffer()
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -105,6 +107,14 @@ class FP8State:
     def get_fp8_bwd_buffer(self) -> FP8MetaBwdBuffer:
         """Returns global fp8 backward buffer."""
         return self._fp8_bwd_buffer
+
+    def is_fp8_recompute_enabled(self) -> bool:
+        """Is FP8 recompute enabled"""
+        return self._fp8_recompute_enabled
+
+    def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
+        """Returns global fp8 recompute buffer."""
+        return self._fp8_recompute_buffer
 
     def enter(
         self,
