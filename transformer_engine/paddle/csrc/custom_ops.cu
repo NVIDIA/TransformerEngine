@@ -1066,13 +1066,15 @@ void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
         amax.data<float>(), rolled_amax_history.data<float>(), amax_history.data<float>(),
         scale.data<float>(), scale_inv.data<float>(), margin, fp8_max, amax_history.numel(),
         amax.numel());
+    NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
                                         const paddle::Tensor &amax) {
     // Copy amax to history[0]
-    cudaMemcpyAsync(history.data(), amax.data(), amax.numel() * SizeOf(amax.dtype()),
-                    cudaMemcpyDeviceToDevice, amax.stream());
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(history.data(), amax.data(),
+                                    amax.numel() * SizeOf(amax.dtype()), cudaMemcpyDeviceToDevice,
+                                    amax.stream()));
 }
 
 }  // namespace paddle_ext
