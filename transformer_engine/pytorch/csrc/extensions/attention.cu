@@ -108,16 +108,16 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty({static_cast<int64_t>(total_seqs),
                   static_cast<int64_t>(h), static_cast<int64_t>(d)}, options);
-  if (set_zero && (h * d % block_size == 0)) {
-    mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-  } else {
-    O.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_QKV, te_S, te_O, te_Bias, te_cu_seqlens;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
+    if (set_zero && (h * d % block_size == 0)) {
+      mha_fill(O, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    } else {
+      O.fill_(0);
+    }
     if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
                     || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
@@ -252,19 +252,11 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
 
   // create output tensor dQKV
   at::Tensor dQKV = torch::empty_like(QKV);
-  auto max_tokens = dQKV.size(0);
-  auto self_2d = dQKV.view({max_tokens, -1});
-  auto fcd_size = self_2d.size(1);
-  if (set_zero && (fcd_size % block_size == 0)) {
-    mha_fill(dQKV, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-  } else {
-    dQKV.fill_(0);
-  }
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   at::Tensor dBias;
   TensorWrapper te_dBias;
   if (bias_type != NVTE_NO_BIAS) {
-    dBias = torch::zeros({1, static_cast<int64_t>(h),
+    dBias = torch::empty({1, static_cast<int64_t>(h),
                     static_cast<int64_t>(max_seqlen),
                     static_cast<int64_t>(max_seqlen)}, options);
     te_dBias = makeTransformerEngineTensor(dBias);
@@ -274,6 +266,14 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   TensorWrapper te_QKV, te_O, te_dO, te_S, te_dP, te_dQKV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
+    auto max_tokens = dQKV.size(0);
+    auto self_2d = dQKV.view({max_tokens, -1});
+    auto fcd_size = self_2d.size(1);
+    if (set_zero && (fcd_size % block_size == 0)) {
+      mha_fill(dQKV, cu_seqlens.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    } else {
+      dQKV.fill_(0);
+    }
     if ((!descale_QKV.has_value()) || (!descale_S.has_value())
                     || (!descale_O.has_value()) || (!descale_dO.has_value())
                     || (!scale_S.has_value()) || (!scale_dP.has_value())
@@ -409,16 +409,16 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   auto O = torch::empty({static_cast<int64_t>(total_seqs_q),
                   static_cast<int64_t>(h), static_cast<int64_t>(d)}, options);
-  if (set_zero && (h * d % block_size == 0)) {
-    mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-  } else {
-    O.fill_(0);
-  }
 
   // construct NVTE tensors
   TensorWrapper te_Q, te_KV, te_S, te_O, te_Bias, te_cu_seqlens_q, te_cu_seqlens_kv;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
+    if (set_zero && (h * d % block_size == 0)) {
+      mha_fill(O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    } else {
+      O.fill_(0);
+    }
     if ((!descale_QKV.has_value()) || (!scale_S.has_value()) || (!scale_O.has_value())
                     || (!amax_S.has_value()) || (!amax_O.has_value())) {
       std::string err_tensors = "descale_QKV, scale_S, scale_O, amax_S and amax_O";
@@ -567,24 +567,11 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   // create output tensors dQ and dKV
   at::Tensor dQ = torch::empty_like(Q);
   at::Tensor dKV = torch::empty_like(KV);
-  auto max_tokens_q = dQ.size(0);
-  auto self_2d_q = dQ.view({max_tokens_q, -1});
-  auto fcd_size_q = self_2d_q.size(1);
-  auto max_tokens_kv = dQ.size(0);
-  auto self_2d_kv = dQ.view({max_tokens_kv, -1});
-  auto fcd_size_kv = self_2d_kv.size(1);
-  if (set_zero && (fcd_size_q % block_size == 0) && (fcd_size_kv % block_size == 0)) {
-    mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-    mha_fill(dKV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-  } else {
-    dQ.fill_(0);
-    dKV.fill_(0);
-  }
   auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   at::Tensor dBias;
   TensorWrapper te_dBias;
   if (bias_type != NVTE_NO_BIAS) {
-    dBias = torch::zeros({1, static_cast<int64_t>(h),
+    dBias = torch::empty({1, static_cast<int64_t>(h),
                     static_cast<int64_t>(max_seqlen_q),
                     static_cast<int64_t>(max_seqlen_kv)}, options);
     te_dBias = makeTransformerEngineTensor(dBias);
@@ -594,6 +581,19 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
   TensorWrapper te_Q, te_KV, te_O, te_dO, te_S, te_dP, te_dQ, te_dKV;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
+    auto max_tokens_q = dQ.size(0);
+    auto self_2d_q = dQ.view({max_tokens_q, -1});
+    auto fcd_size_q = self_2d_q.size(1);
+    auto max_tokens_kv = dQ.size(0);
+    auto self_2d_kv = dQ.view({max_tokens_kv, -1});
+    auto fcd_size_kv = self_2d_kv.size(1);
+    if (set_zero && (fcd_size_q % block_size == 0) && (fcd_size_kv % block_size == 0)) {
+      mha_fill(dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+      mha_fill(dKV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+    } else {
+      dQ.fill_(0);
+      dKV.fill_(0);
+    }
     if ((!descale_QKV.has_value()) || (!descale_S.has_value())
                     || (!descale_O.has_value()) || (!descale_dO.has_value())
                     || (!scale_S.has_value()) || (!scale_dP.has_value())
