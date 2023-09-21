@@ -157,7 +157,7 @@ def get_fp8_recipe():
 
 def _default_sf_compute(amax, scale, fp8_max, margin):
     """Default function to convert amax to scaling factor."""
-    sf = fp8_max / amax
+    sf = (fp8_max / amax) / (2 ** margin)
     sf = tf.where(amax > 0.0, sf, scale)
     sf = tf.where(tf.math.is_finite(amax), sf, scale)
     return sf

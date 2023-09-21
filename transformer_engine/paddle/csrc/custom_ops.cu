@@ -1024,7 +1024,7 @@ __global__ void UpdateScalesKernel(const float *amax, const float *scale, float 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < size) {
-        float sf = fp8_max / amax[idx];
+        float sf = (fp8_max / amax[idx]) / powf(2.0f, margin);
         scale_out[idx] = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
     }
 }

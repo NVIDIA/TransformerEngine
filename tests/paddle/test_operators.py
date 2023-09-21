@@ -876,11 +876,9 @@ def test_update_scale():
 
     def calc_ref(amax, scale, fp8_max, margin=0):
         """Calculate reference scale"""
-        exp = paddle.floor(paddle.log2(fp8_max / amax)) - margin
-        sf = paddle.round(2**paddle.abs(exp))
+        sf = (fp8_max / amax) / (2 ** margin)
         sf = paddle.where(amax > 0.0, sf, scale)
         sf = paddle.where(paddle.isfinite(amax), sf, scale)
-        sf = paddle.where(exp < 0, 1 / sf, sf)
         return sf
 
     scale_ref = calc_ref(amax_tensor, scale_tensor, fp8_max, 0.)
