@@ -277,15 +277,19 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     uint64_t opId=0xdeadcafeb000+(*comm)->ar2_firstgpu;
     ncclResult_t ret = ncclSuccess;
     NCCLCHECK(ncclIpcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
+    MPI_Barrier(MPI_COMM_WORLD);
 
     if((*comm)->ar2_nvrank==0) {
       CUCHECK(cuMulticastCreate(&(*comm)->mc_handle, &mcProp));
       CUCHECK(cuMemExportToShareableHandle(&fd, (*comm)->mc_handle , CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
       for(int p=1;p<(*comm)->ar2_nvsize;p++) {
+        MPI_Barrier((*comm)->comm_intra);
         NCCLCHECKGOTO(ncclIpcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
       }
     } else {
+      for(int i=0;i<(*comm)->ar2_nvrank;i++) MPI_Barrier((*comm)->comm_intra);
       NCCLCHECKGOTO(ncclIpcSocketRecvFd(&ipcSock, &fd), ret, error);
+      for(int i=0;i<(*comm)->ar2_nvsize-(*comm)->ar2_nvrank-1;i++) MPI_Barrier((*comm)->comm_intra);
       CUCHECK(cuMemImportFromShareableHandle(&(*comm)->mc_handle, (void *)fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
     }
     error:
@@ -304,6 +308,7 @@ int create_communicator_grouped2(communicator **comm, int pipegpus, int pipenode
     CUCHECK(cuMemSetAccess(mc_va, mc_maxsize, &accessDesc, 1));
 
     (*comm)->mc_baseptr=reinterpret_cast<void *>(mc_va);
+    MPI_Barrier(MPI_COMM_WORLD);
     if(!(*comm)->myrank) printf ("MC initialized succesfully, window size = %ld\n",mc_maxsize);
   } else {
     if(!(*comm)->myrank) printf ("MC NOT initialized and used\n");
