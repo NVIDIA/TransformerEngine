@@ -904,7 +904,10 @@ class DotProductAttention(torch.nn.Module):
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                   type of attention mask passed into softmax operation.
+                   type of attention mask passed into softmax operation. Overridden by
+                   :attr:`attn_mask_type` in the `forward` method. The forward
+                   arg is useful for dynamically changing mask types and the init arg
+                   is useful for cases involving compilation/tracing, e.g. ONNX export.
 
     Parallelism parameters
     ----------------------
@@ -1079,7 +1082,7 @@ class DotProductAttention(torch.nn.Module):
         attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
         attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `None`
-                       If provided, overrides :attr:`attn_mask_type` from initialization.
+                       type of attention mask passed into softmax operation.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1240,7 +1243,10 @@ class MultiheadAttention(torch.nn.Module):
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                   type of attention mask passed into softmax operation.
+                   type of attention mask passed into softmax operation. Overridden by
+                   :attr:`attn_mask_type` in the `forward` method. The forward
+                   arg is useful for dynamically changing mask types and the init arg
+                   is useful for cases involving compilation/tracing, e.g. ONNX export.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -1554,7 +1560,7 @@ class MultiheadAttention(torch.nn.Module):
         attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
         attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `None`
-                       If provided, overrides :attr:`attn_mask_type` from initialization.
+                       type of attention mask passed into softmax operation.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
