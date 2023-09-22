@@ -212,9 +212,7 @@ class _NoopCat(torch.autograd.Function):
                 *params_split: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
         assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
-        sum_params_shape = 0
-        for _,p in enumerate(params_split):
-            sum_params_shape += p.shape[0]
+        sum_params_shape = sum(p.shape[0] for p in params_split)
         assert (
             full_param_buffer.shape[0] == sum_params_shape
         ), "Dimensions not compatible for concatenation"
@@ -780,7 +778,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 with torch.no_grad():
                     setattr(self, buffer_name, torch.cat(params))
                     slice_begin_j = 0
-                    for _, pname in enumerate(pnames):
+                    for pname in pnames:
                         slice_size_j = parameters_split[pname.split('_')[0]+'_']
                         slice_end_j = slice_begin_j + slice_size_j
                         full_param_buffer = getattr(self, buffer_name)
