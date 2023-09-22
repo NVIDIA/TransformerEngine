@@ -426,8 +426,7 @@ def update_fp8_metas(state: Collection) -> Collection:
 
         sf = (fp8_max / amax) / (2 ^ margin)
         sf = sf if amax > 0.0, else original_scale
-        sf = sf if isfinite(amax), else original_scale)
-        updated_scale = 1/sf if exp < 0, else sf
+        updated_scale = sf if isfinite(amax), else original_scale)
         updated_scale_inv = 1/updated_scale
 
     Collection = [dict, flax.core.frozen_dict.FrozenDict]
