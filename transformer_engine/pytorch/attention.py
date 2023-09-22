@@ -1347,8 +1347,9 @@ class DotProductAttention(torch.nn.Module):
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation. Overridden by
                    :attr:`attn_mask_type` in the `forward` method. The forward
-                   arg is useful for dynamically changing mask types and the init arg
-                   is useful for cases involving compilation/tracing, e.g. ONNX export.
+                   arg is useful for dynamically changing mask types, e.g. a different
+                   mask for training and inference. The init arg is useful for cases
+                   involving compilation/tracing, e.g. ONNX export.
 
     Parallelism parameters
     ----------------------
@@ -1713,8 +1714,9 @@ class MultiheadAttention(torch.nn.Module):
     attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                    type of attention mask passed into softmax operation. Overridden by
                    :attr:`attn_mask_type` in the `forward` method. The forward
-                   arg is useful for dynamically changing mask types and the init arg
-                   is useful for cases involving compilation/tracing, e.g. ONNX export.
+                   arg is useful for dynamically changing mask types, e.g. a different
+                   mask for training and inference. The init arg is useful for cases
+                   involving compilation/tracing, e.g. ONNX export.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in

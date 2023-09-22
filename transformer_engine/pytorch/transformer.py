@@ -126,11 +126,12 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+    self_attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                         type of attention mask passed into softmax operation. Overridden by
                         :attr:`self_attn_mask_type` in the `forward` method. The forward
-                        arg is useful for dynamically changing mask types and the init arg
-                        is useful for cases involving compilation/tracing, e.g. ONNX export.
+                        arg is useful for dynamically changing mask types, e.g. a different
+                        mask for training and inference. The init arg is useful for cases
+                        involving compilation/tracing, e.g. ONNX export.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -467,7 +468,7 @@ class TransformerLayer(torch.nn.Module):
              Input tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
-        self_attn_mask_type: {'causal', 'padding'}, default = `None`
+        self_attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
                             type of attention mask passed into softmax operation.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
