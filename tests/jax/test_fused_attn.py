@@ -147,8 +147,6 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
 
 
-@pytest.mark.skipif(get_device_compute_capability(0) not in [80, 90],
-                    reason="Fused attention kernel is not supported.")
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
 @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
 @pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
@@ -168,6 +166,12 @@ class TestSelfFusedAttn():
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
+
+        compute_capability = get_device_compute_capability(0)
+        if (backend == Backend.Max512
+            and not (compute_capability == 80 or compute_capability >= 90)):
+            pytest.skip("Unsupported compute capability for "
+                        "fused attention with <=512 sequence length")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
                     dropout_probability, dtype, is_training, pad_ratio):
