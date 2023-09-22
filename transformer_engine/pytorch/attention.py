@@ -1202,18 +1202,6 @@ class DotProductAttention(torch.nn.Module):
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
-            if (all(seqlens_q == seqlens_q[0])
-                and all(seqlens_kv == seqlens_kv[0])
-                and query_layer.shape[0] == batch_size * seqlens_q[0]
-                and key_layer.shape[0] == batch_size * seqlens_kv[0]):
-                qkv_format = 'bshd'
-                query_layer = query_layer.view(batch_size, seqlens_q[0], *query_layer.shape[-2:])
-                key_layer, value_layer = [x.view(batch_size, seqlens_kv[0], *x.shape[-2:])
-                    for x in (key_layer, value_layer)]
-                warnings.warn(
-                    """Please use qkv_format 'bshd' instead of 'thd' when sequences have the same
-                    length or are padded to the same length in a batch."""
-                    )
 
         if qkv_format in ['sbhd', 'bshd']:
             assert (all(len(x.shape) == 4 for x in (query_layer, key_layer, value_layer))
