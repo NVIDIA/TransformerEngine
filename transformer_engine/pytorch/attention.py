@@ -509,8 +509,6 @@ class FlashAttention(torch.nn.Module):
                                                                              key_layer,
                                                                              value_layer)
             else:
-                query_layer, key_layer, value_layer = [x.contiguous()
-                    for x in (query_layer, key_layer, value_layer)]
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                     for x in (query_layer, key_layer, value_layer)]
 
