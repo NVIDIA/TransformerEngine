@@ -10,6 +10,7 @@ from importlib.metadata import version
 from contextlib import nullcontext
 from typing import Any, Callable, Optional, Tuple, Union, Dict, List
 from pkg_resources import packaging
+import numpy as np
 
 import torch
 
@@ -116,16 +117,10 @@ class _SplitAlongDim(torch.autograd.Function):
         data_ptr = grad_outputs[0].storage().data_ptr()
         shape = list(grad_outputs[0].shape)
         for i, tensor in enumerate(grad_outputs):
-            strides_i = []
-            for j,s in enumerate(strides):
-                if j <= split_dim:
-                    strides_i.append(s / split_sizes[0] * split_sizes[i])
-                else:
-                    strides_i.append(s)
             shape_i = shape
             shape_i[split_dim] = split_sizes[i]
-            offset_size = sum(split_sizes[:i]) * shape[split_dim+1:]
-            if (tensor.stride() != strides_i or
+            offset_size = sum(split_sizes[:i]) * np.prod(shape[split_dim+1:])
+            if (tensor.stride() != strides or
                 list(tensor.shape) != shape_i or
                 tensor.storage().data_ptr() != data_ptr or
                 tensor.storage_offset() != offset_size):
@@ -137,16 +132,10 @@ class _SplitAlongDim(torch.autograd.Function):
                                     dtype=grad_outputs[0].dtype)
             new_shape = list(shape)
             new_shape[split_dim] = sum(split_sizes)
-            new_strides = []
-            for j in strides:
-                if j <= split_dim:
-                    strides_i.append(strides[j] / split_sizes[0] * sum(split_sizes))
-                else:
-                    strides_i.append(strides[j])
             ret.set_(grad_outputs[0].untyped_storage(),
                      grad_outputs[0].storage_offset(),
                      new_shape,
-                     new_strides
+                     strides
             )
             return ret, None, None
 
