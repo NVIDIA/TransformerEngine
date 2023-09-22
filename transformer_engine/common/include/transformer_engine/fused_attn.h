@@ -25,9 +25,9 @@ extern "C" {
     or padded to the same length, and `THD`-based layouts are used when sequences have
     different lengths in a batch.
  *  \note {`NVTE_QKV_INTERLEAVED`, `NVTE_KV_INTERLEAVED` and `NVTE_NOT_INTERLEAVED`
-    are going to be deprecated. Please use their equivalent enums instead: `NVTE_T3HD`,
-    `NVTE_THD_T2HD` and `NVTE_THD_THD_THD` if sequences are of variable lengths, or `NVTE_BS3HD`,
-    `NVTE_BSHD_BS2HD` and `NVTE_BSHD_BSHD_BSHD` if sequences are of equal length or padded
+    will be deprecated in the next release. Please use their equivalent enums instead, i.e. `NVTE_T3HD`,
+    `NVTE_THD_T2HD` and `NVTE_THD_THD_THD` when sequences are of variable lengths, and `NVTE_BS3HD`,
+    `NVTE_BSHD_BS2HD` and `NVTE_BSHD_BSHD_BSHD` when sequences are of equal length or padded
     to equal length.}
  */
 enum NVTE_QKV_Layout {

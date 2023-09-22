@@ -1250,9 +1250,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
     const auto stride = 2 * num_head * head_dim;
@@ -1323,8 +1320,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
                    bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
                "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512.");
@@ -1472,9 +1467,6 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
                                       cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
 
@@ -1534,9 +1526,6 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      const Tensor *q_cu_seqlens, const Tensor *kv_cu_seqlens,
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
-
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_KV_INTERLEAVED.");
 
     // Q shape is [b, s, h, d]
     // KV shape is [b, s, 2, h, d]

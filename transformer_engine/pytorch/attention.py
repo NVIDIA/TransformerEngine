@@ -787,20 +787,23 @@ class FusedAttention(torch.nn.Module):
 
     Support matrix:
 
-    | backend       | 1                       | 2               |
-    | flash based   | no                      | yes             |
-    | cuDNN based   | yes                     | yes             |
-    | qkv dtype     | fp16/bf16               | fp16/bf16       |
-    | attn_type     | self/cross              | self            |
-    | qkv_layout    |                         |                 |
-    |  - qkv        | qkv_interleaved         | qkv_interleaved |
-    |  - (q,kv)     | kv_interleaved          |                 |
-    | mask_type     | causal/no_mask          | causal          |
-    | bias_type     | no_bias/post_scale_bias | no_bias         |
-    | dropout       | yes                     | yes             |
-    | max_seqlen    | <=512                   | any             |
-    | head_dim      | 64                      | 64,128          |
-    | output dtype  | fp16/bf16               | fp16/bf16       |
+    | backend       | 1                       | 2                              |
+    | flash based   | no                      | yes                            |
+    | cuDNN based   | yes                     | yes                            |
+    | qkv dtype     | fp16/bf16               | fp16/bf16                      |
+    | attn_type     | self/cross              | self                           |
+    | qkv_layout    |                         |                                |
+    |  - qkv        | qkv_interleaved         | qkv_interleaved                |
+    |  - (q,kv)     | kv_interleaved          |                                |
+    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd                   |
+    |               | sbhd_sb2hd, bshd_bs2hd  | sbhd_sb2hd, bshd_bs2hd         |
+    |               | bshd_bshd_bshd          | sbhd_sbhd_sbhd, bshd_bshd_bshd |
+    | mask_type     | causal/no_mask          | causal                         |
+    | bias_type     | no_bias/post_scale_bias | no_bias                        |
+    | dropout       | yes                     | yes                            |
+    | max_seqlen    | <=512                   | any                            |
+    | head_dim      | 64                      | 64,128                         |
+    | output dtype  | fp16/bf16               | fp16/bf16                      |
     """
 
     def __init__(

@@ -1222,9 +1222,6 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
     const auto stride = 2 * num_head * head_dim;
@@ -1295,9 +1292,6 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                   const Tensor *cu_seqlens, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
-
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_INTERLEAVED.");
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;

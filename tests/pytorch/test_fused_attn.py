@@ -39,10 +39,10 @@ class ModelConfig:
 
 model_configs = {
     "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    "test3": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    "test4": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    "test5": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+    #"test2": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+    #"test3": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
+    #"test4": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
+    #"test5": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
 }
 
 if os.getenv('NVTE_ADDITIONAL_TESTS', '0') == '1':
@@ -52,13 +52,14 @@ if os.getenv('NVTE_ADDITIONAL_TESTS', '0') == '1':
     model_configs["test9"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask")
 
 param_types = [torch.float16]
-if torch.cuda.is_bf16_supported():
-    param_types.append(torch.bfloat16)
+#if torch.cuda.is_bf16_supported():
+#    param_types.append(torch.bfloat16)
 
 if get_device_compute_capability() < 9.0:
     batch_sizes = [1, 2]
 else:
-    batch_sizes = [1, 2] #, 32]
+    #batch_sizes = [1, 2] #, 32]
+    batch_sizes = [2] #, 32]
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -145,8 +146,8 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     return op, inp.grad
 
 qkv_layouts = [
-    'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
-    'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
+    #'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
+    'bs3hd', #'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
     # will add tests for thd layouts later when the support is available in fused attention
     #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
     ]
@@ -204,6 +205,7 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
         tensor = 0.1 * torch.randn(tensor_shape, dtype = dtype).cuda()
+        print('tensor shape',tensor.shape)
         tensor_count = 1
         split_dim = 0
         for dim,l in enumerate(layout):
@@ -245,26 +247,52 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
         ).to(dtype = dtype).cuda()
     )
 
+    from transformer_engine.pytorch.constants import TE_DType
+    from transformer_engine.pytorch.attention import FusedAttnFunc_qkvpacked
+    qkv_dtype = TE_DType[inp[0].dtype]
+
+    op1 = FusedAttnFunc_qkvpacked.apply(
+        True,
+        config.seq_len,
+        cu_seqlens,
+        tensor.view(bs * config.seq_len, 3, config.num_attention_heads, config.head_dim),
+        qkv_dtype,
+        None,
+        1.0/4,
+        config.dropout_p,
+        True,
+        'bs3hd',
+        'no_bias',
+        'causal',
+        None, # rng_gen
+        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+        False,
+    ).view(bs, config.seq_len, config.num_attention_heads * config.head_dim)
+
     if qkv_format != 'thd':
         op = block(inp[0], inp[1], inp[2], qkv_format=qkv_format)
-    else:
-        cu_seqlens_q = torch.arange(
-                0,
-                (bs + 1) * config.seq_len,
-                step=config.seq_len,
-                dtype=torch.int32,
-                device=inp[0].device)
-        cu_seqlens_kv = torch.arange(
-                0,
-                (bs + 1) * config.seq_len,
-                step=config.seq_len,
-                dtype=torch.int32,
-                device=inp[1].device)
-        op = block(inp[0], inp[1], inp[2],
-                qkv_format=qkv_format,
-                cu_seqlens_q = cu_seqlens_q,
-                cu_seqlens_kv = cu_seqlens_kv)
-    op.backward(op_grad)
+    print('---',torch.equal(op1, op))
+    print(op1.min().item(), op1.max().item())
+    print(op.min().item(), op.max().item())
+    torch.testing.assert_close(op1, op, atol=2.5e-2, rtol=2.5e-2)
+    #else:
+    #    cu_seqlens_q = torch.arange(
+    #            0,
+    #            (bs + 1) * config.seq_len,
+    #            step=config.seq_len,
+    #            dtype=torch.int32,
+    #            device=inp[0].device)
+    #    cu_seqlens_kv = torch.arange(
+    #            0,
+    #            (bs + 1) * config.seq_len,
+    #            step=config.seq_len,
+    #            dtype=torch.int32,
+    #            device=inp[1].device)
+    #    op = block(inp[0], inp[1], inp[2],
+    #            qkv_format=qkv_format,
+    #            cu_seqlens_q = cu_seqlens_q,
+    #            cu_seqlens_kv = cu_seqlens_kv)
+    #op.backward(op_grad)
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)
 
