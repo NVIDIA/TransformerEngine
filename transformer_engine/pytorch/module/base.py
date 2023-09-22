@@ -447,8 +447,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # All checks after this have already been performed once, thus skip
-        # We assume that user doesn't change input types across iterations
-        if hasattr(self, "activation_dtype"):
+        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
             return
 
         dtype = inp.dtype

@@ -427,6 +427,20 @@ class TransformerLayer(torch.nn.Module):
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
 
+    def set_context_parallel_running(
+        self,
+        cp_group: Union[dist_group_type, None],
+        cp_global_ranks: Union[int],
+        cp_stream: torch.cuda.Stream,
+    ) -> None:
+        """Set CP group and CP dual-stream running"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "set_context_parallel_running"):
+                child.set_context_parallel_running(cp_group, cp_global_ranks, cp_stream)
+
     def forward(
         self,
         hidden_states: torch.Tensor,

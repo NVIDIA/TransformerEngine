@@ -752,6 +752,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.register_parameter(
                     bname, Parameter(self.bias_tensor[slice_begin:slice_end])
                 )
+                if parallel_mode == "row":
+                    setattr(getattr(self, bname), "sequence_parallel", sequence_parallel)
             else:
                 setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
