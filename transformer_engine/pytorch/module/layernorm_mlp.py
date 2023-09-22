@@ -1054,6 +1054,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.fc2_bias = Parameter(
                 torch.empty(hidden_size, device=device, dtype=params_dtype)
             )
+            # RPL
+            if self.set_parallel_mode:
+                setattr(self.fc2_bias, "sequence_parallel", sequence_parallel)
         else:
             self.fc2_bias = torch.Tensor().to(dtype=params_dtype, device=device)
 
