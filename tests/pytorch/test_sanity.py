@@ -788,3 +788,16 @@ def test_gpt_cuda_graph(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_
     )
 
     _test_sanity_e2e_cuda_graph(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+
+def test_model_multiple_cast():
+    a = torch.zeros((16,16)).cuda()
+    m = Linear(16,32)
+
+    y = m(a)
+    assert y.dtype == torch.float32
+
+    m.half()
+    a = a.half()
+
+    y2 = m(a)
+    assert y2.dtype == torch.float16
