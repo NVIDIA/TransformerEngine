@@ -15,6 +15,7 @@
 #include "../common.h"
 #include "utils.h"
 #include "../util/cuda_runtime.h"
+#include "../util/system.h"
 
 #if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
@@ -1333,17 +1334,12 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
         if (required_dp_workspace <= max_allowed_dp_workspace) {
-                use_workspace_opt = true;
+            use_workspace_opt = true;
         }
-        const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
-        if (env_workspace_opt != nullptr) {
-            if (strcmp(env_workspace_opt, "1") == 0) {
-                use_workspace_opt = true;
-            }
-            if (strcmp(env_workspace_opt, "0") == 0) {
-                use_workspace_opt = false;
-            }
-        }
+        std::cout << "qkv before env var: use opt = " << use_workspace_opt << std::endl;
+        use_workspace_opt = transformer_engine::getenv<bool>(
+            "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
+        std::cout << "qkv after env var: use opt = " << use_workspace_opt << std::endl;
         // will not be needed in cuDNN 8.9.6
         NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
         if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
@@ -1487,17 +1483,12 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
         if (required_dp_workspace <= max_allowed_dp_workspace) {
-                use_workspace_opt = true;
+            use_workspace_opt = true;
         }
-        const char* env_workspace_opt = std::getenv("NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT");
-        if (env_workspace_opt != nullptr) {
-            if (strcmp(env_workspace_opt, "1") == 0) {
-                use_workspace_opt = true;
-            }
-            if (strcmp(env_workspace_opt, "0") == 0) {
-                use_workspace_opt = false;
-            }
-        }
+        std::cout << "q/k/v before env var: use opt = " << use_workspace_opt << std::endl;
+        use_workspace_opt = transformer_engine::getenv<bool>(
+            "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
+        std::cout << "q/k/v after env var: use opt = " << use_workspace_opt << std::endl;
         // will not be needed in cuDNN 8.9.6
         NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
         if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
