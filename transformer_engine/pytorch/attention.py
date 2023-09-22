@@ -496,6 +496,7 @@ class FlashAttention(torch.nn.Module):
 
         # For now just 128, will make it more general in the future
 
+        sq, b, np, hn = query_layer.shape
         if (query_layer.shape[-1] == 128 and
             query_layer.shape[0] * query_layer.shape[1] >= 512 and
             _check_qkv_layout(query_layer, key_layer, value_layer) == "sbh3d"):
@@ -503,22 +504,28 @@ class FlashAttention(torch.nn.Module):
                                                                          key_layer,
                                                                          value_layer)
         else:
-            query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
-                           for x in (query_layer, key_layer, value_layer)]
+            # Input tensor format is `sbh` whereas FA only support `bsh`. This trick
+            # converts the formats without change in memory layouts or need for
+            # explicit transposes.
+            query_layer, key_layer, value_layer = [x.view(1, x.shape[0],
+                                                          x.shape[1] * x.shape[2],
+                                                          x.shape[3]).contiguous()
+                                                   for x in (query_layer, key_layer, value_layer)]
 
-        batch_size, seqlen = query_layer.shape[0], query_layer.shape[1]
+        effective_batch_size, effective_seqlen = query_layer.shape[0], query_layer.shape[1]
 
-        # [b, sq, np, hn]
+        # [1, sq, (b np), hn] perceived as (1, sq, np', hn) by flash attention
+        # with a batch size of 1 and increased number of attention heads.
         query_layer, key_layer, value_layer = [
             x.view(x.shape[0] * x.shape[1], *x.shape[2:])
             for x in [query_layer, key_layer, value_layer]
         ]
 
-        max_seqlen = seqlen
+        max_seqlen = effective_seqlen
         cu_seqlens = torch.arange(
             0,
-            (batch_size + 1) * seqlen,
-            step=seqlen,
+            (effective_batch_size + 1) * effective_seqlen,
+            step=effective_seqlen,
             dtype=torch.int32,
             device=query_layer.device)
 
@@ -533,8 +540,8 @@ class FlashAttention(torch.nn.Module):
                 **fa_optional_forward_kwargs
             )
 
-        # [(b sq), np, hn] -> [sq, b, (np hn)]
-        return output.view(batch_size, seqlen, -1).transpose(0, 1).contiguous()
+        # [1, sq, (b np), hn] -> [sq, b, (np hn)]
+        return output.view(sq, b, np * hn)
 
 
 class FusedAttnFunc_qkvpacked(torch.autograd.Function):
