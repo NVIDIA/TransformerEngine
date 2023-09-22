@@ -928,11 +928,6 @@ class DotProductAttention(torch.nn.Module):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
-    .. warning::
-
-        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
-        is deprecated. It will be fully removed in future releases.
-
     Parameters
     ----------
     num_attention_heads : int
@@ -952,6 +947,18 @@ class DotProductAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `DotProductAttention` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
+    qkv_format: str, default = `sbhd`
+               dimension format for `query_layer`, `key_layer` and `value_layer`,
+               {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
+               `h` the number of heads, `d` head size, and `t` the total number of sequences
+               in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
+               are used for when sequences in a batch are of equal length or padded to
+               equal length, and the `thd` format is used for when sequences in a batch
+               have different lengths. Please note that these formats do not reflect how
+               tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
+               For that, please use `_get_qkv_layout` to gain the layout information.
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                   type of attention mask passed into softmax operation.
 
     Parallelism parameters
     ----------------------
@@ -969,7 +976,8 @@ class DotProductAttention(torch.nn.Module):
         kv_channels: int,
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
-        attn_mask_type: Optional[str] = None,
+        qkv_format: str = "sbhd",
+        attn_mask_type: str = "causal",
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -979,13 +987,7 @@ class DotProductAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-
+        self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
@@ -1075,11 +1077,11 @@ class DotProductAttention(torch.nn.Module):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        qkv_format: str = "sbhd",
+        attention_mask: Optional[torch.Tensor] = None,
+        qkv_format: Optional[str] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1135,16 +1137,8 @@ class DotProductAttention(torch.nn.Module):
                    Key tensor.
         value_layer : torch.Tensor
                      Value tensor.
-        qkv_format: str, default = `sbhd`
-                   Dimension format for `query_layer`, `key_layer` and `value_layer`,
-                   {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
-                   `h` the number of heads, `d` head size, and `t` the total number of sequences
-                   in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
-                   are used for when sequences in a batch are of equal length or padded to
-                   equal length, and the `thd` format is used for when sequences in a batch
-                   have different lengths. Please note that these formats do not reflect how
-                   tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-                   For that, please use `_get_qkv_layout` to gain the layout information.
+        qkv_format: str, default = `None`
+                   If provided, overrides :attr:`qkv_format` from initialization.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths in a batch for `query_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
@@ -1153,8 +1147,8 @@ class DotProductAttention(torch.nn.Module):
                    with shape [batch_size + 1] and dtype torch.int32.
         attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out softmax input when not using flash-attn.
-        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                       type of attention mask passed into softmax operation.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `None`
+                       If provided, overrides :attr:`attn_mask_type` from initialization.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1170,14 +1164,10 @@ class DotProductAttention(torch.nn.Module):
 
         assert (key_layer.shape == value_layer.shape
             ), "Keys and values must have the same shape!"
-        if self.attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-            # Keep previous functionality for current users.
+        if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
+        if qkv_format is None:
+            qkv_format = self.qkv_format
 
         assert (key_layer.shape[-2] == self.num_gqa_groups_per_partition
             and value_layer.shape[-2] == self.num_gqa_groups_per_partition
@@ -1354,11 +1344,6 @@ class MultiheadAttention(torch.nn.Module):
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
         :attr:`attn_mask_type` is set to `"causal"`.
 
-    .. warning::
-
-        Argument :attr:`attn_mask_type` has been moved to the `forward` method and
-        is deprecated. It will be fully removed in future releases.
-
     Parameters
     ----------
     hidden_size : int
@@ -1384,6 +1369,8 @@ class MultiheadAttention(torch.nn.Module):
     layer_number: int, default = `None`
                  layer number of the current `TransformerLayer` when multiple such modules are
                  concatenated to form a transformer block.
+    attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+                   type of attention mask passed into softmax operation.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -1474,7 +1461,7 @@ class MultiheadAttention(torch.nn.Module):
         init_method: Optional[Callable] = None,
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
-        attn_mask_type: Optional[str] = None,
+        attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -1499,13 +1486,6 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
-
-        if attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
 
         self.attn_mask_type = attn_mask_type
         self.layer_number = layer_number
@@ -1680,7 +1660,7 @@ class MultiheadAttention(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_output: Optional[torch.Tensor] = None,
-        attn_mask_type: str = "causal",
+        attn_mask_type: Optional[str] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[Any] = None,
@@ -1703,8 +1683,8 @@ class MultiheadAttention(torch.nn.Module):
              Input tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
-        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
-                       type of attention mask passed into softmax operation.
+        attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `None`
+                       If provided, overrides :attr:`attn_mask_type` from initialization.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -1738,13 +1718,7 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if self.attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-            # Keep previous functionality for current users.
+        if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
 
         if attn_mask_type == "padding" and attention_mask is not None:

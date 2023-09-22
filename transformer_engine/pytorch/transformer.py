@@ -73,10 +73,10 @@ class TransformerLayer(torch.nn.Module):
         Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
         are deprecated and will be fully removed in future releases.
 
-    .. warning::
+    .. note::
 
-        Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and
-        is deprecated. It will be fully removed in future releases.
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`self_attn_mask_type` is set to `"causal"`.
 
     Parameters
     ----------
@@ -127,6 +127,8 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
+    self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+                        type of attention mask passed into softmax operation.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -212,7 +214,7 @@ class TransformerLayer(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
-        self_attn_mask_type: Optional[str] = None,
+        self_attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -238,13 +240,6 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
-
-        if self_attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
 
         warnings.warn(
             "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
@@ -431,7 +426,7 @@ class TransformerLayer(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        self_attn_mask_type: str = "causal",
+        self_attn_mask_type: Optional[str] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -456,8 +451,8 @@ class TransformerLayer(torch.nn.Module):
              Input tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
              Boolean tensor used to mask out self-attention softmax input.
-        self_attn_mask_type: {'causal', 'padding'}, default = `causal`
-                            type of attention mask passed into softmax operation.
+        self_attn_mask_type: {'causal', 'padding'}, default = `None`
+                            If provided, overrides :attr:`self_attn_mask_type` from initialization.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -493,13 +488,7 @@ class TransformerLayer(torch.nn.Module):
                     Whether to set output tensors to 0 or not before use.
         """
 
-        if self.self_attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-            # Keep previous functionality for current users.
+        if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
 
         assert (
