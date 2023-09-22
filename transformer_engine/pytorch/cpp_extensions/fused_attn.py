@@ -19,8 +19,8 @@ __all__ = ['fused_attn_fwd_qkvpacked',
            'fused_attn_bwd_qkvpacked',
            'fused_attn_fwd_kvpacked',
            'fused_attn_bwd_kvpacked',
-           'fused_attn_fwd_q_k_v',
-           'fused_attn_bwd_q_k_v']
+           'fused_attn_fwd',
+           'fused_attn_bwd']
 
 
 TORCH_DType = {
@@ -836,7 +836,7 @@ def fused_attn_bwd_kvpacked(
     # otherwise return (d_q, d_kv), d_bias
     return output_tensors[:2], output_tensors[2]
 
-def fused_attn_fwd_q_k_v(
+def fused_attn_fwd(
     is_training: bool,
     max_seqlen_q: int,
     max_seqlen_kv: int,
@@ -1004,7 +1004,7 @@ def fused_attn_fwd_q_k_v(
                 + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1)//BACKEND_F16m512_FP8_THREADS_PER_CTA
 
     # execute kernel
-    output_tensors = tex.fused_attn_fwd_q_k_v(
+    output_tensors = tex.fused_attn_fwd(
             max_seqlen_q, max_seqlen_kv, is_training, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, qkv_dtype,
@@ -1016,7 +1016,7 @@ def fused_attn_fwd_q_k_v(
     return output_tensors[0], output_tensors[1:]
 
 
-def fused_attn_bwd_q_k_v(
+def fused_attn_bwd(
     max_seqlen_q: int,
     max_seqlen_kv: int,
     cu_seqlens_q: torch.Tensor,
@@ -1188,7 +1188,7 @@ def fused_attn_bwd_q_k_v(
         check_stats(z_inv, b, h, max_seqlen_q)
 
     # execute kernel
-    output_tensors = tex.fused_attn_bwd_q_k_v(
+    output_tensors = tex.fused_attn_bwd(
             max_seqlen_q, max_seqlen_kv, attn_scale, dropout, fast_zero_fill,
             QKVLayout[qkv_layout], AttnBiasType[attn_bias_type], AttnMaskType[attn_mask_type],
             cu_seqlens_q, cu_seqlens_kv, q, k, v, o, d_o, qkv_dtype, aux_ctx_tensors,

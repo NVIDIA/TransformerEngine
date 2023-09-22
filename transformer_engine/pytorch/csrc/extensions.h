@@ -106,7 +106,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
                 c10::optional<at::Tensor> amax_dP,
                 c10::optional<at::Tensor> amax_dQKV);
 
-std::vector<at::Tensor> fused_attn_fwd_q_k_v(
+std::vector<at::Tensor> fused_attn_fwd(
                 size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                 float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout,
@@ -127,7 +127,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
                 const c10::optional<at::Generator> rng_gen,
                 size_t rng_elts_per_thread);
 
-std::vector<at::Tensor> fused_attn_bwd_q_k_v(
+std::vector<at::Tensor> fused_attn_bwd(
                 size_t max_seqlen_q, size_t max_seqlen_kv,
                 float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout,

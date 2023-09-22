@@ -718,7 +718,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
 }
 
 // fused attention FWD with separate Q, K and V tensors
-std::vector<at::Tensor> fused_attn_fwd_q_k_v(
+std::vector<at::Tensor> fused_attn_fwd(
                 size_t max_seqlen_q, size_t max_seqlen_kv,
                 bool is_training, float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -825,7 +825,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_fwd_q_k_v(
+  nvte_fused_attn_fwd(
                   te_Q.data(),
                   te_K.data(),
                   te_V.data(),
@@ -866,7 +866,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
   }
 
   // execute the kernel
-  nvte_fused_attn_fwd_q_k_v(
+  nvte_fused_attn_fwd(
                   te_Q.data(),
                   te_K.data(),
                   te_V.data(),
@@ -891,7 +891,7 @@ std::vector<at::Tensor> fused_attn_fwd_q_k_v(
 }
 
 // fused attention BWD with separate Q, K and V
-std::vector<at::Tensor> fused_attn_bwd_q_k_v(
+std::vector<at::Tensor> fused_attn_bwd(
                 size_t max_seqlen_q, size_t max_seqlen_kv,
                 float attn_scale, float p_dropout, bool set_zero,
                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -1100,7 +1100,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_bwd_q_k_v(
+  nvte_fused_attn_bwd(
                   te_Q.data(),
                   te_K.data(),
                   te_V.data(),
@@ -1128,7 +1128,7 @@ std::vector<at::Tensor> fused_attn_bwd_q_k_v(
                   workspace.shape(), workspace.dtype());
 
   // execute kernel
-  nvte_fused_attn_bwd_q_k_v(
+  nvte_fused_attn_bwd(
                   te_Q.data(),
                   te_K.data(),
                   te_V.data(),

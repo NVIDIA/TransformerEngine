@@ -445,7 +445,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd_q_k_v(
+void nvte_fused_attn_fwd(
             const NVTETensor Q,
             const NVTETensor K,
             const NVTETensor V,
@@ -500,7 +500,7 @@ void nvte_fused_attn_fwd_q_k_v(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_bwd_q_k_v(
+void nvte_fused_attn_bwd(
             const NVTETensor Q,
             const NVTETensor K,
             const NVTETensor V,

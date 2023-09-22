@@ -508,7 +508,7 @@ void nvte_fused_attn_bwd_kvpacked(
   }
 }
 // NVTE fused attention FWD with separate Q, K and V
-void nvte_fused_attn_fwd_q_k_v(
+void nvte_fused_attn_fwd(
             const NVTETensor Q,
             const NVTETensor K,
             const NVTETensor V,
@@ -525,7 +525,7 @@ void nvte_fused_attn_fwd_q_k_v(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream) {
-  NVTE_API_CALL(nvte_flash_attn_fwd_q_k_v);
+  NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
@@ -555,7 +555,7 @@ void nvte_fused_attn_fwd_q_k_v(
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
-      fused_attn_max_512_fwd_q_k_v(
+      fused_attn_max_512_fwd(
           b, max_seqlen_q, max_seqlen_kv, h, d,
           is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_Bias, output_O,
@@ -568,7 +568,7 @@ void nvte_fused_attn_fwd_q_k_v(
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
-      fused_attn_arbitrary_seqlen_fwd_q_k_v(
+      fused_attn_arbitrary_seqlen_fwd(
           b, max_seqlen_q, max_seqlen_kv, h, d,
           is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_Bias, output_O,
@@ -582,7 +582,7 @@ void nvte_fused_attn_fwd_q_k_v(
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
-    fused_attn_fp8_fwd_q_k_v(
+    fused_attn_fp8_fwd(
             b, max_seqlen_q, max_seqlen_kv, h, d,
             is_training, attn_scale, dropout, qkv_layout,
             input_Q, input_K, input_V, input_output_S, output_O,
@@ -598,7 +598,7 @@ void nvte_fused_attn_fwd_q_k_v(
   }
 }
 // NVTE fused attention BWD with separate Q, K and V
-void nvte_fused_attn_bwd_q_k_v(
+void nvte_fused_attn_bwd(
             const NVTETensor Q,
             const NVTETensor K,
             const NVTETensor V,
@@ -619,7 +619,7 @@ void nvte_fused_attn_bwd_q_k_v(
             NVTE_Mask_Type attn_mask_type,
             NVTETensor workspace,
             cudaStream_t stream) {
-  NVTE_API_CALL(nvte_flash_attn_bwd_q_k_v);
+  NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor*>(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = reinterpret_cast<const Tensor*>(cu_seqlens_kv);
@@ -654,7 +654,7 @@ void nvte_fused_attn_bwd_q_k_v(
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-      fused_attn_max_512_bwd_q_k_v(
+      fused_attn_max_512_bwd(
           b, max_seqlen_q, max_seqlen_kv, h, d,
           attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_dO,
@@ -669,7 +669,7 @@ void nvte_fused_attn_bwd_q_k_v(
 #if (CUDNN_VERSION >= 8900)
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
-      fused_attn_arbitrary_seqlen_bwd_q_k_v(
+      fused_attn_arbitrary_seqlen_bwd(
           b, max_seqlen_q, max_seqlen_kv, h, d,
           attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_O, input_dO,
@@ -688,7 +688,7 @@ void nvte_fused_attn_bwd_q_k_v(
     const Tensor *input_M = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[0]);
     const Tensor *input_ZInv = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[2]);
-    fused_attn_fp8_bwd_q_k_v(
+    fused_attn_fp8_bwd(
                     b, max_seqlen_q, max_seqlen_kv, h, d,
                     attn_scale, dropout, qkv_layout,
                     input_Q, input_K, input_V, input_O, input_dO,

@@ -56,9 +56,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with packed KV");
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
-  m.def("fused_attn_fwd_q_k_v", &fused_attn_fwd_q_k_v,
+  m.def("fused_attn_fwd", &fused_attn_fwd,
                   "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
-  m.def("fused_attn_bwd_q_k_v", &fused_attn_bwd_q_k_v,
+  m.def("fused_attn_bwd", &fused_attn_bwd,
                   "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");

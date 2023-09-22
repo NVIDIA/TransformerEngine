@@ -48,7 +48,7 @@ void fused_attn_fp8_bwd_qkvpacked(
             cudnnHandle_t handle);
 
 // fused attention FWD FP8 with separate Q, K, V
-void fused_attn_fp8_fwd_q_k_v(
+void fused_attn_fp8_fwd(
             size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
             size_t h, size_t d,
             bool is_training, float attn_scale,
@@ -65,7 +65,7 @@ void fused_attn_fp8_fwd_q_k_v(
             cudnnHandle_t handle);
 
 // fused attention BWD FP8 with separate Q, K, V
-void fused_attn_fp8_bwd_q_k_v(
+void fused_attn_fp8_bwd(
             size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
             size_t h, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,

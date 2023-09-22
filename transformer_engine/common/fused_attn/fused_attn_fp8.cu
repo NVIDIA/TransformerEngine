@@ -1916,6 +1916,8 @@ void fused_attn_fp8_fwd_qkvpacked(
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
 
   void* devPtrAmaxS = input_output_S->amax.dptr;
@@ -2054,7 +2056,7 @@ void fused_attn_fp8_bwd_qkvpacked(
   }
 }
 // fused attention FWD FP8 with separate Q, K, V
-void fused_attn_fp8_fwd_q_k_v(
+void fused_attn_fp8_fwd(
             size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
             size_t h, size_t d,
             bool is_training, float attn_scale,
@@ -2108,6 +2110,8 @@ void fused_attn_fp8_fwd_q_k_v(
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
 
   void* devPtrAmaxS = input_output_S->amax.dptr;
@@ -2153,7 +2157,7 @@ void fused_attn_fp8_fwd_q_k_v(
   }
 }
 // fused attention BWD FP8 with separate Q, K, V
-void fused_attn_fp8_bwd_q_k_v(
+void fused_attn_fp8_bwd(
             size_t b, size_t max_seqlen_q, size_t max_seqlen_kv,
             size_t h, size_t d,
             float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,

@@ -586,8 +586,8 @@ from typing import Union, Dict, Any, Tuple, List
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
-    fused_attn_fwd_q_k_v,
-    fused_attn_bwd_q_k_v,
+    fused_attn_fwd,
+    fused_attn_bwd,
     FusedAttnBackend)
 
 _CUBLASLT_WORKSPACE_SIZE_BYTES = 33_554_432  # 32MiB
@@ -675,7 +675,7 @@ class _dpa_fp8(torch.autograd.Function):
         torch.save(qkv_out_fp16, 'qkv.pt')
 
         # FMHA
-        context_, aux_ctx_tensors, *rest = fused_attn_fwd_q_k_v(
+        context_, aux_ctx_tensors, *rest = fused_attn_fwd(
                 is_training,
                 max_s,
                 max_s,
@@ -754,7 +754,7 @@ class _dpa_fp8(torch.autograd.Function):
                 grad_output, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
             )
 
-            dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
+            dq, dk, dv, *rest = fused_attn_bwd(
                     ctx.max_s,
                     ctx.max_s,
                     ctx.cu_seqlens,

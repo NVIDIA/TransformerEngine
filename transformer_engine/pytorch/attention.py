@@ -19,8 +19,8 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_bwd_qkvpacked,
     fused_attn_fwd_kvpacked,
     fused_attn_bwd_kvpacked,
-    fused_attn_fwd_q_k_v,
-    fused_attn_bwd_q_k_v,
+    fused_attn_fwd,
+    fused_attn_bwd,
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
@@ -706,7 +706,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 None, None, None, None, None, None,
                 None, None, None, None, None, None)
 
-class FusedAttnFunc_q_k_v(torch.autograd.Function):
+class FusedAttnFunc(torch.autograd.Function):
     """Function for FusedAttention with separate Q, K, V tensors"""
 
     @staticmethod
@@ -714,7 +714,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
                 q, k, v, qkv_dtype, attn_bias, attn_scale, dropout_p, fast_zero_fill,
                 qkv_layout, attn_bias_type, attn_mask_type,
                 rng_gen, fused_attention_backend, use_FAv2_bwd):
-        out, aux_ctx_tensors = fused_attn_fwd_q_k_v(
+        out, aux_ctx_tensors = fused_attn_fwd(
             is_training, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
             q, k, v, qkv_dtype, fused_attention_backend, attn_bias,
             None, None, None, None, None,
@@ -758,7 +758,7 @@ class FusedAttnFunc_q_k_v(torch.autograd.Function):
             dk = dk[..., :d_out.shape[-1]]
             dv = dv[..., :d_out.shape[-1]]
         else:
-            dq, dk, dv, *rest = fused_attn_bwd_q_k_v(
+            dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv,
                 q, k, v, out, d_out,
                 ctx.qkv_dtype, ctx.aux_ctx_tensors,
@@ -888,7 +888,7 @@ class FusedAttention(torch.nn.Module):
                 and (fused_attention_backend
                     == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
         with self.attention_dropout_ctx():
-            output = FusedAttnFunc_q_k_v.apply(
+            output = FusedAttnFunc.apply(
                 self.training,
                 max_seqlen_q, max_seqlen_kv,
                 cu_seqlens_q, cu_seqlens_kv,
