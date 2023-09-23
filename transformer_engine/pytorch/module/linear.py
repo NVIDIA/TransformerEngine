@@ -461,11 +461,14 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    parameters_split : Tuple[str, ...], default = None
-                      if a tuple of strings is provided, the weight and bias parameters of the
-                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                      split along the first dimension, where `N` is the length of the argument
-                      and the strings contained are the names of the split parameters.
+    parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
+                      if a tuple of strings or a dict of strings to integers is provided,
+                      the weight and bias parameters of the module are exposed as `N` separate
+                      `torch.nn.parameter.Parameter`s each, split along the first dimension,
+                      where `N` is the length of the argument and the strings contained are the
+                      names of the split parameters. In the case of a tuple, each parameter
+                      has the same shape. In the case of a dict, the values give the
+                      `out_features` for each projection.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -522,7 +525,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
-        parameters_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         device: Union[torch.device, str] = "cuda",
@@ -598,23 +601,35 @@ class Linear(TransformerEngineBaseModule):
             self.bias_tensor.zero_()
 
         if parameters_split is None:
-            parameters_split = ("",)
-
-        assert (
-            self.out_features % len(parameters_split) == 0
-        ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
-
-        split_size = self.out_features // len(parameters_split)
+            parameters_split = {"": self.out_features}
+        elif isinstance(parameters_split, tuple):
+            assert (
+                self.out_features % len(parameters_split) == 0
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
+            split_size = self.out_features // len(parameters_split)
+            parameters_split = {key: split_size for key in parameters_split}
+        elif isinstance(parameters_split, dict):
+            overall_split_size = sum(parameters_split.values())
+            assert(
+                self.out_features == overall_split_size
+            ), f"Overall sum of parameters_split (={overall_split_size}) does not match "\
+               f"to out features (={self.out_features})"
+        else:
+            assert False, "Type of 'parameters_split' is not None, tuple or dict"
+        self.updated_parameters_split = parameters_split
 
         self.weight_names = []
         self.bias_names = []
 
-        for i, pname in enumerate(parameters_split):
+        slice_begin = 0
+        for pname, slice_size in parameters_split.items():
             wname = pname + "weight"
             bname = pname + "bias"
 
+            slice_end = slice_begin + slice_size
+
             self.register_parameter(
-                wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                wname, Parameter(self.weight_tensor[slice_begin:slice_end])
             )
 
             set_tensor_model_parallel_attributes(
@@ -626,7 +641,7 @@ class Linear(TransformerEngineBaseModule):
 
             if self.use_bias:
                 self.register_parameter(
-                    bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    bname, Parameter(self.bias_tensor[slice_begin:slice_end])
                 )
             else:
                 setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
@@ -636,6 +651,8 @@ class Linear(TransformerEngineBaseModule):
 
             self.weight_names.append(wname)
             self.bias_names.append(bname)
+
+            slice_begin = slice_end
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -715,12 +732,14 @@ class Linear(TransformerEngineBaseModule):
             bias_tensor = (
                 self.bias if self.parameters_split is None
                 else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names)
+                else self.noop_cat("bias_tensor", self.bias_names,
+                    self.updated_parameters_split)
             )
             weight_tensor = (
                 self.weight if self.parameters_split is None
                 else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names)
+                else self.noop_cat("weight_tensor", self.weight_names,
+                    self.updated_parameters_split)
             )
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
