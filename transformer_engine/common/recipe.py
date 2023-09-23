@@ -115,8 +115,7 @@ class DelayedScaling:
       .. code-block:: python
 
           FP8_MAX = maximum_representable_value(fp8_format)
-          exp = get_exponent(FP8_MAX / amax) - margin
-          new_scaling_factor = 2.0 ^ exp
+          new_scaling_factor = (FP8_MAX / amax) / (2 ^ margin)
 
     * The scaling factor should always be a power of 2 to not introduce numerical
       error during the conversion from FP8 to higher precision format.

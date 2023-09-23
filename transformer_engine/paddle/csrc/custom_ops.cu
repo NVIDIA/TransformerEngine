@@ -1032,11 +1032,8 @@ __global__ void UpdateFP8MetaKernel(const float *amax, const float *rolled_amax_
     amax_history[idx] = rolled_amax_history[idx];
 
     if (idx < amax_numel) {
-        float exp = floor(log2(fp8_max / amax[idx])) - margin;
-        float sf = round(powf(2.0f, abs(exp)));
-        float scale_reg = scale[idx];
-        sf = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale_reg;
-        scale_reg = exp < 0.0f ? 1 / sf : sf;
+        float sf = (fp8_max / amax[idx]) / powf(2.0f, margin);
+        float scale_reg = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
         scale[idx] = scale_reg;
         scale_inv[idx] = 1.0f / scale_reg;
         amax_history[idx] = 0.0f;
