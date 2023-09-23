@@ -45,8 +45,6 @@ from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
 
-np.random.seed(10)
-paddle.seed(11)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
@@ -55,6 +53,14 @@ SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
 FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    np.random.seed(10)
+    paddle.seed(11)
+    yield
 
 
 def test_quantize_dequantize():
@@ -859,13 +865,17 @@ class TestSoftmax:
         assert_allclose(dx_ref, dx, rtol=1e-4, atol=5e-3)
 
 
-def test_update_scale():
+def test_amax_and_scale_update():
     """Test update_scale"""
     num_gemm = 6
+    history_len = 1024
     recipe = DelayedScaling()
     fp8_max = recipe.fp8_format.value.max_fwd
 
-    amax_tensor = paddle.rand(shape=[num_gemm], dtype='float32') * fp8_max
+    amax_history_tensor = paddle.rand(shape=[history_len, num_gemm], dtype='float32')
+    rolled_history_ref = paddle.roll(amax_history_tensor, -1, axis=0)
+    rolled_history_ref[0] = 0.0
+    amax_tensor = paddle.max(amax_history_tensor, axis=0)
     scale_tensor = paddle.ones(shape=[num_gemm], dtype='float32')
 
     def calc_ref(amax, scale, fp8_max, margin=0):
@@ -878,6 +888,32 @@ def test_update_scale():
         return sf
 
     scale_ref = calc_ref(amax_tensor, scale_tensor, fp8_max, 0.)
-    scale_actual = tex.update_scale(amax_tensor, scale_tensor, fp8_max, 0.)
+    scale_inv_ref = 1. / scale_ref
 
-    assert_allclose(scale_ref, scale_actual, rtol=1e-5, atol=1e-5)
+    # Placeholder
+    scale_actual = paddle.zeros_like(scale_tensor)
+    scale_inv_actual = paddle.zeros_like(scale_tensor)
+
+    tex.amax_and_scale_update_inplace(_amax_history=amax_history_tensor,
+                                      _scale=scale_actual,
+                                      _scale_inv=scale_inv_actual,
+                                      fp8_max=fp8_max,
+                                      margin=0.,
+                                      amax_compute="max")
+
+    assert_allclose(scale_actual, scale_ref, rtol=1e-7, atol=1e-7)
+    assert_allclose(scale_inv_actual, scale_inv_ref, rtol=1e-7, atol=1e-7)
+    assert_allclose(amax_history_tensor, rolled_history_ref, rtol=1e-7, atol=1e-7)
+
+
+def test_update_latest_history():
+    """Test update_latest_history"""
+    num_gemm = 6
+    history_len = 1024
+
+    amax_history_tensor = paddle.rand(shape=[history_len, num_gemm], dtype='float32')
+    amax = paddle.rand(shape=[num_gemm], dtype='float32')
+
+    tex.update_latest_amax_history_inplace(_history=amax_history_tensor, amax=amax)
+
+    assert_allclose(amax_history_tensor[0], amax, rtol=1e-7, atol=1e-7)

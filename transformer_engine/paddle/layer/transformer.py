@@ -9,6 +9,7 @@ import paddle
 
 from . import LayerNormMLP, LayerNorm, MultiHeadAttention
 from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
+from ..distributed import get_tp_group_and_world_size, track_rng_state
 
 
 class TransformerLayer(paddle.nn.Layer):
@@ -69,7 +70,17 @@ class TransformerLayer(paddle.nn.Layer):
                       `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
     tp_group : ProcessGroup, default = `None`
               tensor parallel process group.
-
+    attention_dropout_rng_state_name : str, default = `local_seed`
+                   Controls the rng state used for dropout on attention probs. The
+                   specified rng should be set different seeds for different TP ranks.
+                   It will be ignored if `set_parallel_mode` is False.
+    hidden_dropout_rng_state_name : str, default = `global_seed`
+                   Controls the rng state used for dropout on hidden states. The
+                   specified rng should be given the same seeds for different TP
+                   ranks. It will be ignored if `set_parallel_mode` is False. The
+                   specified name should be registered through
+                   `paddle.distributed.fleet.meta_parallel.get_rng_state_tracker()
+                   .add(rng_state_name, seed)`.
     """
 
     def __init__(self,
@@ -90,6 +101,8 @@ class TransformerLayer(paddle.nn.Layer):
                  activation: str = 'gelu',
                  set_parallel_mode: bool = False,
                  tp_group: Optional[dist_group_type] = None,
+                 attention_dropout_rng_state_name: str = 'local_seed',
+                 hidden_dropout_rng_state_name: str = 'global_seed',
                  backend: str = 'transformer_engine') -> None:
         super().__init__()
 
@@ -99,7 +112,10 @@ class TransformerLayer(paddle.nn.Layer):
         self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
         self.self_attn_mask_type = self_attn_mask_type
         self.set_parallel_mode = set_parallel_mode
-        self.tp_group = tp_group
+        self.tp_group, self.tp_size = get_tp_group_and_world_size(tp_group,
+                                                                  enable_tp=set_parallel_mode)
+        self.tensor_parallel = self.tp_size > 1
+        self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
 
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -119,6 +135,7 @@ class TransformerLayer(paddle.nn.Layer):
             "zero_centered_gamma": zero_centered_gamma,
             "set_parallel_mode": set_parallel_mode,
             "tp_group": tp_group,
+            "rng_state_name": attention_dropout_rng_state_name,
             "backend": backend,
         }
 
@@ -174,6 +191,7 @@ class TransformerLayer(paddle.nn.Layer):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
+        recompute_core_attention: bool = False,
     ) -> paddle.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -200,6 +218,11 @@ class TransformerLayer(paddle.nn.Layer):
                     Bias tensor for Q * K.T
         set_zero: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        recompute_core_attention: bool, default = `False`
+                                  If true, forward activations for core attention are recomputed
+                                  during the backward pass in order to save memory that would
+                                  otherwise be occupied to store the forward activations until
+                                  backprop.
         """
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
@@ -215,6 +238,7 @@ class TransformerLayer(paddle.nn.Layer):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             set_zero=set_zero,
+            recompute_core_attention=recompute_core_attention,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -224,11 +248,12 @@ class TransformerLayer(paddle.nn.Layer):
             residual = hidden_states
 
         # dropoout add.
-        out = paddle.nn.functional.dropout(
-            attention_output,
-            p=self.hidden_dropout,
-            training=True,
-        )
+        with track_rng_state(enable=self.tensor_parallel, name=self.hidden_dropout_rng_state_name):
+            out = paddle.nn.functional.dropout(
+                attention_output,
+                p=self.hidden_dropout,
+                training=True,
+            )
         bda_output = residual + out
 
         # Cross attention.
@@ -240,6 +265,7 @@ class TransformerLayer(paddle.nn.Layer):
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 set_zero=set_zero,
+                recompute_core_attention=recompute_core_attention,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, residual = inter_attention_outputs
@@ -247,11 +273,13 @@ class TransformerLayer(paddle.nn.Layer):
                 attention_output = inter_attention_outputs
                 residual = bda_output
 
-            out = paddle.nn.functional.dropout(
-                attention_output,
-                p=self.hidden_dropout,
-                training=True,
-            )
+            with track_rng_state(enable=self.tensor_parallel,
+                                 name=self.hidden_dropout_rng_state_name):
+                out = paddle.nn.functional.dropout(
+                    attention_output,
+                    p=self.hidden_dropout,
+                    training=True,
+                )
             bda_output = residual + out
 
         # MLP.
@@ -263,7 +291,8 @@ class TransformerLayer(paddle.nn.Layer):
             residual = bda_output
 
         # dropoout add.
-        out = paddle.nn.functional.dropout(mlp_output, p=self.hidden_dropout, training=True)
+        with track_rng_state(enable=self.tensor_parallel, name=self.hidden_dropout_rng_state_name):
+            out = paddle.nn.functional.dropout(mlp_output, p=self.hidden_dropout, training=True)
         output = residual + out
 
         # For BERT like architectures.

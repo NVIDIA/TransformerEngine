@@ -4,14 +4,16 @@
 """FP8 meta buffer for FP8 amax reduction"""
 
 from abc import ABC, abstractmethod
+from collections import deque
 from functools import partial
 import os
 from typing import Dict, Any, List, Union
 
 import numpy as np
 import paddle
+import transformer_engine_paddle as tex
 
-from .constants import dist_group_type
+from .constants import dist_group_type, RecomputeFunctionNames
 
 
 class FP8MetaBufferBase(ABC):
@@ -151,8 +153,10 @@ class FP8MetaBufferBase(ABC):
         amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         assert amax_buffer_key in self._data, "TE internal error."
 
-        fp8_meta[fp8_meta_tensor_key].amax_history[0] = self._data[amax_buffer_key][
-            fp8_meta[buffer_position_key]]
+        # Copy amax to amax_history[0]
+        tex.update_latest_amax_history_inplace(
+            _history=fp8_meta[fp8_meta_tensor_key].amax_history,
+            amax=self._data[amax_buffer_key][fp8_meta[buffer_position_key]])
 
     def set_for_deletion(self, fp8_meta: Dict[str, Any]) -> None:
         """Delete this amax key from global buffer during autocast end."""
@@ -255,3 +259,60 @@ class FP8MetaBwdBuffer(FP8MetaBufferBase):
         """
         self._amax_reduce_wait_func = self._global_amax_reduction(fp8_meta, tp_group, tp_size)
         self._execute_deletion()
+
+
+class FP8RecomputeBuffer:
+    """Buffer used to hold FP8 meta tensors for recompute"""
+
+    def __init__(self):
+        self._data = []
+
+    @staticmethod
+    def get_buffer_position_key():
+        """Returns the key (in fp8_meta) for recompute buffer position"""
+        return 'recompute_buffer_pos'
+
+    def stash_fp8_meta_tensors(self, fp8_meta: Dict[str, Any]) -> None:
+        """Stash the scaling factors and amaxes for recompute"""
+        buffer_position_key = self.get_buffer_position_key()
+
+        to_copy = [
+            fp8_meta["scaling_fwd"].amax_history.clone(),
+            fp8_meta["scaling_fwd"].scale.clone(),
+            fp8_meta["scaling_fwd"].scale_inv.clone(),
+        ]
+
+        if buffer_position_key in fp8_meta:
+            self._data[fp8_meta[buffer_position_key]].append(to_copy)
+        else:
+            self._data.append(deque())
+            self._data[-1].append(to_copy)
+            fp8_meta[buffer_position_key] = len(self._data) - 1
+
+    def retrieve_fp8_meta_tensors(self, fp8_meta: Dict[str, Any]) -> None:
+        """Switch to the previously saved scaling factors and amaxes"""
+        # Store updated amaxes and scales from phase 1 post forward.
+        fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history
+        fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale
+        fp8_meta["updated_scale_inv_fwd"] = fp8_meta["scaling_fwd"].scale_inv
+
+        # Retrieve stashed amaxes and scales from phase 1 pre forward.
+        buffer_position_key = self.get_buffer_position_key()
+        stashed_fp8_meta = self._data[fp8_meta[buffer_position_key]].popleft()
+
+        # Replace amaxes and scales with stashed values for phase 2 forward
+        fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
+        fp8_meta["scaling_fwd"].scale = stashed_fp8_meta[1]
+        fp8_meta["scaling_fwd"].scale_inv = stashed_fp8_meta[2]
+
+    @staticmethod
+    def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
+        """Restore latest scaling factors and amaxes after recompute forward run."""
+        assert "updated_amax_history_fwd" in fp8_meta, "Recompute internal error." \
+            " If you are not using recompute, please check if" \
+            " the forward function is called from one of these functions: " \
+            f"{RecomputeFunctionNames}. If so, consider change the function name " \
+            "or set NVTE_DISABLE_RECOMPUTE=1."
+        fp8_meta["scaling_fwd"].amax_history = fp8_meta["updated_amax_history_fwd"]
+        fp8_meta["scaling_fwd"].scale = fp8_meta["updated_scale_fwd"]
+        fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]
