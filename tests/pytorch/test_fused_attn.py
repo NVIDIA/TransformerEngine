@@ -272,7 +272,8 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
-def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
+@pytest.mark.parametrize("fused_qkv_params", [True, False])
+def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type, fused_qkv_params):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
@@ -280,11 +281,11 @@ def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
 
     if bias_type == "no_bias":
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
+                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type, fused_qkv_params)
     fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type)
+            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type, fused_qkv_params)
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type)
+            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type, fused_qkv_params)
 
     atol, rtol = (5e-1, 5e-2)
     if bias_type == "no_bias":
@@ -293,7 +294,7 @@ def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type):
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
-def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
+def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fused_qkv_params):
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -351,7 +352,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type):
             layer_type="encoder",
             drop_path_rate=drop_path_rates[layer_number - 1],
             set_parallel_mode=True,
-            fuse_qkv_params=True,
+            fuse_qkv_params=fused_qkv_params,
             zero_centered_gamma=False,
             qkv_weight_interleaved=False,
             ub_tp_comm_overlap=False,

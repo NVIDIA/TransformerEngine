@@ -310,11 +310,9 @@ class FP8Helper:
                 amax = fp8_meta_arrays[fp8_amax_idx][..., 0:1]
             scale = fp8_meta_arrays[fp8_scale_idx]
 
-            exp = jnp.floor(jnp.log2(fp8_max / amax)) - FP8Helper.MARGIN
-            sf = jnp.round(jnp.power(2, jnp.abs(exp)))
+            sf = (fp8_max / amax) / (2 ** FP8Helper.MARGIN)
             sf = jnp.where(amax > 0.0, sf, scale)
             sf = jnp.where(jnp.isfinite(amax), sf, scale)
-            scale = jnp.where(exp < 0, 1 / sf, sf)
             fp8_meta_arrays[fp8_scale_idx] = scale
             fp8_meta_arrays[fp8_scale_inv_idx] = 1 / scale
 
@@ -426,11 +424,9 @@ def update_fp8_metas(state: Collection) -> Collection:
 
     .. code-block:: python
 
-        exp = floor(log2(fp8_max / amax)) - margin
-        sf = round(power(2, abs(exp)))
+        sf = (fp8_max / amax) / (2 ^ margin)
         sf = sf if amax > 0.0, else original_scale
-        sf = sf if isfinite(amax), else original_scale)
-        updated_scale = 1/sf if exp < 0, else sf
+        updated_scale = sf if isfinite(amax), else original_scale)
         updated_scale_inv = 1/updated_scale
 
     Collection = [dict, flax.core.frozen_dict.FrozenDict]
