@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 """Methods needed for distributed training."""
 
+import os
+import warnings
 from contextlib import contextmanager
 from typing import Any, Optional, Union, Tuple
 
@@ -35,6 +37,19 @@ def get_tp_group_and_world_size(tp_group: Union[dist_group_type, None],
                             if tp_group is None else tp_group)
     world_size = (tp._HYBRID_PARALLEL_GROUP.get_model_parallel_world_size()
                   if tp_group is None else tp_group.nranks)
+    """
+    When using TP, the NCCL communication needs to be scheduled
+    before the GEMM for a guaranteed overlap. From the host side
+    in TE, the comm calls are always launched first, but to ensure
+    that the GEMM isn't scheduled first, the environment variable
+    `CUDA_DEVICE_MAX_CONNECTIONS` needs to be set to 1 to force a
+    single channel.
+    """
+    num_cuda_work_queues = int(os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", "0"))
+    if num_cuda_work_queues != 1:
+        warnings.warn("To guarantee overlapping TP and SP collectives with the backward"
+                      "GEMMs, set environment variable CUDA_DEVICE_MAX_CONNECTIONS = 1")
+
     return model_parallel_group, world_size
 
 
