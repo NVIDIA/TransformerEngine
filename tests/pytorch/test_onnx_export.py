@@ -1005,6 +1005,7 @@ def test_export_core_attention(
     # Set dimensions (these are arbitrary).
     seq_len, batch_size, num_attention_heads, kv_channels = (64, 4, 1, 64)
     qkv_size = (seq_len, batch_size, num_attention_heads, kv_channels)
+    qkv_format = "sbhd"
 
     query_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
     key_layer = torch.randn(qkv_size, dtype=precision, device="cuda")
@@ -1025,6 +1026,7 @@ def test_export_core_attention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
         attention_dropout=0.5,
+        qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,
     ).to(device='cuda')
     do_export(model,

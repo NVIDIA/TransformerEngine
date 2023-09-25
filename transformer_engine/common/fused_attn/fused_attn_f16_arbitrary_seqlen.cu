@@ -15,6 +15,7 @@
 #include "../common.h"
 #include "utils.h"
 #include "../util/cuda_runtime.h"
+#include "../util/system.h"
 
 #if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
@@ -1059,6 +1060,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             auto matmul_3_Desc = cudnn_frontend::MatMulDescBuilder()
                                 .setComputeType(CUDNN_DATA_FLOAT)
                                 .build();
+
             if (!use_workspace_opt) {
                 auto matmul_op3 = cudnn_frontend::OperationBuilder(
                                     CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR)
@@ -1221,9 +1223,6 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
     const auto stride = 2 * num_head * head_dim;
@@ -1295,9 +1294,6 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
 
@@ -1337,21 +1333,16 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
         // default upper limit for dp workspace 256MB
         size_t max_allowed_dp_workspace = 256;
-        const char* env_workspace_limit_char = std::getenv("NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT");
-        if (env_workspace_limit_char != nullptr) {
-            try {
-                std::string env_dp_workspace_limit(env_workspace_limit_char);
-                int dp_workspace_limit = std::stoi(env_dp_workspace_limit);
-                if (dp_workspace_limit > max_allowed_dp_workspace) {
-                    max_allowed_dp_workspace = dp_workspace_limit;
-                }
-            } catch (...) {
-                NVTE_ERROR(
-                "Invalid argument for NVTE_FUSED_ATTN_DP_WORKSPACE_LIMIT (integer; in MBytes)! \n");
-            }
-        }
         if (required_dp_workspace <= max_allowed_dp_workspace) {
-                use_workspace_opt = true;
+            use_workspace_opt = true;
+        }
+        use_workspace_opt = transformer_engine::getenv<bool>(
+            "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
+        // will not be needed in cuDNN 8.9.6
+        NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+        if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
+            || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
+                use_workspace_opt = false;
         }
     }
 #endif
@@ -1362,6 +1353,153 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 get_cudnn_dtype(qkv_type), workspace->data.dptr,
+                                &workspace_size, stream, handle, use_workspace_opt);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
+    }
+}
+
+void fused_attn_arbitrary_seqlen_fwd(
+    size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
+    size_t num_head, size_t head_dim, bool is_training,
+    float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_K,
+    const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,
+    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+    const Tensor *rng_state,
+    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    using namespace transformer_engine;
+
+    const DType QKV_type = input_Q->data.dtype;
+    void *devPtrQ = input_Q->data.dptr;
+    void *devPtrK = input_K->data.dptr;
+    void *devPtrV = input_V->data.dptr;
+    void *devPtrO = output_O->data.dptr;
+    void *devPtrS = nullptr;
+
+    if (Aux_CTX_Tensors->size == 0) {
+        Aux_CTX_Tensors->size = 2;
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        output_S->data.dptr = nullptr;
+        output_S->data.shape = {batch, num_head, max_seqlen_q, 1};
+        output_S->data.dtype = DType::kFloat32;
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = nullptr;
+        output_rng_state->data.shape = {2};
+        output_rng_state->data.dtype = DType::kInt64;
+    } else if (Aux_CTX_Tensors->size == 2) {
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+    }
+
+    void* devPtrDropoutSeed = rng_state->data.dptr;
+    void* devPtrDropoutOffset = reinterpret_cast<void *>(
+                    reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+    size_t workspace_size = 0;
+
+    fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
+                                is_training, attn_scale, p_dropout, qkv_layout,
+                                devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
+                                devPtrDropoutSeed, devPtrDropoutOffset,
+                                get_cudnn_dtype(QKV_type),
+                                workspace->data.dptr, &workspace_size, stream, handle);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
+    }
+}
+
+void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
+                                  size_t num_head, size_t head_dim, float attn_scale,
+                                  float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                                  const Tensor *input_Q, const Tensor *input_K,
+                                  const Tensor *input_V, const Tensor *input_O,
+                                  const Tensor *input_dO, Tensor *output_S,
+                                  Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
+                                  Tensor *output_dBias, const Tensor *cu_seqlens_q,
+                                  const Tensor *cu_seqlens_kv,
+                                  const Tensor *rng_state, Tensor *workspace,
+                                  cudaStream_t stream, cudnnHandle_t handle) {
+    using namespace transformer_engine;
+
+    const auto QKV_type = input_Q->data.dtype;
+    void *devPtrQ = input_Q->data.dptr;
+    void *devPtrK = input_K->data.dptr;
+    void *devPtrV = input_V->data.dptr;
+    void* devPtrO = input_O->data.dptr;
+    void *devPtrdO = input_dO->data.dptr;
+
+    void *devPtrdQ = output_dQ->data.dptr;
+    void *devPtrdK = output_dK->data.dptr;
+    void *devPtrdV = output_dV->data.dptr;
+    void *devPtrSoftmaxStats = nullptr;
+    devPtrSoftmaxStats = output_S->data.dptr;
+
+    void* devPtrDropoutSeed = rng_state->data.dptr;
+    void* devPtrDropoutOffset = reinterpret_cast<void *>(
+                    reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+
+    size_t workspace_size = 0;
+
+    bool use_workspace_opt = false;
+#if (CUDNN_VERSION >= 8905)
+    const int device_id = cuda::current_device();
+    const int sm_arch_ = cuda::sm_arch(device_id);
+    if (sm_arch_ >= 90) {
+        // quick estimate of dp workspace size
+        size_t max_seqlen_div_up_q = ((max_seqlen_q + 64 - 1) / 64) * 64;
+        size_t max_seqlen_div_up_kv = ((max_seqlen_kv + 64 - 1) / 64) * 64;
+        size_t required_dp_workspace =
+        (batch * num_head * max_seqlen_div_up_q * max_seqlen_div_up_kv * 2 + 1048576 - 1) / 1048576;
+        // default upper limit for dp workspace 256MB
+        size_t max_allowed_dp_workspace = 256;
+        if (required_dp_workspace <= max_allowed_dp_workspace) {
+            use_workspace_opt = true;
+        }
+        use_workspace_opt = transformer_engine::getenv<bool>(
+            "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
+        // will not be needed in cuDNN 8.9.6
+        NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+        if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
+            || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
+                use_workspace_opt = false;
+        }
+    }
+#endif
+
+    fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
+                                attn_scale, p_dropout, qkv_layout,
+                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
+                                devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
+                                devPtrDropoutSeed, devPtrDropoutOffset,
+                                get_cudnn_dtype(QKV_type), workspace->data.dptr,
                                 &workspace_size, stream, handle, use_workspace_opt);
 
     if (workspace_size > 0) {
