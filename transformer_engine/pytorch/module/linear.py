@@ -211,7 +211,7 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
-            _, _, _ = gemm(
+            _ = gemm(
                 weight,
                 inputmat_total,
                 activation_dtype,
@@ -325,7 +325,7 @@ class _Linear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
-                    dgrad = fp8_gemm(
+                    dgrad, _ = fp8_gemm(
                         weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -368,7 +368,7 @@ class _Linear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_split_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                        wgrad = fp8_gemm(
+                        wgrad, _ = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -414,6 +414,9 @@ class _Linear(torch.autograd.Function):
 
             if not ctx.use_bias:
                 grad_bias = None
+
+        # Handle custom DDP from mcore.
+        weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
 
         return (
             wgrad if weight.requires_grad else None,
