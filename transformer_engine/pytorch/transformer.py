@@ -74,6 +74,7 @@ class TransformerLayer(torch.nn.Module):
         are deprecated and will be fully removed in future releases.
 
     .. note::
+
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
         :attr:`self_attn_mask_type` is set to `"causal"`.
 
@@ -638,5 +639,5 @@ class TransformerLayer(torch.nn.Module):
         if self.output_layernorm:
             output = self.layernorm(output)
 
-        # output: [b, s, h]
+        # output: [s, b, h]
         return output
