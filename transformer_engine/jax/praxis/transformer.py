@@ -137,6 +137,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
     dropout_rng_name: str = 'dropout'
     mlp_activations: Sequence[str] = ('relu',)
     use_bias: bool = False
@@ -190,6 +192,8 @@ class TransformerLayer(TransformerEngineBaseLayer):
             hidden_dropout=self.hidden_dropout,
             hidden_dropout_dims=self.hidden_dropout_dims,
             attention_dropout=self.attention_dropout,
+            intermediate_dropout=self.intermediate_dropout,
+            intermediate_dropout_dims=self.intermediate_dropout_dims,
             dropout_rng_name=self.dropout_rng_name,
             mha_kernel_init=TransformerEngineBaseLayer.generate_params_init(
                 "mha_kernel", self.params_init),
