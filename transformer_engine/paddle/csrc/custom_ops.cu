@@ -208,7 +208,7 @@ void te_gemm(const paddle::Tensor &A, const paddle::optional<paddle::Tensor> &A_
 
     nvte_cublas_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(), te_pre_gelu_out.data(),
                      transa, transb, grad, te_workspace.data(), accumulate, use_split_accumulator,
-                     math_sm_count, 0 /*m_split*/, 0 /*n_split*/, false /*gemm_producer*/, A.stream());
+                     math_sm_count, 0, 0, false, counter.data(), A.stream());
 }
 
 std::vector<paddle::Tensor> te_gelu_fp8(const paddle::Tensor &input, const paddle::Tensor &scale,

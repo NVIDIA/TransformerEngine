@@ -250,8 +250,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
-            if bool(int(os.getenv("PRINT_SHAPE", "0"))):
-                print (f"FC1 fprop {fc1_out.size(1)}x{fc1_out.size(0)}x{fc1_weight_fp8.size(1)}")
 
             gelu_out = activation_func(
                 fc1_out,
@@ -304,8 +302,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_meta_tensor = fc2_meta_tensor,
                 D_dtype = fc2_te_type,
             )
-            if bool(int(os.getenv("PRINT_SHAPE", "0"))):
-                print (f"fc2 fprop {fc2_out.size(1)}x{fc2_out.size(0)}x{fc2_weight_fp8.size(1)}")
         else:
             # Cast for native AMP
             fc1_weight = cast_if_needed(fc1_weight, activation_dtype)
@@ -546,8 +542,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_algo=ub_algo,
                     ub=ctx.ub_obj_gradout if ub_overlap_ag else None,
                 )
-                if bool(int(os.getenv("PRINT_SHAPE", "0"))):
-                    print (f"FC2 dgrad {fc2_dgrad.size(1)}x{fc2_dgrad.size(0)}x{fc2_weight_t_fp8.size(1)}")
                 if ub_overlap_ag:
                     grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
                 # FC2 WGRAD

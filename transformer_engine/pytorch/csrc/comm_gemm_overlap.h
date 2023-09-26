@@ -224,8 +224,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int k = A.size(1);
     int n = B.size(0);
     int m_chunk = m / _num_splits;
-    int output_chunk_size = n * m_chunk;
-    int input_a_chunk_size = m_chunk * k;
     int workspace_size_chunk = workspaceSize / _stream_compute.size();
 
     // Get input, output, and workspace data pointers
@@ -234,7 +232,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
     int *counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    int ubuf_offset = 0;
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
@@ -344,7 +341,6 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
 
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-    int ubuf_offset = 0;
     int ori_sms = _ub_comm->sms;
 
     // Catch up the default torch stream
@@ -654,7 +650,6 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Get communication and GEMM output chunk sizes
     const int comm_bytes = _ubufs[0].numel() * _ubufs[0].element_size();
-    const int output_chunk_bytes = (n_chunk * m) * HALF_BYTES;
 
     // Get output and workspace data pointers
     char *output_ptr = reinterpret_cast<char *>(D.data_ptr());

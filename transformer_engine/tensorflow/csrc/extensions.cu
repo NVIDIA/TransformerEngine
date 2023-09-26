@@ -582,8 +582,8 @@ py::object TFE_Py_TeGemm_wrapper(
   nvte_cublas_gemm(a_tensor.data(), b_tensor.data(), d_tensor.data(),
                    bias_tensor.data(), gelu_input_tensor.data(), transa,
                    transb, grad, workspace_tensor.data(), accumulate,
-                   use_split_accumulate, 0, 0 /*m_split*/, 0 /*n_split*/,
-                   false /*gemm_producer*/, counter, stream);
+                   use_split_accumulate, 0, 0, 0,
+                   false, counter, stream);
 
   auto d_eager = CreateTensor(d_ptr, d_shape, otype);
   if (use_gelu && !grad) {

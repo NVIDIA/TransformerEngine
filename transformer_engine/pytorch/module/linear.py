@@ -205,8 +205,6 @@ class _Linear(torch.autograd.Function):
                 fp8_meta_tensor = meta_tensor,
                 D_dtype = proj_out_tetype,
             )
-            if bool(int(os.getenv("PRINT_SHAPE", "0"))):
-                print (f"proj fprop {out.size(1)}x{out.size(0)}x{weight_fp8.size(1)}")
         else:
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
@@ -365,8 +363,6 @@ class _Linear(torch.autograd.Function):
                         ub_algo=ub_algo,
                         ub=ctx.ub_obj_gradout if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag else None,
                     )
-                    if bool(int(os.getenv("PRINT_SHAPE", "0"))):
-                        print (f"proj dgrad {dgrad.size(1)}x{dgrad.size(0)}x{weight_t_fp8.size(1)}")
                 else:
                     dgrad, _, _ = gemm(
                         weight,
