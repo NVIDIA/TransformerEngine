@@ -451,7 +451,7 @@ class Linear(TransformerEngineBaseModule):
     .. warning::
 
         Argument :attr:`skip_weight_param_allocation` is deprecated and will
-        be fully removed in future releases.
+        be fully removed in the next release (v1.0.0).
 
     Parameters
     ----------
@@ -538,7 +538,7 @@ class Linear(TransformerEngineBaseModule):
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases. It has ignored"
+                "will be fully removed in the next release (v1.0.0). It has ignored"
                 "starting from v0.11.",
                 category=DeprecationWarning,
             )
@@ -706,7 +706,7 @@ class Linear(TransformerEngineBaseModule):
         .. warning::
 
             Arguments :attr:`weight` and :attr:`bias` are deprecated and will
-            be fully removed in future releases.
+            be fully removed in the next release (v1.0.0).
 
         Parameters
         ----------
@@ -730,7 +730,7 @@ class Linear(TransformerEngineBaseModule):
         if weight is not None or bias is not None:
             raise RuntimeError(
                 "Arguments `weight` and `bias` are deprecated and "
-                "will be fully removed in future releases."
+                "will be fully removed in the next release (v1.0.0)."
             )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:

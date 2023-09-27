@@ -10,29 +10,39 @@ from ..common.utils import deprecate_wrapper
 
 extend_logical_axis_rules = deprecate_wrapper(
     flax.extend_logical_axis_rules,
-    "extend_logical_axis_rules is moving to transformer_engine.jax.flax module")
+    "extend_logical_axis_rules is moving to transformer_engine.jax.flax module"
+    " and will be fully removed in the next release (v1.0.0).")
 DenseGeneral = deprecate_wrapper(flax.DenseGeneral,
-                                 "DenseGeneral is moving to transformer_engine.jax.flax module")
+                                 "DenseGeneral is moving to transformer_engine.jax.flax module"
+                                 " and will be fully removed in the next release (v1.0.0).")
 LayerNorm = deprecate_wrapper(flax.LayerNorm,
-                              "LayerNorm is moving to transformer_engine.jax.flax module")
+                              "LayerNorm is moving to transformer_engine.jax.flax module"
+                              " and will be fully removed in the next release (v1.0.0).")
 LayerNormDenseGeneral = deprecate_wrapper(
     flax.LayerNormDenseGeneral,
-    "LayerNormDenseGeneral is moving to transformer_engine.jax.flax module")
+    "LayerNormDenseGeneral is moving to transformer_engine.jax.flax module"
+    " and will be fully removed in the next release (v1.0.0).")
 LayerNormMLP = deprecate_wrapper(flax.LayerNormMLP,
-                                 "LayerNormMLP is moving to transformer_engine.jax.flax module")
+                                 "LayerNormMLP is moving to transformer_engine.jax.flax module"
+                                 " and will be fully removed in the next release (v1.0.0).")
 TransformerEngineBase = deprecate_wrapper(
     flax.TransformerEngineBase,
-    "TransformerEngineBase is moving to transformer_engine.jax.flax module")
+    "TransformerEngineBase is moving to transformer_engine.jax.flax module"
+    " and will be fully removed in the next release (v1.0.0).")
 MultiHeadAttention = deprecate_wrapper(
-    flax.MultiHeadAttention, "MultiHeadAttention is moving to transformer_engine.jax.flax module")
+    flax.MultiHeadAttention, "MultiHeadAttention is moving to transformer_engine.jax.flax module"
+                             " and will be fully removed in the next release (v1.0.0).")
 RelativePositionBiases = deprecate_wrapper(
     flax.RelativePositionBiases,
-    "RelativePositionBiases is moving to transformer_engine.jax.flax module")
+    "RelativePositionBiases is moving to transformer_engine.jax.flax module"
+    " and will be fully removed in the next release (v1.0.0).")
 TransformerLayer = deprecate_wrapper(
-    flax.TransformerLayer, "TransformerLayer is moving to transformer_engine.jax.flax module")
+    flax.TransformerLayer, "TransformerLayer is moving to transformer_engine.jax.flax module"
+                           " and will be fully removed in the next release (v1.0.0).")
 TransformerLayerType = deprecate_wrapper(
     flax.TransformerLayerType,
-    "TransformerLayerType is moving to transformer_engine.jax.flax module")
+    "TransformerLayerType is moving to transformer_engine.jax.flax module"
+    " and will be fully removed in the next release (v1.0.0).")
 
 __all__ = [
     'fp8_autocast', 'update_collections', 'update_fp8_metas', 'get_delayed_scaling',
