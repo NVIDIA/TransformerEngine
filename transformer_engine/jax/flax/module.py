@@ -740,8 +740,7 @@ class LayerNormMLP(TransformerEngineBase):
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     intermediate_dropout_rng_name: str, default = 'dropout'
-        The key in given RNGs via flax.linen.Module.apply that for
-        generating Dropout masks in the Multi-Head Attention.
+        The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
     intermediate_dropout_rate: float, default = 0.1
         Dropout probability for the dropout op after the :attr:`activations`.
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
