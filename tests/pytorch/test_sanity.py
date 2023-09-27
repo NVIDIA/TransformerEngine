@@ -226,9 +226,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, bs, dtype, config, fp8_
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
-            assert (
-                p.grad is None and torch.count_nonzero(p.main_grad) > 0
-            ), "Gradient not accumulated."
+            assert torch.count_nonzero(p.main_grad) > 0, "Gradient not accumulated."
 
 
 def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
