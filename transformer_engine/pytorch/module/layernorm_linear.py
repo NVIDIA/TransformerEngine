@@ -173,7 +173,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward)
 
-            out = tex.fp8_gemm(
+            out, _ = tex.fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -389,7 +389,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        wgrad = tex.fp8_gemm(
+                        wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -444,7 +444,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
 
-
             if ctx.ub_bulk_wgrad:
                 dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
             # Column Parallel Linear
@@ -473,6 +472,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if not ctx.use_bias:
                 grad_bias = None
+
+        # Handle custom DDP from mcore.
+        weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
 
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
@@ -514,7 +516,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     .. warning::
 
         Argument :attr:`skip_weight_param_allocation` is deprecated and will
-        be fully removed in future releases.
+        be fully removed in the next release (v1.0.0).
 
     Parameters
     ----------
@@ -622,7 +624,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases. It is ignored"
+                "will be fully removed in the next release (v1.0.0). It is ignored"
                 "starting from v0.11.",
                 category=DeprecationWarning,
             )
@@ -829,7 +831,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         .. warning::
 
             Arguments :attr:`weight` and :attr:`bias` are deprecated and will
-            be fully removed in future releases.
+            be fully removed in the next release (v1.0.0).
 
         Parameters
         ----------
@@ -853,7 +855,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if weight is not None or bias is not None:
             raise RuntimeError(
                 "Arguments `weight` and `bias` are deprecated and "
-                "will be fully removed in future releases."
+                "will be fully removed in the next release (v1.0.0)."
             )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
