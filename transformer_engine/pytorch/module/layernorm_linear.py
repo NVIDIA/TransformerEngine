@@ -473,14 +473,20 @@ class _LayerNormLinear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_bias = None
 
-        # Handle custom DDP from mcore.
-        weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
+        if weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
+                weight.grad_added_to_main_grad = True
+            else:
+                wgrad = None
+        else:
+            wgrad = None
 
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
-            wgrad if weight.requires_grad else None,
+            wgrad,
             None,
             None,
             grad_bias,
