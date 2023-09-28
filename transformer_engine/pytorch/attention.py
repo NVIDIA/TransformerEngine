@@ -1148,6 +1148,8 @@ class FlashAttention(torch.nn.Module):
             qkv_layout in QKVLayouts
             ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
 
+        context_parallel = (cp_group is not None) and (get_distributed_world_size(cp_group) != 1)
+
         qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
 
         if qkv_format == 'sbhd':
@@ -1161,58 +1163,62 @@ class FlashAttention(torch.nn.Module):
             else:
                 query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
                     for x in (query_layer, key_layer, value_layer)]
-
-        if qkv_format == 'bshd':
+        elif qkv_format == 'bshd':
             query_layer, key_layer, value_layer = [x.contiguous()
                 for x in (query_layer, key_layer, value_layer)]
 
+        global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
+        batch_size, max_seqlen_q, max_seqlen_kv = (
+                query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
 
         if qkv_format in ['sbhd', 'bshd']:
-            batch_size, max_seqlen_q, max_seqlen_kv = (
-                    query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
-            if cu_seqlens_q is None:
-                cu_seqlens_q = torch.arange(
-                        0,
-                        (batch_size + 1) * max_seqlen_q,
-                        step=max_seqlen_q,
-                        dtype=torch.int32,
-                        device=query_layer.device)
-            if cu_seqlens_kv is None:
-                cu_seqlens_kv = torch.arange(
-                        0,
-                        (batch_size + 1) * max_seqlen_kv,
-                        step=max_seqlen_kv,
-                        dtype=torch.int32,
-                        device=key_layer.device)
+            if not context_parallel:
+                # [b * s, h, d]
+                query_layer, key_layer, value_layer = [
+                    x.view(x.shape[0] * x.shape[1], *x.shape[2:])
+                    for x in [query_layer, key_layer, value_layer]
+                ]
 
-        global _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv
-        if attn_mask_type == 'padding':
-            assert qkv_format != 'thd', "thd format not supported for padding mask."
-            if self.attention_type == "self":
-                assert (
-                    max_seqlen_q == max_seqlen_kv
-                ), "Maximum sequence length for Q and KV should be the same."
-                if self.layer_number == 1:
-                    _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
-                _cu_seqlens_kv = _cu_seqlens_q
-                query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
-                    _indices_q, query_layer, key_layer, value_layer
-                )
+            if attn_mask_type == 'padding':
+                assert not context_parallel, "Padding mask not supported with context parallelism."
+
+                if self.attention_type == "self":
+                    assert (
+                        max_seqlen_q == max_seqlen_kv
+                    ), "Maximum sequence length for Q and KV should be the same."
+                    if self.layer_number == 1:
+                        _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
+                    _cu_seqlens_kv = _cu_seqlens_q
+                    query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
+                        _indices_q, query_layer, key_layer, value_layer
+                    )
+                else:
+                    if self.layer_number == 1:
+                        _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask[0])
+                        _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
+                    query_layer_packed = PackTensors.apply(_indices_q, query_layer)
+                    key_layer_packed, value_layer_packed = PackTensors.apply(
+                        _indices_kv, key_layer, value_layer
+                    )
+                query_layer, key_layer, value_layer = (
+                    query_layer_packed, key_layer_packed, value_layer_packed)
+                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
             else:
-                if self.layer_number == 1:
-                    _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask[0])
-                    _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
-                query_layer_packed = PackTensors.apply(_indices_q, query_layer)
-                key_layer_packed, value_layer_packed = PackTensors.apply(
-                    _indices_kv, key_layer, value_layer
-                )
-            query_layer, key_layer, value_layer = (
-                query_layer_packed, key_layer_packed, value_layer_packed)
-            cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
-
-        context_parallel = (cp_group is not None) and (get_distributed_world_size(cp_group) != 1)
-
-        if qkv_format == 'thd':
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = torch.arange(
+                            0,
+                            (batch_size + 1) * max_seqlen_q,
+                            step=max_seqlen_q,
+                            dtype=torch.int32,
+                            device=query_layer.device)
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = torch.arange(
+                            0,
+                            (batch_size + 1) * max_seqlen_kv,
+                            step=max_seqlen_kv,
+                            dtype=torch.int32,
+                            device=key_layer.device)
+        elif qkv_format == 'thd':
             assert not context_parallel, "thd format is not supported for context parallelism!"
             assert (_flash_attn_2_available
                 ), "flash-attn v2 is required for variable sequence length support!"
@@ -1222,17 +1228,6 @@ class FlashAttention(torch.nn.Module):
             seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
-
-        if context_parallel:
-            assert (
-                attn_mask_type != 'padding'
-            ), "Padding mask with FlashAttention not supported with Context parallelism."
-        else:
-            # [b * s, h, d]
-            query_layer, key_layer, value_layer = [
-                x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-                for x in [query_layer, key_layer, value_layer]
-            ]
 
         if context_parallel:
             with self.attention_dropout_ctx():
@@ -1264,7 +1259,7 @@ class FlashAttention(torch.nn.Module):
         if qkv_format == 'sbhd':
             # (bs)hd -> bs(hd) -> sb(hd)
             output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1).contiguous()
-        if qkv_format == 'bshd':
+        elif qkv_format == 'bshd':
             # (bs)hd -> bs(hd)
             output = output.view(batch_size, max_seqlen_q, -1).contiguous()
 
