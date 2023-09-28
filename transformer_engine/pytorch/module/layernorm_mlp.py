@@ -798,7 +798,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, 'grad_added_to_main_grad'):
                 fc1_weight.grad_added_to_main_grad = True
-            else:
+            elif ctx.fuse_wgrad_accumulation:
                 fc1_wgrad = None
         else:
             fc1_wgrad = None
@@ -807,7 +807,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(fc2_weight, 'grad_added_to_main_grad'):
                 fc2_weight.grad_added_to_main_grad = True
-            else:
+            elif ctx.fuse_wgrad_accumulation:
                 fc2_wgrad = None
         else:
             fc2_wgrad = None
