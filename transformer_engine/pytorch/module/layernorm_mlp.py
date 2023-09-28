@@ -794,10 +794,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 dbeta = None
 
-        # Handle custom DDP from mcore.
-        fc1_weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
-        fc2_weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
-
         if fc1_weight.requires_grad:
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, 'grad_added_to_main_grad'):
