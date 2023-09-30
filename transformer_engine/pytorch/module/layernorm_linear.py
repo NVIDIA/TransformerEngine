@@ -173,7 +173,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward)
 
-            out = tex.fp8_gemm(
+            out, _ = tex.fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -389,7 +389,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        wgrad = tex.fp8_gemm(
+                        wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -444,7 +444,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
 
-
             if ctx.ub_bulk_wgrad:
                 dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
             # Column Parallel Linear
@@ -473,6 +472,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if not ctx.use_bias:
                 grad_bias = None
+
+        # Handle custom DDP from mcore.
+        weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
 
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
@@ -514,7 +516,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     .. warning::
 
         Argument :attr:`skip_weight_param_allocation` is deprecated and will
-        be fully removed in future releases.
+        be fully removed in the next release (v1.0.0).
 
     Parameters
     ----------
@@ -536,11 +538,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              together with the output of the linear transformation.
                              Example use case: residual connection for transformer module is
                              taken post layernorm.
-    parameters_split : Tuple[str, ...], default = None
-                      if a tuple of strings is provided, the weight and bias parameters of the
-                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                      split along the first dimension, where `N` is the length of the argument
-                      and the strings contained are the names of the split parameters.
+    parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
+                      if a tuple of strings or a dict of strings to integers is provided,
+                      the weight and bias parameters of the module are exposed as `N` separate
+                      `torch.nn.parameter.Parameter`s each, split along the first dimension,
+                      where `N` is the length of the argument and the strings contained are the
+                      names of the split parameters. In the case of a tuple, each parameter
+                      has the same shape. In the case of a dict, the values give the
+                      `out_features` for each projection.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -607,7 +612,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         return_layernorm_output: bool = False,
         skip_weight_param_allocation: bool = False,
-        parameters_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -619,7 +624,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases. It is ignored"
+                "will be fully removed in the next release (v1.0.0). It is ignored"
                 "starting from v0.11.",
                 category=DeprecationWarning,
             )
@@ -707,23 +712,35 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.bias_tensor.zero_()
 
         if parameters_split is None:
-            parameters_split = ("",)
-
-        assert (
-            self.out_features % len(parameters_split) == 0
-        ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
-
-        split_size = self.out_features // len(parameters_split)
+            parameters_split = {"": self.out_features}
+        elif isinstance(parameters_split, tuple):
+            assert (
+                self.out_features % len(parameters_split) == 0
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
+            split_size = self.out_features // len(parameters_split)
+            parameters_split = {key: split_size for key in parameters_split}
+        elif isinstance(parameters_split, dict):
+            overall_split_size = sum(parameters_split.values())
+            assert(
+                self.out_features == overall_split_size
+            ), f"Overall sum of parameters_split (={overall_split_size}) does not match "\
+               f"to out features (={self.out_features})"
+        else:
+            assert False, "Type of 'parameters_split' is not None, tuple or dict"
+        self.updated_parameters_split = parameters_split
 
         self.weight_names = []
         self.bias_names = []
 
-        for i, pname in enumerate(parameters_split):
+        slice_begin = 0
+        for pname, slice_size in parameters_split.items():
             wname = pname + "weight"
             bname = pname + "bias"
 
+            slice_end = slice_begin + slice_size
+
             self.register_parameter(
-                wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                wname, Parameter(self.weight_tensor[slice_begin:slice_end])
             )
 
             set_tensor_model_parallel_attributes(
@@ -735,8 +752,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             if self.use_bias:
                 self.register_parameter(
-                    bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    bname, Parameter(self.bias_tensor[slice_begin:slice_end])
                 )
+                if parallel_mode == "row":
+                    setattr(getattr(self, bname), "sequence_parallel", sequence_parallel)
             else:
                 setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
@@ -745,6 +764,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             self.weight_names.append(wname)
             self.bias_names.append(bname)
+
+            slice_begin = slice_end
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -810,7 +831,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         .. warning::
 
             Arguments :attr:`weight` and :attr:`bias` are deprecated and will
-            be fully removed in future releases.
+            be fully removed in the next release (v1.0.0).
 
         Parameters
         ----------
@@ -834,19 +855,21 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if weight is not None or bias is not None:
             raise RuntimeError(
                 "Arguments `weight` and `bias` are deprecated and "
-                "will be fully removed in future releases."
+                "will be fully removed in the next release (v1.0.0)."
             )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
                 self.bias if self.parameters_split is None
                 else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names)
+                else self.noop_cat("bias_tensor", self.bias_names,
+                    self.updated_parameters_split)
             )
             weight_tensor = (
                 self.weight if self.parameters_split is None
                 else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names)
+                else self.noop_cat("weight_tensor", self.weight_names,
+                    self.updated_parameters_split)
             )
 
             # Fetch the fp8 weights placeholders (for linear/gemm)

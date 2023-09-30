@@ -871,7 +871,7 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     key.retain_grad()
     value.retain_grad()
 
-    out = block(query, key, value, mask)
+    out = block(query, key, value, attention_mask=mask)
     loss = out.sum()
     loss.backward()
 

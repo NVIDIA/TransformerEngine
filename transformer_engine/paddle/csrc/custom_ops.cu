@@ -1032,29 +1032,58 @@ void te_scaled_upper_triang_masked_softmax_backward(paddle::Tensor &output_grads
         softmax_results.stream());
 }
 
-__global__ void UpdateScalesKernel(const float *amax, const float *scale, float margin,
-                                   float fp8_max, size_t size, float *scale_out) {
+__global__ void UpdateFP8MetaKernel(const float *amax, const float *rolled_amax_history,
+                                    float *amax_history, float *scale, float *scale_inv,
+                                    float margin, float fp8_max, size_t history_numel,
+                                    size_t amax_numel) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx < size) {
-        float exp = floor(log2(fp8_max / amax[idx])) - margin;
-        float sf = round(powf(2.0f, abs(exp)));
-        sf = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
-        scale_out[idx] = exp < 0.0f ? 1 / sf : sf;
+    if (idx >= history_numel) {
+        return;
+    }
+
+    amax_history[idx] = rolled_amax_history[idx];
+
+    if (idx < amax_numel) {
+        float sf = (fp8_max / amax[idx]) / powf(2.0f, margin);
+        float scale_reg = ((amax[idx] > 0.0f) && isfinite(amax[idx])) ? sf : scale[idx];
+        scale[idx] = scale_reg;
+        scale_inv[idx] = 1.0f / scale_reg;
+        amax_history[idx] = 0.0f;
     }
 }
 
-constexpr int BLOCK_SIZE = 512;
+void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
+                                   paddle::Tensor &scale,         // NOLINT
+                                   paddle::Tensor &scale_inv,     // NOLINT
+                                   float fp8_max, float margin, const std::string &amax_compute) {
+    NVTE_CHECK(amax_compute == "max" || amax_compute == "most_recent");
 
-std::vector<paddle::Tensor> update_scale(const paddle::Tensor &amax, const paddle::Tensor &scale,
-                                         float fp8_max, float margin) {
-    size_t size = static_cast<size_t>(amax.numel());
+    paddle::Tensor amax;
+
+    if (amax_compute == "max") {
+        amax = amax_history.max({0});
+    } else {
+        amax = amax_history.slice(0, 1);
+    }
+
+    const auto rolled_amax_history = amax_history.roll({-1}, {0});
+
+    auto size = amax_history.numel();
     size_t num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    auto scale_out = paddle::empty_like(scale, scale.dtype(), scale.place());
-    UpdateScalesKernel<<<num_blocks, BLOCK_SIZE, 0, amax.stream()>>>(
-        amax.data<float>(), scale.data<float>(), margin, fp8_max, size, scale_out.data<float>());
+    UpdateFP8MetaKernel<<<num_blocks, BLOCK_SIZE, 0, amax_history.stream()>>>(
+        amax.data<float>(), rolled_amax_history.data<float>(), amax_history.data<float>(),
+        scale.data<float>(), scale_inv.data<float>(), margin, fp8_max, amax_history.numel(),
+        amax.numel());
+    NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
-    return {scale_out};
+void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
+                                        const paddle::Tensor &amax) {
+    // Copy amax to history[0]
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(history.data(), amax.data(),
+                                    amax.numel() * SizeOf(amax.dtype()), cudaMemcpyDeviceToDevice,
+                                    amax.stream()));
 }
 
 __global__ __launch_bounds__(BLOCK_SIZE) void mask_to_actual_seqlens_kernel(
@@ -1339,11 +1368,20 @@ PD_BUILD_OP(te_scaled_upper_triang_masked_softmax_backward)
     .SetKernelFn(
         PD_KERNEL(transformer_engine::paddle_ext::te_scaled_upper_triang_masked_softmax_backward));
 
-PD_BUILD_OP(update_scale)
-    .Inputs({"Amax", "Scale"})
-    .Outputs({"ScaleOut"})
-    .Attrs({"fp8_max: float", "margin: float"})
-    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::update_scale));
+PD_BUILD_OP(amax_and_scale_update_inplace)
+    .Inputs({"_amax_history", "_scale", "_scale_inv"})
+    .Outputs({"amax_history", "scale", "scale_inv"})
+    .SetInplaceMap({{"_amax_history", "amax_history"},
+                    {"_scale", "scale"},
+                    {"_scale_inv", "scale_inv"}})
+    .Attrs({"fp8_max: float", "margin: float", "amax_compute: std::string"})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::amax_and_scale_update_inplace));
+
+PD_BUILD_OP(update_latest_amax_history_inplace)
+    .Inputs({"_history", "amax"})
+    .Outputs({"history"})
+    .SetInplaceMap({{"_history", "history"}})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::update_latest_amax_history_inplace));
 
 PD_BUILD_OP(mask_to_cu_seqlens)
     .Inputs({"mask", "_q_cu_seqlen", paddle::Optional("_kv_cu_seqlen")})
