@@ -243,8 +243,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
                       at::Tensor workspace,
                       int64_t workspaceSize,
                       int64_t accumulate,
-                      int64_t use_split_accumulator,
-                      at::Tensor counter) {
+                      int64_t use_split_accumulator) {
   // cast inputs to types accepted by te_gemm
   transformer_engine::DType A_type_arg = reverse_map_dtype(A_type);
   bool transa_arg = static_cast<bool>(transa);
@@ -283,11 +282,7 @@ at::Tensor te_gemm_ts(at::Tensor A,
           workspaceSize_arg,
           accumulate_arg,
           use_split_accumulator_arg,
-          0,
-          0, /* m_split */
-          0, /* n_split */
-          false, /*gemm_producer*/
-          counter);
+          0);
   return D;
 }
 

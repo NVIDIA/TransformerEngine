@@ -204,11 +204,10 @@ void te_gemm(const paddle::Tensor &A, const paddle::optional<paddle::Tensor> &A_
         MakeNvteTensor(GetOptionalDataPtr(pre_gelu_out), GetShapeArray(pre_gelu_out), gelu_dtype);
     auto te_workspace =
         MakeNvteTensor(workspace.data(), {static_cast<size_t>(workspace_size)}, DType::kByte);
-    auto counter = MakeNvteTensor(nullptr, std::vector<size_t>{0}, DType::kInt32);
 
     nvte_cublas_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(), te_pre_gelu_out.data(),
                      transa, transb, grad, te_workspace.data(), accumulate, use_split_accumulator,
-                     math_sm_count, 0, 0, false, counter.data(), A.stream());
+                     math_sm_count, A.stream());
 }
 
 std::vector<paddle::Tensor> te_gelu_fp8(const paddle::Tensor &input, const paddle::Tensor &scale,

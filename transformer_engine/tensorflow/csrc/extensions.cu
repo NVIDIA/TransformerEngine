@@ -577,13 +577,11 @@ py::object TFE_Py_TeGemm_wrapper(
   auto d_tensor = MakeNVTETensor(d_ptr, d_shape, otype);
 
   NVTEShape empty_shape;
-  TensorWrapper counter(nullptr, empty_shape, DType::kInt32);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_id);
   nvte_cublas_gemm(a_tensor.data(), b_tensor.data(), d_tensor.data(),
                    bias_tensor.data(), gelu_input_tensor.data(), transa,
                    transb, grad, workspace_tensor.data(), accumulate,
-                   use_split_accumulate, 0, 0, 0,
-                   false, counter, stream);
+                   use_split_accumulate, 0, stream);
 
   auto d_eager = CreateTensor(d_ptr, d_shape, otype);
   if (use_gelu && !grad) {
