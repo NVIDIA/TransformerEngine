@@ -1,6 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
- *reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -21,14 +20,13 @@
 #define HALF_BYTES 2
 #define UB_MAX_SM 32
 
-#define CHECK_CUDA(call)                                                       \
-  do {                                                                         \
-    cudaError_t status_ = call;                                                \
-    if (status_ != cudaSuccess) {                                              \
-      fprintf(stderr, "CUDA Error at line %d: %s\n", __LINE__,                 \
-              cudaGetErrorString(status_));                                    \
-      exit(1);                                                                 \
-    }                                                                          \
+#define CHECK_CUDA(call)                                                                           \
+  do {                                                                                             \
+    cudaError_t status_ = call;                                                                    \
+    if (status_ != cudaSuccess) {                                                                  \
+      fprintf(stderr, "CUDA Error at line %d: %s\n", __LINE__, cudaGetErrorString(status_));       \
+      exit(1);                                                                                     \
+    }                                                                                              \
   } while (0)
 
 using namespace torch::indexing;
@@ -64,15 +62,14 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   torch::Tensor _empty_tensor;
   at::cuda::CUDAStream _stream_comm = at::cuda::getStreamFromPool(true);
   std::vector<at::cuda::CUDAStream> _stream_compute;
-  cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm,
-      _stop_comm;
+  cudaEvent_t _start_compute, _stop_compute, _start_d2dcopy, _start_comm, _stop_comm;
   int comm_sms;
   int cga_size;
   int use_ce;
 
-  UbufCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm,
-                  int comm_cga_size, int num_splits, bool set_sm_margin,
-                  int num_max_streams, torch::Tensor empty_tensor) {
+  UbufCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm, int comm_cga_size,
+                  int num_splits, bool set_sm_margin, int num_max_streams,
+                  torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (rank == 0) {
@@ -88,13 +85,12 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Allocate and register extra userbuffers
     int ubuf_bytes = sample.numel() * sample.element_size();
-    _ub_reg = register_user_buffer_collective(
-        reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes, _ub_comm, true);
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
     if (rank == 0) {
       printf("!!! [UB] Register UBuf %d\n", _ub_reg);
     }
-    _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)},
-                             sample.options());
+    _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     const char *env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
     const char *env_q = std::getenv("NVTE_UB_ATOMIC_GEMM_RS");
@@ -123,12 +119,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     // Set the number of SMs for GEMM with margin
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm
-                                : prop.multiProcessorCount;
+    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
 
     output_tensor = torch::Tensor();
-    auto counter_options =
-        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     counter = torch::zeros({num_splits * 2}, counter_options);
     counter.index_put_({Slice(None, num_splits)}, 1);
     // CUDA event creation
@@ -146,21 +140,17 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   std::vector<at::Tensor>
   bulk_overlap(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
                transformer_engine::DType A_type, bool transa, at::Tensor B,
-               at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-               transformer_engine::DType B_type, bool transb, at::Tensor D,
-               at::Tensor D_scale, transformer_engine::DType D_type,
-               at::Tensor D_amax, at::Tensor bias,
-               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
-               bool grad, at::Tensor workspace, size_t workspaceSize,
-               bool accumulate, bool use_split_accumulator, int comm_type,
-               at::Tensor rs_output) {
+               at::Tensor B_scale_inverse, int64_t B_fp8_tensor, transformer_engine::DType B_type,
+               bool transb, at::Tensor D, at::Tensor D_scale, transformer_engine::DType D_type,
+               at::Tensor D_amax, at::Tensor bias, transformer_engine::DType bias_type,
+               at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize,
+               bool accumulate, bool use_split_accumulator, int comm_type, at::Tensor rs_output) {
     _ub_comm->use_ce = use_ce;
     _ub_comm->sms = comm_sms;
     _ub_comm->cga_size = cga_size;
     // Get the current userbuf offset
     char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
-    int comm_elements = (_ubuf.numel() / 2) *
-                        _ubuf.element_size();  // UBUF uses 2Byte element size
+    int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
     COMM_TYPE _comm_type = static_cast<COMM_TYPE>(comm_type);
     if (_comm_type == COMM_TYPE::RS) {
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
@@ -173,21 +163,19 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // Communication: AG and RS
     if (_comm_type == COMM_TYPE::AG) {
-      allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm,
-                                  (cudaStream_t)_stream_comm);
+      allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, (cudaStream_t)_stream_comm);
     } else if (_comm_type == COMM_TYPE::RS) {
       if (_ubuf.element_size() == 1) {
         assert(_ubuf_scale_inv_initialized);
         comm_elements *= 2;
-        float *scale_inv_ptr =
-            reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+        float *scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
         assert(rs_output.numel() == _ubuf.numel() / _tp_size);
         assert(rs_output.size(0) == _ubuf.size(0) / _tp_size);
         assert(rs_output.element_size() == 2);
         char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
-        reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(
-            rs_output_ptr, scale_inv_ptr, _ub_reg, 0, comm_elements, _ub_comm,
-            (cudaStream_t)_stream_comm);
+        reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, scale_inv_ptr, _ub_reg, 0,
+                                                   comm_elements, _ub_comm,
+                                                   (cudaStream_t)_stream_comm);
       } else {
         reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm,
                                         (cudaStream_t)_stream_comm);
@@ -203,21 +191,17 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       B_scale_inverse = B_scale_inverse[B_fp8_tensor];
 
     assert(pre_gelu_out.numel() == 0);
-    te_gemm(A, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type,
-            transb, D, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out,
-            grad, workspace, workspaceSize, accumulate, use_split_accumulator,
-            _math_sms);
+    te_gemm(A, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb, D, D_scale,
+            D_type, D_amax, bias, bias_type, pre_gelu_out, grad, workspace, workspaceSize,
+            accumulate, use_split_accumulator, _math_sms);
 
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_comm, 0));
 
     // Generate output tensor from userbuf data pointer
-    int output_c_dim0 = (_comm_type == COMM_TYPE::AG)
-                            ? _ubuf.size(0)
-                            : _ubuf.size(0) / _tp_size;
+    int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
-    output_tensor = torch::from_blob(
-        ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
+    output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
 
     return {D, output_tensor};
   }  // bulk_overlap
@@ -225,16 +209,16 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void atomic_gemm_overlap_rs(
-      at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-      transformer_engine::DType A_type, bool transa, at::Tensor B,
-      at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-      transformer_engine::DType B_type, bool transb, at::Tensor D,
-      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
-      at::Tensor bias, transformer_engine::DType bias_type,
-      at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-      size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-      bool gemm_overlap, at::Tensor rs_output) {
+  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                              transformer_engine::DType A_type, bool transa, at::Tensor B,
+                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                              transformer_engine::DType B_type, bool transb, at::Tensor D,
+                              at::Tensor D_scale, transformer_engine::DType D_type,
+                              at::Tensor D_amax, at::Tensor bias,
+                              transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                              bool grad, at::Tensor workspace, size_t workspaceSize,
+                              bool accumulate, bool use_split_accumulator, bool gemm_overlap,
+                              at::Tensor rs_output) {
     _ub_comm->use_ce = use_ce;
     _ub_comm->sms = comm_sms;
     _ub_comm->cga_size = cga_size;
@@ -258,10 +242,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
     for (int i = 0; i < _stream_compute.size(); i++) {
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i],
-                                     _start_compute, 0));
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _stop_comm, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _stop_comm, 0));
     }
 
     if (A_scale_inverse.numel())
@@ -272,20 +254,17 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
     assert(pre_gelu_out.numel() == 0);
 
-    torch::Tensor input_a =
-        torch::from_blob(input_a_chunk_ptr, {m, k}, A.options());
-    torch::Tensor output_d =
-        torch::from_blob(output_buf_chunk_ptr, {n, m}, _ubuf.options());
+    torch::Tensor input_a = torch::from_blob(input_a_chunk_ptr, {m, k}, A.options());
+    torch::Tensor output_d = torch::from_blob(output_buf_chunk_ptr, {n, m}, _ubuf.options());
     //    torch::zeros({n, m}, _ubuf.options());
-    torch::Tensor workspace_chunk = torch::from_blob(
-        workspace_ptr, {workspace_size_chunk}, workspace.options());
+    torch::Tensor workspace_chunk =
+        torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
     at::cuda::setCurrentCUDAStream(_stream_compute[0]);
-    te_atomic_gemm(input_a, A_scale_inverse, A_type, transa, B, B_scale_inverse,
-                   B_type, transb, output_d, D_scale, D_type, D_amax, bias,
-                   bias_type, pre_gelu_out, grad, workspace_chunk,
-                   workspace_size_chunk, accumulate, use_split_accumulator,
-                   _math_sms, _num_splits /*m_split*/, 0 /*n_split*/,
-                   true /*gemm_producer*/, counter);
+    te_atomic_gemm(input_a, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
+                   output_d, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                   workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
+                   _math_sms, _num_splits /*m_split*/, 0 /*n_split*/, true /*gemm_producer*/,
+                   counter);
     for (int i = 0; i < _num_splits; i++) {
       const char *env_p = std::getenv("NVTE_RS_STRIDED_ATOMIC");
       if (env_p != nullptr && env_p[0] == '1') {
@@ -294,30 +273,26 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         }
         if (_ubuf.element_size() == 1) {
           assert(_ubuf_scale_inv_initialized);
-          float *d_scale_inv_ptr =
-              reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n,
-              m, m, _num_splits, &counter_ptr[i], _ub_comm,
-              (cudaStream_t)_stream_comm);
-        } else {
-          reducescatter2_userbuff_strided_atomic(
-              rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, _num_splits,
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * m_chunk, m_chunk, n, m, m, _num_splits,
               &counter_ptr[i], _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+          reducescatter2_userbuff_strided_atomic(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
+                                                 _num_splits, &counter_ptr[i], _ub_comm,
+                                                 (cudaStream_t)_stream_comm);
         }
       } else if (env_p != nullptr && env_p[0] == '2') {
         if (_ubuf.element_size() == 1) {
           assert(_ubuf_scale_inv_initialized);
-          float *d_scale_inv_ptr =
-              reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e4m3>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m,
-              m, _num_splits, counter_ptr, _ub_comm,
-              (cudaStream_t)_stream_comm);
-        } else {
-          reducescatter2_userbuff_strided_multiatomic(
-              rs_output_ptr, _ub_reg, m_chunk, m_chunk, n, m, _num_splits,
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, m_chunk, m_chunk, n, m, m, _num_splits,
               counter_ptr, _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+          reducescatter2_userbuff_strided_multiatomic(rs_output_ptr, _ub_reg, m_chunk, m_chunk, n,
+                                                      m, _num_splits, counter_ptr, _ub_comm,
+                                                      (cudaStream_t)_stream_comm);
         }
         break;
       } else {
@@ -325,20 +300,17 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         //        if (i == _num_splits-1) {
         //           _ub_comm->sms = UB_MAX_SM;
         //        }
-        reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i * m_chunk,
-                                        m_chunk, n, m, _ub_comm,
-                                        (cudaStream_t)_stream_comm);
+        reducescatter2_userbuff_strided(rs_output_ptr, _ub_reg, i * m_chunk, m_chunk, n, m,
+                                        _ub_comm, (cudaStream_t)_stream_comm);
       }
 
       rs_output_ptr += m_chunk * rs_output.element_size();
     }
 
     _ub_comm->sms = ori_sms;
-    CHECK_CUDA(
-        cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
+    CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
     CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_comm, 0));
     at::cuda::setCurrentCUDAStream(stream_main);
 
@@ -348,16 +320,14 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse,
-                        int64_t A_fp8_tensor, transformer_engine::DType A_type,
-                        bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-                        int64_t B_fp8_tensor, transformer_engine::DType B_type,
-                        bool transb, at::Tensor D, at::Tensor D_scale,
-                        transformer_engine::DType D_type, at::Tensor D_amax,
+  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                        transformer_engine::DType A_type, bool transa, at::Tensor B,
+                        at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                        transformer_engine::DType B_type, bool transb, at::Tensor D,
+                        at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
                         at::Tensor bias, transformer_engine::DType bias_type,
-                        at::Tensor pre_gelu_out, bool grad,
-                        at::Tensor workspace, size_t workspaceSize,
-                        bool accumulate, bool use_split_accumulator,
+                        at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                        size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         bool gemm_overlap, at::Tensor rs_output) {
     // Get GEMM dimensions
     _ub_comm->use_ce = use_ce;
@@ -383,8 +353,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
     for (int i = 0; i < _stream_compute.size(); i++) {
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i],
-                                     _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[i], _start_compute, 0));
     }
 
     if (A_scale_inverse.numel())
@@ -396,18 +365,15 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     assert(pre_gelu_out.numel() == 0);
 
     if (gemm_overlap) {
-      torch::Tensor input_a_chunk =
-          torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
+      torch::Tensor input_a_chunk = torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
       torch::Tensor output_chunk =
           torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-      torch::Tensor workspace_chunk = torch::from_blob(
-          workspace_ptr, {workspace_size_chunk}, workspace.options());
+      torch::Tensor workspace_chunk =
+          torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
       at::cuda::setCurrentCUDAStream(_stream_compute[0]);
-      te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B,
-              B_scale_inverse, B_type, transb, output_chunk, D_scale, D_type,
-              D_amax, bias, bias_type, pre_gelu_out, grad, workspace_chunk,
-              workspace_size_chunk, accumulate, use_split_accumulator,
-              _math_sms);
+      te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
+              output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+              workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator, _math_sms);
 
       for (int i = 1; i < _num_splits; i++) {
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
@@ -415,86 +381,73 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
         torch::Tensor input_a_chunk =
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
-        torch::Tensor output_chunk = torch::from_blob(
-            output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-        torch::Tensor workspace_chunk = torch::from_blob(
-            workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-            {workspace_size_chunk}, workspace.options());
-        at::cuda::setCurrentCUDAStream(
-            _stream_compute[i % _stream_compute.size()]);
-        te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B,
-                B_scale_inverse, B_type, transb, output_chunk, D_scale, D_type,
-                D_amax, bias, bias_type, pre_gelu_out, grad, workspace_chunk,
-                workspace_size_chunk, accumulate, use_split_accumulator,
+        torch::Tensor output_chunk =
+            torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
+        torch::Tensor workspace_chunk =
+            torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
+                             {workspace_size_chunk}, workspace.options());
+        at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
+        te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
+                output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
         CHECK_CUDA(cudaEventRecord(
-            _start_comm,
-            (cudaStream_t)_stream_compute[(i - 1) % _stream_compute.size()]));
-        CHECK_CUDA(
-            cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
+            _start_comm, (cudaStream_t)_stream_compute[(i - 1) % _stream_compute.size()]));
+        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
         // Communication chunk
         if (_ubuf.element_size() == 1) {
           assert(_ubuf_scale_inv_initialized);
-          float *d_scale_inv_ptr =
-              reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg,
-              (i - 1) * output_chunk_size, m_chunk, n, m, _ub_comm,
-              (cudaStream_t)_stream_comm);
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, (i - 1) * output_chunk_size, m_chunk, n, m,
+              _ub_comm, (cudaStream_t)_stream_comm);
         } else {
-          reducescatter2_userbuff_stridedoutput(
-              rs_output_ptr, _ub_reg, (i - 1) * output_chunk_size, m_chunk, n,
-              m, _ub_comm, (cudaStream_t)_stream_comm);
+          reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, (i - 1) * output_chunk_size,
+                                                m_chunk, n, m, _ub_comm,
+                                                (cudaStream_t)_stream_comm);
         }
 
         rs_output_ptr += m_chunk * rs_output.element_size();
       }
       int last_compute_stream_id =
           (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
-      CHECK_CUDA(cudaEventRecord(
-          _start_comm, (cudaStream_t)_stream_compute[last_compute_stream_id]));
       CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
+          cudaEventRecord(_start_comm, (cudaStream_t)_stream_compute[last_compute_stream_id]));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
       // Last communication chunk with max SM
       _ub_comm->sms = UB_MAX_SM;
       if (_ubuf.element_size() == 1) {
         assert(_ubuf_scale_inv_initialized);
-        float *d_scale_inv_ptr =
-            reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+        float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
         reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-            rs_output_ptr, d_scale_inv_ptr, _ub_reg,
-            (_num_splits - 1) * output_chunk_size, m_chunk, n, m, _ub_comm,
-            (cudaStream_t)_stream_comm);
+            rs_output_ptr, d_scale_inv_ptr, _ub_reg, (_num_splits - 1) * output_chunk_size, m_chunk,
+            n, m, _ub_comm, (cudaStream_t)_stream_comm);
       } else {
-        reducescatter2_userbuff_stridedoutput(
-            rs_output_ptr, _ub_reg, (_num_splits - 1) * output_chunk_size,
-            m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
+        reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
+                                              (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
+                                              _ub_comm, (cudaStream_t)_stream_comm);
       }
     } else {
       for (int i = 0; i < _num_splits; i++) {
         torch::Tensor input_a_chunk =
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
-        torch::Tensor output_chunk = torch::from_blob(
-            output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-        torch::Tensor workspace_chunk = torch::from_blob(
-            workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-            {workspace_size_chunk}, workspace.options());
-        at::cuda::setCurrentCUDAStream(
-            _stream_compute[i % _stream_compute.size()]);
-        te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B,
-                B_scale_inverse, B_type, transb, output_chunk, D_scale, D_type,
-                D_amax, bias, bias_type, pre_gelu_out, grad, workspace_chunk,
-                workspace_size_chunk, accumulate, use_split_accumulator,
+        torch::Tensor output_chunk =
+            torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
+        torch::Tensor workspace_chunk =
+            torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
+                             {workspace_size_chunk}, workspace.options());
+        at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
+        te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
+                output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
-        CHECK_CUDA(cudaEventRecord(
-            _start_comm,
-            (cudaStream_t)_stream_compute[i % _stream_compute.size()]));
-        CHECK_CUDA(
-            cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
+        CHECK_CUDA(cudaEventRecord(_start_comm,
+                                   (cudaStream_t)_stream_compute[i % _stream_compute.size()]));
+        CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_comm, 0));
 
         // Communication chunk. Uses MAX_SM at the last chunk
         if (i == _num_splits - 1) {
@@ -502,15 +455,14 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         }
         if (_ubuf.element_size() == 1) {
           assert(_ubuf_scale_inv_initialized);
-          float *d_scale_inv_ptr =
-              reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
+          float *d_scale_inv_ptr = reinterpret_cast<float *>(_ubuf_scale_inv.data_ptr());
           reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
-              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * output_chunk_size,
-              m_chunk, n, m, _ub_comm, (cudaStream_t)_stream_comm);
-        } else {
-          reducescatter2_userbuff_stridedoutput(
-              rs_output_ptr, _ub_reg, i * output_chunk_size, m_chunk, n, m,
+              rs_output_ptr, d_scale_inv_ptr, _ub_reg, i * output_chunk_size, m_chunk, n, m,
               _ub_comm, (cudaStream_t)_stream_comm);
+        } else {
+          reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg, i * output_chunk_size,
+                                                m_chunk, n, m, _ub_comm,
+                                                (cudaStream_t)_stream_comm);
         }
         rs_output_ptr += m_chunk * rs_output.element_size();
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
@@ -520,11 +472,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     _ub_comm->sms = ori_sms;
     int last_compute_stream_id =
         (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
-    CHECK_CUDA(cudaEventRecord(
-        _stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
-    CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
     CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+        cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
+    CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
     CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_comm, 0));
     at::cuda::setCurrentCUDAStream(stream_main);
 
@@ -550,19 +501,16 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       }
       ubuf_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
     } else {
-      if (input.numel() != _ubuf.numel() ||
-          input.element_size() != _ubuf.element_size()) {
+      if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
       }
     }
 
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
-    CHECK_CUDA(cudaMemcpyAsync(
-        ubuf_ptr, input.data_ptr(), input.numel() * input.element_size(),
-        cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
+    CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input.data_ptr(), input.numel() * input.element_size(),
+                               cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
   }
 
   torch::Tensor &get_ubuf_output(int comm_type) {
@@ -572,12 +520,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       NVTE_ERROR("Invalid comm_type");
     if (_comm_type == COMM_TYPE::RS)
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
-    int output_c_dim0 = (_comm_type == COMM_TYPE::AG)
-                            ? _ubuf.size(0)
-                            : _ubuf.size(0) / _tp_size;
+    int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
-    output_tensor = torch::from_blob(
-        ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
+    output_tensor = torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
     return output_tensor;
   }
 };  // UbufCommOverlap
@@ -603,9 +548,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   int sms;
   int cga_size;
 
-  UbufP2PCommOverlap(torch::Tensor sample, int rank, int tp_size,
-                     int num_comm_sm, int comm_cga_size, bool set_sm_margin,
-                     bool aggregate2, int num_max_streams,
+  UbufP2PCommOverlap(torch::Tensor sample, int rank, int tp_size, int num_comm_sm,
+                     int comm_cga_size, bool set_sm_margin, bool aggregate2, int num_max_streams,
                      torch::Tensor empty_tensor) {
     // Initialize userbuf communicator
     if (!comm_created) {
@@ -623,20 +567,18 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     // Create workspace tensor with userbuffer
     int ubuf_bytes = sample.numel() * sample.element_size();
     int ubuf_chunk_bytes = ubuf_bytes / tp_size;
-    _ub_reg = register_user_buffer_collective(
-        reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes, _ub_comm, true);
+    _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
+                                              _ub_comm, true);
     if (rank == 0) {
       printf("!!! [UBP2P] Register UBuf %d\n", _ub_reg);
     }
-    _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)},
-                             sample.options());
+    _ubuf = torch::from_blob(_ubuf_ptr, {sample.size(0), sample.size(1)}, sample.options());
 
     // Create tensor chunks for easy management
     char *ubuf_byte_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
     for (int i = 0; i < tp_size; i++) {
       torch::Tensor ubuf_chunk = torch::from_blob(
-          ubuf_byte_ptr, {sample.size(0) / tp_size, sample.size(1)},
-          sample.options());
+          ubuf_byte_ptr, {sample.size(0) / tp_size, sample.size(1)}, sample.options());
       _ubufs.push_back(ubuf_chunk);
       ubuf_byte_ptr += ubuf_chunk_bytes;
     }
@@ -652,8 +594,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     // Set the number of SMs for GEMM with margin
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm
-                                : prop.multiProcessorCount;
+    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
 
     _tp_size = tp_size;
     _aggregate2 = aggregate2;
@@ -664,8 +605,7 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     _next_rank = (tp_size + rank + 1) % tp_size + _rank_round_tp;
     _prev_rank = (tp_size + rank + -1) % tp_size + _rank_round_tp;
 
-    auto counter_options =
-        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto counter_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     counter = torch::zeros({tp_size * 2}, counter_options);
     counter.index_put_({Slice(None, tp_size)}, 1);
     _self_chunk_id = _tp_id;
@@ -701,14 +641,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   */
   torch::Tensor atomic_gemm_overlap_ag(
       at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-      transformer_engine::DType A_type, bool transa, at::Tensor B,
-      at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-      transformer_engine::DType B_type, bool transb, at::Tensor D,
-      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
-      at::Tensor bias, transformer_engine::DType bias_type,
-      at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-      size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-      at::Tensor B_copy) {
+      transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+      int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
+      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
+      transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+      size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
     _ub_comm->use_ce = use_ce;
     _ub_comm->sms = sms;
     _ub_comm->cga_size = cga_size;
@@ -737,17 +674,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     assert(pre_gelu_out.numel() == 0);
     // Catch up the default torch stream
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
-    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0],
-                                   _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
 
-    torch::Tensor output_chunk =
-        torch::from_blob(output_ptr, {_ubuf.size(0), m}, D.options());
-    torch::Tensor workspace_chunk = torch::from_blob(
-        workspace_ptr, {workspace_size_chunk}, workspace.options());
+    torch::Tensor output_chunk = torch::from_blob(output_ptr, {_ubuf.size(0), m}, D.options());
+    torch::Tensor workspace_chunk =
+        torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
     for (int i = 0; i < _tp_size; i++) {
       // Set the userbuffer id. Buffer under send is the input for the current
       // GEMM chunk The initial input chunk is stored _ubuf[rank]. This is to
@@ -761,23 +694,20 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       if (i < _tp_size - 1) {
         const char *env_p = std::getenv("NVTE_AG_P2P_ATOMIC");
         if (env_p != nullptr && env_p[0] == '1') {
-          userbuffers_sendrecv_atomic(
-              _ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
-              _next_rank, _prev_rank, &counter_ptr[recv_chunk_id],
-              (cudaStream_t)_stream_recv);
+          userbuffers_sendrecv_atomic(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes,
+                                      _ub_comm, _next_rank, _prev_rank, &counter_ptr[recv_chunk_id],
+                                      (cudaStream_t)_stream_recv);
         } else if (env_p != nullptr && env_p[0] == '2') {
           if (i == 0) {
-            userbuffers_sendrecv_multiatomic(
-                _ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes, _ub_comm,
-                _next_rank, _prev_rank, _tp_size, counter_ptr, false,
-                (cudaStream_t)_stream_recv);
+            userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
+                                             _ub_comm, _next_rank, _prev_rank, _tp_size,
+                                             counter_ptr, false, (cudaStream_t)_stream_recv);
           }
         } else if (env_p != nullptr && env_p[0] == '3') {
           if (i == 0) {
-            userbuffers_sendrecv_multiatomic(
-                _ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes, _ub_comm,
-                _next_rank, _prev_rank, _tp_size, counter_ptr, true,
-                (cudaStream_t)_stream_recv);
+            userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
+                                             _ub_comm, _next_rank, _prev_rank, _tp_size,
+                                             counter_ptr, true, (cudaStream_t)_stream_recv);
           }
         } else {
           // P2P communication
@@ -791,19 +721,16 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
           // (cudaStream_t)_stream_recv));
           // CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send,
           // _stop_recv, 0));
-          userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset,
-                               comm_bytes, _ub_comm, _next_rank, _prev_rank,
-                               (cudaStream_t)_stream_recv);
+          userbuffers_sendrecv(_ub_reg, _ub_reg, send_offset, recv_offset, comm_bytes, _ub_comm,
+                               _next_rank, _prev_rank, (cudaStream_t)_stream_recv);
           producer(counter_ptr, recv_chunk_id, (cudaStream_t)_stream_recv);
         }
         if (i == 0) {
           at::cuda::setCurrentCUDAStream(_stream_compute[0]);
-          te_atomic_gemm(A, A_scale_inverse, A_type, transa, _ubuf,
-                         B_scale_inverse, B_type, transb, output_chunk, D_scale,
-                         D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
-                         workspace_chunk, workspace_size_chunk, accumulate,
-                         use_split_accumulator, _math_sms, 0, _tp_size, false,
-                         counter);
+          te_atomic_gemm(A, A_scale_inverse, A_type, transa, _ubuf, B_scale_inverse, B_type, transb,
+                         output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                         workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
+                         _math_sms, 0, _tp_size, false, counter);
         }
       } else {
         // GEMM
@@ -818,13 +745,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
         if (B_copy.numel() > 0) {
           assert(B_copy.numel() == _ubufs[_tp_id].numel());
           assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-          CHECK_CUDA(cudaMemcpyAsync(
-              B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
-              _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
-              cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
+                                     _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                     cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
           CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-          CHECK_CUDA(
-              cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
     }
@@ -834,10 +759,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       }
     }
     at::cuda::setCurrentCUDAStream(stream_main);
-    CHECK_CUDA(
-        cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    CHECK_CUDA(cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[0]));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
 
     return D;
   }  // split_overlap_ag
@@ -848,17 +771,15 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  torch::Tensor
-  split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse,
-                   int64_t A_fp8_tensor, transformer_engine::DType A_type,
-                   bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-                   int64_t B_fp8_tensor, transformer_engine::DType B_type,
-                   bool transb, at::Tensor D, at::Tensor D_scale,
-                   transformer_engine::DType D_type, at::Tensor D_amax,
-                   at::Tensor bias, transformer_engine::DType bias_type,
-                   at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-                   size_t workspaceSize, bool accumulate,
-                   bool use_split_accumulator, at::Tensor B_copy) {
+  torch::Tensor split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                                 transformer_engine::DType A_type, bool transa, at::Tensor B,
+                                 at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                                 transformer_engine::DType B_type, bool transb, at::Tensor D,
+                                 at::Tensor D_scale, transformer_engine::DType D_type,
+                                 at::Tensor D_amax, at::Tensor bias,
+                                 transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                                 bool grad, at::Tensor workspace, size_t workspaceSize,
+                                 bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
     _ub_comm->use_ce = use_ce;
     _ub_comm->sms = sms;
     _ub_comm->cga_size = cga_size;
@@ -888,10 +809,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     assert(pre_gelu_out.numel() == 0);
     if (_aggregate2) {
       // Catch up the default torch stream
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
 
       const int num_steps = _tp_size / 2;
       char *input_b_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
@@ -902,15 +821,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       int send_offset = comm_bytes * send_chunk_id;
       int recv_offset = comm_bytes * recv_chunk_id;
       int peer_rank = (_tp_id % 2 == 0) ? _next_rank : _prev_rank;
-      userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes,
-                       _ub_comm, peer_rank, (cudaStream_t)_stream_send);
-      userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes,
-                       _ub_comm, peer_rank, (cudaStream_t)_stream_recv);
+      userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm, peer_rank,
+                       (cudaStream_t)_stream_send);
+      userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, peer_rank,
+                       (cudaStream_t)_stream_recv);
       CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _stop_recv, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _stop_recv, 0));
 
       int local_rank_round2 = (_tp_id % 2 == 0) ? _tp_id : _tp_id - 1;
       const int next_rank = (_tp_size + _tp_id + 2) % _tp_size + _rank_round_tp;
@@ -924,62 +841,49 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
         recv_offset = comm_bytes * recv_chunk_id;
 
         // GEMM
-        torch::Tensor input_b_chunk = torch::from_blob(
-            input_b_ptr + send_offset, {n_chunk * 2, k}, _ubuf.options());
-        torch::Tensor output_chunk =
-            torch::from_blob(output_ptr + (send_chunk_id * output_chunk_bytes),
-                             {n_chunk * 2, m}, D.options());
-        torch::Tensor workspace_chunk = torch::from_blob(
-            workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-            {workspace_size_chunk}, workspace.options());
-        at::cuda::setCurrentCUDAStream(
-            _stream_compute[i % _stream_compute.size()]);
-        te_gemm(A, A_scale_inverse, A_type, transa, input_b_chunk,
-                B_scale_inverse, B_type, transb, output_chunk, D_scale, D_type,
-                D_amax, bias, bias_type, pre_gelu_out, grad, workspace_chunk,
-                workspace_size_chunk, accumulate, use_split_accumulator,
+        torch::Tensor input_b_chunk =
+            torch::from_blob(input_b_ptr + send_offset, {n_chunk * 2, k}, _ubuf.options());
+        torch::Tensor output_chunk = torch::from_blob(
+            output_ptr + (send_chunk_id * output_chunk_bytes), {n_chunk * 2, m}, D.options());
+        torch::Tensor workspace_chunk =
+            torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
+                             {workspace_size_chunk}, workspace.options());
+        at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
+        te_gemm(A, A_scale_inverse, A_type, transa, input_b_chunk, B_scale_inverse, B_type, transb,
+                output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
         if (i < num_steps - 1) {
           // P2P communication
-          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset,
-                           comm_bytes * 2, _ub_comm, next_rank,
-                           (cudaStream_t)_stream_send);
-          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset,
-                           comm_bytes * 2, _ub_comm, prev_rank,
-                           (cudaStream_t)_stream_recv);
+          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes * 2, _ub_comm,
+                           next_rank, (cudaStream_t)_stream_send);
+          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes * 2, _ub_comm,
+                           prev_rank, (cudaStream_t)_stream_recv);
           CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-          CHECK_CUDA(
-              cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
           CHECK_CUDA(cudaStreamWaitEvent(
-              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()],
-              _stop_recv, 0));
+              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
         } else if (B_copy.numel() > 0) {
           assert(B_copy.numel() == _ubufs[_tp_id].numel());
           assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-          CHECK_CUDA(cudaMemcpyAsync(
-              B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
-              _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
-              cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
+                                     _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                     cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
           CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-          CHECK_CUDA(
-              cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
       at::cuda::setCurrentCUDAStream(stream_main);
       int last_compute_stream_id =
           (num_steps + _stream_compute.size() - 1) % _stream_compute.size();
-      CHECK_CUDA(cudaEventRecord(
-          _stop_compute,
-          (cudaStream_t)_stream_compute[last_compute_stream_id]));
+      CHECK_CUDA(
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     } else {
       // Catch up the default torch stream
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
-      CHECK_CUDA(
-          cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
-      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0],
-                                     _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_recv, _start_compute, 0));
+      CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_compute[0], _start_compute, 0));
 
       for (int i = 0; i < _tp_size; i++) {
         // Set the userbuffer id. Buffer under send is the input for the current
@@ -992,55 +896,43 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
         int recv_offset = comm_bytes * recv_chunk_id;
 
         // GEMM
-        torch::Tensor output_chunk =
-            torch::from_blob(output_ptr + (send_chunk_id * output_chunk_bytes),
-                             {n_chunk, m}, D.options());
-        torch::Tensor workspace_chunk = torch::from_blob(
-            workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
-            {workspace_size_chunk}, workspace.options());
-        at::cuda::setCurrentCUDAStream(
-            _stream_compute[i % _stream_compute.size()]);
-        te_gemm(A, A_scale_inverse, A_type, transa, _ubufs[send_chunk_id],
-                B_scale_inverse, B_type, transb, output_chunk, D_scale, D_type,
-                D_amax, bias, bias_type, pre_gelu_out, grad, workspace_chunk,
-                workspace_size_chunk, accumulate, use_split_accumulator,
+        torch::Tensor output_chunk = torch::from_blob(
+            output_ptr + (send_chunk_id * output_chunk_bytes), {n_chunk, m}, D.options());
+        torch::Tensor workspace_chunk =
+            torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
+                             {workspace_size_chunk}, workspace.options());
+        at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
+        te_gemm(A, A_scale_inverse, A_type, transa, _ubufs[send_chunk_id], B_scale_inverse, B_type,
+                transb, output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
         if (i < _tp_size - 1) {
           // P2P communication
-          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset,
-                           comm_bytes, _ub_comm, _next_rank,
-                           (cudaStream_t)_stream_send);
-          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset,
-                           comm_bytes, _ub_comm, _prev_rank,
-                           (cudaStream_t)_stream_recv);
+          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
+                           _next_rank, (cudaStream_t)_stream_send);
+          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
+                           _prev_rank, (cudaStream_t)_stream_recv);
           CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
-          CHECK_CUDA(
-              cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_send, _stop_recv, 0));
           CHECK_CUDA(cudaStreamWaitEvent(
-              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()],
-              _stop_recv, 0));
+              (cudaStream_t)_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
         } else if (B_copy.numel() > 0) {
           assert(B_copy.numel() == _ubufs[_tp_id].numel());
           assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-          CHECK_CUDA(cudaMemcpyAsync(
-              B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
-              _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
-              cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
+          CHECK_CUDA(cudaMemcpyAsync(B_copy.data_ptr(), _ubufs[_tp_id].data_ptr(),
+                                     _ubufs[_tp_id].numel() * _ubufs[_tp_id].element_size(),
+                                     cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_send));
           CHECK_CUDA(cudaEventRecord(_stop_send, (cudaStream_t)_stream_send));
-          CHECK_CUDA(
-              cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
+          CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_send, 0));
         }
       }
       at::cuda::setCurrentCUDAStream(stream_main);
-      int last_compute_stream_id =
-          (_tp_size + _stream_compute.size() - 1) % _stream_compute.size();
-      CHECK_CUDA(cudaEventRecord(
-          _stop_compute,
-          (cudaStream_t)_stream_compute[last_compute_stream_id]));
+      int last_compute_stream_id = (_tp_size + _stream_compute.size() - 1) % _stream_compute.size();
+      CHECK_CUDA(
+          cudaEventRecord(_stop_compute, (cudaStream_t)_stream_compute[last_compute_stream_id]));
     }
-    CHECK_CUDA(
-        cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
+    CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _stop_compute, 0));
 
     return D;
   }  // split_overlap_ag
@@ -1052,22 +944,18 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     at::cuda::CUDAStream stream_main = at::cuda::getDefaultCUDAStream();
     if (chunk) {
       // Copy input to the target ubuf chunk by rank offset
-      if (input.numel() != _ubufs[0].numel() ||
-          input.element_size() != _ubufs[0].element_size()) {
+      if (input.numel() != _ubufs[0].numel() || input.element_size() != _ubufs[0].element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
       }
       CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].data_ptr(), input.data_ptr(),
-                                 input.numel() * input.element_size(),
-                                 cudaMemcpyDeviceToDevice,
+                                 input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
                                  (cudaStream_t)stream_main));
     } else {
-      if (input.numel() != _ubuf.numel() ||
-          input.element_size() != _ubuf.element_size()) {
+      if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
         NVTE_ERROR("input and ubuf size do not match!");
       }
       CHECK_CUDA(cudaMemcpyAsync(_ubuf.data_ptr(), input.data_ptr(),
-                                 input.numel() * input.element_size(),
-                                 cudaMemcpyDeviceToDevice,
+                                 input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
                                  (cudaStream_t)stream_main));
     }
   }
@@ -1078,12 +966,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       NVTE_ERROR("Invalid comm_type");
     if (_comm_type == COMM_TYPE::RS)
       ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
-    int output_c_dim0 = (_comm_type == COMM_TYPE::AG)
-                            ? _ubuf.size(0)
-                            : _ubuf.size(0) / _tp_size;
+    int output_c_dim0 = (_comm_type == COMM_TYPE::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
     int output_c_dim1 = _ubuf.size(1);
-    return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1},
-                            _ubuf.options());
+    return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf.options());
   }
 };  // UbufP2PCommOverlap
 
