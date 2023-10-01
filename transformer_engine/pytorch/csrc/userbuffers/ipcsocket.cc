@@ -5,15 +5,19 @@
  */
 
 #include "ipcsocket.h"
-//#include "utils.h"
+// #include "utils.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 
-#define WARN(...) {}
-#define TRACE(...) {}
-#define SYSCHECK(...) {}
-#define EQCHECK(...) {}
+#define WARN(...)                                                              \
+  {}
+#define TRACE(...)                                                             \
+  {}
+#define SYSCHECK(...)                                                          \
+  {}
+#define EQCHECK(...)                                                           \
+  {}
 
 // Enable Linux abstract socket naming
 #define USE_ABSTRACT_SOCKET
@@ -23,7 +27,8 @@
 /*
  * Create a Unix Domain Socket
  */
-ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash, volatile uint32_t* abortFlag) {
+ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash,
+                               volatile uint32_t *abortFlag) {
   int fd = -1;
   struct sockaddr_un cliaddr;
   char temp[NCCL_IPC_SOCKNAME_LEN] = "";
@@ -43,7 +48,8 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash, v
   cliaddr.sun_family = AF_UNIX;
 
   // Create unique name for the socket.
-  int len = snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
+  int len =
+      snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
   if (len > (sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot bind provided name to socket. Name too large");
     return ncclInternalError;
@@ -56,16 +62,17 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash, v
 
   strncpy(cliaddr.sun_path, temp, len);
 #ifdef USE_ABSTRACT_SOCKET
-  cliaddr.sun_path[0] = '\0'; // Linux abstract socket trick
+  cliaddr.sun_path[0] = '\0';  // Linux abstract socket trick
 #endif
   if (bind(fd, (struct sockaddr *)&cliaddr, sizeof(cliaddr)) < 0) {
-    WARN("UDS: Binding to socket %s failed : %s (%d)", temp, strerror(errno), errno);
+    WARN("UDS: Binding to socket %s failed : %s (%d)", temp, strerror(errno),
+         errno);
     close(fd);
     return ncclSystemError;
   }
 
   handle->fd = fd;
-  strcpy(handle->socketName, temp);
+  strcpy(handle->socketName, temp);  // NOLINT(*)
 
   handle->abortFlag = abortFlag;
   // Mark socket as non-blocking
@@ -78,12 +85,13 @@ ncclResult_t ncclIpcSocketInit(ncclIpcSocket *handle, int rank, uint64_t hash, v
   return ncclSuccess;
 }
 
-ncclResult_t ncclIpcSocketGetFd(struct ncclIpcSocket* handle, int* fd) {
+ncclResult_t ncclIpcSocketGetFd(struct ncclIpcSocket *handle, int *fd) {
   if (handle == NULL) {
     WARN("ncclSocketGetFd: pass NULL socket");
     return ncclInvalidArgument;
   }
-  if (fd) *fd = handle->fd;
+  if (fd)
+    *fd = handle->fd;
   return ncclSuccess;
 }
 
@@ -104,7 +112,8 @@ ncclResult_t ncclIpcSocketClose(ncclIpcSocket *handle) {
   return ncclSuccess;
 }
 
-ncclResult_t ncclIpcSocketRecvMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, int *recvFd) {
+ncclResult_t ncclIpcSocketRecvMsg(ncclIpcSocket *handle, void *hdr, int hdrLen,
+                                  int *recvFd) {
   struct msghdr msg = {0, 0, 0, 0, 0, 0, 0};
   struct iovec iov[1];
 
@@ -122,7 +131,7 @@ ncclResult_t ncclIpcSocketRecvMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
   msg.msg_controllen = sizeof(control_un.control);
 
   if (hdr == NULL) {
-    iov[0].iov_base = (void *)dummy_buffer;
+    iov[0].iov_base = reinterpret_cast<void *>(dummy_buffer);
     iov[0].iov_len = sizeof(dummy_buffer);
   } else {
     iov[0].iov_base = hdr;
@@ -137,14 +146,17 @@ ncclResult_t ncclIpcSocketRecvMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
       WARN("UDS: Receiving data over socket failed : %d", errno);
       return ncclSystemError;
     }
-    if (handle->abortFlag && *handle->abortFlag) return ncclInternalError;
+    if (handle->abortFlag && *handle->abortFlag)
+      return ncclInternalError;
   }
 
   if (recvFd != NULL) {
-    if (((cmptr = CMSG_FIRSTHDR(&msg)) != NULL) && (cmptr->cmsg_len == CMSG_LEN(sizeof(int)))) {
-      if ((cmptr->cmsg_level != SOL_SOCKET) || (cmptr->cmsg_type != SCM_RIGHTS)) {
+    if (((cmptr = CMSG_FIRSTHDR(&msg)) != NULL) &&
+        (cmptr->cmsg_len == CMSG_LEN(sizeof(int)))) {
+      if ((cmptr->cmsg_level != SOL_SOCKET) ||
+          (cmptr->cmsg_type != SCM_RIGHTS)) {
         WARN("UDS: Receiving data over socket failed");
-      return ncclSystemError;
+        return ncclSystemError;
       }
 
       memmove(recvFd, CMSG_DATA(cmptr), sizeof(*recvFd));
@@ -152,7 +164,8 @@ ncclResult_t ncclIpcSocketRecvMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
       WARN("UDS: Receiving data over socket %s failed", handle->socketName);
       return ncclSystemError;
     }
-    TRACE(NCCL_INIT|NCCL_P2P, "UDS: Got recvFd %d from socket %s", *recvFd, handle->socketName);
+    TRACE(NCCL_INIT | NCCL_P2P, "UDS: Got recvFd %d from socket %s", *recvFd,
+          handle->socketName);
   }
 
   return ncclSuccess;
@@ -162,7 +175,8 @@ ncclResult_t ncclIpcSocketRecvFd(ncclIpcSocket *handle, int *recvFd) {
   return ncclIpcSocketRecvMsg(handle, NULL, 0, recvFd);
 }
 
-ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, const int sendFd, int rank, uint64_t hash) {
+ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen,
+                                  const int sendFd, int rank, uint64_t hash) {
   struct msghdr msg = {0, 0, 0, 0, 0, 0, 0};
   struct iovec iov[1];
   char temp[NCCL_IPC_SOCKNAME_LEN];
@@ -180,18 +194,20 @@ ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
   bzero(&cliaddr, sizeof(cliaddr));
   cliaddr.sun_family = AF_UNIX;
 
-  int len = snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
+  int len =
+      snprintf(temp, NCCL_IPC_SOCKNAME_LEN, NCCL_IPC_SOCKNAME_STR, rank, hash);
   if (len > (sizeof(cliaddr.sun_path) - 1)) {
     WARN("UDS: Cannot connect to provided name for socket. Name too large");
     return ncclInternalError;
   }
-  (void) strncpy(cliaddr.sun_path, temp, len);
+  (void)strncpy(cliaddr.sun_path, temp, len);
 
 #ifdef USE_ABSTRACT_SOCKET
-  cliaddr.sun_path[0] = '\0'; // Linux abstract socket trick
+  cliaddr.sun_path[0] = '\0';  // Linux abstract socket trick
 #endif
 
-  TRACE(NCCL_INIT, "UDS: Sending hdr %p len %d to UDS socket %s", hdr, hdrLen, temp);
+  TRACE(NCCL_INIT, "UDS: Sending hdr %p len %d to UDS socket %s", hdr, hdrLen,
+        temp);
 
   if (sendFd != -1) {
     TRACE(NCCL_INIT, "UDS: Sending fd %d to UDS socket %s", sendFd, temp);
@@ -206,11 +222,11 @@ ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
     memmove(CMSG_DATA(cmptr), &sendFd, sizeof(sendFd));
   }
 
-  msg.msg_name = (void *)&cliaddr;
+  msg.msg_name = reinterpret_cast<void *>(&cliaddr);
   msg.msg_namelen = sizeof(struct sockaddr_un);
 
   if (hdr == NULL) {
-    iov[0].iov_base = (void *)dummy_buffer;
+    iov[0].iov_base = reinterpret_cast<void *>(dummy_buffer);
     iov[0].iov_len = sizeof(dummy_buffer);
   } else {
     iov[0].iov_base = hdr;
@@ -223,15 +239,18 @@ ncclResult_t ncclIpcSocketSendMsg(ncclIpcSocket *handle, void *hdr, int hdrLen, 
   ssize_t sendResult;
   while ((sendResult = sendmsg(handle->fd, &msg, 0)) < 0) {
     if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-      WARN("UDS: Sending data over socket %s failed : %s (%d)", temp, strerror(errno), errno);
+      WARN("UDS: Sending data over socket %s failed : %s (%d)", temp,
+           strerror(errno), errno);
       return ncclSystemError;
     }
-    if (handle->abortFlag && *handle->abortFlag) return ncclInternalError;
+    if (handle->abortFlag && *handle->abortFlag)
+      return ncclInternalError;
   }
 
   return ncclSuccess;
 }
 
-ncclResult_t ncclIpcSocketSendFd(ncclIpcSocket *handle, const int sendFd, int rank, uint64_t hash) {
+ncclResult_t ncclIpcSocketSendFd(ncclIpcSocket *handle, const int sendFd,
+                                 int rank, uint64_t hash) {
   return ncclIpcSocketSendMsg(handle, NULL, 0, sendFd, rank, hash);
 }

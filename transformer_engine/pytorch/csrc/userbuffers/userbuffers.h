@@ -98,17 +98,17 @@ struct communicator {
   void *mem_ptr[NVTE_MAX_REGIONS];
   void **peer_ptr[NVTE_MAX_REGIONS];
 
-  int memflags[NVTE_MAX_REGIONS]; //UC,MC, user/lib allocated
+  int memflags[NVTE_MAX_REGIONS];  // UC,MC, user/lib allocated
 
   CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
-  void* ucbase_ptr[NVTE_MAX_REGIONS]; //only for cuMem allocated memory
+  void* ucbase_ptr[NVTE_MAX_REGIONS];  // only for cuMem allocated memory
   size_t mem_size[NVTE_MAX_REGIONS];
 
   void* mc_ptr[NVTE_MAX_REGIONS];
   void* mc_baseptr;
   CUmemGenericAllocationHandle mc_handle;
-  size_t mc_offset,mc_maxsize;
-  int use_mc; //1: use MC if available, 0: override not to use MC
+  size_t mc_offset, mc_maxsize;
+  int use_mc;  // 1: use MC if available, 0: override not to use MC
 
   int ar_nvsize, ar_firstgpu,
       ar_nvrank;  // number of gpus(and first gpu in a group) of gpus per node in reduction subgroup
@@ -223,20 +223,44 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
                                            const int strideelements, communicator *comm,
                                            cudaStream_t stream = 0);
 template<typename fp8type>
-void reducescatter2_userbuff_stridedoutput_fp8(void* output, float* scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_stridedoutput_fp8(void* output, float* scale, const int handler,
+                                               const int offset, const int rowelements,
+                                               const int colelements, const int strideelements,
+                                               communicator* comm, cudaStream_t stream = 0);
 template<typename fp8type>
-void reducescatter2_userbuff_fp8(void* output, float* scale, const int handler,const int offset,const int elements, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_fp8(void* output, float* scale, const int handler, const int offset,
+                                 const int elements, communicator* comm, cudaStream_t stream = 0);
 #if 0
 template<typename fp8type>
-void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,
+                                                const int offset, const int rowelements,
+                                                const int colelements, const int strideelements,
+                                                const int numchunks, void *counters,
+                                                communicator* comm, cudaStream_t stream = 0);
 #endif
 template<typename fp8type>
-void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_atomic_fp8(void* output, float *scale, const int handler,
+                                                const int offset, const int rowelements,
+                                                const int colelements, const int strideelements_out,
+                                                const int strideelements_in, const int numchunks,
+                                                void *counters, communicator* comm,
+                                                cudaStream_t stream = 0);
 template<typename fp8type>
-void reducescatter2_userbuff_strided_multiatomic_fp8(void* output, float *scale, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements_out, const int strideelements_in, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
-void reducescatter2_userbuff_strided(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, communicator* comm, cudaStream_t stream=0);
-void reducescatter2_userbuff_strided_atomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
-void reducescatter2_userbuff_strided_multiatomic(void* output, const int handler,const int offset,const int rowelements, const int colelements, const int strideelements, const int numchunks, void *counters, communicator* comm, cudaStream_t stream=0);
+void reducescatter2_userbuff_strided_multiatomic_fp8(
+  void* output, float *scale, const int handler, const int offset, const int rowelements,
+  const int colelements, const int strideelements_out, const int strideelements_in,
+  const int numchunks, void *counters, communicator* comm, cudaStream_t stream = 0);
+void reducescatter2_userbuff_strided(
+  void* output, const int handler, const int offset, const int rowelements, const int colelements,
+  const int strideelements, communicator* comm, cudaStream_t stream = 0);
+void reducescatter2_userbuff_strided_atomic(
+  void* output, const int handler , const int offset, const int rowelements, const int colelements,
+  const int strideelements, const int numchunks, void *counters, communicator* comm,
+  cudaStream_t stream = 0);
+void reducescatter2_userbuff_strided_multiatomic(
+  void* output, const int handler, const int offset, const int rowelements, const int colelements,
+  const int strideelements, const int numchunks, void *counters, communicator* comm,
+  cudaStream_t stream = 0);
 /* everything should be 16byte aligned = 8 elts aligned
 output is strided: row starts separated by stride elements*/
 
@@ -254,9 +278,18 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, cudaStream_t stream = 0);
-void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, cudaStream_t stream=0);
-void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, void *counters, cudaStream_t stream=0);
-void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset, const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, const int nchunks, void *counters, bool shuffle, cudaStream_t stream=0);
+void userbuffers_sendrecv(
+  const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
+  const size_t bytes, communicator* comm, const int send_peer, const int recv_peer,
+  cudaStream_t stream = 0);
+void userbuffers_sendrecv_atomic(
+  const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
+  const size_t bytes, communicator* comm, const int send_peer, const int recv_peer, void *counters,
+  cudaStream_t stream = 0);
+void userbuffers_sendrecv_multiatomic(
+  const int srchandler, const int dsthandler, const size_t send_offset, const size_t recv_offset,
+  const size_t bytes, communicator* comm, const int send_peer, const int recv_peer,
+  const int nchunks, void *counters, bool shuffle, cudaStream_t stream = 0);
 
 
 // alltoall split send and recv to allow for overlap

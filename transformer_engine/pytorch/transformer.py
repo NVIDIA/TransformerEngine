@@ -263,14 +263,16 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
         ub_split_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_AG", "1")))
         ub_split_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_RS", "1")))
-        ub_atomic_gemm_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_RS", "0")))
+        ub_atomic_gemm_rs = (ub_tp_comm_overlap
+                             and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_RS", "0"))))
         assert (
             not (ub_split_rs and ub_atomic_gemm_rs)
-          ), f"Only one type of RS overlap NVTE_UB_SPLIT_RS/NVTE_UB_ATOMIC_GEMM_RS should be enabled."
-        ub_atomic_gemm_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_AG", "0")))
+        ), "Only one type of RS overlap NVTE_UB_SPLIT_RS/NVTE_UB_ATOMIC_GEMM_RS should be enabled."
+        ub_atomic_gemm_ag = (ub_tp_comm_overlap
+                             and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_AG", "0"))))
         assert (
             not (ub_split_ag and ub_atomic_gemm_ag)
-          ), f"Only one type of AG overlap NVTE_UB_SPLIT_AG/NVTE_UB_ATOMIC_GEMM_AG should be enabled."
+        ), "Only one type of AG overlap NVTE_UB_SPLIT_AG/NVTE_UB_ATOMIC_GEMM_AG should be enabled."
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm

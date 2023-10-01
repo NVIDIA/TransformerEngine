@@ -4,7 +4,6 @@
 
 """Linear API"""
 import warnings
-import os
 from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
@@ -97,7 +96,7 @@ class _Linear(torch.autograd.Function):
                 ub_split_rs = False
                 ub_atomic_gemm_rs = False
         if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
-            assert fp8, f"AtomicGemm overlap supported only for FP8 GEMM."
+            assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
@@ -161,7 +160,8 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                     )
 
-            proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = None, None, None, activation_dtype
+            proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
+                None, None, None, activation_dtype)
             if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
@@ -170,7 +170,7 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = weight.size(0)
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
-                if ub_obj_projout.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                if ub_obj_projout.is_fp8_ubuf():
                     proj_out_index = tex.FP8FwdTensors.GEMM1_OUTPUT
                     meta_tensor = fp8_meta["scaling_fwd"]
                     proj_out_tetype = fp8_dtype_forward

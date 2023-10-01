@@ -119,8 +119,9 @@ void te_atomic_gemm(at::Tensor A,
                                           D_scale.data_ptr(), nullptr);
   auto te_bias = makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))},
                                              bias_type);
-  auto te_counter = makeTransformerEngineTensor(counter.data_ptr(), {static_cast<size_t>(counter.size(0))},
-                                             DType::kInt32);
+  auto te_counter = makeTransformerEngineTensor(counter.data_ptr(),
+                                                {static_cast<size_t>(counter.size(0))},
+                                                DType::kInt32);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                           ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}

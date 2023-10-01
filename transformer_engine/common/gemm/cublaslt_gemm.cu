@@ -235,21 +235,20 @@ void cublas_gemm(const Tensor *inputA,
   if (counter != nullptr) {
     if (m_split == 0) m_split=1;
     if (n_split == 0) n_split=1;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                   CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_ROWS,
-                                                   &m_split, sizeof(m_split)));
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                   CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_COLS,
-                                                   &n_split, sizeof(n_split)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+       operationDesc, CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_ROWS,
+       &m_split, sizeof(m_split)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+       operationDesc, CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_NUM_CHUNKS_D_COLS,
+       &n_split, sizeof(n_split)));
     if (gemm_producer) {
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                       CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_OUT_COUNTERS_POINTER,
-                                                       &counter, sizeof(counter)));
-    }
-    else {
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                       CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_IN_COUNTERS_POINTER,
-                                                       &counter, sizeof(counter)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_OUT_COUNTERS_POINTER,
+        &counter, sizeof(counter)));
+    } else {
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_ATOMIC_SYNC_IN_COUNTERS_POINTER,
+        &counter, sizeof(counter)));
     }
   }
 #endif

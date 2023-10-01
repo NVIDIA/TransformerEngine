@@ -150,7 +150,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_split_rs = False
                 ub_atomic_gemm_rs = False
         if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
-            assert fp8, f"AtomicGemm overlap supported only for FP8 GEMM."
+            assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -258,7 +258,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_forward,
             )
 
-            fc2_out_index, fc2_meta_tensor, fc2_te_type, out_type = None, None, None, activation_dtype
+            fc2_out_index, fc2_meta_tensor, fc2_te_type, out_type = (
+                None, None, None, activation_dtype)
             if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
@@ -267,7 +268,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[1] = fc2_weight.size(0)
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
 
-                if ub_obj_fc2out.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                if ub_obj_fc2out.is_fp8_ubuf():
                     fc2_out_index = tex.FP8FwdTensors.GEMM2_OUTPUT
                     fc2_meta_tensor = fp8_meta["scaling_fwd"]
                     fc2_te_type = fp8_dtype_forward
@@ -624,13 +625,14 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
                     dgelu_t = None
 
-                out_index, meta_tensor, out_te_type, out_type = None, None, None, ctx.activation_dtype
+                out_index, meta_tensor, out_te_type, out_type = (
+                    None, None, None, ctx.activation_dtype)
                 fc1_dgrad_size = list(dgelu.size())
                 fc1_dgrad_size[1] = fc1_weight.size(1)
                 if ctx.ub_bulk_wgrad: # allocate dgrad output
                     ub_obj_dgrad = get_ub("fc1_wgrad")
                     fc1_dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
-                    if ub_obj_dgrad.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+                    if ub_obj_dgrad.is_fp8_ubuf():
                         out_index = tex.FP8BwdTensors.GRAD_INPUT2
                         meta_tensor = ctx.fp8_meta["scaling_bwd"]
                         out_te_type = fp8_dtype_backward
@@ -744,9 +746,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     # FC1 WGRAD
                     extra_output_tensor = None
                     if ctx.ub_bulk_wgrad:
-                        if ub_obj_dgrad.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # Reduce-scatter output
-                            extra_output_tensor = torch.empty(dim_size, dtype=ctx.activation_dtype, device=fc1_dgrad.device)
+                        if ub_obj_dgrad.is_fp8_ubuf():
+                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # RS output
+                            extra_output_tensor = torch.empty(
+                                dim_size, dtype=ctx.activation_dtype, device=fc1_dgrad.device)
                             fc1_dgrad = extra_output_tensor
                         else:
                             fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
@@ -821,7 +824,10 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
 
             # Column Parallel Linear
-            if (not ctx.ub_bulk_wgrad) and ctx.set_parallel_mode and ctx.tensor_parallel and handle is not None:
+            if ((not ctx.ub_bulk_wgrad)
+                and ctx.set_parallel_mode
+                and ctx.tensor_parallel
+                and handle is not None):
                 handle.wait()
 
             # LayerNorm gradient
@@ -1043,7 +1049,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
 
-        if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_rs or ub_split_ag or ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+        if (ub_bulk_wgrad # pylint: disable=too-many-boolean-expressions
+            or ub_bulk_dgrad
+            or ub_split_rs
+            or ub_split_ag
+            or ub_atomic_gemm_rs
+            or ub_atomic_gemm_ag):
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."

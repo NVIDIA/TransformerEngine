@@ -576,7 +576,6 @@ py::object TFE_Py_TeGemm_wrapper(
   void* d_ptr = AllocateSpace(d_shape, otype);
   auto d_tensor = MakeNVTETensor(d_ptr, d_shape, otype);
 
-  NVTEShape empty_shape;
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_id);
   nvte_cublas_gemm(a_tensor.data(), b_tensor.data(), d_tensor.data(),
                    bias_tensor.data(), gelu_input_tensor.data(), transa,

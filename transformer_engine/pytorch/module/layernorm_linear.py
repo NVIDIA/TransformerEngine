@@ -115,7 +115,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
         if ub_atomic_gemm_ag:
-            assert fp8, f"AtomicGemm overlap supported only for FP8 GEMM."
+            assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -345,7 +345,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 fp8_dtype_backward = get_fp8_te_dtype(
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
-                out_index, meta_tensor, out_te_type, out_type = None, None, None, ctx.activation_dtype
+                out_index, meta_tensor, out_te_type, out_type = (
+                    None, None, None, ctx.activation_dtype)
                 if ctx.ub_bulk_wgrad and ub_obj_dgrad.is_fp8_ubuf():
                     out_index = tex.FP8BwdTensors.GRAD_INPUT1
                     meta_tensor = ctx.fp8_meta["scaling_bwd"]
@@ -405,9 +406,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     # WGRAD
                     extra_output_tensor = None
                     if ctx.ub_bulk_wgrad:
-                        if ub_obj_dgrad.is_fp8_ubuf(): #bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # Reduce-scatter output
-                            extra_output_tensor = torch.empty(dim_size, dtype=ctx.activation_dtype, device=dgrad.device)
+                        if ub_obj_dgrad.is_fp8_ubuf():
+                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size()) # RS output
+                            extra_output_tensor = torch.empty(
+                                dim_size, dtype=ctx.activation_dtype, device=dgrad.device)
                             dgrad = extra_output_tensor
                         else:
                             dgrad = ub_obj_dgrad.get_ubuf_output(0)
@@ -473,7 +475,10 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
 
             # Column Parallel Linear
-            if (not ctx.ub_bulk_wgrad) and ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
+            if ((not ctx.ub_bulk_wgrad)
+                and ctx.parallel_mode == "column"
+                and ctx.tensor_parallel
+                and handle is not None):
                 handle.wait()
 
             # LayerNorm gradient
