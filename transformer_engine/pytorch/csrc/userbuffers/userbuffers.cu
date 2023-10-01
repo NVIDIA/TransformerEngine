@@ -662,7 +662,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
         : "l"(mc_ptr + (mylineoffset + line))
         : "memory");
 #endif
-    (reinterpret_cast<uint4 *> outbuf)[(line / rowlines) * skiplines + (line % rowlines)] = val;
+    reinterpret_cast<uint4 *> (outbuf)[(line / rowlines) * skiplines + (line % rowlines)] = val;
   }
 
   if (threadIdx.x == 0 && lastSM)
