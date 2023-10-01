@@ -1,8 +1,8 @@
-/*
- * Copyright (c) 2016-2023, NVIDIA CORPORATION. All rights reserved.
+/*************************************************************************
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See COPYRIGHT for license information
- */
+ * See LICENSE for license information.
+ ************************************************************************/
 
 #ifndef NCCL_IPCSOCKET_H
 #define NCCL_IPCSOCKET_H
