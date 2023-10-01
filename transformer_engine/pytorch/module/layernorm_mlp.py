@@ -794,20 +794,34 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 dbeta = None
 
-        # Handle custom DDP from mcore.
-        fc1_weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
-        fc2_weight.grad_added_to_main_grad = ctx.fuse_wgrad_accumulation
+        if fc1_weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, 'grad_added_to_main_grad'):
+                fc1_weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                fc1_wgrad = None
+        else:
+            fc1_wgrad = None
+
+        if fc2_weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(fc2_weight, 'grad_added_to_main_grad'):
+                fc2_weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                fc2_wgrad = None
+        else:
+            fc2_wgrad = None
 
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
-            fc1_wgrad if fc1_weight.requires_grad else None,
+            fc1_wgrad,
             None,
             None,
             fc1_bias_grad if ctx.use_fc1_bias else None,
             None,
-            fc2_wgrad if fc2_weight.requires_grad else None,
+            fc2_wgrad,
             None,
             None,
             fc2_bias_grad if ctx.use_fc2_bias else None,
