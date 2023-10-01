@@ -378,7 +378,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if isinstance(state, list):
             warnings.warn(
                 "This checkpoint format is deprecated and will be"
-                "removed in a future release of Transformer Engine"
+                "removed in the next release (v1.0.0)."
             )
 
             # Retrieve checkpointed items.
@@ -424,7 +424,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             warnings.warn(
                 "This checkpoint format is deprecated and will be"
-                "removed in a future release of Transformer Engine"
+                "removed in the next release (v1.0.0)."
             )
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])

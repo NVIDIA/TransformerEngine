@@ -230,7 +230,7 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
-            _, _, _ = gemm(
+            _ = gemm(
                 weight,
                 inputmat_total,
                 activation_dtype,
@@ -348,7 +348,7 @@ class _Linear(torch.autograd.Function):
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
             if ctx.requires_dgrad:
                 if ctx.fp8:
-                    dgrad = fp8_gemm(
+                    dgrad, _ = fp8_gemm(
                         weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -391,7 +391,7 @@ class _Linear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                        wgrad = fp8_gemm(
+                        wgrad, _ = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -438,8 +438,17 @@ class _Linear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_bias = None
 
+        if weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
+                weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                wgrad = None
+        else:
+            wgrad = None
+
         return (
-            wgrad if weight.requires_grad else None,
+            wgrad,
             None,
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
@@ -473,7 +482,7 @@ class Linear(TransformerEngineBaseModule):
     .. warning::
 
         Argument :attr:`skip_weight_param_allocation` is deprecated and will
-        be fully removed in future releases.
+        be fully removed in the next release (v1.0.0).
 
     Parameters
     ----------
@@ -562,7 +571,7 @@ class Linear(TransformerEngineBaseModule):
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases. It has ignored"
+                "will be fully removed in the next release (v1.0.0). It has ignored"
                 "starting from v0.11.",
                 category=DeprecationWarning,
             )
@@ -732,7 +741,7 @@ class Linear(TransformerEngineBaseModule):
         .. warning::
 
             Arguments :attr:`weight` and :attr:`bias` are deprecated and will
-            be fully removed in future releases.
+            be fully removed in the next release (v1.0.0).
 
         Parameters
         ----------
@@ -756,7 +765,7 @@ class Linear(TransformerEngineBaseModule):
         if weight is not None or bias is not None:
             raise RuntimeError(
                 "Arguments `weight` and `bias` are deprecated and "
-                "will be fully removed in future releases."
+                "will be fully removed in the next release (v1.0.0)."
             )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:

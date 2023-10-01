@@ -232,7 +232,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
-            fc1_out = tex.fp8_gemm(
+            fc1_out, _ = tex.fp8_gemm(
                 fc1_weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -366,7 +366,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
                 fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
-            _, _, _ = tex.gemm(
+            _ = tex.gemm(
                 fc2_weight,
                 gelu_out,
                 activation_dtype,
@@ -527,7 +527,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None
                 ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
                 # FC2 DGRAD; Unconditional
-                fc2_dgrad = tex.fp8_gemm(
+                fc2_dgrad, _ = tex.fp8_gemm(
                     fc2_weight_t_fp8,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM2_WEIGHT,
@@ -548,7 +548,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     if fc2_weight.requires_grad:
                         gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
-                        fc2_wgrad = tex.fp8_gemm(
+                        fc2_wgrad, _ = tex.fp8_gemm(
                             gelu_out_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM2_INPUT,
@@ -714,7 +714,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_dgrad_size, dtype=ctx.activation_dtype, device=fc1_weight.device
                     )
                 # FC1 DGRAD: Unconditional
-                _, _, _ = tex.gemm(
+                _ = tex.gemm(
                     fc1_weight,
                     dgelu,
                     ctx.activation_dtype,
@@ -752,7 +752,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        fc1_wgrad = tex.fp8_gemm(
+                        fc1_wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -843,16 +843,34 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 dbeta = None
 
+        if fc1_weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, 'grad_added_to_main_grad'):
+                fc1_weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                fc1_wgrad = None
+        else:
+            fc1_wgrad = None
+
+        if fc2_weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(fc2_weight, 'grad_added_to_main_grad'):
+                fc2_weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                fc2_wgrad = None
+        else:
+            fc2_wgrad = None
+
         return (
             dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
-            fc1_wgrad if fc1_weight.requires_grad else None,
+            fc1_wgrad,
             None,
             None,
             fc1_bias_grad if ctx.use_fc1_bias else None,
             None,
-            fc2_wgrad if fc2_weight.requires_grad else None,
+            fc2_wgrad,
             None,
             None,
             fc2_bias_grad if ctx.use_fc2_bias else None,

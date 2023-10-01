@@ -45,7 +45,6 @@ def fp8_gemm(
     assert_dim_for_fp8_exec(A)
     assert_dim_for_fp8_exec(B)
 
-    return_output = False
     if out is None:
         out = torch.empty(
             B.shape[0],
@@ -53,7 +52,7 @@ def fp8_gemm(
             dtype=out_dtype,
             device="cuda",
         )
-        return_output = True
+
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
     if gelu:
@@ -128,13 +127,7 @@ def fp8_gemm(
             args = tuple(args + (True, extra_output_tensor,))
     _ = fn(*args)
 
-    if return_output:
-        if gelu:
-            return out, gelu_input
-        return out
-    if gelu:
-        return gelu_input
-    return None
+    return out, gelu_input
 
 
 def gemm(
@@ -162,7 +155,6 @@ def gemm(
     empty_tensor = torch.Tensor()
     fp8_index = -1 # dummy index
 
-    return_output = False
     if out is None:
         out = torch.empty(
             B.shape[1] if transb else B.shape[0],
@@ -170,7 +162,6 @@ def gemm(
             dtype=dtype,
             device="cuda",
         )
-        return_output = True
 
     if gelu and not grad:
         gelu_input = torch.empty_like(out, dtype=dtype)
@@ -240,6 +231,4 @@ def gemm(
             args = tuple(args + (False, extra_output_tensor,))
     _ = fn(*args)
 
-    if return_output:
-        return out, grad_bias, gelu_input
-    return None, grad_bias, gelu_input
+    return out, grad_bias, gelu_input

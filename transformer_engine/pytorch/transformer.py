@@ -71,7 +71,7 @@ class TransformerLayer(torch.nn.Module):
     .. warning::
 
         Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
-        are deprecated and will be fully removed in future releases.
+        are deprecated and will be fully removed in the next release (v1.0.0).
 
     .. note::
 
@@ -247,7 +247,7 @@ class TransformerLayer(torch.nn.Module):
 
         warnings.warn(
             "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
-            "are deprecated and will be fully removed in future releases.",
+            "are deprecated and will be fully removed in the next release (v1.0.0).",
             category=DeprecationWarning,
         )
 
