@@ -1053,6 +1053,8 @@ __global__ void UpdateFP8MetaKernel(const float *amax, const float *rolled_amax_
     }
 }
 
+constexpr int BLOCK_SIZE = 512;
+
 void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
                                    paddle::Tensor &scale,         // NOLINT
                                    paddle::Tensor &scale_inv,     // NOLINT
