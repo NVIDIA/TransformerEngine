@@ -7,6 +7,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
+#include <cuda.h>
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include "../common.h"
@@ -375,7 +376,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A,
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
 
   int cudart_version;
-  cudaRuntimeGetVersion(&cudart_version);
+  NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
   NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
   NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
 
