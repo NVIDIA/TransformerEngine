@@ -667,18 +667,20 @@ class TestFusedAttn:
         q_cu_seqlen_tensor = paddle.to_tensor(self.q_cu_seqlen, dtype="int32", stop_gradient=True)
         kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
 
-        rng_state = paddle.zeros((2,), dtype=np.int64)
+        fused_attention_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen if (
+            self.q_seqlen <= 512
+            and self.kv_seqlen <= 512) else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
 
         qkv_dtype = tex.DType.kBFloat16 if self.dtype == "bfloat16" else tex.DType.kFloat16
         out, softmax_aux_tensor, q_grad, k_grad, v_grad = None, None, None, None, None
         if self.attn_mode == 'self_attn':
-            out, softmax_aux_tensor = fused_attn_fwd_qkvpacked(
+            out, softmax_aux_tensor, rng_state = fused_attn_fwd_qkvpacked(
                 qkv_tensor,
                 q_cu_seqlen_tensor,
-                rng_state,
                 is_training=True,
                 max_seqlen=self.q_seqlen,
                 qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
                 Bias=None,
                 attn_scale=self.scaling_factor,
                 dropout=self.dropout_prob,
@@ -693,6 +695,7 @@ class TestFusedAttn:
                 softmax_aux_tensor,
                 max_seqlen=self.q_seqlen,
                 qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
                 attn_scale=self.scaling_factor,
                 dropout=self.dropout_prob,
                 set_zero=False,
@@ -701,19 +704,20 @@ class TestFusedAttn:
             k_grad = dqkv[:, :, 1, :, :]
             v_grad = dqkv[:, :, 2, :, :]
         else:    # attn_mode == 'cross_attn'
-            out, softmax_aux_tensor = fused_attn_fwd_kvpacked(q_tensor,
-                                                              kv_tensor,
-                                                              q_cu_seqlen_tensor,
-                                                              kv_cu_seqlen_tensor,
-                                                              rng_state,
-                                                              is_training=True,
-                                                              max_seqlen_q=self.q_seqlen,
-                                                              max_seqlen_kv=self.kv_seqlen,
-                                                              qkv_dtype=qkv_dtype,
-                                                              Bias=None,
-                                                              attn_scale=self.scaling_factor,
-                                                              dropout=self.dropout_prob,
-                                                              set_zero=False)
+            out, softmax_aux_tensor, rng_state = fused_attn_fwd_kvpacked(
+                q_tensor,
+                kv_tensor,
+                q_cu_seqlen_tensor,
+                kv_cu_seqlen_tensor,
+                is_training=True,
+                max_seqlen_q=self.q_seqlen,
+                max_seqlen_kv=self.kv_seqlen,
+                qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
+                Bias=None,
+                attn_scale=self.scaling_factor,
+                dropout=self.dropout_prob,
+                set_zero=False)
             dq, dkv, _ = fused_attn_bwd_kvpacked(q_tensor,
                                                  kv_tensor,
                                                  q_cu_seqlen_tensor,
@@ -722,6 +726,7 @@ class TestFusedAttn:
                                                  out,
                                                  self.dout,
                                                  softmax_aux_tensor,
+                                                 fused_attention_backend=fused_attention_backend,
                                                  max_seqlen_q=self.q_seqlen,
                                                  max_seqlen_kv=self.kv_seqlen,
                                                  qkv_dtype=qkv_dtype,

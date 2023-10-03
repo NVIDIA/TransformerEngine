@@ -28,7 +28,7 @@ can be used seamlessly with your framework-specific code. TE also includes a fra
 C++ API that can be integrated with other deep learning libraries to enable FP8 support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for
-architectures such as BERT, GPT and T5 become very memory and compute intensive. Most deep learning
+architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
 frameworks train with FP32 by default. This is not essential, however, to achieve full accuracy for
 many deep learning models. Using mixed-precision training, which combines single-precision (FP32)
 with lower precision (e.g. FP16) format when training a model, results in significant speedups with
@@ -39,7 +39,7 @@ not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
 Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework agnostic library in C++ including structs and kernels needed for FP8 support.
+layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8 support.
 Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
 simplifying mixed precision training for users.
 
@@ -176,7 +176,7 @@ The quickest way to get started with Transformer Engine is the NGC PyTorch conta
 
     docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.04-py3
 
-Where 23.04 is the container version. For example, 23.04 for April 2023 release.
+Where 23.04 is the container version. For example, 23.04 for the April 2023 release.
 
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
@@ -195,9 +195,8 @@ Compiling with Flash Attention 2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 TransformerEngine release v0.11.0 adds support for Flash Attention 2.0 for improved performance. It is a known issue that Flash Attention 2.0 compilation is
-resource intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory
-errors during the installation of TransformerEngine. To circumvent the issue, please try setting **MAX_JOBS=1** in the environment. If the errors persist, then
-proceed to install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
+resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory
+errors during the installation of TransformerEngine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue. If the errors persist, install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
 
 Model Support
 ----------
@@ -263,16 +262,17 @@ the `MLP` layer. In TE this can be added by setting the `layer_type` to `decoder
 Integrations
 ==================
 
-Transformer Engine has been integrated with several popular open-source DL frameworks such as:
+Transformer Engine has been integrated with popular LLM frameworks such as:
 
 * `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_ 
 * `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
-* `Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
+* `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
+* `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
+* `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
 * `NVIDIA NeMo <https://github.com/NVIDIA/NeMo>`_ 
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
-* `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
 
 
