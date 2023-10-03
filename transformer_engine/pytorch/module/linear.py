@@ -78,10 +78,27 @@ class _Linear(torch.autograd.Function):
         ub_split_rs: bool,
         ub_split_ag: bool,
     ) -> torch.Tensor:
-        # Make sure input dimensions are compatible
+        # Make sure tensor dimensions are compatible
         in_features = weight.shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        if inp.shape[-1] != in_features:
+            raise ValueError(
+                "Weight and input shapes are not compatible "
+                f"(weight shape = {list(weight.size())}, "
+                f"input shape = {list(inp.size())})"
+            )
+
+        # Make sure tensors are in expected format
+        to_kwargs = dict(
+            device="cuda",
+            memory_format=torch.contiguous_format,
+        )
+        inp = inp.to(dtype=activation_dtype, **to_kwargs)
         inputmat = inp.view((-1, in_features))
+        weight = weight.to(**to_kwargs)
+        if use_bias:
+            bias = bias.to(**to_kwargs)
+
+        # Make sure tensor dimensions are compatible with FP8
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
@@ -92,8 +109,6 @@ class _Linear(torch.autograd.Function):
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
 
         if fp8:

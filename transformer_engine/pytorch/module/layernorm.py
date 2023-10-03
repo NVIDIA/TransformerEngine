@@ -16,7 +16,6 @@ from ..cpp_extensions import (
     layernorm_fwd_inf,
  )
 from ..jit import no_torch_dynamo
-from ..utils import cast_if_needed
 
 __all__ = ["LayerNorm"]
 
@@ -37,17 +36,33 @@ class _LayerNorm(torch.autograd.Function):
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
     ) -> torch.Tensor:
-        # Make sure input dimensions are compatible
+        # Make sure tensor dimensions are compatible
         in_features = ln_weight.numel()
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert inp.shape[-1] == in_features, "LayerNorm not possible"
-        inputmat = inp.view((-1, in_features))
+        if ln_bias.numel() != in_features:
+            raise ValueError(
+                "Weight and bias shapes do not match "
+                f"(weight shape = {list(ln_weight.size())}, "
+                f"bias shape = {list(ln_bias.size())})"
+            )
+        if inp.size(-1) != in_features:
+            raise ValueError(
+                "Weight and input shapes are not compatible "
+                f"(weight shape = {list(ln_weight.size())}, "
+                f"input shape = {list(inp.size())})"
+            )
 
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        ln_weight = cast_if_needed(ln_weight, activation_dtype)
-        ln_bias = cast_if_needed(ln_bias, activation_dtype)
+        # Make sure tensors are in expected format
+        to_kwargs = dict(
+            device="cuda",
+            dtype=activation_dtype,
+            memory_format=torch.contiguous_format,
+        )
+        inp = inp.to(**to_kwargs)
+        inputmat = inp.to(**to_kwargs).view((-1, in_features))
+        ln_weight = ln_weight.to(**to_kwargs)
+        ln_bias = ln_bias.to(**to_kwargs)
 
+        # Apply layer norm kernel
         if is_grad_enabled:
             ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
                 ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
@@ -65,7 +80,10 @@ class _LayerNorm(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
-        grad_output = grad_output.contiguous()
+        grad_output = grad_output.to(
+            device="cuda",
+            memory_format=torch.contiguous_format,
+        )
         d_ln_out = grad_output.view(inputmat.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
             d_ln_out, inputmat, mu, rsigma, ln_weight,
