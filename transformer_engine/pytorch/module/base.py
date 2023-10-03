@@ -126,9 +126,6 @@ def initialize_ub(
     ]
     if bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
         fp8_buf.append ("proj_fprop")
-#        fp8_buf.append ("fc2_fprop")
-#        fp8_buf.append ("fc1_wgrad")
-#        fp8_buf.append ("qkv_wgrad")
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
@@ -153,8 +150,6 @@ def initialize_ub(
     ) -> None:
         dtype = torch.uint8 if (use_fp8 and name in fp8_buf) else torch.bfloat16
         sample_buffer = torch.empty(shape, dtype=dtype, device='cuda')
-        if (rank_id==0) and (name in ["proj_fprop", "fc2_fprop", "fc1_wgrad", "qkv_wgrad"]):
-            print (f'!!! UB RS-overlap {name}-{dtype}')
         if method == 'ring_exchange':
             ub_obj = tex.UbufP2PCommOverlap(
                     sample_buffer,          # Sample userbuffer
