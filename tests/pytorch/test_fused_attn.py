@@ -105,6 +105,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
 
     inp = torch.randn(
             config.seq_len, bs, 3, config.num_attention_heads, config.head_dim,
