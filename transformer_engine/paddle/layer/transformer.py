@@ -6,6 +6,7 @@
 from typing import Optional, Union
 
 import paddle
+from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
 
 from . import LayerNormMLP, LayerNorm, MultiHeadAttention
 from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
@@ -182,6 +183,11 @@ class TransformerLayer(paddle.nn.Layer):
                 backend=backend,
             )
 
+        self.fused_dropout_add1 = FusedDropoutAdd(self.hidden_dropout, mode="upscale_in_train")
+        if self.layer_type == "decoder":
+            self.fused_dropout_add2 = FusedDropoutAdd(self.hidden_dropout, mode="upscale_in_train")
+        self.fused_dropout_add3 = FusedDropoutAdd(self.hidden_dropout, mode="upscale_in_train")
+
     def forward(
         self,
         hidden_states: paddle.Tensor,
@@ -249,12 +255,7 @@ class TransformerLayer(paddle.nn.Layer):
 
         # dropoout add.
         with track_rng_state(enable=self.tensor_parallel, name=self.hidden_dropout_rng_state_name):
-            out = paddle.nn.functional.dropout(
-                attention_output,
-                p=self.hidden_dropout,
-                training=True,
-            )
-        bda_output = residual + out
+            bda_output = self.fused_dropout_add1(attention_output, residual)
 
         # Cross attention.
         if self.layer_type == "decoder":
@@ -275,12 +276,7 @@ class TransformerLayer(paddle.nn.Layer):
 
             with track_rng_state(enable=self.tensor_parallel,
                                  name=self.hidden_dropout_rng_state_name):
-                out = paddle.nn.functional.dropout(
-                    attention_output,
-                    p=self.hidden_dropout,
-                    training=True,
-                )
-            bda_output = residual + out
+                bda_output = self.fused_dropout_add2(attention_output, residual)
 
         # MLP.
         mlp_outputs = self.layernorm_mlp(bda_output)
@@ -292,8 +288,7 @@ class TransformerLayer(paddle.nn.Layer):
 
         # dropoout add.
         with track_rng_state(enable=self.tensor_parallel, name=self.hidden_dropout_rng_state_name):
-            out = paddle.nn.functional.dropout(mlp_output, p=self.hidden_dropout, training=True)
-        output = residual + out
+            output = self.fused_dropout_add3(mlp_output, residual)
 
         # For BERT like architectures.
         if self.output_layernorm:
