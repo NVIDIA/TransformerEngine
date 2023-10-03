@@ -52,3 +52,27 @@ GemmParallelModes = ("row", "column", None)
 dist_group_type = paddle.distributed.collective.Group
 
 RecomputeFunctionNames = ('unpack', 'backward')
+
+QKVLayout = {
+    "not_interleaved": tex.NVTE_QKV_Layout.NVTE_NOT_INTERLEAVED,
+    "qkv_interleaved": tex.NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED,
+    "kv_interleaved": tex.NVTE_QKV_Layout.NVTE_KV_INTERLEAVED,
+}
+
+AttnBiasType = {
+    "no_bias": tex.NVTE_Bias_Type.NVTE_NO_BIAS,
+    "pre_scale_bias": tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS,
+    "post_scale_bias": tex.NVTE_Bias_Type.NVTE_POST_SCALE_BIAS,
+}
+
+AttnMaskType = {
+    "no_mask": tex.NVTE_Mask_Type.NVTE_NO_MASK,
+    "padding": tex.NVTE_Mask_Type.NVTE_PADDING_MASK,
+    "causal": tex.NVTE_Mask_Type.NVTE_CAUSAL_MASK,
+}
+
+FusedAttnBackend = {
+    "F16_max512_seqlen": tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
+    "F16_arbitrary_seqlen": tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+    "No_Backend": tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+}
