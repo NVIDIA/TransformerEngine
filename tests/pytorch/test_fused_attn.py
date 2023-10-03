@@ -661,7 +661,7 @@ class _dpa_fp8(torch.autograd.Function):
         ZInv = None
         philox_unpacked = None
 
-        qkv_out = ext.fp8_gemm(
+        qkv_out, _ = ext.fp8_gemm(
             qkv_weight_fp8,
             fp8_meta["scaling_fwd"].scale_inv,
             tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -811,7 +811,7 @@ class _dpa_fp8(torch.autograd.Function):
             )
 
             # QKV DGRAD
-            qkv_dgrad = ext.fp8_gemm(
+            qkv_dgrad, _ = ext.fp8_gemm(
                 qkv_weight_t_fp8,
                 fwd_scale_inverses,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -825,7 +825,7 @@ class _dpa_fp8(torch.autograd.Function):
                 use_split_accumulator=_2X_ACC_DGRAD,
             )
             # QKV WGRAD
-            qkv_wgrad = ext.fp8_gemm(
+            qkv_wgrad, _ = ext.fp8_gemm(
                 inputmat_t,
                 fwd_scale_inverses,
                 tex.FP8FwdTensors.GEMM1_INPUT,
