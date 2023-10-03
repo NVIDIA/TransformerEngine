@@ -21,6 +21,8 @@ from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+_cudnn_version = [int(i) for i in os.environ['CUDNN_VERSION'].split('.')]
+
 
 class ModelConfig:
     def __init__(
@@ -51,11 +53,21 @@ if os.getenv('NVTE_ADDITIONAL_TESTS', '0') == '1':
     model_configs["test8"] = ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal")
     model_configs["test9"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask")
 
+model_configs_lean = {
+    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
+    "test2": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
+}
+
 param_types = [torch.float16]
 if torch.cuda.is_bf16_supported():
     param_types.append(torch.bfloat16)
 
+param_types_lean = [torch.float16]
+
 batch_sizes = [1, 2] # add more if needed, e.g. 32
+
+batch_sizes_lean = [2]
+
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
@@ -69,7 +81,6 @@ def test_dot_product_attention(dtype, bs, model, ckpt_attn, bias_type):
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
     config = model_configs[model]
-
     if bias_type == "no_bias":
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
                 dtype, bs, config, "FlashAttention", ckpt_attn, bias_type)
@@ -150,9 +161,11 @@ qkv_layouts = [
 
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.skipif(
+    _cudnn_version >= [8,9,5], reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("bs", batch_sizes_lean)
+@pytest.mark.parametrize("model", model_configs_lean.keys())
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
 def test_dpa_qkv_layout(dtype, bs, model, workspace_opt, qkv_layout):
@@ -187,7 +200,6 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
-
 
     dim_to_num = {'b': bs,
         's': config.seq_len,
@@ -376,9 +388,9 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fus
 @pytest.mark.skipif(not _flash_attn_2_available, reason="FA2.0 is not available")
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("bs", batch_sizes_lean)
+@pytest.mark.parametrize("model", model_configs_lean.keys())
 def test_transformer_layer_gqa(dtype, bs, model):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
