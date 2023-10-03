@@ -2322,12 +2322,7 @@ int allreduce2_userbuff_inplace_gpu(const int maxcredit, const int handler, cons
     callranks2_block(1) callranks2_block(2) callranks2_block(4) callranks2_block(8)
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    //if (op == userbuffers_allreduceop_nonsharp2 && comm->use_mc &&
-    //    (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-    //  callranksMC(2) callranksMC(4) callranksMC(8)
-    //} else {
       callranks(2) callranks(4) callranks(8)
-    //}
   }
   return sms;
 }
@@ -2643,11 +2638,7 @@ int reducescatter2_userbuff_inplace_gpu(const int maxcredit, const int handler, 
     callranks2_block_rs(1) callranks2_block_rs(2) callranks2_block_rs(4) callranks2_block_rs(8)
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    //if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-    //  callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
-    //} else {
       callranks_rs(2) callranks_rs(4) callranks_rs(8)
-    //}
   }
   return sms;
 }
@@ -2866,11 +2857,7 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
     warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  //if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-  //  callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
-  //} else {
     callranks_ag(2) callranks_ag(4) callranks_ag(8)
-  //}
 }
 
 void allgather2_userbuff_inplace_sliced(const int handler, const int offset, const int elements,
@@ -2906,11 +2893,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
     warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  //if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-  //  callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
-  //} else {
     callranks_rs(2) callranks_rs(4) callranks_rs(8)
-  //}
 }
 void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
                                            const int rowelements, const int colelements,
@@ -2933,11 +2916,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
     warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  //if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-  //  callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
-  //} else {
     callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
-  //}
 }
 void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,
                              communicator *comm, cudaStream_t stream) {
