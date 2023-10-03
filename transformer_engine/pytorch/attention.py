@@ -1251,9 +1251,10 @@ class FusedAttention(torch.nn.Module):
     | qkv_layout    |                         |                                |
     |  - qkv        | qkv_interleaved         | qkv_interleaved                |
     |  - (q,kv)     | kv_interleaved          |                                |
-    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd                   |
+    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd, sbh3d, bsh3d     |
     |               | sbhd_sb2hd, bshd_bs2hd  | sbhd_sb2hd, bshd_bs2hd         |
-    |               | bshd_bshd_bshd          | sbhd_sbhd_sbhd, bshd_bshd_bshd |
+    |               | bshd_bshd_bshd          | sbhd_sbh2d, bshd_bsh2d         |
+    |               |                         | sbhd_sbhd_sbhd, bshd_bshd_bshd |
     | mask_type     | causal/no_mask          | causal                         |
     | bias_type     | no_bias/post_scale_bias | no_bias                        |
     | dropout       | yes                     | yes                            |
