@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v3
       - name: 'Install dependencies'
         run: |
-          pip install sphinx==5.1.1 sphinx_rtd_theme==1.0.0 nbsphinx==0.8.10 IPython ipython_genutils==0.2.0 ipywidgets==8.0.2
+          pip install sphinx==5.1.1 sphinx_rtd_theme==1.0.0 nbsphinx==0.8.10 IPython ipython_genutils==0.2.0 ipywidgets==8.0.2 astroid==2.15.7
           pip install breathe==4.34.0 sphinx-autoapi==2.0.1
           sudo apt-get install -y pandoc graphviz doxygen
           export GIT_SHA=$(git show-ref --hash HEAD)
