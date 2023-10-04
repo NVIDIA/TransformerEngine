@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
@@ -127,7 +127,7 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+    self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
                         type of attention mask passed into softmax operation. Overridden by
                         :attr:`self_attn_mask_type` in the `forward` method. The forward
                         arg is useful for dynamically changing mask types, e.g. a different
@@ -429,7 +429,7 @@ class TransformerLayer(torch.nn.Module):
     def set_context_parallel_running(
         self,
         cp_group: Union[dist_group_type, None],
-        cp_global_ranks: Union[int],
+        cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
         """Set CP group and CP dual-stream running"""
@@ -460,16 +460,17 @@ class TransformerLayer(torch.nn.Module):
 
         .. note::
 
-            Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
-            is set to `"causal"`.
+            Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
+            includes `"padding"` or `"arbitrary"`.
 
         Parameters
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : Optional[torch.Tensor], default = `None`
-             Boolean tensor used to mask out self-attention softmax input.
-        self_attn_mask_type: {'causal', 'padding', 'no_mask'}, default = `causal`
+        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                        Boolean tensor used to mask out self-attention softmax input.
+                        Can be a tuple of 2 masks for cross attention with padding masks.
+        self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
                             type of attention mask passed into softmax operation.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using

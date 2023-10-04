@@ -261,27 +261,36 @@ class FusedScaleMaskSoftmax(nn.Module):
             scale is None or self.softmax_in_fp32
         ), "softmax should be in fp32 when scaled"
 
-        if self.is_kernel_available(*inp.size()) and not is_in_onnx_export_mode():
+        if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 
         if ( # pylint: disable=too-many-boolean-expressions
-            self.scaled_masked_softmax_fusion  # user want to fuse
+            self.scaled_masked_softmax_fusion  # user wants to fuse
             and self.input_in_float16  # input must be fp16
             and 16 < sk <= 4096  # sk must be 16 ~ 2048
             and sk % 8 == 0  # sk must be divisor of 8
             and sq % 4 == 0  # sq must be divisor of 4
             and attn_batches % 4 == 0  # np * b must be divisor of 4
+            and self.attn_mask_type != "arbitrary"  # Custom masks not supported
         ):
             if 0 <= sk <= 4096:
                 batch_per_block = self.get_batch_per_block(int(sk))
 
                 if self.attn_mask_type == "causal":
                     if attn_batches % batch_per_block == 0:
+                        return True
+                elif self.attn_mask_type == "padding":
+                    if (
+                        mask is not None
+                        and sq % batch_per_block == 0
+                        and mask.shape[-2] == sq
+                        and mask.shape[-1] == sk
+                    ):
                         return True
                 else:
                     if sq % batch_per_block == 0:
@@ -303,7 +312,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             probs = ScaledUpperTriangMaskedSoftmax.apply(inp, scale)
             return probs.view(b, np, sq, sk)
         # input is 4D tensor (b, np, sq, sk)
-        if mask is not None:
+        if mask is not None and self.attn_mask_type != "no_mask":
             return ScaledMaskedSoftmax.apply(inp, mask, scale)
         return ScaledSoftmax.apply(inp, scale)
 
@@ -325,7 +334,9 @@ class FusedScaleMaskSoftmax(nn.Module):
             else:
                 mask = _get_default_causal_mask(inp.size(2))
 
-        mask_output = self.mask_func(inp, mask) if mask is not None else inp
+        mask_output = inp
+        if mask is not None and self.attn_mask_type != "no_mask":
+            mask_output = self.mask_func(inp, mask)
         probs = torch.nn.Softmax(dim=-1)(mask_output)
 
         if self.input_in_float16 and self.softmax_in_fp32:
