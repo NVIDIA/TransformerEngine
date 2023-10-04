@@ -4,28 +4,49 @@
 
 """LayerNormMLP API"""
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
 
 import torch
-from torch.nn import init
 from torch.nn.parameter import Parameter
+from torch.nn import init
 
-from ._common import _apply_normalization, _get_normalization_grad
 from .base import (
-    TransformerEngineBaseModule, _2X_ACC_DGRAD, _2X_ACC_FPROP, _2X_ACC_WGRAD, _prepare_backward, get_ub, get_workspace,
-)
-from .. import cpp_extensions as tex
-from ..constants import TE_DType, dist_group_type
-from ..distributed import (
-    allreduce, gather_along_first_dim, get_distributed_world_size, initialize_affine_weight_gpu,
-    reduce_scatter_along_first_dim, set_tensor_model_parallel_attributes,
+    get_workspace,
+    _prepare_backward,
+    get_ub,
+    TransformerEngineBaseModule,
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
 )
 from ..fp8 import get_fp8_te_dtype
 from ..jit import (
-    bgrad_dgelu_fused, bias_gelu_fused, no_torch_dynamo, set_jit_fusion_options,
+    bias_gelu_fused,
+    bgrad_dgelu_fused,
+    set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
-from ..utils import (assert_dim_for_fp8_exec, cast_if_needed, divide, get_default_init_method)
+from ..utils import (
+    divide,
+    get_default_init_method,
+    cast_if_needed,
+    assert_dim_for_fp8_exec,
+)
+from ..distributed import (
+    set_tensor_model_parallel_attributes,
+    get_distributed_world_size,
+    allreduce,
+    initialize_affine_weight_gpu,
+    reduce_scatter_along_first_dim,
+    gather_along_first_dim,
+)
+
+from .. import cpp_extensions as tex
+
+from ..constants import dist_group_type, TE_DType
+from ..jit import no_torch_dynamo
+
+from ._common import _apply_normalization, _get_normalization_grad
 
 __all__ = ["LayerNormMLP"]
 
@@ -137,7 +158,8 @@ class _LayerNormMLP(torch.autograd.Function):
                                               fwd_ln_sm_margin,
                                               zero_centered_gamma,
                                               is_grad_enabled)
-        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() if ln_out_direct_fp8 else None
+        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() \
+            if ln_out_direct_fp8 else None
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.

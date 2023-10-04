@@ -32,7 +32,8 @@ std::vector<at::Tensor> layernorm_bwd_fp8(const at::Tensor &dz,
 
     auto dz_cu      = makeTransformerEngineTensor(dz);
     auto z_cu       = makeTransformerEngineTensor(z.data_ptr(), {N, H}, otype,
-                                                  getDataPtr(at::Tensor()), getDataPtr(at::Tensor()),
+                                                  getDataPtr(at::Tensor()),
+                                                  getDataPtr(at::Tensor()),
                                                   getDataPtr(scale_inv));
     auto x_cu       = makeTransformerEngineTensor(x);
     auto rsigma_cu  = makeTransformerEngineTensor(rsigma);
@@ -92,7 +93,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz,
                                       const bool zero_centered_gamma
 ) {
     using namespace transformer_engine;
-    return layernorm_bwd_fp8(dz, z, x, rsigma, gamma, beta, eps, 
+    return layernorm_bwd_fp8(dz, z, x, rsigma, gamma, beta, eps,
                              at::Tensor(), sm_margin, zero_centered_gamma);
 }
 
@@ -268,7 +269,8 @@ std::vector<at::Tensor> rmsnorm_bwd_fp8(const at::Tensor &dz,
 
     auto dz_cu      = makeTransformerEngineTensor(dz);
     auto z_cu       = makeTransformerEngineTensor(z.data_ptr(), {N, H}, otype,
-                                                  getDataPtr(at::Tensor()), getDataPtr(at::Tensor()),
+                                                  getDataPtr(at::Tensor()),
+                                                  getDataPtr(at::Tensor()),
                                                   getDataPtr(scale_inv));
     auto x_cu       = makeTransformerEngineTensor(x);
     auto rsigma_cu  = makeTransformerEngineTensor(rsigma);
@@ -319,7 +321,7 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz,
                                       const bool zero_centered_gamma
 ) {
     using namespace transformer_engine;
-    return rmsnorm_bwd_fp8(dz, z, x, rsigma, gamma, eps, 
+    return rmsnorm_bwd_fp8(dz, z, x, rsigma, gamma, eps,
                            at::Tensor(), sm_margin, zero_centered_gamma);
 }
 

@@ -127,7 +127,8 @@ class _LayerNormLinear(torch.autograd.Function):
                                               fwd_ln_sm_margin,
                                               zero_centered_gamma,
                                               is_grad_enabled)
-        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() if ln_out_direct_fp8 else None
+        fwd_scale_inverses_ln = fp8_meta["scaling_fwd"].scale_inv.clone() \
+            if ln_out_direct_fp8 else None
         # If residual connection is after LN, we need `ln_out_return`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.

@@ -4,17 +4,17 @@
 
 """LayerNorm API"""
 import os
-from typing import Any, Mapping, Optional, Tuple, Union
+from typing import Union, Tuple, Any, Mapping, Optional
 
 import torch
-import transformer_engine_extensions as tex
-from torch.nn import init
 from torch.nn.parameter import Parameter
+from torch.nn import init
 
+import transformer_engine_extensions as tex
 from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
-)
+ )
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
@@ -26,7 +26,7 @@ class _LayerNorm(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
+            ctx,
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
         ln_bias: torch.Tensor,
@@ -58,8 +58,8 @@ class _LayerNorm(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.eps = eps
         else:
-            ln_out, mu, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
-                ln_bias, eps, zero_centered_gamma), None, None
+            ln_out, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
+                ln_bias, eps, zero_centered_gamma), None
         return ln_out.view_as(inp)
 
     @staticmethod
