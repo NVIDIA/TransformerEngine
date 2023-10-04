@@ -6,10 +6,9 @@
 import struct
 
 import numpy as np
-import pytest
 import paddle
 import paddle.nn.functional as F
-from utils import assert_allclose, create_fp8_meta
+import pytest
 
 import transformer_engine    # pylint: disable=unused-import
 import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
@@ -44,6 +43,8 @@ from transformer_engine.paddle.cpp_extensions import (
 from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
+
+from utils import assert_allclose, is_fused_attention_supported, create_fp8_meta
 
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
@@ -739,8 +740,6 @@ class TestFusedAttn:
 
         return out, q_grad, k_grad, v_grad
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
-                        reason="cuDNN fMHA kernel is not supported")
     @pytest.mark.parametrize('b, s, h, d', SELF_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True, False])
@@ -748,6 +747,17 @@ class TestFusedAttn:
         """
         test self attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s,
+            kv_seqlen=s,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="qkv_interleaved",
+            bias_type="no_bias",
+            mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
@@ -756,14 +766,23 @@ class TestFusedAttn:
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
-                        reason="cuDNN fMHA kernel is not supported")
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     def test_cross_attn_forward_backward(self, b, s_q, s_kv, h, d, dtype):
         """
         test cross attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s_q,
+            kv_seqlen=s_kv,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="kv_interleaved",
+            bias_type="no_bias",
+            mask_type="padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s_q, s_kv, h, d, dtype, "cross_attn")
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
@@ -772,8 +791,6 @@ class TestFusedAttn:
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
-                        reason="cuDNN fMHA kernel is not supported")
     @pytest.mark.parametrize('b, s, h, d', FLASH_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True])
@@ -781,6 +798,17 @@ class TestFusedAttn:
         """
         test flash attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s,
+            kv_seqlen=s,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="qkv_interleaved",
+            bias_type="no_bias",
+            mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()

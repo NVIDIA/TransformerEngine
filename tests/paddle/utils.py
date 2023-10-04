@@ -4,15 +4,23 @@
 """Utils for testing"""
 
 import random
-import numpy as np
+from typing import Union
 
+import numpy as np
 import paddle
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 
 import transformer_engine    # pylint: disable=unused-import
-
+from transformer_engine.paddle.constants import (
+    TE_DType,
+    QKVLayout,
+    AttnBiasType,
+    AttnMaskType,
+    FusedAttnBackend,
+)
 from transformer_engine.paddle.fp8 import FP8TensorMeta
+import transformer_engine_paddle as tex
 
 
 def create_fp8_meta(num_gemms=1, amax_history_len=10):
@@ -92,3 +100,32 @@ def set_random_seed(seed):
         tracker.add("local_seed", local_seed)
 
     paddle.seed(global_seed)
+
+def is_fused_attention_supported(
+    head_size: int,
+    q_seqlen: int,
+    kv_seqlen: int,
+    dtype: Union[paddle.dtype, str],
+    dropout: float,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    mask_type: str = "causal",
+) -> bool:
+    if isinstance(dtype, str):
+        dtype = dict(
+            float32=paddle.float32,
+            bfloat16=paddle.bfloat16,
+            float16=paddle.float16,
+        )[dtype]
+    backend = tex.get_fused_attn_backend(
+        TE_DType[dtype],
+        TE_DType[dtype],
+        QKVLayout[qkv_layout],
+        AttnBiasType[bias_type],
+        AttnMaskType[mask_type],
+        dropout,
+        q_seqlen,
+        kv_seqlen,
+        head_size,
+    )
+    return backend != FusedAttnBackend["No_Backend"]
