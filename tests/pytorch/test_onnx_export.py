@@ -506,7 +506,7 @@ def test_export_gemm(
                 self.fp8_tensor_weight,
                 self.weights_type)
 
-            ret = fp8_gemm(
+            ret, _ = fp8_gemm(
                 weight_fp8,
                 self.meta_weight.scale_inv,
                 self.fp8_tensor_weight,
@@ -1323,7 +1323,7 @@ def test_export_gemm_layernorm(
                 self.fp8_tensor_weight,
                 self.weights_type)
 
-            ret = fp8_gemm(
+            ret, _ = fp8_gemm(
                 weight_fp8,
                 self.meta_weight.scale_inv,
                 self.fp8_tensor_weight,
