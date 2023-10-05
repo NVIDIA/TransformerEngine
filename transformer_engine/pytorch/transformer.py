@@ -273,6 +273,13 @@ class TransformerLayer(torch.nn.Module):
         assert (
             not (ub_split_ag and ub_atomic_gemm_ag)
         ), "Only one type of AG overlap NVTE_UB_SPLIT_AG/NVTE_UB_ATOMIC_GEMM_AG should be enabled."
+
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+            warnings.warn(
+                "Atomic gemm uses an experimental API from cublas "
+                "and is not guaranteed to work for all use cases."
+            )
+
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm

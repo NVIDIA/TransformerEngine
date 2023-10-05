@@ -690,6 +690,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
 
+        if ub_atomic_gemm_ag:
+            warnings.warn(
+                "Atomic gemm uses an experimental API from cublas "
+                "and is not guaranteed to work for all use cases."
+            )
+
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
