@@ -157,18 +157,7 @@ def _test_sanity_e2e_amp(block, bs, dtype, config, fp8_recipe, skip_wgrad):
         config.seq_len, bs, config.hidden_size, dtype=torch.float32, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -193,18 +182,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, bs, dtype, config, fp8_
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -233,18 +211,24 @@ def _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+
+    if skip_wgrad:
+        _disable_wgrads(block)
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp_hidden_states)
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+
+def _test_sanity_e2e_bert(block, bs, dtype, config, fp8_recipe, skip_wgrad):
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+
+    te_inp_attn_mask = torch.rand(torch.Size([bs, 1, 1, config.seq_len])).cuda() > 0.5
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -261,18 +245,8 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
-    te_inp_attn_mask = (
-        torch.rand(
-            (
-                1,
-                1,
-                config.seq_len,
-                config.seq_len,
-            )
-        )
-        .cuda()
-        .bool()
-    )
+    te_inp_attn_mask = torch.randint(2, (1, 1, config.seq_len, config.seq_len)).cuda().bool()
+    enc_dec_attn_mask = torch.rand(torch.Size([bs, 1, 1, config.seq_len])).cuda() > 0.5
 
     if skip_wgrad:
         _disable_wgrads(block)
@@ -282,7 +256,8 @@ def _test_sanity_e2e_T5(block, bs, dtype, config, fp8_recipe, skip_wgrad):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
-            encoder_output=te_inp_hidden_states
+            encoder_output=te_inp_hidden_states,
+            enc_dec_attn_mask=enc_dec_attn_mask,
         )
     loss = te_out.sum()
     loss.backward()
@@ -541,13 +516,14 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
             apply_residual_connection_post_layernorm=True,
             output_layernorm=True,
             zero_centered_gamma=zero_centered_gamma,
+            self_attn_mask_type="padding",
             normalization=normalization,
         )
         .to(dtype=dtype)
         .cuda()
     )
 
-    _test_sanity_e2e(block, bs, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e_bert(block, bs, dtype, config, fp8_recipe, skip_wgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)

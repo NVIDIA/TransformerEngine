@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cub/cub.cuh>
 #include <vector>
 #include "../common.h"
 #include "common.h"
@@ -542,6 +543,11 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
     return {dx, dgamma};
 }
 
+__global__ void set_rng_state(std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
+    rng_state_ptr[0] = static_cast<int64_t>(seed_offset.first);
+    rng_state_ptr[1] = static_cast<int64_t>(seed_offset.second);
+}
+
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
                                  const paddle::optional<paddle::Tensor> &Bias,
                                  paddle::Tensor &O,                              // NOLINT
@@ -551,7 +557,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
                                  int64_t max_seqlen, bool is_training, float attn_scale,
                                  float p_dropout, const std::string &qkv_layout,
                                  const std::string &bias_type, const std::string &attn_mask_type,
-                                 const int64_t qkv_type) {
+                                 const int64_t qkv_type, int64_t rng_elts_per_thread) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
@@ -580,6 +586,11 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
     // extract random number generator seed and offset
+    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(QKV.place());
+    auto gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    set_rng_state<<<1, 1, 0, QKV.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors
@@ -692,18 +703,16 @@ void te_fused_attn_bwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
 }
 
-void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &KV,
-                                const paddle::Tensor &cu_seqlens_q,
-                                const paddle::Tensor &cu_seqlens_kv,
-                                const paddle::optional<paddle::Tensor> &Bias,
-                                paddle::Tensor &O,                              // NOLINT
-                                paddle::optional<paddle::Tensor> &softmax_aux,  // NOLINT
-                                paddle::Tensor &rng_state,                      // NOLINT
-                                int64_t b, int64_t h, int64_t d, int64_t total_seqs_q,
-                                int64_t total_seqs_kv, int64_t max_seqlen_q, int64_t max_seqlen_kv,
-                                bool is_training, float attn_scale, float p_dropout,
-                                const std::string &qkv_layout, const std::string &bias_type,
-                                const std::string &attn_mask_type, const int64_t qkv_type) {
+void te_fused_attn_fwd_kvpacked(
+    const paddle::Tensor &Q, const paddle::Tensor &KV, const paddle::Tensor &cu_seqlens_q,
+    const paddle::Tensor &cu_seqlens_kv, const paddle::optional<paddle::Tensor> &Bias,
+    paddle::Tensor &O,                              // NOLINT
+    paddle::optional<paddle::Tensor> &softmax_aux,  // NOLINT
+    paddle::Tensor &rng_state,                      // NOLINT
+    int64_t b, int64_t h, int64_t d, int64_t total_seqs_q, int64_t total_seqs_kv,
+    int64_t max_seqlen_q, int64_t max_seqlen_kv, bool is_training, float attn_scale,
+    float p_dropout, const std::string &qkv_layout, const std::string &bias_type,
+    const std::string &attn_mask_type, const int64_t qkv_type, int64_t rng_elts_per_thread) {
     if (is_training && !softmax_aux) {
         NVTE_ERROR("softmax_aux must be provided when training. \n");
     }
@@ -747,6 +756,10 @@ void te_fused_attn_fwd_kvpacked(const paddle::Tensor &Q, const paddle::Tensor &K
     NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
+    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
+    auto gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors
@@ -1040,6 +1053,8 @@ __global__ void UpdateFP8MetaKernel(const float *amax, const float *rolled_amax_
     }
 }
 
+constexpr int BLOCK_SIZE = 512;
+
 void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
                                    paddle::Tensor &scale,         // NOLINT
                                    paddle::Tensor &scale_inv,     // NOLINT
@@ -1057,7 +1072,6 @@ void amax_and_scale_update_inplace(paddle::Tensor &amax_history,  // NOLINT
     const auto rolled_amax_history = amax_history.roll({-1}, {0});
 
     auto size = amax_history.numel();
-    constexpr int BLOCK_SIZE = 256;
     size_t num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
     UpdateFP8MetaKernel<<<num_blocks, BLOCK_SIZE, 0, amax_history.stream()>>>(
         amax.data<float>(), rolled_amax_history.data<float>(), amax_history.data<float>(),
@@ -1072,6 +1086,87 @@ void update_latest_amax_history_inplace(paddle::Tensor &history,  // NOLINT
     NVTE_CHECK_CUDA(cudaMemcpyAsync(history.data(), amax.data(),
                                     amax.numel() * SizeOf(amax.dtype()), cudaMemcpyDeviceToDevice,
                                     amax.stream()));
+}
+
+__global__ __launch_bounds__(BLOCK_SIZE) void mask_to_actual_seqlens_kernel(
+    const bool *mask, int32_t *q_actual_seqlen, int32_t *kv_actual_seqlen, int q_seqlen,
+    int kv_seqlen, bool need_kv) {
+    typedef cub::BlockReduce<int, BLOCK_SIZE> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage q_smem;
+    __shared__ typename BlockReduce::TempStorage kv_smem;
+    unsigned int tid = threadIdx.x;
+    unsigned int batch_offset = blockIdx.x * q_seqlen * kv_seqlen;
+
+    // load mask, convert to 1/0, do accumulation
+    int q = 0, kv = 0;
+    for (unsigned int q_idx = tid * kv_seqlen; q_idx < q_seqlen * kv_seqlen;
+         q_idx += BLOCK_SIZE * kv_seqlen) {
+        q += (mask[q_idx + batch_offset] ? 0 : 1);
+    }
+
+    if (need_kv) {
+        for (unsigned int kv_idx = tid; kv_idx < kv_seqlen; kv_idx += BLOCK_SIZE) {
+            kv += (mask[kv_idx + batch_offset] ? 0 : 1);
+        }
+    }
+    __syncthreads();
+
+    // compute cub::BlockReduce
+    int q_sum, kv_sum;
+    q_sum = BlockReduce(q_smem).Sum(q);
+    if (need_kv) kv_sum = BlockReduce(kv_smem).Sum(kv);
+
+    // write result for this block to global mem
+    if (tid == 0) {
+        q_actual_seqlen[blockIdx.x + 1] = q_sum;
+        if (need_kv) {
+            kv_actual_seqlen[blockIdx.x + 1] = kv_sum;
+        }
+    }
+}
+
+__global__ __launch_bounds__(BLOCK_SIZE) void block_prefix_sum_inplace(int32_t *x, int n) {
+    typedef cub::BlockScan<int32_t, BLOCK_SIZE> BlockScan;
+    __shared__ typename BlockScan::TempStorage smem;
+    // +1 to ignore the first element
+    int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
+
+    // load data
+    int32_t thread_data[1];
+    thread_data[0] = i < n ? x[i] : 0;
+    __syncthreads();
+
+    // CUB block prefix sum
+    BlockScan(smem).InclusiveSum(thread_data, thread_data);
+    __syncthreads();
+
+    // write result
+    if (i < n) {
+        x[i] = thread_data[0];
+    }
+}
+
+void mask_to_cu_seqlens(const paddle::Tensor &mask,
+                        paddle::Tensor &q_cu_seqlen,                     // NOLINT
+                        paddle::optional<paddle::Tensor> &kv_cu_seqlen,  // NOLINT
+                        int q_seqlen, int kv_seqlen, bool need_kv) {
+    if (need_kv) {
+        NVTE_CHECK(GetOptionalDataPtr(kv_cu_seqlen) != nullptr,
+                   "kv_cu_seqlen must be provided when need_kv is true");
+    }
+    mask_to_actual_seqlens_kernel<<<mask.shape()[0], BLOCK_SIZE, 0, mask.stream()>>>(
+        mask.data<bool>(), q_cu_seqlen.data<int32_t>(),
+        reinterpret_cast<int32_t *>(GetOptionalDataPtr(kv_cu_seqlen)), q_seqlen, kv_seqlen,
+        need_kv);
+    // q_cu_seqlen shape: [bs+1], assume bs is not too large (<=512), so we can use a single block
+    // to do prefix sum
+    NVTE_CHECK(q_cu_seqlen.numel() - 1 <= BLOCK_SIZE, "batch size too large, kernel may fail");
+    block_prefix_sum_inplace<<<1, BLOCK_SIZE, 0, mask.stream()>>>(q_cu_seqlen.data<int32_t>(),
+                                                                  q_cu_seqlen.numel());
+    if (need_kv) {
+        block_prefix_sum_inplace<<<1, BLOCK_SIZE, 0, mask.stream()>>>(
+            reinterpret_cast<int32_t *>(GetOptionalDataPtr(kv_cu_seqlen)), kv_cu_seqlen->numel());
+    }
 }
 
 }  // namespace paddle_ext
@@ -1192,7 +1287,8 @@ PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)
     .Outputs({"O", paddle::Optional("softmax_aux")})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_qkvpacked));
@@ -1214,7 +1310,8 @@ PD_BUILD_OP(te_fused_attn_fwd_kvpacked)
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
-            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t"})
+            "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
+            "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
                     {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_kvpacked));
@@ -1287,3 +1384,11 @@ PD_BUILD_OP(update_latest_amax_history_inplace)
     .Outputs({"history"})
     .SetInplaceMap({{"_history", "history"}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::update_latest_amax_history_inplace));
+
+PD_BUILD_OP(mask_to_cu_seqlens)
+    .Inputs({"mask", "_q_cu_seqlen", paddle::Optional("_kv_cu_seqlen")})
+    .Outputs({"q_cu_seqlen", paddle::Optional("kv_cu_seqlen")})
+    .Attrs({"q_seqlen: int", "kv_seqlen: int", "need_kv: bool"})
+    .SetInplaceMap({{"_q_cu_seqlen", "q_cu_seqlen"},
+                    {paddle::Optional("_kv_cu_seqlen"), paddle::Optional("kv_cu_seqlen")}})
+    .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::mask_to_cu_seqlens));
