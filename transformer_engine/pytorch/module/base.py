@@ -124,6 +124,8 @@ def initialize_ub(
     fp8_buf = [
         "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
     ]
+    if bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+        fp8_buf.append ("proj_fprop")
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
@@ -153,8 +155,12 @@ def initialize_ub(
                     sample_buffer,          # Sample userbuffer
                     rank_id,                # Rank id
                     tp_size,                # TP size
+                    num_sm,                 # Number of communication SMs
+                    cga_size,               # CGA cluster size
+                    set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -166,6 +172,7 @@ def initialize_ub(
                     num_splits,             # Number of communication splits
                     set_sm_margin,          # Set SM margin
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
 
@@ -676,10 +683,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output_mat = grad_output.view((-1, grad_output.shape[-1]))
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
+        if gather_grad_output:
+            ub_overlap_ag = ctx.ub_split_ag or ctx.ub_atomic_gemm_ag
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8:
             if gather_grad_output:
-                if not ctx.ub_split_ag:
+                if not ub_overlap_ag:
                     grad_output_mat, _ = gather_along_first_dim(
                         grad_output_mat, ctx.tp_group
                     )
@@ -698,8 +707,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and ctx.fp8_meta["recipe"].override_linear_precision.wgrad
         ):
             assert (
-                not ctx.ub_split_ag
-            ), "override_linear_precision.wgrad not supported with ub_split_ag"
+                not ub_overlap_ag
+            ), "override_linear_precision.wgrad not supported with UB AG overlap"
             grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
         # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
         elif gather_grad_output:
@@ -707,7 +716,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output_mat.sum(dim=0)
             else:
                 grad_bias = None
-            if ctx.ub_split_ag:
+            if ub_overlap_ag:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
@@ -718,7 +727,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype_backward,
                 out=grad_output_c,
             )
-            if not ctx.ub_split_ag:
+            if not ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
             else:
