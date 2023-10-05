@@ -56,7 +56,7 @@ void nvte_cublas_gemm(const NVTETensor A,
 
 /*! \brief Compute matrix multiplication of 2 matrices with chunking and atomic counters.
  *
- * \warning   Cublas atomic gemm uses a beta API and is not guaranteed to work for all use cases.
+ * \warning   Cublas atomic gemm uses a beta API and is not tested for all use cases.
  *
  * Computes:
  *  - `D = AB` if both `bias` and `pre_gelu_out` are empty tensors

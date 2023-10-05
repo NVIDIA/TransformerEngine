@@ -692,8 +692,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if ub_atomic_gemm_ag:
             warnings.warn(
-                "Atomic gemm uses a beta API from cublas and is"
-                " not guaranteed to work for all use cases."
+                "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
             )
 
         if tp_group is None:
