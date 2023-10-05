@@ -26,7 +26,7 @@ class _LayerNorm(torch.autograd.Function):
 
     @staticmethod
     def forward(
-            ctx,
+        ctx,
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
         ln_bias: torch.Tensor,
