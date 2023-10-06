@@ -310,11 +310,11 @@ class FP8Helper:
                 amax = fp8_meta_arrays[fp8_amax_idx][..., 0:1]
             scale = fp8_meta_arrays[fp8_scale_idx]
 
-            sf = (fp8_max / amax) / (2 ** FP8Helper.MARGIN)
+            sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
             sf = jnp.where(amax > 0.0, sf, scale)
             sf = jnp.where(jnp.isfinite(amax), sf, scale)
-            fp8_meta_arrays[fp8_scale_idx] = scale
-            fp8_meta_arrays[fp8_scale_inv_idx] = 1 / scale
+            fp8_meta_arrays[fp8_scale_idx] = sf
+            fp8_meta_arrays[fp8_scale_inv_idx] = 1 / sf
 
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
 
