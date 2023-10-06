@@ -316,9 +316,9 @@ def get_attn_mask_str(use_mask, attn_mask_type):
     # See FusedScaleMaskSoftmax::forward_fused_softmax for logic behind names.
     if attn_mask_type is None:
         return "_mask" if use_mask else "_no-mask"
-    attn_mask_str = "_padding-no-mask"
+    attn_mask_str = "_arbitrary-no-mask"
     attn_mask_str = "_causal-mask" if attn_mask_type == "causal" else attn_mask_str
-    attn_mask_str = "_padding-mask" if use_mask and attn_mask_type == "padding" else attn_mask_str
+    attn_mask_str = "_arbitrary-mask" if use_mask and attn_mask_type == "arbitrary" else attn_mask_str
     return attn_mask_str
 
 
@@ -506,7 +506,7 @@ def test_export_gemm(
                 self.fp8_tensor_weight,
                 self.weights_type)
 
-            ret = fp8_gemm(
+            ret, _ = fp8_gemm(
                 weight_fp8,
                 self.meta_weight.scale_inv,
                 self.fp8_tensor_weight,
@@ -986,14 +986,14 @@ def test_export_layernorm_mlp(
 @skip_FP8
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type", [
-    (torch.float32,  True,     "padding"), # calls forward_torch_softmax (apply user mask)
-    (torch.float32,  False,    "no_mask"), # calls forward_torch_softmax (apply no mask)
-    (torch.float16,  False,    "causal"),  # calls forward_torch_softmax (apply dynamic onnx mask)
-    (torch.float16,  True,     "padding"), # calls forward_torch_softmax (apply user mask)
-    (torch.float16,  False,    "no_mask"), # calls forward_torch_softmax (apply no mask)
-    (torch.bfloat16, False,    "causal"),  # calls forward_torch_softmax (apply dynamic onnx mask)
-    (torch.bfloat16, True,     "padding"), # calls forward_torch_softmax (apply user mask)
-    (torch.bfloat16, False,    "no_mask"), # calls forward_torch_softmax (apply no mask)
+    (torch.float32,  True,     "arbitrary"), # calls forward_torch_softmax (apply user mask)
+    (torch.float32,  False,    "no_mask"),   # calls forward_torch_softmax (apply no mask)
+    (torch.float16,  False,    "causal"),    # calls forward_torch_softmax (apply dynamic onnx mask)
+    (torch.float16,  True,     "arbitrary"), # calls forward_torch_softmax (apply user mask)
+    (torch.float16,  False,    "no_mask"),   # calls forward_torch_softmax (apply no mask)
+    (torch.bfloat16, False,    "causal"),    # calls forward_torch_softmax (apply dynamic onnx mask)
+    (torch.bfloat16, True,     "arbitrary"), # calls forward_torch_softmax (apply user mask)
+    (torch.bfloat16, False,    "no_mask"),   # calls forward_torch_softmax (apply no mask)
 ])
 def test_export_core_attention(
     seed_default_rng,
@@ -1014,7 +1014,7 @@ def test_export_core_attention(
     attention_mask = None
     if use_mask:
         # Generate a random mask with 50% probability for 0 or 1.
-        probs = 0.5 * torch.ones(qkv_size[1], qkv_size[2], qkv_size[0], qkv_size[0], device="cuda", dtype=precision)
+        probs = 0.5 * torch.ones(batch_size, 1, 1, seq_len, device="cuda", dtype=precision)
         attention_mask = torch.bernoulli(probs).to("cuda", dtype=torch.bool)
     inp = (query_layer, key_layer, value_layer, attention_mask)
 
@@ -1043,9 +1043,8 @@ def test_export_core_attention(
 
 test_configs_multihead_attention = [
     #"use_mask, attn_mask_type"
-    (False,    "causal"),  # calls ScaledUpperTriangMaskedSoftmax
-    (True,     "padding"), # calls ScaledMaskedSoftmax
-    (False,    "padding"), # calls ScaledSoftmax
+    (False,    "no_mask"),   # calls ScaledSoftmax
+    (True,     "arbitrary"), # calls ScaledMaskedSoftmax
 ]
 test_configs_attention_type = [
     #"input_layernorm, attention_type, fuse_qkv_params"
@@ -1324,7 +1323,7 @@ def test_export_gemm_layernorm(
                 self.fp8_tensor_weight,
                 self.weights_type)
 
-            ret = fp8_gemm(
+            ret, _ = fp8_gemm(
                 weight_fp8,
                 self.meta_weight.scale_inv,
                 self.fp8_tensor_weight,

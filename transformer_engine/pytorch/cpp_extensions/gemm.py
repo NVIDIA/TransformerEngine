@@ -91,12 +91,24 @@ def fp8_gemm(
         assert ub is not None, 'ub object is None!'
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
-            args = tuple(args + (1,))
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (1, extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
-            args = tuple(args + (0,))
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (0, extra_output_tensor,))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
             fn = ub.split_overlap_ag
+            extra_output_tensor = (
+                empty_tensor if extra_output_tensor is None else extra_output_tensor
+            )
+            args = tuple(args + (extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG:
+            fn = ub.atomic_gemm_overlap_ag
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
@@ -106,6 +118,12 @@ def fp8_gemm(
             assert (
                 extra_output_tensor is not None
             ), 'SPLIT_PIPELINED_RS requires extra output tensor'
+            args = tuple(args + (True, extra_output_tensor,))
+        elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS:
+            fn = ub.atomic_gemm_overlap_rs
+            assert (
+                extra_output_tensor is not None
+            ), 'ATOMIC_GEMM_RS requires extra output tensor'
             args = tuple(args + (True, extra_output_tensor,))
     _ = fn(*args)
 
@@ -195,10 +213,10 @@ def gemm(
         assert ub is not None, 'ub object is None!'
         if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
-            args = tuple(args + (1,))
+            args = tuple(args + (1, empty_tensor))
         elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
-            args = tuple(args + (0,))
+            args = tuple(args + (0, empty_tensor))
         elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG:
             fn = ub.split_overlap_ag
             extra_output_tensor = (
