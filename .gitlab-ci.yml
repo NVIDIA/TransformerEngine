@@ -272,6 +272,9 @@ pytorch-py3-devel:
     needs: [ pytorch-py3-base ]
     extends:
     - .devel_template
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 jax-py3-devel:
     stage: build devel
@@ -280,6 +283,9 @@ jax-py3-devel:
     needs: [ jax-py3-base ]
     extends:
     - .devel_template
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 tensorflow-py3-devel:
     stage: build devel
@@ -288,6 +294,9 @@ tensorflow-py3-devel:
     needs: [ tensorflow-py3-base ]
     extends:
     - .devel_template
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 paddle-py3-devel:
     stage: build devel
@@ -296,6 +305,9 @@ paddle-py3-devel:
     needs: [ paddle-py3-base ]
     extends:
     - .devel_template
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 .stage_template : &STAGE
     environment: staging
@@ -648,11 +660,11 @@ upload_logs:
 ##
 ######################################################
 
-L0_license:
-    extends:
-    - .L0_test
-    tags:
-    - 1GPU
+# L0_license:
+#     extends:
+#     - .L0_test
+#     tags:
+#     - 1GPU
 
 L0_lint:
     variables:
@@ -662,6 +674,9 @@ L0_lint:
     - .L0_test
     tags:
     - 1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_jax_lint:
     variables:
@@ -671,6 +686,9 @@ L0_jax_lint:
     - .L0_test
     tags:
     - 1GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 L0_tensorflow_lint:
     variables:
@@ -680,6 +698,9 @@ L0_tensorflow_lint:
     - .L0_test
     tags:
     - 1GPU
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 L0_paddle_lint:
     variables:
@@ -689,6 +710,9 @@ L0_paddle_lint:
     - .L0_test
     tags:
     - 1GPU
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 L0_unittest--V100_1GPU:
     variables:
@@ -697,6 +721,9 @@ L0_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_unittest--A100_1GPU:
     variables:
@@ -705,6 +732,9 @@ L0_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_unittest--TU102_R445_1GPU:
     variables:
@@ -713,6 +743,9 @@ L0_unittest--TU102_R445_1GPU:
     extends:
     - .L0_test
     - .TU102_R445_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_unittest--H100_1GPU:
     variables:
@@ -721,6 +754,9 @@ L0_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
@@ -729,6 +765,9 @@ L1_pytorch_distributed_unittest--H100_4GPU:
     extends:
     - .L1_test
     - .H100_4GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_jax_unittest--V100_1GPU:
     variables:
@@ -737,6 +776,9 @@ L0_jax_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 L0_jax_unittest--A100_1GPU:
     variables:
@@ -745,6 +787,9 @@ L0_jax_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 L0_jax_unittest--H100_1GPU:
     variables:
@@ -753,6 +798,9 @@ L0_jax_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 L0_tensorflow_unittest--V100_1GPU:
     variables:
@@ -761,6 +809,9 @@ L0_tensorflow_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 L0_tensorflow_unittest--A100_1GPU:
     variables:
@@ -769,6 +820,9 @@ L0_tensorflow_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 L0_tensorflow_unittest--H100_1GPU:
     variables:
@@ -777,6 +831,9 @@ L0_tensorflow_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+    except:
+      variables:
+        - $BUILD_TENSORFLOW == "0"
 
 L0_paddle_unittest--V100_1GPU:
     variables:
@@ -785,6 +842,9 @@ L0_paddle_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 L0_paddle_unittest--A100_1GPU:
     variables:
@@ -793,6 +853,9 @@ L0_paddle_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 L0_paddle_unittest--H100_1GPU:
     variables:
@@ -801,21 +864,49 @@ L0_paddle_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 L0_cppunittest--V100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
     extends:
     - .L0_test
     - .V100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_cppunittest--A100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
     extends:
     - .L0_test
     - .A100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L0_cppunittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
     extends:
     - .L0_test
     - .H100_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 docs:
-    <<: *DOCS_BUILD
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .docs_template
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
