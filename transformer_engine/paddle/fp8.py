@@ -13,7 +13,7 @@ import transformer_engine_paddle as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 
 from .constants import dist_group_type
-from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer
+from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
 
 # FP8 support
 _is_fp8_available = None
@@ -59,8 +59,10 @@ class FP8State:
         self._is_first_fp8_module = False
         self._fp8_autocast_counter = 0
         self._fp8_autocast_depth = 0
+        self._fp8_recompute_enabled = False
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
+        self._fp8_recompute_buffer = FP8RecomputeBuffer()
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -105,6 +107,14 @@ class FP8State:
     def get_fp8_bwd_buffer(self) -> FP8MetaBwdBuffer:
         """Returns global fp8 backward buffer."""
         return self._fp8_bwd_buffer
+
+    def is_fp8_recompute_enabled(self) -> bool:
+        """Is FP8 recompute enabled"""
+        return self._fp8_recompute_enabled
+
+    def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
+        """Returns global fp8 recompute buffer."""
+        return self._fp8_recompute_buffer
 
     def enter(
         self,
@@ -187,30 +197,12 @@ def amax_and_scale_update(
     fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
 
     if not callable(amax_compute) and sf_compute is None:
-        # Obtain amax from history
-        amax_history = fp8_meta[fp8_meta_tensor_key].amax_history
-        if amax_compute == "max":
-            amax = paddle.max(amax_history, axis=0)
-        else:    # amax_compute_algo == "most_recent"
-            amax = amax_history[0]
-
-        # Update amax history and set next amax to zero
-        if amax_history.shape[0] > 1:
-            amax_history = paddle.roll(amax_history, -1, 0)
-        amax_history[0] = 0.0
-        fp8_meta[fp8_meta_tensor_key].amax_history = amax_history
-
-        # Update scaling factor
-        fp8_meta[fp8_meta_tensor_key].scale = tex.update_scale(
-            amax=amax,
-            scale=fp8_meta[fp8_meta_tensor_key].scale,
-            fp8_max=fp8_meta[fp8_max_key],
-            margin=float(fp8_meta["recipe"].margin))
-
-        # Update scale_inv
-        fp8_meta[fp8_meta_tensor_key].scale_inv = \
-                    1.0 / fp8_meta[fp8_meta_tensor_key].scale
-
+        tex.amax_and_scale_update_inplace(_amax_history=fp8_meta[fp8_meta_tensor_key].amax_history,
+                                          _scale=fp8_meta[fp8_meta_tensor_key].scale,
+                                          _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
+                                          fp8_max=fp8_meta[fp8_max_key],
+                                          margin=float(fp8_meta["recipe"].margin),
+                                          amax_compute=amax_compute)
     else:
         raise ValueError("We only support the fp8 recipe with 'max' or 'most_recent' "
                          "amax_compute_algo and default scaling_factor_compute_algo at this "
@@ -237,7 +229,7 @@ class FP8TensorMeta():
             curr_len = self.amax_history.shape[0]
             num_fp8_tensors = self.amax_history.shape[1]
             if amax_history_len < curr_len:
-                self.amax_history = (self.amax_history[:amax_history_len])
+                self.amax_history = self.amax_history[:amax_history_len]
             elif amax_history_len > curr_len:
                 extra_rows = amax_history_len - curr_len
                 self.amax_history = paddle.concat([

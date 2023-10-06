@@ -10,6 +10,7 @@
 
 #include <cublasLt.h>
 #include "paddle/extension.h"
+#include "paddle/phi/backends/all_context.h"
 
 #include "common/util/logging.h"
 #include <transformer_engine/activation.h>
@@ -121,6 +122,17 @@ inline DType Int2NvteDType(int64_t dtype) {
     } else {
         NVTE_ERROR("Type not supported.");
     }
+}
+
+// get the fused attention backend
+inline NVTE_Fused_Attn_Backend get_fused_attn_backend(
+    const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    float p_dropout, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim) {
+    NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
+        attn_mask_type, p_dropout, max_seqlen_q, max_seqlen_kv, head_dim);
+    return fused_attention_backend;
 }
 
 // CUDA Utils

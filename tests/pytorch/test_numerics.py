@@ -612,14 +612,13 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
     ).cuda()
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
     block = _test_e2e_checkpointing_get_model(config, dtype)
 
     for _ in range(steps // 2):
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
         )
         loss = te_out.sum()
         loss.backward()
@@ -650,7 +649,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     for _ in range(steps // 2):
         te_out = block(
             te_inp_hidden_states,
-            te_inp_attn_mask,
+            None,
         )
         loss = te_out.sum()
         loss.backward()
@@ -871,7 +870,7 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     key.retain_grad()
     value.retain_grad()
 
-    out = block(query, key, value, mask)
+    out = block(query, key, value, attention_mask=mask)
     loss = out.sum()
     loss.backward()
 

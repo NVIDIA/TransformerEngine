@@ -56,6 +56,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                   "Fused Attention FP8/BF16/FP16 FWD with packed KV");
   m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
                   "Fused Attention FP8/BF16/FP16 BWD with packed KV");
+  m.def("fused_attn_fwd", &fused_attn_fwd,
+                  "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
+  m.def("fused_attn_bwd", &fused_attn_bwd,
+                  "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O");
   m.def("gelu", &gelu, "GeLU with FP8 output");
   m.def("relu", &relu, "ReLU with FP8 output");
@@ -87,18 +91,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .value("BULK_OVERLAP_AG", ubuf::UBOverlapAlgo::BULK_OVERLAP_AG)
     .value("BULK_OVERLAP_RS", ubuf::UBOverlapAlgo::BULK_OVERLAP_RS)
     .value("SPLIT_PIPELINED_RS", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_RS)
-    .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG);
+    .value("SPLIT_PIPELINED_AG", ubuf::UBOverlapAlgo::SPLIT_PIPELINED_AG)
+    .value("ATOMIC_GEMM_RS", ubuf::UBOverlapAlgo::ATOMIC_GEMM_RS)
+    .value("ATOMIC_GEMM_AG", ubuf::UBOverlapAlgo::ATOMIC_GEMM_AG);
 
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int>())
+    .def(py::init<torch::Tensor&, int, int, int, int, int, bool, int, torch::Tensor>())
     .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap)
     .def("split_overlap_rs", &ubuf::UbufCommOverlap::split_overlap_rs)
+    .def("set_ubuf_scale_inv", &ubuf::UbufCommOverlap::set_ubuf_scale_inv)
+    .def("atomic_gemm_overlap_rs", &ubuf::UbufCommOverlap::atomic_gemm_overlap_rs)
+    .def("is_fp8_ubuf", &ubuf::UbufCommOverlap::is_fp8_ubuf)
     .def("copy_input_to_ubuf", &ubuf::UbufCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufCommOverlap::get_ubuf_output);
 
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
-    .def(py::init<torch::Tensor&, int, int, bool, int>())
+    .def(py::init<torch::Tensor&, int, int, int, int, bool, bool, int, torch::Tensor>())
     .def("split_overlap_ag", &ubuf::UbufP2PCommOverlap::split_overlap_ag)
+    .def("atomic_gemm_overlap_ag", &ubuf::UbufP2PCommOverlap::atomic_gemm_overlap_ag)
     .def("copy_input_to_ubuf", &ubuf::UbufP2PCommOverlap::copy_input_to_ubuf)
     .def("get_ubuf_output", &ubuf::UbufP2PCommOverlap::get_ubuf_output);
 #else  // NVTE_WITH_USERBUFFERS
@@ -148,7 +158,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
       .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
       .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-      .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED);
+      .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
+      .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
+      .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
+      .value("NVTE_SBHD_SB2HD", NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
+      .value("NVTE_SBHD_SBH2D", NVTE_QKV_Layout::NVTE_SBHD_SBH2D)
+      .value("NVTE_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD)
+      .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
+      .value("NVTE_BSH3D", NVTE_QKV_Layout::NVTE_BSH3D)
+      .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
+      .value("NVTE_BSHD_BSH2D", NVTE_QKV_Layout::NVTE_BSHD_BSH2D)
+      .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
+      .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
+      .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)
+      .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
+      .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
 
   py::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)

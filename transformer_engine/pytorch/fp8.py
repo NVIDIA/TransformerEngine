@@ -326,24 +326,29 @@ class FP8GlobalStateManager:
             return None
 
         # Reduce AMAX in DP-domain at an interval.
+        # `NVTE_DP_AMAX_REDUCE_INTERVAL` should be set as an integer value larger than 0. If
+        # `NVTE_DP_AMAX_REDUCE_INTERVAL` is set to 0, AMAX is reduced only in TP domain.
         if cls.dp_amax_reduce_interval is None:
             cls.dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
-        tp_amax_reduce = False
-        if forward:
-            if cls.dp_amax_reduce_forward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
-            else:
-                tp_amax_reduce = True
-            cls.dp_amax_reduce_forward_idx = (
-                (cls.dp_amax_reduce_forward_idx + 1) % cls.dp_amax_reduce_interval)
+        if cls.dp_amax_reduce_interval == 0:
+            tp_amax_reduce = True
         else:
-            if cls.dp_amax_reduce_backward_idx == 0:
-                reduce_group = fp8_meta["fp8_group"]
+            tp_amax_reduce = False
+            if forward:
+                if cls.dp_amax_reduce_forward_idx == 0:
+                    reduce_group = fp8_meta["fp8_group"]
+                else:
+                    tp_amax_reduce = True
+                cls.dp_amax_reduce_forward_idx = (
+                    (cls.dp_amax_reduce_forward_idx + 1) % cls.dp_amax_reduce_interval)
             else:
-                tp_amax_reduce = True
-            cls.dp_amax_reduce_backward_idx = (
-                (cls.dp_amax_reduce_backward_idx + 1) % cls.dp_amax_reduce_interval)
+                if cls.dp_amax_reduce_backward_idx == 0:
+                    reduce_group = fp8_meta["fp8_group"]
+                else:
+                    tp_amax_reduce = True
+                cls.dp_amax_reduce_backward_idx = (
+                    (cls.dp_amax_reduce_backward_idx + 1) % cls.dp_amax_reduce_interval)
 
         if tp_amax_reduce:
             if tp_size > 1:
@@ -533,12 +538,9 @@ def _default_sf_compute(
     margin: int,
 ) -> torch.Tensor:
     """Default function to convert amax to scaling factor."""
-    exp = torch.floor(torch.log2(fp8_max / amax)) - margin
-    sf = torch.round(torch.pow(2, torch.abs(exp)))
+    sf = (fp8_max / amax) / (2 ** margin)
     sf = torch.where(amax > 0.0, sf, scale)
     sf = torch.where(torch.isfinite(amax), sf, scale)
-    sf = torch.where(exp < 0, 1 / sf, sf)
-
     return sf
 
 

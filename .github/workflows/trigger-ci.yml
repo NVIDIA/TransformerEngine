@@ -16,8 +16,8 @@ jobs:
 
     # This job only runs for pull request comments
     if: |
-         contains( 'ptrendx,ksivaman,schetlur-nv,timmoon10,zlsh80826,mingxu1067,cyanguwa,nzmora-nvidia,galagam,nouiz,', format('{0},', github.actor)) &&
-         github.event.comment.body == '/te-ci'
+         contains( 'ptrendx,ksivaman,schetlur-nv,timmoon10,zlsh80826,mingxu1067,cyanguwa,nzmora-nvidia,galagam,nouiz,denera,', format('{0},', github.actor)) &&
+         startsWith(github.event.comment.body, '/te-ci')
     steps:
       - name: Check if comment is issued by authorized person
         run: blossom-ci

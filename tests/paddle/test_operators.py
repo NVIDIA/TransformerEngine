@@ -45,8 +45,6 @@ from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
 
-np.random.seed(10)
-paddle.seed(11)
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
 is_fp8_supported, reason = is_fp8_available()
@@ -55,6 +53,14 @@ SELF_ATTN_CASES = [(32, 512, 16, 64), (32, 128, 16, 64)]
 CROSS_ATTN_CASES = [(32, 128, 512, 16, 64)]
 FLASH_ATTN_CASES = [(4, 1024, 16, 64), (2, 2048, 16, 128)]
 ATTN_DTYPES = [tex.DType.kFloat16, tex.DType.kBFloat16]
+
+
+@pytest.fixture(autouse=True)
+def setup():
+    """Setup random seed before each test"""
+    np.random.seed(10)
+    paddle.seed(11)
+    yield
 
 
 def test_quantize_dequantize():
@@ -661,18 +667,20 @@ class TestFusedAttn:
         q_cu_seqlen_tensor = paddle.to_tensor(self.q_cu_seqlen, dtype="int32", stop_gradient=True)
         kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
 
-        rng_state = paddle.zeros((2,), dtype=np.int64)
+        fused_attention_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen if (
+            self.q_seqlen <= 512
+            and self.kv_seqlen <= 512) else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
 
         qkv_dtype = tex.DType.kBFloat16 if self.dtype == "bfloat16" else tex.DType.kFloat16
         out, softmax_aux_tensor, q_grad, k_grad, v_grad = None, None, None, None, None
         if self.attn_mode == 'self_attn':
-            out, softmax_aux_tensor = fused_attn_fwd_qkvpacked(
+            out, softmax_aux_tensor, rng_state = fused_attn_fwd_qkvpacked(
                 qkv_tensor,
                 q_cu_seqlen_tensor,
-                rng_state,
                 is_training=True,
                 max_seqlen=self.q_seqlen,
                 qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
                 Bias=None,
                 attn_scale=self.scaling_factor,
                 dropout=self.dropout_prob,
@@ -687,6 +695,7 @@ class TestFusedAttn:
                 softmax_aux_tensor,
                 max_seqlen=self.q_seqlen,
                 qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
                 attn_scale=self.scaling_factor,
                 dropout=self.dropout_prob,
                 set_zero=False,
@@ -695,19 +704,20 @@ class TestFusedAttn:
             k_grad = dqkv[:, :, 1, :, :]
             v_grad = dqkv[:, :, 2, :, :]
         else:    # attn_mode == 'cross_attn'
-            out, softmax_aux_tensor = fused_attn_fwd_kvpacked(q_tensor,
-                                                              kv_tensor,
-                                                              q_cu_seqlen_tensor,
-                                                              kv_cu_seqlen_tensor,
-                                                              rng_state,
-                                                              is_training=True,
-                                                              max_seqlen_q=self.q_seqlen,
-                                                              max_seqlen_kv=self.kv_seqlen,
-                                                              qkv_dtype=qkv_dtype,
-                                                              Bias=None,
-                                                              attn_scale=self.scaling_factor,
-                                                              dropout=self.dropout_prob,
-                                                              set_zero=False)
+            out, softmax_aux_tensor, rng_state = fused_attn_fwd_kvpacked(
+                q_tensor,
+                kv_tensor,
+                q_cu_seqlen_tensor,
+                kv_cu_seqlen_tensor,
+                is_training=True,
+                max_seqlen_q=self.q_seqlen,
+                max_seqlen_kv=self.kv_seqlen,
+                qkv_dtype=qkv_dtype,
+                fused_attention_backend=fused_attention_backend,
+                Bias=None,
+                attn_scale=self.scaling_factor,
+                dropout=self.dropout_prob,
+                set_zero=False)
             dq, dkv, _ = fused_attn_bwd_kvpacked(q_tensor,
                                                  kv_tensor,
                                                  q_cu_seqlen_tensor,
@@ -716,6 +726,7 @@ class TestFusedAttn:
                                                  out,
                                                  self.dout,
                                                  softmax_aux_tensor,
+                                                 fused_attention_backend=fused_attention_backend,
                                                  max_seqlen_q=self.q_seqlen,
                                                  max_seqlen_kv=self.kv_seqlen,
                                                  qkv_dtype=qkv_dtype,
@@ -859,25 +870,53 @@ class TestSoftmax:
         assert_allclose(dx_ref, dx, rtol=1e-4, atol=5e-3)
 
 
-def test_update_scale():
+def test_amax_and_scale_update():
     """Test update_scale"""
     num_gemm = 6
+    history_len = 1024
     recipe = DelayedScaling()
     fp8_max = recipe.fp8_format.value.max_fwd
 
-    amax_tensor = paddle.rand(shape=[num_gemm], dtype='float32') * fp8_max
+    amax_history_tensor = paddle.rand(shape=[history_len, num_gemm], dtype='float32')
+    rolled_history_ref = paddle.roll(amax_history_tensor, -1, axis=0)
+    rolled_history_ref[0] = 0.0
+    amax_tensor = paddle.max(amax_history_tensor, axis=0)
     scale_tensor = paddle.ones(shape=[num_gemm], dtype='float32')
 
     def calc_ref(amax, scale, fp8_max, margin=0):
         """Calculate reference scale"""
-        exp = paddle.floor(paddle.log2(fp8_max / amax)) - margin
-        sf = paddle.round(2**paddle.abs(exp))
+        sf = (fp8_max / amax) / (2 ** margin)
         sf = paddle.where(amax > 0.0, sf, scale)
         sf = paddle.where(paddle.isfinite(amax), sf, scale)
-        sf = paddle.where(exp < 0, 1 / sf, sf)
         return sf
 
     scale_ref = calc_ref(amax_tensor, scale_tensor, fp8_max, 0.)
-    scale_actual = tex.update_scale(amax_tensor, scale_tensor, fp8_max, 0.)
+    scale_inv_ref = 1. / scale_ref
 
-    assert_allclose(scale_ref, scale_actual, rtol=1e-5, atol=1e-5)
+    # Placeholder
+    scale_actual = paddle.zeros_like(scale_tensor)
+    scale_inv_actual = paddle.zeros_like(scale_tensor)
+
+    tex.amax_and_scale_update_inplace(_amax_history=amax_history_tensor,
+                                      _scale=scale_actual,
+                                      _scale_inv=scale_inv_actual,
+                                      fp8_max=fp8_max,
+                                      margin=0.,
+                                      amax_compute="max")
+
+    assert_allclose(scale_actual, scale_ref, rtol=1e-7, atol=1e-7)
+    assert_allclose(scale_inv_actual, scale_inv_ref, rtol=1e-7, atol=1e-7)
+    assert_allclose(amax_history_tensor, rolled_history_ref, rtol=1e-7, atol=1e-7)
+
+
+def test_update_latest_history():
+    """Test update_latest_history"""
+    num_gemm = 6
+    history_len = 1024
+
+    amax_history_tensor = paddle.rand(shape=[history_len, num_gemm], dtype='float32')
+    amax = paddle.rand(shape=[num_gemm], dtype='float32')
+
+    tex.update_latest_amax_history_inplace(_history=amax_history_tensor, amax=amax)
+
+    assert_allclose(amax_history_tensor[0], amax, rtol=1e-7, atol=1e-7)

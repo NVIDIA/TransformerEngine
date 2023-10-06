@@ -11,13 +11,19 @@ import operator
 import warnings
 
 import numpy as np
-from jaxlib.hlo_helpers import custom_call
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
 from jax.core import ShapedArray
 from jax.interpreters import xla, mlir
 from jax.interpreters.mlir import ir, dtype_to_ir_type
+
+try:
+    from jaxlib.hlo_helpers import custom_call
+except ImportError:
+    # Newer JAX changed its API. But we want to support a few JAX
+    # version, so we still need this import.
+    pass
 
 import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType
@@ -190,14 +196,27 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
     """
     XLA custom call warpper
     """
-    out = custom_call(name,
-                      args.output_types,
-                      args.operands,
-                      operand_layouts=args.operand_layouts,
-                      result_layouts=args.output_layouts,
-                      backend_config=opaque,
-                      has_side_effect=has_side_effect,
-                      **kwargs)
+    if hasattr(mlir, "custom_call"):
+        out = mlir.custom_call(name,
+                               result_types=args.output_types,
+                               operands=args.operands,
+                               operand_layouts=args.operand_layouts,
+                               result_layouts=args.output_layouts,
+                               backend_config=opaque,
+                               has_side_effect=has_side_effect,
+                               **kwargs).results
+    else:
+        # Need to disable one pylint error as the second function
+        # parameter name recenctly in JAX. Otherwise we won't be
+        # compatible with multiple JAX version.
+        out = custom_call(name,    # pylint: disable=too-many-function-args
+                          args.output_types,
+                          operands=args.operands,
+                          operand_layouts=args.operand_layouts,
+                          result_layouts=args.output_layouts,
+                          backend_config=opaque,
+                          has_side_effect=has_side_effect,
+                          **kwargs)
     return out
 
 
