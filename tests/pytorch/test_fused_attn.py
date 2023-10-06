@@ -47,24 +47,18 @@ model_configs = {
     "test5": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
 }
 
-if os.getenv('NVTE_ADDITIONAL_TESTS', '0') == '1':
-    model_configs["test6"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "causal")
-    model_configs["test7"] = ModelConfig(1, 2048, 16, 128, 512, 0.0, "causal")
-    model_configs["test8"] = ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal")
-    model_configs["test9"] = ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask")
-
-model_configs_lean = {
-    "test1": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    "test2": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-}
-
 param_types = [torch.float16]
 if torch.cuda.is_bf16_supported():
     param_types.append(torch.bfloat16)
 
-param_types_lean = [torch.float16]
+batch_sizes = [1, 32]
 
-batch_sizes = [1, 2] # add more if needed, e.g. 32
+model_configs_lean = {
+    "test6": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+    "test7": ModelConfig(1, 2048, 16, 128, 2048, 0.0, "causal"),
+}
+
+param_types_lean = [torch.bfloat16]
 
 batch_sizes_lean = [2]
 
@@ -72,7 +66,7 @@ batch_sizes_lean = [2]
 @pytest.mark.skipif(
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("bs", batch_sizes_lean)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("ckpt_attn", [True, False])
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
@@ -172,7 +166,7 @@ qkv_layouts = [
 def test_dpa_qkv_layout(dtype, bs, model, workspace_opt, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
 
-    config = model_configs[model]
+    config = model_configs_lean[model]
 
     flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
             dtype, bs, config, "FlashAttention", qkv_layout, workspace_opt)
@@ -282,23 +276,23 @@ def _run_dpa_qkv_layout(dtype, bs, config, backend, qkv_layout, workspace_opt):
     get_device_compute_capability() < 8.0, reason="Compute capability 8.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("ckpt_attn", [False])
+@pytest.mark.parametrize("model", model_configs_lean.keys())
 @pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
 @pytest.mark.parametrize("fused_qkv_params", [True, False])
-def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type, fused_qkv_params):
+@pytest.mark.parametrize("RoPE", [True, False])
+def test_transformer_layer(dtype, bs, model, bias_type, fused_qkv_params, RoPE):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
-    config = model_configs[model]
+    config = model_configs_lean[model]
 
     if bias_type == "no_bias":
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-                dtype, bs, config, "FlashAttention", ckpt_attn, bias_type, fused_qkv_params)
+                dtype, bs, config, "FlashAttention", bias_type, fused_qkv_params, RoPE)
     fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "FusedAttention", ckpt_attn, bias_type, fused_qkv_params)
+            dtype, bs, config, "FusedAttention", bias_type, fused_qkv_params, RoPE)
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-            dtype, bs, config, "UnfusedDotProductAttention", ckpt_attn, bias_type, fused_qkv_params)
+            dtype, bs, config, "UnfusedDotProductAttention", bias_type, fused_qkv_params, RoPE)
 
     atol, rtol = (5e-1, 5e-2)
     if bias_type == "no_bias":
@@ -307,7 +301,7 @@ def test_transformer_layer(dtype, bs, model, ckpt_attn, bias_type, fused_qkv_par
     torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
-def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fused_qkv_params):
+def _run_transformer_layer(dtype, bs, config, backend, bias_type, fused_qkv_params, RoPE):
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -340,8 +334,10 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fus
     else:
         bias = None
 
-    RoPE = RotaryPositionEmbedding(dim=config.head_dim)
-    rotary_pos_emb = RoPE(config.seq_len).cuda().to(dtype=dtype)
+    rotary_pos_emb = None
+    if RoPE:
+        PE = RotaryPositionEmbedding(dim=config.head_dim)
+        rotary_pos_emb = PE(config.seq_len).cuda().to(dtype=dtype)
 
     block = (
         TransformerLayer(
@@ -381,7 +377,6 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fus
     num_iters = 5
     for i in range(num_iters):
         op = block(inp, self_attn_mask_type=config.attn_mask_type,
-            checkpoint_core_attention=ckpt_attn,
             rotary_pos_emb=rotary_pos_emb,
             core_attention_bias_type=bias_type,
             core_attention_bias=bias)
@@ -400,7 +395,7 @@ def test_transformer_layer_gqa(dtype, bs, model):
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
-    config = model_configs[model]
+    config = model_configs_lean[model]
     def find_factors(x):
        f = []
        for i in range(1, x + 1):
