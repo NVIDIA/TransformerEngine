@@ -167,6 +167,7 @@ class TestEncoderLayer:
             if k == 'dropout_rate':
                 te_layer_attrs['attention_dropout'] = v
                 te_layer_attrs['hidden_dropout'] = v
+                te_layer_attrs['intermediate_dropout'] = v
             elif k == 'fuse_mlp_wi':
                 continue
             else:
@@ -174,6 +175,7 @@ class TestEncoderLayer:
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
+                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
                             self_attn_mask_type='padding',
                             dtype=dtype,
@@ -212,6 +214,7 @@ class TestEncoderLayer:
             if k == 'dropout_rate':
                 te_layer_attrs['attention_dropout'] = v
                 te_layer_attrs['hidden_dropout'] = v
+                te_layer_attrs['intermediate_dropout'] = v
             elif k == 'fuse_mlp_wi':
                 continue
             else:
@@ -219,6 +222,7 @@ class TestEncoderLayer:
         ref_layer_cls = partial(RefEncoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
+                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.ENCODER,
                             self_attn_mask_type='padding',
                             dtype=dtype,
@@ -381,6 +385,7 @@ class TestDecoderLayer:
             if k == 'dropout_rate':
                 te_layer_attrs['attention_dropout'] = v
                 te_layer_attrs['hidden_dropout'] = v
+                te_layer_attrs['intermediate_dropout'] = v
             elif k == 'fuse_mlp_wi':
                 continue
             else:
@@ -388,6 +393,7 @@ class TestDecoderLayer:
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
+                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
                             dtype=dtype,
                             **te_layer_attrs)
@@ -426,6 +432,7 @@ class TestDecoderLayer:
             if k == 'dropout_rate':
                 te_layer_attrs['attention_dropout'] = v
                 te_layer_attrs['hidden_dropout'] = v
+                te_layer_attrs['intermediate_dropout'] = v
             elif k == 'fuse_mlp_wi':
                 continue
             else:
@@ -433,6 +440,7 @@ class TestDecoderLayer:
         ref_layer_cls = partial(RefDecoderLayer, dtype=dtype, **attrs)
         layer_cls = partial(TransformerLayer,
                             hidden_dropout_dims=(sequence_dim,),
+                            intermediate_dropout_dims=(sequence_dim,),
                             layer_type=TransformerLayerType.DECODER,
                             dtype=dtype,
                             **te_layer_attrs)

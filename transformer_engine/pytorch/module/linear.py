@@ -77,6 +77,8 @@ class _Linear(torch.autograd.Function):
         is_grad_enabled: bool,
         ub_split_rs: bool,
         ub_split_ag: bool,
+        ub_atomic_gemm_rs: bool,
+        ub_atomic_gemm_ag: bool,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -88,10 +90,13 @@ class _Linear(torch.autograd.Function):
 
         update_fp8_weights = is_first_microbatch is None or is_first_microbatch
 
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             tp_world_size = get_distributed_world_size(tp_group)
             if tp_world_size == 1:
                 ub_split_rs = False
+                ub_atomic_gemm_rs = False
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+            assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_no_fp8 = inputmat
@@ -155,18 +160,29 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                     )
 
-            if ub_split_rs:
+            proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
+                None, None, None, activation_dtype)
+            if ub_split_rs or ub_atomic_gemm_rs:
                 ub_obj_projout = get_ub("proj_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = weight.size(0)
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+
+                if ub_obj_projout.is_fp8_ubuf():
+                    proj_out_index = tex.FP8FwdTensors.GEMM1_OUTPUT
+                    meta_tensor = fp8_meta["scaling_fwd"]
+                    proj_out_tetype = fp8_dtype_forward
+                    proj_out_pttype = torch.uint8
+                    ub_obj_projout.set_ubuf_scale_inv(meta_tensor.scale_inv[proj_out_index])
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
+            ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
+            ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
             _ = fp8_gemm(
                 weight_fp8,
                 fp8_meta["scaling_fwd"].scale_inv,
@@ -176,15 +192,18 @@ class _Linear(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_INPUT,
                 fp8_dtype_forward,
-                activation_dtype,
+                proj_out_pttype,
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=out,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else None,
-                ub=ub_obj_projout if ub_split_rs else None,
-                extra_output_tensor=rs_out if ub_split_rs else None,
+                ub_algo=ub_algo,
+                ub=ub_obj_projout if (ub_split_rs or ub_atomic_gemm_rs) else None,
+                extra_output_tensor=rs_out if (ub_split_rs or ub_atomic_gemm_rs) else None,
+                out_index=proj_out_index,
+                fp8_meta_tensor = meta_tensor,
+                D_dtype = proj_out_tetype,
             )
         else:
             # Cast for native AMP
@@ -211,7 +230,7 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = weight.size(0)
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
-            _, _, _ = gemm(
+            _ = gemm(
                 weight,
                 inputmat_total,
                 activation_dtype,
@@ -245,11 +264,12 @@ class _Linear(torch.autograd.Function):
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_split_ag = ub_split_ag
+            ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
         # Row Parallel Linear
-        if ub_split_rs:
+        if ub_split_rs or ub_atomic_gemm_rs:
             out = rs_out
         elif parallel_mode == "row" and sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
@@ -275,11 +295,12 @@ class _Linear(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
-            if ctx.ub_split_ag:
+            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
                 if tp_world_size == 1:
                     ctx.ub_split_ag = False
-            if ctx.ub_split_ag:
+                    ctx.ub_atomic_gemm_ag = False
+            if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ctx.ub_obj_gradout = get_ub("proj_dgrad")
@@ -323,9 +344,11 @@ class _Linear(torch.autograd.Function):
                     ctx.fp8_meta["recipe"], fprop_tensor=False
                 )
 
+            ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None
+            ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
             if ctx.requires_dgrad:
                 if ctx.fp8:
-                    dgrad = fp8_gemm(
+                    dgrad, _ = fp8_gemm(
                         weight_t_fp8,
                         fwd_scale_inverses,
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
@@ -337,8 +360,8 @@ class _Linear(torch.autograd.Function):
                         ctx.activation_dtype,
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
-                        ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ctx.ub_split_ag else None,
-                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag else None,
+                        ub_algo=ub_algo,
+                        ub=ctx.ub_obj_gradout if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag else None,
                     )
                 else:
                     dgrad, _, _ = gemm(
@@ -366,9 +389,9 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        if ctx.ub_split_ag:
+                        if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                        wgrad = fp8_gemm(
+                        wgrad, _ = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -415,12 +438,23 @@ class _Linear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_bias = None
 
+        if weight.requires_grad:
+            # Handle custom DDP from mcore.
+            if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
+                weight.grad_added_to_main_grad = True
+            elif ctx.fuse_wgrad_accumulation:
+                wgrad = None
+        else:
+            wgrad = None
+
         return (
-            wgrad if weight.requires_grad else None,
+            wgrad,
             None,
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
+            None,
             None,
             None,
             None,
@@ -448,7 +482,7 @@ class Linear(TransformerEngineBaseModule):
     .. warning::
 
         Argument :attr:`skip_weight_param_allocation` is deprecated and will
-        be fully removed in future releases.
+        be fully removed in the next release (v1.0.0).
 
     Parameters
     ----------
@@ -461,11 +495,14 @@ class Linear(TransformerEngineBaseModule):
     init_method : Callable, default = `None`
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
-    parameters_split : Tuple[str, ...], default = None
-                      if a tuple of strings is provided, the weight and bias parameters of the
-                      module are exposed as `N` separate `torch.nn.parameter.Parameter`s each,
-                      split along the first dimension, where `N` is the length of the argument
-                      and the strings contained are the names of the split parameters.
+    parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
+                      if a tuple of strings or a dict of strings to integers is provided,
+                      the weight and bias parameters of the module are exposed as `N` separate
+                      `torch.nn.parameter.Parameter`s each, split along the first dimension,
+                      where `N` is the length of the argument and the strings contained are the
+                      names of the split parameters. In the case of a tuple, each parameter
+                      has the same shape. In the case of a dict, the values give the
+                      `out_features` for each projection.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -522,17 +559,19 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         skip_weight_param_allocation: bool = False,
-        parameters_split: Optional[Tuple[str, ...]] = None,
+        parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         ub_split_rs: bool = False,
         ub_split_ag: bool = False,
         device: Union[torch.device, str] = "cuda",
+        ub_atomic_gemm_rs: bool = False,
+        ub_atomic_gemm_ag: bool = False,
     ) -> None:
         super().__init__()
 
         if skip_weight_param_allocation:
             warnings.warn(
                 "Argument `skip_weight_param_allocation` is deprecated and"
-                "will be fully removed in future releases. It has ignored"
+                "will be fully removed in the next release (v1.0.0). It has ignored"
                 "starting from v0.11.",
                 category=DeprecationWarning,
             )
@@ -547,11 +586,18 @@ class Linear(TransformerEngineBaseModule):
         self.parameters_split = parameters_split
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
+        self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
+        self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
 
-        if ub_split_rs or ub_split_ag:
+        if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
                 tex.userbuf_comm_available()
             ), "Userbuffer communication backend not available."
+
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+            warnings.warn(
+                "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
+            )
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -598,23 +644,35 @@ class Linear(TransformerEngineBaseModule):
             self.bias_tensor.zero_()
 
         if parameters_split is None:
-            parameters_split = ("",)
-
-        assert (
-            self.out_features % len(parameters_split) == 0
-        ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
-
-        split_size = self.out_features // len(parameters_split)
+            parameters_split = {"": self.out_features}
+        elif isinstance(parameters_split, tuple):
+            assert (
+                self.out_features % len(parameters_split) == 0
+            ), f"Weight and bias params cannot be split into {len(parameters_split)} parts"
+            split_size = self.out_features // len(parameters_split)
+            parameters_split = {key: split_size for key in parameters_split}
+        elif isinstance(parameters_split, dict):
+            overall_split_size = sum(parameters_split.values())
+            assert(
+                self.out_features == overall_split_size
+            ), f"Overall sum of parameters_split (={overall_split_size}) does not match "\
+               f"to out features (={self.out_features})"
+        else:
+            assert False, "Type of 'parameters_split' is not None, tuple or dict"
+        self.updated_parameters_split = parameters_split
 
         self.weight_names = []
         self.bias_names = []
 
-        for i, pname in enumerate(parameters_split):
+        slice_begin = 0
+        for pname, slice_size in parameters_split.items():
             wname = pname + "weight"
             bname = pname + "bias"
 
+            slice_end = slice_begin + slice_size
+
             self.register_parameter(
-                wname, Parameter(self.weight_tensor[i * split_size : (i+1) * split_size])
+                wname, Parameter(self.weight_tensor[slice_begin:slice_end])
             )
 
             set_tensor_model_parallel_attributes(
@@ -626,8 +684,10 @@ class Linear(TransformerEngineBaseModule):
 
             if self.use_bias:
                 self.register_parameter(
-                    bname, Parameter(self.bias_tensor[i * split_size : (i+1) * split_size])
+                    bname, Parameter(self.bias_tensor[slice_begin:slice_end])
                 )
+                if parallel_mode == "row":
+                    setattr(getattr(self, bname), "sequence_parallel", sequence_parallel)
             else:
                 setattr(self, bname, torch.Tensor().to(dtype=params_dtype, device=device))
 
@@ -636,6 +696,8 @@ class Linear(TransformerEngineBaseModule):
 
             self.weight_names.append(wname)
             self.bias_names.append(bname)
+
+            slice_begin = slice_end
 
         self.fp8_weight_shapes.append(torch.Size((self.out_features, self.in_features)))
 
@@ -684,7 +746,7 @@ class Linear(TransformerEngineBaseModule):
         .. warning::
 
             Arguments :attr:`weight` and :attr:`bias` are deprecated and will
-            be fully removed in future releases.
+            be fully removed in the next release (v1.0.0).
 
         Parameters
         ----------
@@ -708,19 +770,21 @@ class Linear(TransformerEngineBaseModule):
         if weight is not None or bias is not None:
             raise RuntimeError(
                 "Arguments `weight` and `bias` are deprecated and "
-                "will be fully removed in future releases."
+                "will be fully removed in the next release (v1.0.0)."
             )
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
             bias_tensor = (
                 self.bias if self.parameters_split is None
                 else self.bias_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("bias_tensor", self.bias_names)
+                else self.noop_cat("bias_tensor", self.bias_names,
+                    self.updated_parameters_split)
             )
             weight_tensor = (
                 self.weight if self.parameters_split is None
                 else self.weight_tensor if not torch.is_grad_enabled()
-                else self.noop_cat("weight_tensor", self.weight_names)
+                else self.noop_cat("weight_tensor", self.weight_names,
+                    self.updated_parameters_split)
             )
 
             # Fetch the fp8 weights placeholders (for linear/gemm)
@@ -755,6 +819,8 @@ class Linear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self.ub_split_rs,
                 self.ub_split_ag,
+                self.ub_atomic_gemm_rs,
+                self.ub_atomic_gemm_ag,
             )
             out = linear_fn(*args)
 

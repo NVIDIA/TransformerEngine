@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
@@ -71,12 +71,12 @@ class TransformerLayer(torch.nn.Module):
     .. warning::
 
         Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
-        are deprecated and will be fully removed in future releases.
+        are deprecated and will be fully removed in the next release (v1.0.0).
 
-    .. warning::
+    .. note::
 
-        Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and
-        is deprecated. It will be fully removed in future releases.
+        Argument :attr:`attention_mask` will be ignored in the `forward` call when
+        :attr:`self_attn_mask_type` is set to `"causal"`.
 
     Parameters
     ----------
@@ -127,6 +127,12 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
+    self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
+                        type of attention mask passed into softmax operation. Overridden by
+                        :attr:`self_attn_mask_type` in the `forward` method. The forward
+                        arg is useful for dynamically changing mask types, e.g. a different
+                        mask for training and inference. The init arg is useful for cases
+                        involving compilation/tracing, e.g. ONNX export.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -212,7 +218,7 @@ class TransformerLayer(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
-        self_attn_mask_type: Optional[str] = None,
+        self_attn_mask_type: str = "causal",
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -239,16 +245,9 @@ class TransformerLayer(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if self_attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-
         warnings.warn(
             "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
-            "are deprecated and will be fully removed in future releases.",
+            "are deprecated and will be fully removed in the next release (v1.0.0).",
             category=DeprecationWarning,
         )
 
@@ -264,6 +263,22 @@ class TransformerLayer(torch.nn.Module):
         ub_bulk_dgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_DGRAD", "1")))
         ub_split_ag = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_AG", "1")))
         ub_split_rs = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_SPLIT_RS", "1")))
+        ub_atomic_gemm_rs = (ub_tp_comm_overlap
+                             and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_RS", "0"))))
+        assert (
+            not (ub_split_rs and ub_atomic_gemm_rs)
+        ), "Only one type of RS overlap NVTE_UB_SPLIT_RS/NVTE_UB_ATOMIC_GEMM_RS should be enabled."
+        ub_atomic_gemm_ag = (ub_tp_comm_overlap
+                             and bool(int(os.getenv("NVTE_UB_ATOMIC_GEMM_AG", "0"))))
+        assert (
+            not (ub_split_ag and ub_atomic_gemm_ag)
+        ), "Only one type of AG overlap NVTE_UB_SPLIT_AG/NVTE_UB_ATOMIC_GEMM_AG should be enabled."
+
+        if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
+            warnings.warn(
+                "Atomic gemm uses a beta API from cublas and is not tested for all use cases."
+            )
+
         bias_dropout_fusion = bool(int(os.getenv("NVTE_BIAS_DROPOUT_FUSION", "1")))
         self.layer_number = layer_number
         self.output_layernorm = output_layernorm
@@ -324,6 +339,8 @@ class TransformerLayer(torch.nn.Module):
             "ub_bulk_dgrad" : ub_bulk_dgrad,
             "ub_split_ag" : ub_split_ag,
             "ub_split_rs" : ub_split_rs,
+            "ub_atomic_gemm_rs" : ub_atomic_gemm_rs,
+            "ub_atomic_gemm_ag" : ub_atomic_gemm_ag,
         }
 
         self.self_attention = MultiheadAttention(
@@ -378,6 +395,8 @@ class TransformerLayer(torch.nn.Module):
             ub_bulk_dgrad=ub_bulk_dgrad,
             ub_split_rs=ub_split_rs,
             ub_split_ag=ub_split_ag,
+            ub_atomic_gemm_rs=ub_atomic_gemm_rs,
+            ub_atomic_gemm_ag=ub_atomic_gemm_ag,
             activation=activation,
             normalization=normalization,
             device=device,
@@ -427,11 +446,25 @@ class TransformerLayer(torch.nn.Module):
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
 
+    def set_context_parallel_running(
+        self,
+        cp_group: Union[dist_group_type, None],
+        cp_global_ranks: List[int],
+        cp_stream: torch.cuda.Stream,
+    ) -> None:
+        """Set CP group and CP dual-stream running"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "set_context_parallel_running"):
+                child.set_context_parallel_running(cp_group, cp_global_ranks, cp_stream)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        self_attn_mask_type: str = "causal",
+        self_attn_mask_type: Optional[str] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -447,16 +480,17 @@ class TransformerLayer(torch.nn.Module):
 
         .. note::
 
-            Argument :attr:`attention_mask` will be ignored when :attr:`self_attn_mask_type`
-            is set to `"causal"`.
+            Argument :attr:`attention_mask` is only used when :attr:`self_attn_mask_type`
+            includes `"padding"` or `"arbitrary"`.
 
         Parameters
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : Optional[torch.Tensor], default = `None`
-             Boolean tensor used to mask out self-attention softmax input.
-        self_attn_mask_type: {'causal', 'padding'}, default = `causal`
+        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+                        Boolean tensor used to mask out self-attention softmax input.
+                        Can be a tuple of 2 masks for cross attention with padding masks.
+        self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
                             type of attention mask passed into softmax operation.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
@@ -493,13 +527,7 @@ class TransformerLayer(torch.nn.Module):
                     Whether to set output tensors to 0 or not before use.
         """
 
-        if self.self_attn_mask_type is not None:
-            warnings.warn(
-                "Argument :attr:`self_attn_mask_type` has been moved to the `forward` method and"
-                "is deprecated. It will be fully removed in future releases.",
-                category=DeprecationWarning,
-            )
-            # Keep previous functionality for current users.
+        if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
 
         assert (
@@ -632,5 +660,5 @@ class TransformerLayer(torch.nn.Module):
         if self.output_layernorm:
             output = self.layernorm(output)
 
-        # output: [b, s, h]
+        # output: [s, b, h]
         return output

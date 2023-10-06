@@ -647,7 +647,8 @@ void fused_attn_max_512_fwd_impl(
                                 d,           scaling_factor,
                                 is_training, dropout_probability,
                                 layout,      bias_type,
-                                mask_type,   tensorType};
+                                mask_type,   tensorType,
+                                false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
@@ -846,7 +847,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
         FADescriptor descriptor{
             b,      h,         s_q,       s_kv,      d, scaling_factor, true, dropout_probability,
-            layout, bias_type, mask_type, tensorType};
+            layout, bias_type, mask_type, tensorType, false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_bprop_cache;
@@ -1249,9 +1250,6 @@ void fused_attn_max_512_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED.");
-
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
     const auto stride = 2 * num_head * head_dim;
@@ -1322,8 +1320,6 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_Layout::NVTE_KV_INTERLEAVED.");
     NVTE_CHECK(bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
                    bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS,
                "NVTE_PRE_SCALE_BIAS is not implemented in fused_attn_max_512.");
@@ -1390,6 +1386,76 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         NVTE_ERROR("Unexpected workspace_size.");
     }
 }
+void fused_attn_max_512_fwd(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+                                     size_t num_head, size_t head_dim, bool is_training,
+                                     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                                     const Tensor *input_Q, const Tensor *input_K,
+                                     const Tensor *input_V,
+                                     const Tensor *input_Bias, Tensor *output_O,
+                                     NVTETensorPack *Aux_CTX_Tensors, const Tensor *q_cu_seqlens,
+                                     const Tensor *kv_cu_seqlens, const Tensor *rng_state,
+                                     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    using namespace transformer_engine;
+
+    void *devPtrQ = input_Q->data.dptr;
+    void *devPtrK = input_K->data.dptr;
+    void *devPtrV = input_V->data.dptr;
+
+    void *devPtrBias = input_Bias->data.dptr;
+
+    void *devPtrO = output_O->data.dptr;
+
+    void *devPtrS = nullptr;
+
+    const DType q_type = input_Q->data.dtype;
+    const DType kv_type = input_K->data.dtype;
+    NVTE_CHECK(q_type == kv_type, "data type of Q must be equal to data type of KV.");
+
+    if (Aux_CTX_Tensors->size == 0) {
+        Aux_CTX_Tensors->size = 1;
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        output_S->data.dptr = nullptr;
+        output_S->data.shape = {batch, num_head, q_max_seqlen, kv_max_seqlen};
+        output_S->data.dtype = q_type;
+    } else if (Aux_CTX_Tensors->size == 1) {
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+    } else {
+        NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+    }
+
+    void *devQCuSeqlen = q_cu_seqlens->data.dptr;
+    void *devKVCuSeqlen = kv_cu_seqlens->data.dptr;
+
+    const DType rng_state_type = rng_state->data.dtype;
+    NVTE_CHECK(rng_state_type == DType::kInt64);
+    void *devPtrDropoutSeed = rng_state->data.dptr;
+    void *devPtrDropoutOffset =
+        static_cast<void *>(static_cast<uint64_t *>(rng_state->data.dptr) + 1);
+
+    size_t workspace_size = 0;
+
+    fused_attn_max_512_fwd_impl(
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, is_training, attn_scale, p_dropout,
+        qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO, devPtrBias,
+        devQCuSeqlen, devKVCuSeqlen, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
+        &workspace_size, get_cudnn_dtype(q_type), stream, handle);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
+    }
+}
 
 void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t num_head,
                                       size_t head_dim, float attn_scale, float p_dropout,
@@ -1400,9 +1466,6 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
                                       const Tensor *cu_seqlens, Tensor *workspace,
                                       cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
-
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED,
-               "qkv_layout must be NVTE_QKV_INTERLEAVED.");
 
     // QKV shape is [b, s, 3, h, d]
     void *devPtrQKV = input_QKV->data.dptr;
@@ -1464,9 +1527,6 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
-    NVTE_CHECK(qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED,
-               "qkv_layout must be NVTE_KV_INTERLEAVED.");
-
     // Q shape is [b, s, h, d]
     // KV shape is [b, s, 2, h, d]
     auto stride = 2 * num_head * head_dim;
@@ -1494,6 +1554,64 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
 
     const auto q_type = input_Q->data.dtype;
     const auto kv_type = input_KV->data.dtype;
+    NVTE_CHECK(q_type == kv_type, "data type of Q must be equal to data type of KV.");
+    size_t workspace_size = 0;
+
+    fused_attn_max_512_bwd_impl(
+        batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim, attn_scale, p_dropout, qkv_layout,
+        mask_type, bias_type, devPtrQ, devPtrK, devPtrV, devPtrS, devPtrdQ, devPtrdK, devPtrdV,
+        devPtrdO, devPtrdS, devPtrdBias, devPtrQCuSeqlens, devPtrKVCuSeqlens, workspace->data.dptr,
+        &workspace_size, get_cudnn_dtype(q_type), stream, handle);
+
+    if (workspace_size > 0) {
+        if (workspace->data.dptr == nullptr) {
+            workspace->data.shape = {workspace_size};
+            workspace->data.dtype = DType::kByte;
+            return;
+        }
+    } else if (workspace_size == 0) {
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+    } else {
+        NVTE_ERROR("Unexpected workspace_size.");
+    }
+}
+void fused_attn_max_512_bwd(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+                                     size_t num_head, size_t head_dim, float attn_scale,
+                                     float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                                     const Tensor *input_Q, const Tensor *input_K,
+                                     const Tensor *input_V,
+                                     const Tensor *input_dO, Tensor *output_S,
+                                     Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
+                                     Tensor *output_dBias,
+                                     const Tensor *q_cu_seqlens, const Tensor *kv_cu_seqlens,
+                                     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    using namespace transformer_engine;
+
+    void *devPtrQ = input_Q->data.dptr;
+    void *devPtrK = input_K->data.dptr;
+    void *devPtrV = input_V->data.dptr;
+
+    void *devPtrdO = input_dO->data.dptr;
+
+    void *devPtrdQ = output_dQ->data.dptr;
+    void *devPtrdK = output_dK->data.dptr;
+    void *devPtrdV = output_dV->data.dptr;
+
+    void *devPtrdBias = output_dBias->data.dptr;
+
+    void *devPtrS = output_S->data.dptr;
+
+    // devPtrdS reuses the memory of devPtrS
+    void *devPtrdS = devPtrS;
+
+    void *devPtrQCuSeqlens = q_cu_seqlens->data.dptr;
+    void *devPtrKVCuSeqlens = kv_cu_seqlens->data.dptr;
+
+    const auto q_type = input_Q->data.dtype;
+    const auto kv_type = input_K->data.dtype;
     NVTE_CHECK(q_type == kv_type, "data type of Q must be equal to data type of KV.");
     size_t workspace_size = 0;
 

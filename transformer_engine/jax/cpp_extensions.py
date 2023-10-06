@@ -11,13 +11,19 @@ import operator
 import warnings
 
 import numpy as np
-from jaxlib.hlo_helpers import custom_call
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
 from jax.core import ShapedArray
 from jax.interpreters import xla, mlir
 from jax.interpreters.mlir import ir, dtype_to_ir_type
+
+try:
+    from jaxlib.hlo_helpers import custom_call
+except ImportError:
+    # Newer JAX changed its API. But we want to support a few JAX
+    # version, so we still need this import.
+    pass
 
 import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType

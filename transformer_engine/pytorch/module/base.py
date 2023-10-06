@@ -124,6 +124,8 @@ def initialize_ub(
     fp8_buf = [
         "qkv_fprop", "qkv_dgrad", "proj_dgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad"
     ]
+    if bool(int(os.getenv("NVTE_UB_FP8_RS", "0"))):
+        fp8_buf.append ("proj_fprop")
     # Default overlap methods for layers
     methods = {
         "ring_exchange":["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
@@ -153,8 +155,12 @@ def initialize_ub(
                     sample_buffer,          # Sample userbuffer
                     rank_id,                # Rank id
                     tp_size,                # TP size
+                    num_sm,                 # Number of communication SMs
+                    cga_size,               # CGA cluster size
+                    set_sm_margin,          # Set SM margin
                     aggregate,              # Aggregate 2X GEMM chunks
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -166,6 +172,7 @@ def initialize_ub(
                     num_splits,             # Number of communication splits
                     set_sm_margin,          # Set SM margin
                     _NUM_MAX_UB_STREAMS,    # Max concurrent GEMM streams
+                    torch.Tensor(),         # empty tensor to pass to counters
                 )
         _ub_communicators[name] = ub_obj
 
@@ -212,8 +219,9 @@ class _NoopCat(torch.autograd.Function):
                 *params_split: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
         assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
+        sum_params_shape = sum(p.shape[0] for p in params_split)
         assert (
-            full_param_buffer.shape[0] % len(params_split) == 0
+            full_param_buffer.shape[0] == sum_params_shape
         ), "Dimensions not compatible for concatenation"
 
         param_temp = full_param_buffer.new()
@@ -223,18 +231,19 @@ class _NoopCat(torch.autograd.Function):
                         full_param_buffer.stride())
         param_temp.requires_grad = True
 
-        ctx.save_for_backward(full_param_buffer, *params_split)
+        ctx.save_for_backward(*params_split)
         return param_temp
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        full_param_buffer, *params_split = ctx.saved_tensors
-
-        split_size = full_param_buffer.shape[0] // len(params_split)
+        params_split = ctx.saved_tensors
         grads = []
-
+        slice_begin = 0
         for i, _ in enumerate(params_split):
-            grads.append(grad_output[i * split_size : (i+1) * split_size])
+            slice_size = params_split[i].shape[0]
+            slice_end = slice_begin + slice_size
+            grads.append(grad_output[slice_begin:slice_end])
+            slice_begin = slice_end
 
         return None, *grads
 
@@ -364,7 +373,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if isinstance(state, list):
             warnings.warn(
                 "This checkpoint format is deprecated and will be"
-                "removed in a future release of Transformer Engine"
+                "removed in the next release (v1.0.0)."
             )
 
             # Retrieve checkpointed items.
@@ -410,7 +419,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             warnings.warn(
                 "This checkpoint format is deprecated and will be"
-                "removed in a future release of Transformer Engine"
+                "removed in the next release (v1.0.0)."
             )
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
@@ -445,8 +454,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # All checks after this have already been performed once, thus skip
-        # We assume that user doesn't change input types across iterations
-        if hasattr(self, "activation_dtype"):
+        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
             return
 
         dtype = inp.dtype
@@ -675,10 +683,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output_mat = grad_output.view((-1, grad_output.shape[-1]))
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
+        if gather_grad_output:
+            ub_overlap_ag = ctx.ub_split_ag or ctx.ub_atomic_gemm_ag
         # No-FP8 case: bgrad is fused with wgrad for this case.
         if not ctx.fp8:
             if gather_grad_output:
-                if not ctx.ub_split_ag:
+                if not ub_overlap_ag:
                     grad_output_mat, _ = gather_along_first_dim(
                         grad_output_mat, ctx.tp_group
                     )
@@ -697,8 +707,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             and ctx.fp8_meta["recipe"].override_linear_precision.wgrad
         ):
             assert (
-                not ctx.ub_split_ag
-            ), "override_linear_precision.wgrad not supported with ub_split_ag"
+                not ub_overlap_ag
+            ), "override_linear_precision.wgrad not supported with UB AG overlap"
             grad_output_mat, _ = gather_along_first_dim(grad_output_mat, ctx.tp_group)
         # FP8 case with gather: unfused bgrad, cast, transpose for efficient gather
         elif gather_grad_output:
@@ -706,7 +716,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output_mat.sum(dim=0)
             else:
                 grad_bias = None
-            if ctx.ub_split_ag:
+            if ub_overlap_ag:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
                 grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
@@ -717,7 +727,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype_backward,
                 out=grad_output_c,
             )
-            if not ctx.ub_split_ag:
+            if not ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
                 grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
             else:
@@ -754,7 +764,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self, buffer_name: str, pnames: List[str]) -> torch.Tensor:
+    def noop_cat(self,
+        buffer_name: str,
+        pnames: List[str],
+        parameters_split: Dict[str, int]
+        ) -> torch.Tensor:
         """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
            the same memory region. If this is not the case, then the split parameters
            are concatenated and the buffer is overwritten. The parameters' memory is then
@@ -763,17 +777,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
         full_param_buffer = getattr(self, buffer_name)
-        split_size = full_param_buffer.shape[0] // len(pnames)
         params = [getattr(self, name) for name in pnames]
+        slice_begin = 0
         for i, p in enumerate(params):
-            if p.data.data_ptr() != full_param_buffer[i*split_size : (i+1)*split_size].data_ptr():
+            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
+            slice_end = slice_begin + slice_size
+            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
                 with torch.no_grad():
                     setattr(self, buffer_name, torch.cat(params))
-                    for j, pname in enumerate(pnames):
+                    slice_begin_j = 0
+                    for pname in pnames:
+                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
+                        slice_end_j = slice_begin_j + slice_size_j
                         full_param_buffer = getattr(self, buffer_name)
                         setattr(self, pname,
-                                Parameter(full_param_buffer[j*split_size : (j+1)*split_size]))
+                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
+                        slice_begin_j = slice_end_j
                 break
+            slice_begin = slice_end
 
         return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
 
