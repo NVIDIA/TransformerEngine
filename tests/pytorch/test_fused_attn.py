@@ -12,7 +12,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch import TransformerLayer
-from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import DotProductAttention, RotaryPositionEmbedding
 import os
 
 from pkg_resources import packaging
@@ -340,6 +340,9 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fus
     else:
         bias = None
 
+    RoPE = RotaryPositionEmbedding(dim=config.head_dim)
+    rotary_pos_emb = RoPE(config.seq_len).cuda().to(dtype=dtype)
+
     block = (
         TransformerLayer(
             config.hidden_size,
@@ -379,6 +382,7 @@ def _run_transformer_layer(dtype, bs, config, backend, ckpt_attn, bias_type, fus
     for i in range(num_iters):
         op = block(inp, self_attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=ckpt_attn,
+            rotary_pos_emb=rotary_pos_emb,
             core_attention_bias_type=bias_type,
             core_attention_bias=bias)
         loss = op.sum()

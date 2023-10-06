@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from typing import Any, Callable, List, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 import numpy as np
+from einops import rearrange
 
 import torch
 import torch.nn.functional as F
@@ -690,6 +691,52 @@ def flash_attn_forward_func_with_cp(q, k, v, cu_seqlens_q, cu_seqlens_k,
     )
     return out
 
+
+class RotaryPositionEmbedding(torch.nn.Module):
+    """
+    Implements Rotary Position Embedding from https://arxiv.org/abs/2104.09864.
+    """
+    def __init__(
+        self,
+        dim: int,
+        seq_len_interpolation_factor: int = None,
+        pretrained_max_position_embeddings: int = None,
+    ):
+        """
+        Parameters
+        ----------
+        dim: int
+            rotary embedding dimension
+        seq_len_interpolation_factor: int
+            if not None, discrete positions will be interpolated by this factor via the trick in
+            https://arxiv.org/abs/2306.15595
+        pretrained_max_position_embeddings: int
+            pre-trained max_position_embeddings before position interpolation
+        """
+        super().__init__()
+        self.seq_len_interpolation_factor = seq_len_interpolation_factor
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
+
+    def forward(self, max_seq_len, offset=0):
+        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
+        seq = seq.type_as(self.inv_freq)
+
+        if self.pretrained_max_position_embeddings is not None and self.seq_len_interpolation_factor is not None:
+            if max_seq_len > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor:
+                # dynamic linear scaling (length > position we have learned)
+                seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
+            else:
+                # fixed linear scaling
+                seq *= 1 / self.seq_len_interpolation_factor
+
+        freqs = torch.einsum('i , j -> i j', seq, self.inv_freq)
+        # first part even vector components, second part odd vector components,
+        #  2 * dim in dimension size
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # emb [seq_length, .., dim]
+        return rearrange(emb, 'n d -> n 1 1 d')
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
@@ -2737,6 +2784,7 @@ class MultiheadAttention(torch.nn.Module):
             q_pos_emb, k_pos_emb = rotary_pos_emb
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            value_layer = value_layer.contiguous()
 
         context_layer = self.core_attention(
             query_layer,
