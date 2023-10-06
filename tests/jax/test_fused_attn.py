@@ -18,10 +18,10 @@ from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
 from jax import value_and_grad, jit
 
+from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
-from transformer_engine_jax import get_device_compute_capability
 
 # Type annotations
 Array = jnp.ndarray
@@ -159,9 +159,9 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim, pad_ratio):
-        if (s > 512 or backend == Backend.Arbitrary) and pad_ratio != 0:
-            pytest.skip("Arbitrary seqlen backend hasn't support padded input.")
+                      head_dim):
+
+        assert isinstance(backend, Backend)
 
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
@@ -182,8 +182,7 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d,
-                                     pad_ratio=pad_ratio)
+                                     head_dim=d)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
