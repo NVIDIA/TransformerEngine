@@ -146,6 +146,10 @@ before_script:
             --form "variables[GH_BRANCH]=${GH_BRANCH}" \
             --form "variables[GIT_SHA]=${GIT_SHA}" \
             --form "variables[GH_PR]=${GH_PR}" \
+            --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
+            --form "variables[BUILD_JAX]=${BUILD_JAX}" \
+            --form "variables[BUILD_TENSORFLOW]=${BUILD_TENSORFLOW}" \
+            --form "variables[BUILD_PADDLE]=${BUILD_PADDLE}" \
             --form "variables[GL_MR]=${GL_MR}" \
             --form "variables[GH_NIGHTLY]=${GH_NIGHTLY}" \
             --form "variables[GH_WEEKLY]=${GH_WEEKLY}" \
