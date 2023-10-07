@@ -72,11 +72,10 @@ class TestFP8Helper(unittest.TestCase):
             amax = np.array(amax)
             scale = np.array(scale)
 
-            exp = np.floor(np.log2(fp8_max / amax)) - FP8Helper.MARGIN
-            sf = np.round(np.power(2, np.abs(exp)))
-            sf = np.where(amax > 0.0, sf, scale)
-            sf = np.where(np.isfinite(amax), sf, scale)
-            return np.where(exp < 0, 1 / sf, sf)
+            sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
+            sf = jnp.where(amax > 0.0, sf, scale)
+            sf = jnp.where(jnp.isfinite(amax), sf, scale)
+            return sf
 
         amax_meta_shape = (num_of_meta, FP8Helper.AMAX_HISTORY_LEN)
         scale_meta_shape = (num_of_meta, 1)

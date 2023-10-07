@@ -883,6 +883,10 @@ class TransformerLayer(nn.Module):
         Dimensions that will share the same dropout mask for hidden
     attention_dropout: float, default = 0.1
         Dropout probability for the dropout op during multi-head attention.
+    intermediate_dropout: float, default = 0.1
+        Dropout probability for the dropout op after FC1 layer.
+    intermediate_dropout_dims: Sequence[int], default = ()
+        Dimensions that will share the same dropout mask for hidden after FC1 layer.
     dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for
         generating Dropout masks in the Multi-Head Attention.
@@ -963,6 +967,8 @@ class TransformerLayer(nn.Module):
     hidden_dropout: float = 0.1
     hidden_dropout_dims: Sequence[int] = ()
     attention_dropout: float = 0.1
+    intermediate_dropout: float = 0.1
+    intermediate_dropout_dims: Sequence[int] = ()
     dropout_rng_name: str = 'dropout'
     mha_kernel_init: Initializer = None
     mlp_kernel_init: Initializer = None
@@ -1078,6 +1084,8 @@ class TransformerLayer(nn.Module):
         else:
             mha_name = 'self_attention'
 
+        inputs = _with_sharding_constraint(inputs, (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES))
+
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         x, residual = MultiHeadAttention(
             num_heads=self.num_attention_heads,
@@ -1113,14 +1121,15 @@ class TransformerLayer(nn.Module):
                 assert -x_shape_len <= dims < x_shape_len
 
             return nn.Dropout(rate=self.hidden_dropout,
-                              broadcast_dims=self.hidden_dropout_dims)(x,
-                                                                       deterministic=deterministic)
+                              broadcast_dims=self.hidden_dropout_dims,
+                              rng_collection=self.dropout_rng_name)(x, deterministic=deterministic)
 
         x = hidden_dropout(x, deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
             x = nn.Dropout(rate=self.drop_path,
-                           broadcast_dims=drop_path_shape)(x, deterministic=deterministic)
+                           broadcast_dims=drop_path_shape,
+                           rng_collection=self.dropout_rng_name)(x, deterministic=deterministic)
         x = x + residual
 
         mlp_input = x
@@ -1156,6 +1165,8 @@ class TransformerLayer(nn.Module):
             y = hidden_dropout(y, deterministic)
             mlp_input = y + residual
 
+        mlp_input = _with_sharding_constraint(mlp_input, (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES))
+
         # MlpBlock
         residual = mlp_input
         z, ln_out = LayerNormMLP(
@@ -1167,8 +1178,9 @@ class TransformerLayer(nn.Module):
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             intermediate_dim=self.mlp_hidden_size,
             activations=self.mlp_activations,
-            intermediate_dropout_rate=self.hidden_dropout,
-            intermediate_hidden_dropout_dims=self.hidden_dropout_dims,
+            intermediate_dropout_rng_name=self.dropout_rng_name,
+            intermediate_dropout_rate=self.intermediate_dropout,
+            intermediate_hidden_dropout_dims=self.intermediate_dropout_dims,
             dtype=self.dtype,
             scale_axes=(W_NO_SHARD_AXES,),
             ln_bias_axes=(W_NO_SHARD_AXES,),
