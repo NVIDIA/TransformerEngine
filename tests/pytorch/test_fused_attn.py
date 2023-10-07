@@ -696,6 +696,10 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    if backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
 
     inp = torch.load('qkv.pt').cuda()
     inp.requires_grad=True
