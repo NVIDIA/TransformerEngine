@@ -11,7 +11,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, List, Optional, Tuple, Union, Dict
 from pkg_resources import packaging
 import numpy as np
-from einops import rearrange
 
 import torch
 import torch.nn.functional as F
@@ -699,8 +698,8 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def __init__(
         self,
         dim: int,
-        seq_len_interpolation_factor: int = None,
-        pretrained_max_position_embeddings: int = None,
+        seq_len_interpolation_factor: Optional[int] = None,
+        pretrained_max_position_embeddings: Optional[int] = None,
     ):
         """
         Parameters
@@ -748,7 +747,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         #  2 * dim in dimension size
         emb = torch.cat((freqs, freqs), dim=-1)
         # emb [seq_length, .., dim]
-        return rearrange(emb, 'n d -> n 1 1 d')
+        return emb.reshape(emb.size(0), 1, 1, emb.size(1))
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
