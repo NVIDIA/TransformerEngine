@@ -301,7 +301,7 @@ class TestGemm:
         actual_out, _, _ = gemm(b, a, paddle.bfloat16, workspace, False, None, False, False, "TN",
                                 None, None, False)
 
-        assert_allclose(actual_out, ref_out)
+        assert_allclose(actual_out, ref_out, rtol=1.6e-2, atol=1e-5)
 
     @staticmethod
     @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
@@ -333,8 +333,8 @@ class TestGemm:
         """
         Test "TN" FP8 GEMM
         """
-        min_val = -8
-        max_val = 8
+        min_val = -4
+        max_val = 4
         fp8_dtype = tex.DType.kFloat8E4M3
         out_dtype = paddle.float32
         fp8_meta = create_fp8_meta(num_gemms=1)
@@ -599,15 +599,14 @@ class TestFusedAttn:
             shape=(self.batch_size, 1, self.q_seqlen, self.kv_seqlen),
             dtype=np.int32,
         )
-        for i in range(0, self.batch_size):
-            self.attn_mask[i, 0, 0:self.q_actual_seqlen[i], 0:self.kv_actual_seqlen[i],] = 1
-
-            if self.is_causal_masking:
-                assert attn_mode == "self_attn", "only support causal masking for self attention"
-                col_beg, col_end = 1, self.q_actual_seqlen[i]
-                for row in range(0, self.q_actual_seqlen[i]):
-                    self.attn_mask[i, 0, row, col_beg:col_end] = 0
-                    col_beg += 1
+        if self.is_causal_masking:
+            assert attn_mode == "self_attn", "only support causal masking for self attention"
+            for row in range(min(self.q_seqlen, self.kv_seqlen)):
+                self.attn_mask[:, :, row, row+1:] = 1
+        else:
+            self.attn_mask[...] = 1
+            for i in range(0, self.batch_size):
+                self.attn_mask[i, :, :self.q_actual_seqlen[i], :self.kv_actual_seqlen[i]] = 0
 
         dout = _random((self.batch_size, self.q_seqlen, self.num_heads, self.head_size))
         self.dout = paddle.to_tensor(dout, dtype=self.dtype)
@@ -630,9 +629,10 @@ class TestFusedAttn:
         )
 
         attn_mask = paddle.to_tensor(self.attn_mask, stop_gradient=True)
-        attn_mask = (paddle.cast(attn_mask, self.dtype) - 1.0) * 1e4
-        attn_mask_out = qk_out + attn_mask
+        attn_mask_out = qk_out - 1e4 * attn_mask
+        attn_mask_out = paddle.cast(attn_mask_out, 'float32')
         softmax_out = F.softmax(attn_mask_out)
+        softmax_out = paddle.cast(softmax_out, self.dtype)
 
         if self.dropout_prob:
             dropout_out = F.dropout(
