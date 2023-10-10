@@ -334,9 +334,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Save before checkpointing."""
         state = None
 
-        # Maintain backward compatibility.
-        fp8_checkpoint = "fp8_checkpoint" in self.fp8_meta and self.fp8_meta["fp8_checkpoint"]
-        fp8_checkpoint = fp8_checkpoint or self.fp8 or self.fp8_calibration
+        fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
 
         if fp8_checkpoint:
             state = {}
@@ -369,44 +367,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Maintain backward compatibility with v0.2.0 and older.
-        if isinstance(state, list):
-            warnings.warn(
-                "This checkpoint format is deprecated and will be"
-                "removed in the next release (v1.0.0)."
-            )
-
-            # Retrieve checkpointed items.
-            scale_fwd = state[0]
-            amax_history_fwd = state[1]
-            scale_bwd = state[2]
-            amax_history_bwd = state[3]
-            self.fp8_meta["recipe"].amax_history_len = amax_history_fwd.shape[0]
-            self.fp8_meta["num_gemms"] = (
-                amax_history_fwd.shape[1] // 2
-            )  # Two FWD tensors per GEMM
-
-            # Initialize before loading
-            self.init_fp8_meta_tensors()
-            self.fp8_meta["scaling_fwd"].scale.copy_(scale_fwd)
-            self.fp8_meta["scaling_fwd"].amax_history.copy_(amax_history_fwd)
-            self.fp8_meta["scaling_bwd"].scale.copy_(scale_bwd)
-            self.fp8_meta["scaling_bwd"].amax_history.copy_(amax_history_bwd)
-
-            # Restore global FP8 buffer state.
-            FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state[4])
-            self.fp8_meta["update_amax_and_scale_fwd"] = state[5]
-            self.fp8_meta["global_fp8_buffer_pos_fwd"] = state[6]
-            self.fp8_meta["global_fp8_buffer_pos_bwd"] = state[7]
-            self.fp8_meta["autocast_id_fwd"] = state[8]
-            self.fp8_meta["autocast_id_bwd"] = state[9]
-            return
-
         if isinstance(state, torch.Tensor):
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):
             state.seek(0)
             state = torch.load(state, map_location='cuda')
+        else:
+            raise RuntimeError("Unsupported checkpoint format.")
 
         if state is None:
             return
@@ -414,13 +381,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Restore global FP8 amax buffer.
         FP8GlobalStateManager.set_global_fp8_buffer_checkpoint(state["global_fp8_buffer"])
         # Restore global FP8 state.
-        if "global_fp8_state" in state:
-            FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
-        else:
-            warnings.warn(
-                "This checkpoint format is deprecated and will be"
-                "removed in the next release (v1.0.0)."
-            )
+        FP8GlobalStateManager.set_global_fp8_state_checkpoint(state["global_fp8_state"])
+
         # Load extra items.
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
@@ -433,18 +395,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
         self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
-
-        # Backwards compatibility: compute scale inv if it wasn't saved in the extra state.
-        if "scale_inv_fwd" not in state or "scale_inv_bwd" not in state:
-            assert (
-                "scale_inv_fwd" not in state and "scale_inv_bwd" not in state
-            ), "Invalid state, began saving scale_inv_fwd and scale_inv_bwd at the same time"
-            self.fp8_meta["scaling_fwd"].scale_inv.copy_(1.0/state["scale_fwd"])
-            self.fp8_meta["scaling_bwd"].scale_inv.copy_(1.0/state["scale_bwd"])
-        else:
-            self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
-            self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
-
+        self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
+        self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
