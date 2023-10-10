@@ -1338,12 +1338,13 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
         }
         use_workspace_opt = transformer_engine::getenv<bool>(
             "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
-        // will not be needed in cuDNN 8.9.6
+#if (CUDNN_VERSION < 8906)
         NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
         if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
             || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
                 use_workspace_opt = false;
         }
+#endif
     }
 #endif
 
@@ -1485,12 +1486,13 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
         }
         use_workspace_opt = transformer_engine::getenv<bool>(
             "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT", use_workspace_opt);
-        // will not be needed in cuDNN 8.9.6
+#if (CUDNN_VERSION < 8906)
         NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
         if ((layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD)
             || (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D)) {
                 use_workspace_opt = false;
         }
+#endif
     }
 #endif
 
