@@ -42,9 +42,6 @@
 #define K_TRANSPOSE_ID 22
 #define dQ_ACCUM_ID 23
 
-#define FWD_VAR 1
-#define BWD_VAR 1
-
 #define VIRTUAL_ID 30
 
 namespace transformer_engine {
@@ -121,10 +118,8 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                             .setaMatDesc(qTensor)
                             .setbMatDesc(kTransposeTensor)
                             .setcMatDesc(sTensor)
-#ifdef FWD_VAR
                             .setmOverrideDesc(seqlenQTensor)
                             .setnOverrideDesc(seqlenKTensor)
-#endif
                             .setmatmulDesc(matmul_1_Desc)
                             .build();
 
@@ -192,11 +187,9 @@ createPaddingMask(int64_t b,
                                .setAxis(2)
                                .setComputeType(CUDNN_DATA_FLOAT)
                                .build();
-    // std::cout << genIndexRowDesc.describe() << std::endl;
 
     // Create a gen index Node.
     auto genIndexRow_op = unary_pw_op_create(prevBlockOutputTensor, rowIndexTensor, genIndexRowDesc);
-    // std::cout << genIndexRow_op.describe() << std::endl;
 
     // Define the gen index for row descriptor
     auto genIndexColumnDesc = cudnn_frontend::PointWiseDescBuilder()
@@ -204,7 +197,6 @@ createPaddingMask(int64_t b,
                                   .setAxis(3)
                                   .setComputeType(CUDNN_DATA_FLOAT)
                                   .build();
-    // std::cout << genIndexColumnDesc.describe() << std::endl;
 
     // Create a gen index Node.
     auto genIndexColumn_op = unary_pw_op_create(prevBlockOutputTensor, columnIndexTensor, genIndexColumnDesc);
@@ -663,10 +655,8 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                             .setaMatDesc(afterScaleDropoutTensor)
                             .setbMatDesc(vTensor)
                             .setcMatDesc(oTensor)
-#ifdef FWD_VAR
                             .setmOverrideDesc(seqlenQTensor)
                             .setkOverrideDesc(seqlenKTensor)
-#endif
                             .setmatmulDesc(matmul_2_Desc)
                             .build();
 
@@ -726,14 +716,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto sAfterMaskTensor = createCausalMask(
                                 b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
-            // std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
-            // softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(sAfterMaskTensor));
-
-            // constexpr bool variable_sequence_length = true;
-            // if (variable_sequence_length) {
             auto sAfterPaddingMaskTensor = createPaddingMask(b, h, s_q, s_kv, d, layout, tensorType, ops, sAfterMaskTensor);
             auto softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(sAfterPaddingMaskTensor));
-            // }
 
             NVTE_CHECK(dropout_probability != 1.0f,
                                 "Dropout probability cannot be 1.0");
@@ -815,10 +799,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_SEED_ID, devPtrDropoutSeed));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_CONST_ID, &scale_dropout));
-#ifdef FWD_VAR
         data_ptrs.insert(std::pair<uint64_t, void*>(Q_SEQLEN_ID, devActualSeqlenQ));
         data_ptrs.insert(std::pair<uint64_t, void*>(K_SEQLEN_ID, devActualSeqlenK));
-#endif
 
         // If training mode, we write out softmax stats
         if (is_training) {
@@ -919,12 +901,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             int64_t scale_dim[4] = {1, 1, 1, 1};
             int64_t scale_stride[4] = {1, 1, 1, 1};
 
-#ifdef BWD_VAR
             auto seqlenQTensor = tensor_create(CUDNN_DATA_INT32, Q_SEQLEN_ID, seqlen_dim,
                                                seqlen_stride, false, false);
             auto seqlenKTensor = tensor_create(CUDNN_DATA_INT32, K_SEQLEN_ID, seqlen_dim,
                                                seqlen_stride, false, false);
-#endif
 
             /*******************************************************************************
              *                          Dot product dO * O                                */ 
@@ -1007,10 +987,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(qTensor)
                             .setbMatDesc(kTransposeTensor)
                             .setcMatDesc(pTensor)
-#ifdef BWD_VAR
                             .setmOverrideDesc(seqlenQTensor)
                             .setnOverrideDesc(seqlenKTensor)
-#endif
                             .setmatmulDesc(matmul_0_Desc)
                             .build();
 
@@ -1032,17 +1010,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             /*******************************************************************************
              *                          Causal masking -> pAfterMaskTensor                */
 
-            // std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
             auto pAfterMaskTensor = createCausalMask(
                             b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
 
-            // softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(pAfterMaskTensor));
-
-            // constexpr bool variable_sequence_length = true;
-            // if (variable_sequence_length) {
             auto pAfterPaddingMaskTensor = createPaddingMask(b, h, s_q, s_kv, d, layout, tensorType, ops, pAfterMaskTensor);
             auto softmaxInput = std::make_shared<cudnn_frontend::Tensor>(std::move(pAfterPaddingMaskTensor));
-            // }
 
             /*******************************************************************************
              *                          pAfterMaskTensor - softmaxStats -> pAfterSubtract */
@@ -1128,10 +1100,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(sTransposeTensor)
                             .setbMatDesc(dOTensor)
                             .setcMatDesc(dVTensor)
-#ifdef BWD_VAR
                             .setmOverrideDesc(seqlenKTensor)
                             .setkOverrideDesc(seqlenQTensor)
-#endif
                             .setmatmulDesc(matmul_1_Desc)
                             .build();
 
@@ -1157,10 +1127,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .setaMatDesc(dOTensor)
                             .setbMatDesc(vTransposeTensor)
                             .setcMatDesc(dSTensor)
-#ifdef BWD_VAR
                             .setmOverrideDesc(seqlenQTensor)
                             .setnOverrideDesc(seqlenKTensor)
-#endif
                             .setmatmulDesc(matmul_2_Desc)
                             .build();
 
@@ -1268,10 +1236,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                     .setaMatDesc(dPScaledTensor)
                                     .setbMatDesc(kTensor)
                                     .setcMatDesc(dqAccumTensor)
-#ifdef BWD_VAR
                                     .setmOverrideDesc(seqlenQTensor)
                                     .setkOverrideDesc(seqlenKTensor)
-#endif
                                     .setmatmulDesc(matmul_3_Desc)
                                     .build();
 
@@ -1282,10 +1248,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                     .setaMatDesc(dPScaledTensor)
                                     .setbMatDesc(kTensor)
                                     .setcMatDesc(dQTensor)
-#ifdef BWD_VAR
                                     .setmOverrideDesc(seqlenQTensor)
                                     .setkOverrideDesc(seqlenKTensor)
-#endif
                                     .setmatmulDesc(matmul_3_Desc)
                                     .build();
 
@@ -1315,10 +1279,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .setaMatDesc(dPTransposeTensor)
                                 .setbMatDesc(qTensor)
                                 .setcMatDesc(dKTensor)
-#ifdef BWD_VAR
                                 .setmOverrideDesc(seqlenKTensor)
                                 .setkOverrideDesc(seqlenQTensor)
-#endif
                                 .setmatmulDesc(matmul_4_Desc)
                                 .build();
 
@@ -1415,10 +1377,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_SEED_ID, devPtrDropoutSeed));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(MASK_VAL_ID, &negInfinity));
-#ifdef BWD_VAR
         data_ptrs.insert(std::pair<uint64_t, void *>(Q_SEQLEN_ID, devActualSeqlenQ));
         data_ptrs.insert(std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
-#endif
 
         float scaleProb = 1.0f - dropout_probability;
         data_ptrs.insert(std::pair<uint64_t, void*>(D_CONST_ID, &scale_dropout));
