@@ -6,13 +6,13 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.attention import InferenceParams, MultiheadAttention
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -456,7 +456,7 @@ class TransformerLayer(torch.nn.Module):
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
-        inference_params: Optional[Any] = None,
+        inference_params: Optional[InferenceParams] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -512,6 +512,9 @@ class TransformerLayer(torch.nn.Module):
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        inference_params: InferenceParams, default = None
+                         Inference parameters that are passed to the main model in order
+                         to efficienly calculate and store the context during inference.
         """
 
         if self_attn_mask_type is None:
