@@ -6,13 +6,13 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.attention import InferenceParams, MultiheadAttention
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -67,11 +67,6 @@ class TransformerLayer(torch.nn.Module):
     r"""
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
-
-    .. warning::
-
-        Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
-        are deprecated and will be fully removed in the next release (v1.0.0).
 
     .. note::
 
@@ -224,8 +219,6 @@ class TransformerLayer(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        apply_query_key_layer_scaling: bool = False, # pylint: disable=unused-argument
-        attention_softmax_in_fp32: bool = True, # pylint: disable=unused-argument
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         sequence_parallel: bool = False,
@@ -244,12 +237,6 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
-
-        warnings.warn(
-            "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
-            "are deprecated and will be fully removed in the next release (v1.0.0).",
-            category=DeprecationWarning,
-        )
 
         if ub_tp_comm_overlap:
             assert (
@@ -446,19 +433,19 @@ class TransformerLayer(torch.nn.Module):
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
 
-    def set_context_parallel_running(
+    def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group and CP dual-stream running"""
+        """Set CP group"""
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
-            if hasattr(child, "set_context_parallel_running"):
-                child.set_context_parallel_running(cp_group, cp_global_ranks, cp_stream)
+            if hasattr(child, "set_context_parallel_group"):
+                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream)
 
     def forward(
         self,
@@ -469,7 +456,7 @@ class TransformerLayer(torch.nn.Module):
         enc_dec_attn_mask: Optional[torch.Tensor] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
-        inference_params: Optional[Any] = None,
+        inference_params: Optional[InferenceParams] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -525,6 +512,9 @@ class TransformerLayer(torch.nn.Module):
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        inference_params: InferenceParams, default = None
+                         Inference parameters that are passed to the main model in order
+                         to efficienly calculate and store the context during inference.
         """
 
         if self_attn_mask_type is None:

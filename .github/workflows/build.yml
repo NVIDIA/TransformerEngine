@@ -11,6 +11,7 @@ jobs:
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest
+    if: false  # NGC PyTorch container does not fit on GitHub runner
     container:
       image: nvcr.io/nvidia/pytorch:23.03-py3
       options: --user root

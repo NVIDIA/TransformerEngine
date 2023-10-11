@@ -28,6 +28,9 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward
 
+.. autoapiclass:: transformer_engine.pytorch.InferenceParams(max_batch_size, max_sequence_length)
+  :members: swap_key_value_dict
+
 .. autoapifunction:: transformer_engine.pytorch.fp8_autocast
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
