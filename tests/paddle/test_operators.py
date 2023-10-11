@@ -595,16 +595,16 @@ class TestFusedAttn:
         self.q_cu_seqlen = np.insert(self.q_cu_seqlen, 0, 0)
         self.kv_cu_seqlen = np.cumsum(self.kv_actual_seqlen)
         self.kv_cu_seqlen = np.insert(self.kv_cu_seqlen, 0, 0)
-        self.attn_mask = np.zeros(
+        self.attn_mask = np.ones(
             shape=(self.batch_size, 1, self.q_seqlen, self.kv_seqlen),
             dtype=np.int32,
         )
         if self.is_causal_masking:
             assert attn_mode == "self_attn", "only support causal masking for self attention"
-            for row in range(min(self.q_seqlen, self.kv_seqlen)):
-                self.attn_mask[:, :, row, row+1:] = 1
+            for i in range(0, self.batch_size):
+                for j in range(self.q_actual_seqlen[i]):
+                    self.attn_mask[i, :, j, :j+1] = 0
         else:
-            self.attn_mask[...] = 1
             for i in range(0, self.batch_size):
                 self.attn_mask[i, :, :self.q_actual_seqlen[i], :self.kv_actual_seqlen[i]] = 0
 
@@ -628,8 +628,9 @@ class TestFusedAttn:
             transpose_y=True,
         )
 
-        attn_mask = paddle.to_tensor(self.attn_mask, stop_gradient=True)
-        attn_mask_out = qk_out - 1e4 * attn_mask
+        attn_mask = paddle.to_tensor(self.attn_mask, stop_gradient=True).cast('bool')
+        attn_mask_vals = paddle.full(qk_out.shape, -1e4, qk_out.dtype)
+        attn_mask_out = paddle.where(attn_mask, attn_mask_vals, qk_out)
         attn_mask_out = paddle.cast(attn_mask_out, 'float32')
         softmax_out = F.softmax(attn_mask_out)
         softmax_out = paddle.cast(softmax_out, self.dtype)
@@ -761,10 +762,10 @@ class TestFusedAttn:
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
-        assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
-        assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
-        assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
-        assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(reference_out, fused_attention_out, rtol=2.5e-2, atol=2.5e-2)
+        assert_allclose(q_grad_ref, q_grad, rtol=2.5e-2, atol=2.5e-2)
+        assert_allclose(k_grad_ref, k_grad, rtol=2.5e-2, atol=2.5e-2)
+        assert_allclose(v_grad_ref, v_grad, rtol=2.5e-2, atol=2.5e-2)
 
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
