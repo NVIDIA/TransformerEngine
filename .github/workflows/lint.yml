@@ -63,28 +63,3 @@ jobs:
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
-  tensorflow_cpplint:
-    name: 'TensorFlow C++'
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          export CPP_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_tensorflow_lint/test.sh
-  tensorflow_pylint:
-    name: 'TensorFlow Python'
-    runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
-      options: --user root
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          export PYTHON_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_tensorflow_lint/test.sh

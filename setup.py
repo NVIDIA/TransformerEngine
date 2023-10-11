@@ -203,7 +203,7 @@ def with_userbuffers() -> bool:
 def frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
+    supported_frameworks = ["pytorch", "jax", "paddle"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -229,12 +229,6 @@ def frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import tensorflow
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("tensorflow")
         try:
             import paddle
         except ImportError:
@@ -297,11 +291,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
-    if "tensorflow" in frameworks():
-        if not found_pybind11():
-            add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, "tensorflow")
-        add_unique(test_reqs, ["keras", "tensorflow_datasets"])
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
@@ -451,8 +440,6 @@ def setup_common_extension() -> CMakeExtension:
     cmake_flags = []
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
-    if "tensorflow" in frameworks():
-        cmake_flags.append("-DENABLE_TENSORFLOW=ON")
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
