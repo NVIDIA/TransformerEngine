@@ -540,7 +540,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 "necessary when using sequence parallelism with FP8."
 
             # Previous iteration was grad_enabled
-            if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+            if self.fp8 and self.fp8_meta.get("update_amax_and_scale_fwd", True):
                 if self.fp8_meta["recipe"].reduce_amax:
                     FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
