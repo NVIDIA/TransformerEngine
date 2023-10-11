@@ -68,11 +68,6 @@ class TransformerLayer(torch.nn.Module):
     TransformerLayer is made up of an attention block and a feedforward network (MLP).
     This standard layer is based on the paper "Attention Is All You Need".
 
-    .. warning::
-
-        Arguments :attr:`attention_softmax_in_fp32` and :attr:`apply_query_key_layer_scaling`
-        are deprecated and will be fully removed in the next release (v1.0.0).
-
     .. note::
 
         Argument :attr:`attention_mask` will be ignored in the `forward` call when
@@ -224,8 +219,6 @@ class TransformerLayer(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         get_rng_state_tracker: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
-        apply_query_key_layer_scaling: bool = False, # pylint: disable=unused-argument
-        attention_softmax_in_fp32: bool = True, # pylint: disable=unused-argument
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         sequence_parallel: bool = False,
@@ -244,12 +237,6 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
-
-        warnings.warn(
-            "Arguments `attention_softmax_in_fp32` and `apply_query_key_layer_scaling`"
-            "are deprecated and will be fully removed in the next release (v1.0.0).",
-            category=DeprecationWarning,
-        )
 
         if ub_tp_comm_overlap:
             assert (

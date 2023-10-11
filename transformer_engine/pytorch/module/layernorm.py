@@ -4,7 +4,7 @@
 
 """LayerNorm API"""
 import os
-from typing import Union, Tuple, Any, Mapping, Optional
+from typing import Union, Tuple, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -148,23 +148,6 @@ class LayerNorm(torch.nn.Module):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
-    def load_state_dict(
-        self,
-        state_dict: Mapping[str, Any],
-        strict: bool = True,
-    ) -> None:
-        """Override PyTorch loader to maintain backward compatibility
-        with previous version of LayerNorm parameter names.
-        """
-        if "layer_norm_weight" in state_dict:
-            state_dict["weight"] = state_dict["layer_norm_weight"]
-            del state_dict["layer_norm_weight"]
-        if "layer_norm_bias" in state_dict:
-            state_dict["bias"] = state_dict["layer_norm_bias"]
-            del state_dict["layer_norm_bias"]
-
-        super().load_state_dict(state_dict, strict)
-
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         if not self.zero_centered_gamma:
@@ -173,16 +156,9 @@ class LayerNorm(torch.nn.Module):
             init.zeros_(self.weight)
         init.zeros_(self.bias)
 
-
     @no_torch_dynamo
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
-        # Maintain backward compatibility.
-        if hasattr(self, "layer_norm_weight"):
-            setattr(self, "weight", self.layer_norm_weight)
-        if hasattr(self, "layer_norm_bias"):
-            setattr(self, "bias", self.layer_norm_bias)
-
         # Set the activation type for AMP.
         TransformerEngineBaseModule.set_activation_dtype(self, inp)
 
