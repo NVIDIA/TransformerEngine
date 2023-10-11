@@ -101,6 +101,35 @@ def set_random_seed(seed):
 
     paddle.seed(global_seed)
 
+def get_fused_attention_backend(
+    head_size: int,
+    q_seqlen: int,
+    kv_seqlen: int,
+    dtype: Union[paddle.dtype, str],
+    dropout: float,
+    qkv_layout: str = "qkv_interleaved",
+    bias_type: str = "no_bias",
+    mask_type: str = "causal",
+) -> tex.NVTE_Fused_Attn_Backend:
+    """Get cuDNN fused attention backend for attention config"""
+    if isinstance(dtype, str):
+        dtype = dict(
+            float32=paddle.float32,
+            bfloat16=paddle.bfloat16,
+            float16=paddle.float16,
+        )[dtype]
+    return tex.get_fused_attn_backend(
+        TE_DType[dtype],
+        TE_DType[dtype],
+        QKVLayout[qkv_layout],
+        AttnBiasType[bias_type],
+        AttnMaskType[mask_type],
+        dropout,
+        q_seqlen,
+        kv_seqlen,
+        head_size,
+    )
+
 def is_fused_attention_supported(
     head_size: int,
     q_seqlen: int,
@@ -111,21 +140,15 @@ def is_fused_attention_supported(
     bias_type: str = "no_bias",
     mask_type: str = "causal",
 ) -> bool:
-    if isinstance(dtype, str):
-        dtype = dict(
-            float32=paddle.float32,
-            bfloat16=paddle.bfloat16,
-            float16=paddle.float16,
-        )[dtype]
-    backend = tex.get_fused_attn_backend(
-        TE_DType[dtype],
-        TE_DType[dtype],
-        QKVLayout[qkv_layout],
-        AttnBiasType[bias_type],
-        AttnMaskType[mask_type],
-        dropout,
-        q_seqlen,
-        kv_seqlen,
-        head_size,
+    """Check if cuDNN fused attention is supported for attention config"""
+    backend = get_fused_attention_backend(
+        head_size=head_size,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        dtype=dtype,
+        dropout=dropout,
+        qkv_layout=qkv_layout,
+        bias_type=bias_type,
+        mask_type=mask_type,
     )
     return backend != FusedAttnBackend["No_Backend"]

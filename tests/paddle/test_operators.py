@@ -44,7 +44,12 @@ from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
 
-from utils import assert_allclose, is_fused_attention_supported, create_fp8_meta
+from utils import (
+    assert_allclose,
+    create_fp8_meta,
+    get_fused_attention_backend,
+    is_fused_attention_supported,
+)
 
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
@@ -583,12 +588,20 @@ class TestFusedAttn:
         else:
             self.kv = _random(self.kv_shape)
 
-        self.q_actual_seqlen = np.random.randint(
-            low=20,
-            high=self.q_seqlen,
-            size=(self.batch_size,),
-            dtype=np.int32,
-        )
+        self.q_actual_seqlen = None
+        if self.is_causal_masking:
+            self.q_actual_seqlen = np.full(
+                self.batch_size,
+                self.q_seqlen,
+                dtype=np.int32,
+            )
+        else:
+            self.q_actual_seqlen = np.random.randint(
+                low=20,
+                high=self.q_seqlen,
+                size=(self.batch_size,),
+                dtype=np.int32,
+            )
         self.kv_actual_seqlen = self.q_actual_seqlen
 
         self.q_cu_seqlen = np.cumsum(self.q_actual_seqlen)
@@ -669,9 +682,21 @@ class TestFusedAttn:
         q_cu_seqlen_tensor = paddle.to_tensor(self.q_cu_seqlen, dtype="int32", stop_gradient=True)
         kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
 
-        fused_attention_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen if (
-            self.q_seqlen <= 512
-            and self.kv_seqlen <= 512) else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+        qkv_layout = (
+            "qkv_interleaved"
+            if self.attn_mode == "self_attn"
+            else "kv_interleaved"
+        )
+        fused_attention_backend = get_fused_attention_backend(
+            head_size=self.head_size,
+            q_seqlen=self.q_seqlen,
+            kv_seqlen=self.kv_seqlen,
+            dtype=self.dtype,
+            dropout=self.dropout_prob,
+            qkv_layout=qkv_layout,
+            bias_type="no_bias",
+            mask_type="causal" if self.is_causal_masking else "padding",
+        )
 
         qkv_dtype = tex.DType.kBFloat16 if self.dtype == "bfloat16" else tex.DType.kFloat16
         out, softmax_aux_tensor, q_grad, k_grad, v_grad = None, None, None, None, None
@@ -762,10 +787,10 @@ class TestFusedAttn:
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
-        assert_allclose(reference_out, fused_attention_out, rtol=2.5e-2, atol=2.5e-2)
-        assert_allclose(q_grad_ref, q_grad, rtol=2.5e-2, atol=2.5e-2)
-        assert_allclose(k_grad_ref, k_grad, rtol=2.5e-2, atol=2.5e-2)
-        assert_allclose(v_grad_ref, v_grad, rtol=2.5e-2, atol=2.5e-2)
+        assert_allclose(reference_out, fused_attention_out, rtol=1e-3, atol=1e-2)
+        assert_allclose(q_grad_ref, q_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
+        assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
