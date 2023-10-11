@@ -70,7 +70,53 @@ else:
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 
 
-__all__ = ["DotProductAttention", "MultiheadAttention"]
+__all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+
+
+class InferenceParams: # pylint: disable=too-few-public-methods
+    """
+    Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference.
+
+    Parameters
+    ----------
+    max_batch_size : int
+                    maximum batch size during inference.
+    max_sequence_length : int
+                         maximum sequence length during inference.
+    """
+
+    def __init__(self, max_batch_size, max_sequence_length):
+        self.max_sequence_length = max_sequence_length
+        self.max_batch_size = max_batch_size
+        self.sequence_len_offset = 0
+        self.batch_size_offset = 0
+        self.key_value_memory_dict = {}
+
+    def swap_key_value_dict(self, batch_indices):
+        """
+        Reorders the KV cache using the specified batch indices.
+
+        Parameters
+        ----------
+        batch_indices : List[int]
+                       Sequence of indices to reorder along the batch dimensions of
+                       the KV cache. Must have a length equal to the batch size.
+        """
+        if len(self.key_value_memory_dict) == 0:
+            raise ValueError("should not swap when dict in empty")
+
+        for layer_number, inference_memory in self.key_value_memory_dict.items():
+            inference_key_memory, inference_value_memory = inference_memory
+            assert (
+                len(batch_indices) == inference_key_memory.shape[1]
+            )  # make sure batch size is the same
+            new_inference_key_memory = inference_key_memory[:, batch_indices]
+            new_inference_value_memory = inference_value_memory[:, batch_indices]
+            self.key_value_memory_dict[layer_number] = (
+                new_inference_key_memory,
+                new_inference_value_memory,
+            )
 
 
 def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1868,6 +1914,17 @@ class DotProductAttention(torch.nn.Module):
 
         return hidden_states
 
+    def set_context_parallel_group(
+        self,
+        cp_group: Union[dist_group_type, None],
+        cp_global_ranks: List[int],
+        cp_stream: torch.cuda.Stream,
+    ) -> None:
+        """Set CP group"""
+        self.cp_group = cp_group
+        self.cp_global_ranks = cp_global_ranks
+        self.cp_stream = cp_stream
+
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -2503,16 +2560,19 @@ class MultiheadAttention(torch.nn.Module):
         """Set TP group"""
         self.tp_group = tp_group
 
-    def set_context_parallel_running(
+    def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group and CP dual-stream running"""
-        self.core_attention.cp_group = cp_group
-        self.core_attention.cp_global_ranks = cp_global_ranks
-        self.core_attention.cp_stream = cp_stream
+        """Set CP group"""
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "set_context_parallel_group"):
+                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream)
 
     def forward(
         self,
@@ -2522,7 +2582,7 @@ class MultiheadAttention(torch.nn.Module):
         attn_mask_type: Optional[str] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
-        inference_params: Optional[Any] = None,
+        inference_params: Optional[InferenceParams] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
