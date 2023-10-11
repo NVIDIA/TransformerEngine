@@ -2,29 +2,25 @@
 #
 # See LICENSE for license information.
 
-import math
-import os
 import contextlib
-from typing import List, Optional
-import pytest
 import copy
+import os
+from typing import List, Optional
 
+import math
+import pytest
 import torch
 import torch.nn as nn
-from torch.nn import Parameter
 from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
+from torch.nn import Parameter
 
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-    attention_mask_func,
-)
 from transformer_engine.pytorch import (
-    DotProductAttention, LayerNormLinear, LayerNormMLP, Linear,
-    MultiheadAttention, RMSNorm, TransformerLayer
+    DotProductAttention, LayerNorm, LayerNormLinear, LayerNormMLP, Linear,
+    MultiheadAttention, RMSNorm, TransformerLayer,
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
+from transformer_engine.pytorch.utils import (attention_mask_func, init_method_normal, scaled_init_method_normal)
 
 seed = 1234
 rng_str = "rng_state"
@@ -75,11 +71,11 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
         assert torch.equal(t1, t2), "Output mismatch."
 
 
-def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float) -> bool:
+def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = 1e-5) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for t1, t2 in zip(l1, l2):
-        result = torch.allclose(t1, t2, atol=atol)
+        result = torch.allclose(t1, t2, atol=atol, rtol=rtol)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
@@ -958,6 +954,58 @@ def test_linear_accuracy(dtype, bs, model):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
+def test_layernorm_accuracy(dtype, bs, model, eps):
+    config = model_configs[model]
+
+    te_layernorm = (
+        LayerNorm(
+            config.hidden_size,
+            eps=eps,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    torch_layernorm = (
+        nn.LayerNorm(
+            config.hidden_size,
+            eps=eps,
+        )
+        .to(dtype=dtype)
+        .cuda()
+        .eval()
+    )
+
+    # Share params
+    with torch.no_grad():
+        torch_layernorm.weight = Parameter(te_layernorm.weight.clone())
+
+    te_outputs = _test_granular_accuracy(te_layernorm, bs, dtype, config)
+    torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
+
+    # Check output.
+    if dtype == torch.float32:
+        assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
+    else:
+        assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+
+    if dtype == torch.float32:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 1e-4)
+    elif dtype == torch.float16:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 4e-2, rtol=2e-3)
+    else:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 3e-1, rtol=1e-1)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -997,6 +1045,17 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+
+    if dtype == torch.float32:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 1e-4)
+    elif dtype == torch.float16:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 4e-2, rtol=2e-3)
+    else:
+        for i in range(1, len(te_outputs)):
+            assert_allclose(te_outputs[i], torch_outputs[i], 3e-1, rtol=1e-1)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)

@@ -45,8 +45,8 @@ void compute_ref_stats(const InputType *data, float *mu, float *rsigma,
   }
 }
 
-template <typename InputType, typename OutputType>
-void compute_ref_output(const InputType *data, const InputType *gamma, const InputType *beta,
+template <typename InputType, typename WeightType, typename OutputType>
+void compute_ref_output(const InputType *data, const WeightType *gamma, const WeightType *beta,
                  OutputType *output, const float *mu, const float *rsigma,
                  const size_t N, const size_t H,
                  float *amax, float scale, const bool zero_centered_gamma) {
@@ -67,14 +67,30 @@ void compute_ref_output(const InputType *data, const InputType *gamma, const Inp
   *amax = current_max;
 }
 
-template <typename InputType, typename OutputType>
-void compute_ref_backward(const OutputType *output_grad, const InputType *data,
-                          const float *mu, const float *rsigma,
-                          const InputType *gamma,
+template <typename ComputeType>
+ComputeType clamp_by_magnitude(ComputeType g, const float eps) {
+  if (g < 0 && g > - eps) {
+    return - eps;
+  }
+  if (g >= 0 && g < eps) {
+    return eps;
+  }
+  return g;
+}
+
+template <typename InputType, typename WeightType, typename OutputType>
+void compute_ref_backward(const OutputType *output_grad, 
+                          const OutputType *data,
+                          const float *rsigma,
+                          const WeightType *gamma,
+                          const WeightType *beta,
                           InputType *data_grad,
-                          InputType *gamma_grad, InputType *beta_grad,
+                          WeightType *gamma_grad,
+                          WeightType *beta_grad,
+                          const float eps,
                           const size_t N, const size_t H,
-                          const bool zero_centered_gamma) {
+                          const bool zero_centered_gamma,
+                          const float scale) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
   std::vector<compute_t> dbeta(H, 0.f);
@@ -83,12 +99,13 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
     // Reductions
     compute_t mdy = 0, mdyy = 0;
     for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - mu[i]) * rsigma[i];
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
+      const compute_t b = static_cast<compute_t>(beta[j]);
       compute_t g = static_cast<compute_t>(gamma[j]);
       if (zero_centered_gamma) {
         g += 1;
       }
+      const compute_t y = (z - b) / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -101,12 +118,13 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
 
     // Input grads
     for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - mu[i]) * rsigma[i];
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
       compute_t g = static_cast<compute_t>(gamma[j]);
+      const compute_t b = static_cast<compute_t>(beta[j]);
       if (zero_centered_gamma) {
         g += 1;
       }
+      const compute_t y = (z - b) / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
@@ -116,8 +134,8 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data,
 
   // Weight grads
   for (size_t j = 0; j < H; ++j) {
-    gamma_grad[j] = static_cast<InputType>(dgamma[j]);
-    beta_grad[j] = static_cast<InputType>(dbeta[j]);
+    gamma_grad[j] = static_cast<WeightType>(dgamma[j]);
+    beta_grad[j] = static_cast<WeightType>(dbeta[j]);
   }
 }
 
@@ -144,7 +162,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   Tensor beta({ H }, wtype);
   Tensor mu({ N }, DType::kFloat32);
   Tensor rsigma({ N }, DType::kFloat32);
-  Tensor dz({ N, H }, wtype);
+  Tensor dz({ N, H }, otype);
   Tensor dx({ N, H }, itype);
   Tensor dgamma({ H }, wtype);
   Tensor dbeta({ H }, wtype);
@@ -160,8 +178,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   std::unique_ptr<float[]> ref_mu = std::make_unique<float[]>(N);
   std::unique_ptr<float[]> ref_rsigma = std::make_unique<float[]>(N);
   std::unique_ptr<InputType[]> ref_dx = std::make_unique<InputType[]>(N * H);
-  std::unique_ptr<WeightType[]> ref_dgamma = std::make_unique<InputType[]>(H);
-  std::unique_ptr<WeightType[]> ref_dbeta = std::make_unique<InputType[]>(H);
+  std::unique_ptr<WeightType[]> ref_dgamma = std::make_unique<WeightType[]>(H);
+  std::unique_ptr<WeightType[]> ref_dbeta = std::make_unique<WeightType[]>(H);
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
@@ -170,30 +188,30 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   float epsilon = 1e-5;
   auto fwd_function = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
-               z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
+               z.data(), rsigma.data(), 0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
-               z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
+               z.data(), rsigma.data(), 0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
 
   // Backward kernel
   auto bwd_function = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
-  bwd_function(dz.data(), input.data(),
-               mu.data(), rsigma.data(), gamma.data(),
+  bwd_function(dz.data(), z.data(), input.data(),
+               rsigma.data(), gamma.data(), beta.data(),
                dx.data(), dgamma.data(), dbeta.data(),
-               dgamma_part.data(), dbeta_part.data(),
+               dgamma_part.data(), dbeta_part.data(), epsilon,
                0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   dgamma_part = Tensor(dgamma_part.shape(), dgamma_part.dtype());
   dbeta_part = Tensor(dbeta_part.shape(), dbeta_part.dtype());
-  bwd_function(dz.data(), input.data(),
-               mu.data(), rsigma.data(), gamma.data(),
+  bwd_function(dz.data(), z.data(), input.data(),
+               rsigma.data(), gamma.data(), beta.data(),
                dx.data(), dgamma.data(), dbeta.data(),
-               dgamma_part.data(), dbeta_part.data(),
+               dgamma_part.data(), dbeta_part.data(), epsilon,
                0, prop.multiProcessorCount,
                workspace.data(), barrier.data());
 
@@ -209,17 +227,18 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                      gamma.cpu_dptr<WeightType>(),
                      beta.cpu_dptr<WeightType>(),
                      ref_output.get(),
-                     mu.cpu_dptr<float>(),
+                     ref_mu.get(),
                      rsigma.cpu_dptr<float>(),
                      N, H,
                      &ref_amax,
                      ref_scale,
                      zero_centered_gamma);
-  compute_ref_backward(dz.cpu_dptr<WeightType>(), input.cpu_dptr<InputType>(),
-                       mu.cpu_dptr<float>(), rsigma.cpu_dptr<float>(),
+  compute_ref_backward(dz.cpu_dptr<OutputType>(), ref_output.get(),
+                       rsigma.cpu_dptr<float>(),
                        gamma.cpu_dptr<WeightType>(),
-                       ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(),
-                       N, H, zero_centered_gamma);
+                       beta.cpu_dptr<WeightType>(),
+                       ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(), epsilon,
+                       N, H, zero_centered_gamma, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -232,20 +251,81 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
 
   auto [atol_stats, rtol_stats] = getTolerances(DType::kFloat32);
   rtol_stats = 5e-5;
-  compareResults("mu", mu, ref_mu.get(), atol_stats, rtol_stats);
   compareResults("rsigma", rsigma, ref_rsigma.get(), atol_stats, rtol_stats);
 
-  auto [atol, rtol] = getTolerances(otype);
-  if (otype == DType::kFloat32) {
-    atol = 5e-7;
+  // This is because we no longer write mu tensor into gmem
+  double atol, rtol;
+  switch (otype) {
+    case DType::kBFloat16:
+      atol = 2e-5;
+      rtol = 1e-4;
+      break;
+    case DType::kFloat16:
+      atol = 2e-5;
+      rtol = 1e-3;
+      break;
+    case DType::kFloat8E4M3:
+      atol = 1e-2;
+      rtol = 1e-2;
+      break;
+    default:
+      atol = 2e-5;
+      rtol = 1e-4;
   }
   compareResults("output", z, ref_output.get(), atol, rtol);
 
-  double atol_bwd = 1e-4;
-  double rtol_bwd = 1e-4;
+  double atol_bwd;
+  double rtol_bwd;
+  switch (otype) {
+    case DType::kBFloat16:
+      atol_bwd = 2e-2;
+      rtol_bwd = 5e-2;
+      break;
+    case DType::kFloat16:
+      atol_bwd = 2e-3;
+      rtol_bwd = 1e-3;
+      break;
+    case DType::kFloat8E4M3:
+      atol_bwd = 5e-2;
+      rtol_bwd = 5e-2;
+      break;
+    default:
+      atol_bwd = 2e-5;
+      rtol_bwd = 1e-4;
+  }
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
-  compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
-  compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
+
+  double atol_bwd_reduce;
+  double rtol_bwd_reduce;
+  switch (otype) {
+    case DType::kBFloat16:
+      if (H >= 65536) {
+        atol_bwd_reduce = 2e-1;
+        rtol_bwd_reduce = 2e-1;
+      } else {
+        atol_bwd_reduce = 1e-1;
+        rtol_bwd_reduce = 5e-2;
+      }
+      break;
+    case DType::kFloat16:
+      atol_bwd_reduce = 5e-2;
+      rtol_bwd_reduce = 1e-2;
+      break;
+    case DType::kFloat8E4M3:
+      if (H >= 12288) {
+        atol_bwd_reduce = 8e-1;
+        rtol_bwd_reduce = 8e-1;
+      } else {
+        atol_bwd_reduce = 2e-1;
+        rtol_bwd_reduce = 1e-1;
+      }
+      break;
+    default:
+      atol_bwd_reduce = 5e-4;
+      rtol_bwd_reduce = 2e-4;
+  }
+  compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd_reduce, rtol_bwd_reduce);
+  compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd_reduce, rtol_bwd_reduce);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},

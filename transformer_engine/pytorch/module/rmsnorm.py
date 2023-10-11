@@ -48,10 +48,12 @@ class _RMSNorm(torch.autograd.Function):
             rmsnorm_out, rsigma = tex.rmsnorm_fwd(inputmat, rmsnorm_weight,
                                                   eps, fwd_rmsnorm_sm_margin,
                                                   zero_centered_gamma)
-            ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
+            fake_input = torch.empty(0, device=inputmat.device, dtype=inputmat.dtype)
+            ctx.save_for_backward(rmsnorm_out, fake_input, rmsnorm_weight, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.eps = eps
         else:
             rmsnorm_out = tex.rmsnorm_fwd_inf(inputmat, rmsnorm_weight,
                                               eps,
@@ -62,12 +64,12 @@ class _RMSNorm(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
+        rmsnorm_out, fake_input, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-        d_rmsnorm_out = grad_output.view(inputmat.shape)
+        d_rmsnorm_out = grad_output.view(rmsnorm_out.shape)
         dxmat, dgamma = tex.rmsnorm_bwd(
-            d_rmsnorm_out, inputmat, rsigma, rmsnorm_weight,
-            ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
+            d_rmsnorm_out, rmsnorm_out, fake_input, rsigma, rmsnorm_weight,
+            ctx.eps, ctx.bwd_rmsnorm_sm_margin, ctx.zero_centered_gamma
         )
         return (
             dxmat.view(ctx.inp_shape),

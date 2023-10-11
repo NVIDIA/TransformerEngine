@@ -55,10 +55,22 @@ void compute_ref_output(const InputType *data, const InputType *gamma, OutputTyp
   *amax = current_max;
 }
 
-template <typename InputType, typename OutputType>
-void compute_ref_backward(const OutputType *output_grad, const InputType *data, const float *rsigma,
-                          const InputType *gamma, InputType *data_grad, InputType *gamma_grad,
-                          const size_t N, const size_t H) {
+template <typename ComputeType>
+ComputeType clamp_by_magnitude(ComputeType g, const float eps) {
+  if (g < 0 && g > - eps) {
+    return - eps;
+  }
+  if (g >= 0 && g < eps) {
+    return eps;
+  }
+  return g;
+}
+
+template <typename InputType, typename WeightType, typename OutputType>
+void compute_ref_backward(const OutputType *output_grad, const OutputType *data, const float *rsigma,
+                          const WeightType *gamma, InputType *data_grad, WeightType *gamma_grad,
+                          const float eps,
+                          const size_t N, const size_t H, float scale) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
 
@@ -66,9 +78,9 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data, 
     // Reductions
     compute_t mdyy = 0;
     for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = x * rsigma[i];
-      const compute_t g = static_cast<compute_t>(gamma[j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
+      compute_t g = static_cast<compute_t>(gamma[j]);
+      const compute_t y = z / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -78,9 +90,9 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data, 
 
     // Input grads
     for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = x * rsigma[i];
-      const compute_t g = static_cast<compute_t>(gamma[j]);
+      const compute_t z = static_cast<compute_t>(data[i * H + j]) / clamp_by_magnitude(scale, eps);
+      compute_t g = static_cast<compute_t>(gamma[j]);
+      const compute_t y = z / clamp_by_magnitude(g, eps);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y);
@@ -115,7 +127,7 @@ void performTest(const size_t N, const size_t H) {
   Tensor z({N, H}, otype);
   Tensor gamma({H}, wtype);
   Tensor rsigma({N}, DType::kFloat32);
-  Tensor dz({N, H}, wtype);
+  Tensor dz({N, H}, otype);
   Tensor dx({N, H}, itype);
   Tensor dgamma({H}, wtype);
   Tensor workspace, barrier, dgamma_part;
@@ -143,14 +155,14 @@ void performTest(const size_t N, const size_t H) {
                    prop.multiProcessorCount, workspace.data(), barrier.data());
 
   // Backward kernel
-  nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(), dx.data(), dgamma.data(),
-                   dgamma_part.data(), 0, prop.multiProcessorCount, workspace.data(),
+  nvte_rmsnorm_bwd(dz.data(), z.data(), input.data(), rsigma.data(), gamma.data(), dx.data(), dgamma.data(),
+                   dgamma_part.data(), epsilon, 0, prop.multiProcessorCount, workspace.data(),
                    barrier.data());
   workspace = Tensor(workspace.shape(), workspace.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   dgamma_part = Tensor(dgamma_part.shape(), dgamma_part.dtype());
-  nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(), dx.data(), dgamma.data(),
-                   dgamma_part.data(), 0, prop.multiProcessorCount, workspace.data(),
+  nvte_rmsnorm_bwd(dz.data(), z.data(), input.data(), rsigma.data(), gamma.data(), dx.data(), dgamma.data(),
+                   dgamma_part.data(), epsilon, 0, prop.multiProcessorCount, workspace.data(),
                    barrier.data());
 
   // Reference implementations
@@ -161,9 +173,9 @@ void performTest(const size_t N, const size_t H) {
   float ref_scale = isFp8Type(otype) ? z.scale() : 1.f;
   compute_ref_output(input.cpu_dptr<InputType>(), gamma.cpu_dptr<WeightType>(), ref_output.get(),
                      rsigma.cpu_dptr<float>(), N, H, &ref_amax, ref_scale);
-  compute_ref_backward(dz.cpu_dptr<WeightType>(), input.cpu_dptr<InputType>(),
+  compute_ref_backward(dz.cpu_dptr<OutputType>(), ref_output.get(),
                        rsigma.cpu_dptr<float>(), gamma.cpu_dptr<WeightType>(), ref_dx.get(),
-                       ref_dgamma.get(), N, H);
+                       ref_dgamma.get(), epsilon, N, H, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();

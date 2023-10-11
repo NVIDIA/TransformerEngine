@@ -13,6 +13,19 @@ namespace transformer_engine {
 namespace rmsnorm {
 using namespace transformer_engine;
 
+template<typename V> __device__
+V clamp_by_magnitude(V curr_gamma, float eps) {
+  const V kMinGamma = V(eps);
+  if (curr_gamma >= 0) {
+        if (curr_gamma < kMinGamma) {
+            return kMinGamma;
+        }
+    } else if  (curr_gamma > -kMinGamma) {
+        return -kMinGamma;
+    }
+    return curr_gamma;
+}
+
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_kernel(
     BwdParams params) {
@@ -77,13 +90,13 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
 #pragma unroll 1
     for (int row = r; row < params.rows; row += params.ctas_per_col * ROWS_PER_CTA) {
         const compute_t rs_r = static_cast<const compute_t *>(params.rs)[row];
-        Ivec x[LDGS];
+        Ovec z[LDGS];
         Ovec dz[LDGS];
         index_t idx = row * Ktraits::VEC_COLS + c;
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
             dz[it].load_from(params.dz, idx);
-            x[it].load_from(params.x, idx);
+            z[it].load_from(params.z, idx);
             idx += Ktraits::VEC_COLS_PER_LDG;
         }
 
@@ -91,15 +104,22 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         compute_t y[LDGS * NUM_ELTS];
 
         compute_t mdyy_local = 0.f;
+
+        compute_t scale_inv;
+        if (params.fp8_out) {
+            scale_inv = *reinterpret_cast<compute_t *>(params.scale_inv);
+        } else {
+            scale_inv = 1.f;
+        }
 #pragma unroll
         for (int it = 0; it < LDGS; it++) {
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
-                compute_t x_tmp = x[it].data.elt[jt];
-                compute_t y_tmp = rs_r * (x_tmp);
-                compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]);
-                dy_tmp *= compute_t(dz[it].data.elt[jt]);
-                compute_t dz_tmp = dz[it].data.elt[jt];
+                compute_t x_tmp = static_cast<compute_t> (z[it].data.elt[jt]) * scale_inv;
+                compute_t gamma_tmp = compute_t(gamma[it].data.elt[jt]);
+                compute_t y_tmp = (x_tmp) / clamp_by_magnitude(gamma_tmp, params.epsilon);
+                compute_t dy_tmp = gamma_tmp * compute_t(dz[it].data.elt[jt]);
+                compute_t dz_tmp = static_cast<compute_t> (dz[it].data.elt[jt]);
 
                 mdyy_local += dy_tmp * y_tmp;
 
@@ -345,19 +365,25 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
         compute_t mdy = 0.f;
         compute_t mdyy = 0.f;
 
+        compute_t scale_inv;
+        if (params.fp8_out) {
+            scale_inv = *reinterpret_cast<compute_t *>(params.scale_inv);
+        } else {
+            scale_inv = 1.f;
+        }
 #pragma unroll
         for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
              it++, col += gdimn * NUM_ELTS) {
-            Ivec x;
+            Ovec z;
             Ovec dz;
-            x.load_from_elts(params.x, row * params.cols + col, params.cols - col);
+            z.load_from_elts(params.z, row * params.cols + col, params.cols - col);
             dz.load_from_elts(params.dz, row * params.cols + col, params.cols - col);
 #pragma unroll
             for (int jt = 0; jt < NUM_ELTS; jt++) {
-                compute_t x_ij = x.data.elt[jt];
-                compute_t y_ij = rs * (x_ij);
                 compute_t g_ij = gamma[it].data.elt[jt];
-                compute_t dz_ij = dz.data.elt[jt];
+                compute_t x_ij = static_cast<compute_t> (z.data.elt[jt]) * scale_inv;
+                compute_t y_ij = (x_ij) / clamp_by_magnitude(g_ij, params.epsilon);
+                compute_t dz_ij = static_cast<compute_t> (dz.data.elt[jt]);
                 compute_t dy_ij = g_ij * dz_ij;
 
                 y[it].data.elt[jt] = y_ij;

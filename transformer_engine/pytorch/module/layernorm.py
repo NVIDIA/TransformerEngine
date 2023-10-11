@@ -49,27 +49,29 @@ class _LayerNorm(torch.autograd.Function):
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if is_grad_enabled:
-            ln_out, mu, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
+            ln_out, rsigma = tex.layernorm_fwd(inputmat, ln_weight,
                 ln_bias, eps, fwd_ln_sm_margin, zero_centered_gamma)
-            ctx.save_for_backward(inputmat, ln_weight, mu, rsigma)
+            fake_input = torch.empty(0, device=inputmat.device, dtype=inputmat.dtype)
+            ctx.save_for_backward(fake_input, ln_out, ln_weight, ln_bias, rsigma)
             ctx.inp_shape = inp.shape
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
             ctx.zero_centered_gamma = zero_centered_gamma
+            ctx.eps = eps
         else:
-            ln_out, mu, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
-                ln_bias, eps, zero_centered_gamma), None, None
+            ln_out, rsigma = layernorm_fwd_inf(inputmat, ln_weight,
+                ln_bias, eps, zero_centered_gamma), None
         return ln_out.view_as(inp)
 
     @staticmethod
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
+        fake_input, ln_out, ln_weight, ln_bias, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-        d_ln_out = grad_output.view(inputmat.shape)
+        d_ln_out = grad_output.view(ln_out.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
-            d_ln_out, inputmat, mu, rsigma, ln_weight,
-            ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
+            d_ln_out, ln_out, fake_input, rsigma, ln_weight, ln_bias,
+            ctx.eps, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
         return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None
 
