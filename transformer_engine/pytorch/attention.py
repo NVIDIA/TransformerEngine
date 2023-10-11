@@ -2527,7 +2527,6 @@ class MultiheadAttention(torch.nn.Module):
                 continue
             if hasattr(child, "set_context_parallel_group"):
                 child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream)
-        )
 
     def forward(
         self,
