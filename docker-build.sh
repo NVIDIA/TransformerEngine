@@ -45,8 +45,8 @@ Usage:
                  scan base image. Default is 'bd'. Either 'c', 'd' or 's' assume
                  that a base image exists in the local or remote registry.
   --framework    Framework extensions to build with Transformer Engine. Options
-                 include 'pytorch', 'jax', 'tensorflow', 'paddle', 'all'. Framework
-                 should already be installed in base image.
+                 include 'pytorch', 'jax', 'paddle', 'all'. Framework should
+                 already be installed in base image.
 
 
 EOF
@@ -232,7 +232,7 @@ if [[ -z "$PIPELINE" ]]; then
   else
     PIPELINE="$(echo "$COMMIT_SHA" | cut -c1-8)"
 
-    # Add TF hash to PIPELINE for one-off builds
+    # Add TE hash to PIPELINE for one-off builds
     if [[ "$ONE_OFF_BUILD" -eq 1 ]]; then
       PIPELINE="${PIPELINE}.$(echo "$TRANSFORMERENGINE_HASH" | cut -c1-8)"
     fi
