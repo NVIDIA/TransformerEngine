@@ -310,7 +310,7 @@ def checkpoint(
             specified tensor parallel group (`tp_group`) before saving it for the
             backward pass.
     get_cuda_rng_tracker: `Callable`
-            python callable which returns an instance of :func:`CudaRNGStatesTracker`
+            python callable which returns an instance of :func:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup, default = `None`
             tensor parallel process group.
     args : tuple
