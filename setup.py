@@ -434,7 +434,7 @@ class CMakeBuildExtension(BuildExtension):
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
 
-    Also builds JAX, TensorFlow, and userbuffers support if needed.
+    Also builds JAX or userbuffers support if needed.
 
     """
     cmake_flags = []

@@ -46,8 +46,8 @@ simplifying mixed precision training for users.
 Highlights
 ----------
 
-* Easy-to-use modules for building Transformer layers with FP8 support 
-* Optimizations (e.g. fused kernels) for Transformer models 
+* Easy-to-use modules for building Transformer layers with FP8 support
+* Optimizations (e.g. fused kernels) for Transformer models
 * Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
@@ -174,7 +174,7 @@ While the more granular modules in Transformer Engine allow building any Transfo
 the `TransformerLayer` API of Transformer Engine is flexible enough to build multiple major
 Transformer model architectures.
 
-Transformer Engine supports the following DL frameworks: PyTorch, JAX (Flax, Praxis), and TensorFlow.
+Transformer Engine supports the following DL frameworks: PyTorch and JAX (Flax, Praxis).
 
 NOTE: For simplicity, we only show PyTorch examples below. For the usage of `TransformerLayer`
 of all supported frameworks, refer to `examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
@@ -233,13 +233,13 @@ Integrations
 
 Transformer Engine has been integrated with popular LLM frameworks such as:
 
-* `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_ 
-* `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_ 
+* `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_
+* `Hugging Face Accelerate <https://github.com/huggingface/accelerate/releases/tag/v0.17.0>`_
 * `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_
-* `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_ 
+* `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
-* `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_ 
-* `NVIDIA NeMo <https://github.com/NVIDIA/NeMo>`_ 
+* `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
+* `NVIDIA NeMo <https://github.com/NVIDIA/NeMo>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
@@ -249,7 +249,7 @@ Contributing
 ==================
 
 We welcome contributions to Transformer Engine! To contribute to Transformer Engine and make pull requests,
-follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide. 
+follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide.
 
 Papers
 ==================
@@ -262,9 +262,9 @@ Papers
 Videos
 ==================
 
-* `FP8 Training with Transformer Engine <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51393>`_  
-* `FP8 for Deep Learning <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s52166/>`_  
-* `Inside the Hopper Architecture <https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s42663/>`_  
+* `FP8 Training with Transformer Engine <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51393>`_
+* `FP8 for Deep Learning <https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s52166/>`_
+* `Inside the Hopper Architecture <https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s42663/>`_
 
 .. |License| image:: https://img.shields.io/badge/License-Apache%202.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0

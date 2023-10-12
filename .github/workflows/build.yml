@@ -31,8 +31,7 @@ jobs:
     name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      #image: nvcr.io/nvidia/jax:XX.XX-py3  # Not yet available
-      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
+      image: ghcr.io/nvidia/jax:latest
       options: --user root
     steps:
       - name: 'Checkout'
@@ -40,9 +39,7 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: |
-          pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
-          pip install . -v
+        run: pip install . -v
         env:
           NVTE_FRAMEWORK: jax
       - name: 'Sanity check'
