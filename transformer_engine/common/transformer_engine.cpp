@@ -49,11 +49,11 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     NVTE_CHECK(t.amax.dtype == DType::kFloat32);
     NVTE_CHECK(t.amax.shape == std::vector<size_t>{ 1 });
     NVTE_CHECK(t.scale_inv.dptr != nullptr,
-               "FP8 output " + name + " must have scale.");
+               "FP8 output " + name + " must have inverse of scale.");
     NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32);
     NVTE_CHECK(t.scale_inv.shape == std::vector<size_t>{ 1 });
     NVTE_CHECK(t.scale.dptr != nullptr,
-               "FP8 output " + name + " must have inverse of scale.");
+               "FP8 output " + name + " must have scale.");
     NVTE_CHECK(t.scale.dtype == DType::kFloat32);
     NVTE_CHECK(t.scale.shape == std::vector<size_t>{ 1 });
   } else {

@@ -1,0 +1,16 @@
+## Not Yet Implemented
+- Inplace operations:
+    - inplace `nvte.***` for use during inference
+    - using those commands in `training` methods of `Op`s
+- Torch compile fullgraph support - requires action from Meta side
+- Attention
+- Dropout
+- Type inference
+- Model parallelism
+- User buffers
+- Margin used for scaling factor calculation is currently hardcoded to be 1.0
+- Make the sources saved by `exec_saving_source` be garbage collected when there are no references to objects from within the source.
+- Cleanup `compute_pipeline_function.py` and `base.py`. Currently they are both a mess full of hacks around Torch Dynamo issues.
+- Maybe cleanup `nvte/_common.py`??? It has a complicated implementation of `nvte.torch_op`. Though, maybe it is that's just how this has to be implemented.
+- Maybe rename some files and move some code??? Files like `_common.py` or `_storage.py` were supposed to be internal to a folder, but static type chackers complain about them being private. They also export some things...
+- ..? Other things supported by current implementation

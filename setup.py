@@ -471,7 +471,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -523,6 +523,73 @@ def setup_pytorch_extension() -> setuptools.Extension:
         },
     )
 
+def setup_sequential_extension() -> setuptools.Extension:
+    # Source files
+    src_dir = root_path / "transformer_engine" / "pytorch" / "sequential" / "nvte" / "cppsrc"
+    sources = [
+        src_dir / "pybind.cpp"
+    ]
+
+    # Header files
+    include_dirs = [
+        root_path / "transformer_engine" / "common" / "include",
+        root_path / "transformer_engine",
+        root_path / "3rdparty" / "cudnn-frontend" / "include",
+    ]
+
+    # Compiler flags
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    nvcc_flags = [
+        "-O3",
+        "-gencode",
+        "arch=compute_70,code=sm_70",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--use_fast_math",
+    ]
+
+    # Version-dependent CUDA options
+    try:
+        version = cuda_version()
+    except FileNotFoundError:
+        print("Could not determine CUDA Toolkit version")
+    else:
+        if version >= (11, 2):
+            nvcc_flags.extend(["--threads", "4"])
+        if version >= (11, 0):
+            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+        if version >= (11, 8):
+            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+
+    # userbuffers support
+    if with_userbuffers():
+        if os.getenv("MPI_HOME"):
+            mpi_home = Path(os.getenv("MPI_HOME"))
+            include_dirs.append(mpi_home / "include")
+        cxx_flags.append("-DNVTE_WITH_USERBUFFERS")
+        nvcc_flags.append("-DNVTE_WITH_USERBUFFERS")
+
+    # Construct PyTorch CUDA extension
+    sources = [str(path) for path in sources]
+    include_dirs = [str(path) for path in include_dirs]
+    from torch.utils.cpp_extension import CUDAExtension
+    return CUDAExtension(
+        name="transformer_engine_cuda",
+        sources=sources,
+        include_dirs=include_dirs,
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "nvcc": nvcc_flags,
+        },
+        package_data={"transformer_engine_cuda": ["py.typed", "*.pyi"]}
+    )
+
 
 def setup_paddle_extension() -> setuptools.Extension:
     """Setup CUDA extension for Paddle support"""
@@ -542,7 +609,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     ]
 
     # Compiler flags
-    cxx_flags = ["-O3"]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
     nvcc_flags = [
         "-O3",
         "-gencode",
@@ -601,6 +668,7 @@ def main():
     ext_modules = [setup_common_extension()]
     if "pytorch" in frameworks():
         ext_modules.append(setup_pytorch_extension())
+        ext_modules.append(setup_sequential_extension())
 
     if "paddle" in frameworks():
         ext_modules.append(setup_paddle_extension())
