@@ -607,6 +607,15 @@ upload_logs:
       CI_SLURM_TIME: 240
       DATADIR: /mnt/nvdl/datasets
 
+.L40_1GPU:
+    tags:
+    - dlcluster_l40
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      CI_SLURM_TIME: 240
+      DATADIR: /mnt/nvdl
+
 ######################################################
 ##
 ## Test definitions.
@@ -721,6 +730,14 @@ L0_unittest--H100_1GPU:
       variables:
         - $BUILD_PYTORCH == "0"
 
+L0_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
@@ -765,6 +782,14 @@ L0_jax_unittest--H100_1GPU:
       variables:
         - $BUILD_JAX == "0"
 
+L0_jax_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
 L0_paddle_unittest--V100_1GPU:
     variables:
       FRAMEWORK: paddle
@@ -797,6 +822,14 @@ L0_paddle_unittest--H100_1GPU:
     except:
       variables:
         - $BUILD_PADDLE == "0"
+
+L0_paddle_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
 
 L0_cppunittest--V100_1GPU:
     variables:
