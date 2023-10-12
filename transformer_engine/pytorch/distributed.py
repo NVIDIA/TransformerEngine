@@ -303,17 +303,14 @@ def checkpoint(
     Parameters
     ----------
     function: Callable
-            whether or not to enable fp8
+            pytorch module used to run the forward and backward passes using
+            the specified :attr:`args` and :attr:`kwargs`.
     distribute_saved_activations: bool
             if set to `True`, the first tensor argument is distributed across the
             specified tensor parallel group (`tp_group`) before saving it for the
             backward pass.
     get_cuda_rng_tracker: `Callable`
-            python function with the functionality to retrieve a state via
-            :attr:`state = get_cuda_rng_tracker().get_states()` and to reset the state via
-            :attr:`get_cuda_rng_tracker().set_states(state)`. This is used to ensure any
-            extra cuda rng state or general global state can be reproduced across the 2
-            forward phases; original and recompute.
+            python callable which returns an instance of :func:`CudaRNGStatesTracker`
     tp_group : ProcessGroup, default = `None`
             tensor parallel process group.
     args : tuple
