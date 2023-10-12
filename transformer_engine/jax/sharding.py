@@ -16,9 +16,6 @@ import jax.numpy as jnp
 from jax.experimental.maps import xmap
 from jax.sharding import PartitionSpec
 
-jax.config.update('experimental_xmap_spmd_lowering', True)
-jax.config.update('experimental_xmap_spmd_lowering_manual', True)
-
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
 
@@ -40,8 +37,18 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     return jax.lax.with_sharding_constraint(x, pspec)
 
 
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+    """
+    A wrapper function to invoke lax.p* operations, like psum.
+    """
+    if mesh_resource is not None:
+        _, resource = _get_mesh_info(mesh_resource)
+        return ops(x, resource)
+    return x
+
+
 @dataclass
-class ShardingResource:
+class MeshResource:
     """
     A data container to indicate which axis in Mesh for data parallelism and
     which for tensor parallelism.
@@ -54,34 +61,72 @@ class ShardingResource:
     tp_resource : str, default = None
         The axis name in Mesh used to split the hidden dimensions along.
         If it is None, then tensor parallelism is disabled.
+    fsdp_resource : str, default = None
+        The axis name in Mesh used to split the batch and weights along.
+        If it is None, then full-sharded data parallelism is disabled.
+    pp_resource : str, default = None
+        The axis name in Mesh used to split model layers. along.
+        If it is None, then pipeline parallelism is disabled.
     """
     dp_resource: str = None
     tp_resource: str = None
     fsdp_resource: str = None
+    pp_resource: str = None
 
 
-_GLOBAL_SHARD_RESOURCE = ShardingResource()
+_GLOBAL_MESH_RESOURCE = MeshResource()
 
 
 @contextmanager
-def global_shard_guard(resource: ShardingResource):
+def global_shard_guard(resource: MeshResource):
     """
-    A context manager to switch the global ShardingResource
+    A context manager to switch the global MeshResource
     """
-    global _GLOBAL_SHARD_RESOURCE
-    prev_gsr = _GLOBAL_SHARD_RESOURCE
+    global _GLOBAL_MESH_RESOURCE
+    prev_gmr = _GLOBAL_MESH_RESOURCE
     try:
-        _GLOBAL_SHARD_RESOURCE = resource
+        _GLOBAL_MESH_RESOURCE = resource
         yield
     finally:
-        _GLOBAL_SHARD_RESOURCE = prev_gsr
+        _GLOBAL_MESH_RESOURCE = prev_gmr
 
 
-def global_shard_resource() -> ShardingResource:
+def global_mesh_resource() -> MeshResource:
     """
-    A getter of  the global ShardingResource
+    A getter of  the global MeshResource
     """
-    return _GLOBAL_SHARD_RESOURCE
+    return _GLOBAL_MESH_RESOURCE
+
+
+def all_reduce_sum_along_dp_fsdp(x: jnp.array):
+    """
+    All-Reduce (Sum) along DP and FSDP mesh axes.
+    """
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
+
+
+def all_reduce_sum_along_tp(x: jnp.array):
+    """
+    All-Reduce (Sum) along TP mesh axis.
+    """
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().tp_resource)
+
+
+def all_reduce_max_along_all(x: jnp.array):
+    """
+    All-Reduce (Max ) along all mesh axes.
+    """
+    return lax_paral_op(x, jax.lax.pmax, global_mesh_resource().tp_resource)
+
+
+# Deprecating Items ---------------------------------------------------------------
+jax.config.update('experimental_xmap_spmd_lowering', True)
+jax.config.update('experimental_xmap_spmd_lowering_manual', True)
+
+ShardingResource = MeshResource
+
+global_shard_resource = global_mesh_resource
 
 
 class MajorShardingType(Enum):
