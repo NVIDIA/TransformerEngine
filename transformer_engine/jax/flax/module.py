@@ -286,9 +286,7 @@ class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
                          ln_bias,
                          layernorm_type=self.layernorm_type,
                          zero_centered_gamma=self.zero_centered_gamma,
-                         epsilon=self.epsilon,
-                         sharding_type=self.sharding_type,
-                         dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                         epsilon=self.epsilon)
 
 
 class TransformerEngineBase(nn.Module):
@@ -597,9 +595,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                               ln_bias,
                               layernorm_type=self.layernorm_type,
                               zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon,
-                              sharding_type=self.sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                              epsilon=self.epsilon)
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -844,9 +840,7 @@ class LayerNormMLP(TransformerEngineBase):
                               ln_bias,
                               layernorm_type=self.layernorm_type,
                               zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon,
-                              sharding_type=first_sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                              epsilon=self.epsilon)
             else:
                 assert not self.return_layernorm_output
                 y = inputs

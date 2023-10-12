@@ -16,7 +16,10 @@ from jax.lib import xla_client
 from jax import core, dtypes
 from jax.core import ShapedArray
 from jax.interpreters import xla, mlir
+from jax.experimental.custom_partitioning import custom_partitioning
 from jax.interpreters.mlir import ir, dtype_to_ir_type
+from jax.sharding import PartitionSpec, NamedSharding
+from jax._src.interpreters import batching
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -31,6 +34,8 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
+
+from .sharding import all_reduce_sum_along_dp_fsdp
 
 for _name, _value in transformer_engine_jax.registrations().items():
     xla_client.register_custom_call_target(_name, _value, platform="CUDA")
@@ -65,7 +70,6 @@ def jax_dtype_to_te_dtype(jax_dtype):
     """
     convert jax dtype to TE dtype
     """
-    jax_dtype = dtypes.canonicalize_dtype(jax_dtype)
     if jax_dtype == jnp.float32:
         return TEDType.kFloat32
     if jax_dtype == jnp.float16:
@@ -75,51 +79,15 @@ def jax_dtype_to_te_dtype(jax_dtype):
     raise ValueError(f"Not support the {jax_dtype=}")
 
 
-@dataclass(frozen=True)
-class FusedAttnHelper:
+def get_padded_spec(arg_info):
     """
-    Helper for the fused attention backend
+    Get padded spec for partitioning from arguments' information
     """
-
-    q_type: jnp.dtype
-    kv_type: jnp.dtype
-    qkv_layout: NVTE_QKV_Layout
-    attn_bias_type: NVTE_Bias_Type
-    attn_mask_type: NVTE_Mask_Type
-    dropout_probability: float
-    max_seqlen_q: int
-    max_seqlen_kv: int
-    head_dim: int
-
-    def is_fused_attn_kernel_available(self):
-        """Check if there is available fused attention kernel"""
-        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
-
-    def get_fused_attn_backend(self):
-        """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
-                                                             jax_dtype_to_te_dtype(self.kv_type),
-                                                             self.qkv_layout, self.attn_bias_type,
-                                                             self.attn_mask_type,
-                                                             self.dropout_probability,
-                                                             self.max_seqlen_q, self.max_seqlen_kv,
-                                                             self.head_dim)
-
-
-def merge_named_shape(base, new):
-    """
-    merge named shape(ie, dict), no key conflict
-    """
-    output_named_shape = {**base}
-    for key in new:
-        if key in output_named_shape:
-            assert output_named_shape[key] == new[key], \
-                f"The value of named shape with a same name should be equal between" \
-                f" base and new in merge_named_shape, but got base[{key}]=" \
-                f"{output_named_shape[key]} and {new[key]=}"
-        else:
-            output_named_shape[key] = new[key]
-    return output_named_shape
+    if arg_info.sharding is None:
+        return (None,) * arg_info.ndim
+    ndim, spec = arg_info.ndim, arg_info.sharding.spec
+    assert len(spec) <= ndim
+    return spec + (None,) * (ndim - len(spec))
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -143,17 +111,65 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         return NotImplemented
 
+    @staticmethod
+    @abstractmethod
+    def impl():
+        """
+        to describe implementation
+        """
+        return NotImplemented
+
+    @staticmethod
+    @abstractmethod
+    def batcher():
+        """
+        to describe batch rules for vmap
+        """
+        return NotImplemented
+
+    @staticmethod
+    @abstractmethod
+    def infer_sharding_from_operands():
+        """
+        to describe infer_sharding_from_operands for custom_partitioning
+        """
+        return NotImplemented
+
+    @staticmethod
+    @abstractmethod
+    def partition():
+        """
+        to describe partition for custom_partitioning
+        """
+        return NotImplemented
+
 
 def register_primitive(cls):
     """
     register jax primitive
     """
-    p = core.Primitive(cls.name)
-    p.multiple_results = cls.multiple_results
-    p.def_impl(partial(xla.apply_primitive, p))
-    p.def_abstract_eval(cls.abstract)
-    mlir.register_lowering(p, cls.lowering, platform='cuda')
-    return p
+
+    def name_of_wrapper_p():
+        return cls.name + "_wrapper"
+
+    inner_p = core.Primitive(cls.name)
+    inner_p.multiple_results = cls.multiple_results
+    inner_p.def_impl(partial(xla.apply_primitive, inner_p))
+    inner_p.def_abstract_eval(cls.abstract)
+    mlir.register_lowering(inner_p, cls.lowering, platform='cuda')
+    cls.inner_primitive = inner_p
+
+    outer_p = core.Primitive(name_of_wrapper_p())
+    outer_p.multiple_results = cls.multiple_results
+    outer_p.def_impl(cls.impl)
+    outer_p.def_abstract_eval(cls.abstract)
+    batching.primitive_batchers[outer_p] = cls.batcher
+    outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
+    outer_p_lower.def_partition(infer_sharding_from_operands=cls.infer_sharding_from_operands,
+                                partition=cls.partition)
+    mlir.register_lowering(outer_p,
+                           mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results))
+    cls.outer_primitive = outer_p
 
 
 @dataclass
@@ -214,8 +230,8 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
         # Need to disable one pylint error as the second function
         # parameter name recenctly in JAX. Otherwise we won't be
         # compatible with multiple JAX version.
-        out = custom_call(    # pylint: disable=too-many-function-args
-            name,
+        out = custom_call(
+            name,    # pylint: disable=too-many-function-args
             args.output_types,
             operands=args.operands,
             operand_layouts=args.operand_layouts,
@@ -226,7 +242,639 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
     return out
 
 
-class TransposePrimitive(BasePrimitive):
+class LayerNormFwdPrimitive(BasePrimitive):
+    """
+    Layer Normalization Forward Primitive
+    """
+    name = "te_layernorm_forward"
+    multiple_results = True
+    impl_static_args = (3, 4)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(x_aval, gamma_aval, beta_aval, **kwargs):    # pylint: disable=unused-argument
+        """
+        LayerNorm fwd abstract
+        """
+        x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        mu_rsigama_dtype = jnp.float32
+
+        out_aval = core.raise_to_shaped(x_aval)
+        mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
+
+        assert gamma_aval.size == beta_aval.size
+        hidden_size = gamma_aval.size
+        assert x_aval.size % hidden_size == 0
+
+        return out_aval, mu_aval, rsigma_aval
+
+    @staticmethod
+    def lowering(ctx, x, gamma, beta, *, zero_centered_gamma, epsilon):
+        """
+        LayerNorm fwd lowering rules
+        """
+        x_aval, gamma_aval, beta_aval = ctx.avals_in
+        assert gamma_aval.dtype == beta_aval.dtype
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        w_type = ir.RankedTensorType(gamma.type)
+        w_shape = w_type.shape
+        b_type = ir.RankedTensorType(beta.type)
+        b_shape = b_type.shape
+
+        assert w_type == b_type
+        assert w_shape == b_shape
+
+        # Output shape is same as the input shape, but the output type is same as the weight type.
+        # See ln_api.cpp
+        output_type = w_type.element_type
+        ir_mu_dtype = ir.F32Type.get()
+        ir_rsigma_dtype = ir.F32Type.get()
+
+        out_shape = x_shape
+        hidden_size = reduce(operator.mul, w_shape)
+        batch_shape = out_shape[:-1]
+        batch_size = reduce(operator.mul, x_shape) // hidden_size
+
+        out_types = [
+            ir.RankedTensorType.get(out_shape, output_type),
+            ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
+            ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
+        ]
+        operands = [x, gamma, beta]
+        operand_shapes = [x_shape, w_shape, b_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_norm_descriptor(
+            batch_size,
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),
+            jax_dtype_to_te_dtype(gamma_aval.dtype),
+            zero_centered_gamma,
+            epsilon,
+        )
+
+        out = custom_caller(LayerNormFwdPrimitive.name, args, opaque, False)
+
+        return out
+
+    @staticmethod
+    def impl(x, gamma, beta, zero_centered_gamma, epsilon):
+        """
+        to describe implementation
+        """
+        assert LayerNormFwdPrimitive.inner_primitive is not None
+        out, mu, rsigma = LayerNormFwdPrimitive.inner_primitive.bind(
+            x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
+        return out, mu, rsigma
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, zero_centered_gamma, epsilon):
+        """
+        to describe batch rules for vmap
+        """
+        assert LayerNormFwdPrimitive.outer_primitive is not None
+        x, gamma, beta = batched_args
+        x_bdim, _, _ = batch_dims
+
+        out_bdims = x_bdim, x_bdim, x_bdim
+        return LayerNormFwdPrimitive.outer_primitive.bind(x,
+                                                          gamma,
+                                                          beta,
+                                                          zero_centered_gamma=zero_centered_gamma,
+                                                          epsilon=epsilon), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
+        del zero_centered_gamma, epsilon, result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}"
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
+        return (out_sharding, mu_sharding, rsigma_sharding)
+
+    @staticmethod
+    def partition(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        assert x_spec.spec[-1] is None, \
+            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}"
+        g_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        b_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        out_spec = x_spec
+        mu_spec = rsigma_spec = NamedSharding(mesh,
+                                              PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        arg_shardings = (x_spec, g_spec, b_spec)
+        out_shardings = (out_spec, mu_spec, rsigma_spec)
+        impl = partial(LayerNormFwdPrimitive.impl,
+                       zero_centered_gamma=zero_centered_gamma,
+                       epsilon=epsilon)
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(LayerNormFwdPrimitive)
+
+
+def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
+                  epsilon: float):
+    """
+    Wrapper for TE layernorm fwd
+    """
+    return LayerNormFwdPrimitive.outer_primitive.bind(x,
+                                                      gamma,
+                                                      beta,
+                                                      zero_centered_gamma=zero_centered_gamma,
+                                                      epsilon=epsilon)
+
+
+class LayerNormBwdPrimitive(BasePrimitive):
+    """
+    Layer Normalization Backward Primitive
+    """
+    name = "te_layernorm_backward"
+    multiple_results = True
+    impl_static_args = (5, 6)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(dz_aval, x_aval, mu_aval, rsigma_aval, gamma_aval, **kwargs):    # pylint: disable=unused-argument
+        """
+        Layernorm bwd abstract
+        """
+        w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
+        mu_dtype = dtypes.canonicalize_dtype(mu_aval.dtype)
+        rsigma_dtype = dtypes.canonicalize_dtype(rsigma_aval.dtype)
+
+        assert dtypes.canonicalize_dtype(dz_aval.dtype) == w_dtype
+        assert dz_aval.shape == x_aval.shape
+        assert mu_aval.shape == rsigma_aval.shape == x_aval.shape[:-1]
+        assert mu_dtype == rsigma_dtype == jnp.float32
+
+        dx_aval = core.raise_to_shaped(dz_aval)
+        dgamma_aval = dbeta_aval = core.raise_to_shaped(gamma_aval)
+        return dx_aval, dgamma_aval, dbeta_aval
+
+    @staticmethod
+    def lowering(ctx, dz, x, mu, rsigma, gamma, *, zero_centered_gamma, epsilon):
+        """
+        Layernorm bwd lowering rules
+        """
+        _, x_aval, _, _, gamma_aval = ctx.avals_in
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        w_type = ir.RankedTensorType(gamma.type)
+        w_shape = w_type.shape
+        b_type = ir.RankedTensorType(gamma.type)
+        b_shape = b_type.shape
+        assert w_type == b_type
+        assert w_shape == b_shape
+
+        dz_shape = ir.RankedTensorType(dz.type).shape
+        mu_shape = ir.RankedTensorType(mu.type).shape
+        rsigma_shape = ir.RankedTensorType(rsigma.type).shape
+
+        hidden_size = reduce(operator.mul, w_shape)
+        batch_size = reduce(operator.mul, x_shape) // hidden_size
+
+        out_types = [
+            ir.RankedTensorType.get(x_shape, x_type.element_type),
+            ir.RankedTensorType.get(w_shape, w_type.element_type),
+            ir.RankedTensorType.get(b_shape, b_type.element_type),
+        ]
+        operands = [dz, mu, rsigma, x, gamma]
+        operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, w_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_norm_descriptor(
+            batch_size,
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),
+            jax_dtype_to_te_dtype(gamma_aval.dtype),
+            zero_centered_gamma,
+            epsilon,
+        )
+
+        out = custom_caller(LayerNormBwdPrimitive.name, args, opaque, False)
+
+        return out
+
+    @staticmethod
+    def impl(dz, x, mu, rsigma, gamma, zero_centered_gamma, epsilon):
+        assert LayerNormBwdPrimitive.inner_primitive is not None
+        dx, dgamma, dbeta = LayerNormBwdPrimitive.inner_primitive.bind(
+            dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon)
+        return dx, dgamma, dbeta
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, zero_centered_gamma, epsilon):
+        assert LayerNormBwdPrimitive.outer_primitive is not None
+        dz, x, mu, rsigma, gamma = batched_args
+        _, x_bdim, _, _, gamma_bdim = batch_dims
+
+        out_bdims = x_bdim, gamma_bdim, gamma_bdim
+        return LayerNormBwdPrimitive.outer_primitive.bind(dz,
+                                                          x,
+                                                          mu,
+                                                          rsigma,
+                                                          gamma,
+                                                          zero_centered_gamma=zero_centered_gamma,
+                                                          epsilon=epsilon), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
+        del zero_centered_gamma, epsilon, result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}"
+        g_b_spec = get_padded_spec(arg_infos[4])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
+        return dx_sharding, dgamma_sharding, dbeta_sharding
+
+    @staticmethod
+    def partition(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}"
+        g_b_spec = get_padded_spec(arg_infos[4])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
+        out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
+        x_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec)),) * 2
+        mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
+        arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(*g_b_spec)))
+
+        def sharded_impl(dz, x, mu, rsigma, gamma):
+            local_dx, local_dgamma, local_dbeta = \
+                LayerNormBwdPrimitive.impl(dz, x, mu, rsigma, gamma,
+                     zero_centered_gamma=zero_centered_gamma,
+                     epsilon=epsilon)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
+            global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta)
+            return local_dx, global_dgamma, global_dbeta
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(LayerNormBwdPrimitive)
+
+
+def layernorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.ndarray,
+                  gamma: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
+    """
+    Wrapper for TE layernorm bwd
+    """
+    return LayerNormBwdPrimitive.outer_primitive.bind(dz,
+                                                      x,
+                                                      mu,
+                                                      rsigma,
+                                                      gamma,
+                                                      zero_centered_gamma=zero_centered_gamma,
+                                                      epsilon=epsilon)
+
+
+class RmsNormFwdPrimitive(BasePrimitive):
+    """
+    RMS Normalization Forward Primitive
+    """
+    name = "te_rmsnorm_forward"
+    multiple_results = True
+    impl_static_args = (2,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(x_aval, gamma_aval, **kwargs):    # pylint: disable=unused-argument
+        """
+        RMSNorm fwd abstract
+        """
+        x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        rsigama_dtype = jnp.float32
+
+        out_aval = core.raise_to_shaped(x_aval)
+        rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=rsigama_dtype)
+
+        hidden_size = gamma_aval.size
+        assert x_aval.size % hidden_size == 0
+
+        return out_aval, rsigma_aval
+
+    @staticmethod
+    def lowering(ctx, x, gamma, *, epsilon):
+        """
+        RMSNorm fwd lowering rules
+        """
+        x_aval, gamma_aval = ctx.avals_in
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        w_type = ir.RankedTensorType(gamma.type)
+        w_shape = w_type.shape
+        rsigma_element_type = ir.F32Type.get()
+
+        out_shape = x_shape
+        hidden_size = reduce(operator.mul, w_shape)
+        batch_shape = out_shape[:-1]
+        batch_size = reduce(operator.mul, x_shape) // hidden_size
+
+        out_types = [
+            ir.RankedTensorType.get(out_shape, x_type.element_type),
+            ir.RankedTensorType.get(batch_shape, rsigma_element_type),
+        ]
+        operands = [x, gamma]
+        operand_shapes = [x_shape, w_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_norm_descriptor(
+            batch_size,
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),
+            jax_dtype_to_te_dtype(gamma_aval.dtype),
+            False,    # RMSNorm doesn't support zero_centered_gamma
+            epsilon,
+        )
+
+        out = custom_caller(RmsNormFwdPrimitive.name, args, opaque, False)
+
+        return out
+
+    @staticmethod
+    def impl(x, gamma, epsilon):
+        """
+        to describe implementation
+        """
+        assert RmsNormFwdPrimitive.inner_primitive is not None
+        out, rsigma = RmsNormFwdPrimitive.inner_primitive.bind(x, gamma, epsilon=epsilon)
+        return out, rsigma
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, epsilon):
+        """
+        to describe batch rules for vmap
+        """
+        assert RmsNormFwdPrimitive.outer_primitive is not None
+        x, gamma = batched_args
+        x_bdim, _ = batch_dims
+
+        out_bdims = x_bdim, x_bdim
+        return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(epsilon, mesh, arg_infos, result_infos):
+        del epsilon, result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}"
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
+        return (out_sharding, rsigma_sharding)
+
+    @staticmethod
+    def partition(epsilon, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        assert x_spec.spec[-1] is None, \
+            f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}"
+        g_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        out_spec = x_spec
+        rsigma_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        arg_shardings = (x_spec, g_spec)
+        out_shardings = (out_spec, rsigma_spec)
+        impl = partial(RmsNormFwdPrimitive.impl, epsilon=epsilon)
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(RmsNormFwdPrimitive)
+
+
+def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
+    """
+    Wrapper for TE rmsnorm fwd
+    """
+    return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon)
+
+
+class RmsNormBwdPrimitive(BasePrimitive):
+    """
+    RMS Normalization Backward Primitive
+    """
+    name = "te_rmsnorm_backward"
+    multiple_results = True
+    impl_static_args = (4,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+            dz_aval,
+            x_aval,
+            rsigma_aval,
+            gamma_aval,
+            **kwargs    # pylint: disable=unused-argument
+    ):
+        """
+        RMSNorm bwd abstract
+        """
+        w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
+        rsigma_dtype = dtypes.canonicalize_dtype(rsigma_aval.dtype)
+
+        assert dtypes.canonicalize_dtype(dz_aval.dtype) == w_dtype
+        assert dz_aval.shape == x_aval.shape
+        assert rsigma_aval.shape == x_aval.shape[:-1]
+        assert rsigma_dtype == jnp.float32
+
+        dx_aval = core.raise_to_shaped(dz_aval)
+        dgamma_aval = core.raise_to_shaped(gamma_aval)
+        return dx_aval, dgamma_aval
+
+    @staticmethod
+    def lowering(ctx, dz, x, rsigma, gamma, *, epsilon):
+        """
+        RMSNorm bwd lowering rules
+        """
+        _, x_aval, _, gamma_aval = ctx.avals_in
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        w_type = ir.RankedTensorType(gamma.type)
+        w_shape = w_type.shape
+        go_shape = ir.RankedTensorType(dz.type).shape
+        rsigma_shape = ir.RankedTensorType(rsigma.type).shape
+
+        hidden_size = reduce(operator.mul, w_shape)
+        batch_size = reduce(operator.mul, x_shape) // hidden_size
+
+        out_types = [
+            ir.RankedTensorType.get(x_shape, x_type.element_type),
+            ir.RankedTensorType.get(w_shape, w_type.element_type),
+        ]
+        operands = [dz, rsigma, x, gamma]
+        operand_shapes = [go_shape, rsigma_shape, x_shape, w_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_norm_descriptor(
+            batch_size,
+            hidden_size,
+            jax_dtype_to_te_dtype(x_aval.dtype),
+            jax_dtype_to_te_dtype(gamma_aval.dtype),
+            False,    # RMSNorm doesn't support zero_centered_gamma
+            epsilon,
+        )
+
+        out = custom_caller(RmsNormBwdPrimitive.name, args, opaque, False)
+
+        return out
+
+    @staticmethod
+    def impl(dz, x, rsigma, gamma, epsilon):
+        assert RmsNormBwdPrimitive.inner_primitive is not None
+        dx, dgamma = RmsNormBwdPrimitive.inner_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
+        return dx, dgamma
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, epsilon):
+        assert RmsNormBwdPrimitive.outer_primitive is not None
+        dz, x, rsigma, gamma = batched_args
+        _, x_bdim, _, gamma_bdim = batch_dims
+
+        out_bdims = x_bdim, gamma_bdim
+        return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma,
+                                                        epsilon=epsilon), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(epsilon, mesh, arg_infos, result_infos):
+        del epsilon, result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}"
+        g_spec = get_padded_spec(arg_infos[3])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        return dx_sharding, dgamma_sharding
+
+    @staticmethod
+    def partition(epsilon, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        assert x_spec[-1] is None, \
+            f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}"
+        g_spec = get_padded_spec(arg_infos[3])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        out_shardings = dx_sharding, dgamma_sharding
+        x_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec)),) * 2
+        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
+        arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(*g_spec)))
+
+        def sharded_impl(dz, x, rsigma, gamma):
+            local_dx, local_dgamma = \
+                RmsNormBwdPrimitive.impl(dz, x, rsigma, gamma, epsilon=epsilon)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
+            return local_dx, global_dgamma
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(RmsNormBwdPrimitive)
+
+
+def rmsnorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp.ndarray,
+                epsilon: float):
+    """
+    Wrapper for TE layernorm bwd
+    """
+    return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
+
+
+# Deprecating Items ---------------------------------------------------------------
+@dataclass(frozen=True)
+class FusedAttnHelper:
+    """
+    Helper for the fused attention backend
+    """
+
+    q_type: jnp.dtype
+    kv_type: jnp.dtype
+    qkv_layout: NVTE_QKV_Layout
+    attn_bias_type: NVTE_Bias_Type
+    attn_mask_type: NVTE_Mask_Type
+    dropout_probability: float
+    max_seqlen_q: int
+    max_seqlen_kv: int
+    head_dim: int
+
+    def is_fused_attn_kernel_available(self):
+        """Check if there is available fused attention kernel"""
+        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+
+    def get_fused_attn_backend(self):
+        """Get the fused attention kernel backend"""
+        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
+                                                             jax_dtype_to_te_dtype(self.kv_type),
+                                                             self.qkv_layout, self.attn_bias_type,
+                                                             self.attn_mask_type,
+                                                             self.dropout_probability,
+                                                             self.max_seqlen_q, self.max_seqlen_kv,
+                                                             self.head_dim)
+
+
+def merge_named_shape(base, new):
+    """
+    merge named shape(ie, dict), no key conflict
+    """
+    output_named_shape = {**base}
+    for key in new:
+        if key in output_named_shape:
+            assert output_named_shape[key] == new[key], \
+                f"The value of named shape with a same name should be equal between" \
+                f" base and new in merge_named_shape, but got base[{key}]=" \
+                f"{output_named_shape[key]} and {new[key]=}"
+        else:
+            output_named_shape[key] = new[key]
+    return output_named_shape
+
+
+class BasePrimitiveLegacy(metaclass=ABCMeta):
+    """
+    jax premitive
+    """
+
+    @staticmethod
+    @abstractmethod
+    def abstract():
+        """
+        to describe computing graph
+        """
+        return NotImplemented
+
+    @staticmethod
+    @abstractmethod
+    def lowering():
+        """
+        to describe MLIR
+        """
+        return NotImplemented
+
+
+def register_primitive_legacy(cls):
+    """
+    register jax primitive
+    """
+    p = core.Primitive(cls.name)
+    p.multiple_results = cls.multiple_results
+    p.def_impl(partial(xla.apply_primitive, p))
+    p.def_abstract_eval(cls.abstract)
+    mlir.register_lowering(p, cls.lowering, platform='cuda')
+    return p
+
+
+class TransposePrimitive(BasePrimitiveLegacy):
     """
     Transpose Primitive
     """
@@ -275,7 +923,7 @@ class TransposePrimitive(BasePrimitive):
         return [out]
 
 
-_transpose_p = register_primitive(TransposePrimitive)
+_transpose_p = register_primitive_legacy(TransposePrimitive)
 
 
 def transpose(inputs: jnp.ndarray, dtype: TEDType) -> jnp.ndarray:
@@ -286,7 +934,7 @@ def transpose(inputs: jnp.ndarray, dtype: TEDType) -> jnp.ndarray:
     return _transpose_p.bind(inputs, dtype=dtype)
 
 
-class CastTransposePrimitive(BasePrimitive):
+class CastTransposePrimitive(BasePrimitiveLegacy):
     """
     Cast Transpose Primitive
     """
@@ -356,7 +1004,7 @@ class CastTransposePrimitive(BasePrimitive):
         return out
 
 
-_cast_transpose_p = register_primitive(CastTransposePrimitive)
+_cast_transpose_p = register_primitive_legacy(CastTransposePrimitive)
 
 
 def cast_transpose(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
@@ -369,7 +1017,7 @@ def cast_transpose(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     return _cast_transpose_p.bind(inputs, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
-class GatedGeluPrimitive(BasePrimitive):
+class GatedGeluPrimitive(BasePrimitiveLegacy):
     """
     Gated Gelu Primitive
     """
@@ -423,7 +1071,7 @@ class GatedGeluPrimitive(BasePrimitive):
         return [out]
 
 
-_gated_gelu_p = register_primitive(GatedGeluPrimitive)
+_gated_gelu_p = register_primitive_legacy(GatedGeluPrimitive)
 
 
 def gated_gelu(inputs: jnp.ndarray) -> jnp.ndarray:
@@ -435,7 +1083,7 @@ def gated_gelu(inputs: jnp.ndarray) -> jnp.ndarray:
     return _gated_gelu_p.bind(inputs)
 
 
-class GatedGeluFp8Primitive(BasePrimitive):
+class GatedGeluFp8Primitive(BasePrimitiveLegacy):
     """
     Gated Gelu FP8 Primitive
     """
@@ -505,7 +1153,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         return out
 
 
-_gated_gelu_fp8_p = register_primitive(GatedGeluFp8Primitive)
+_gated_gelu_fp8_p = register_primitive_legacy(GatedGeluFp8Primitive)
 
 
 def gated_gelu_fp8(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
@@ -519,7 +1167,7 @@ def gated_gelu_fp8(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
     return _gated_gelu_fp8_p.bind(inputs, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
-class DgatedGeluPrimitive(BasePrimitive):
+class DgatedGeluPrimitive(BasePrimitiveLegacy):
     """
     Dgated Gelu Primitive
     """
@@ -581,7 +1229,7 @@ class DgatedGeluPrimitive(BasePrimitive):
         return [out]
 
 
-_dgated_gelu_p = register_primitive(DgatedGeluPrimitive)
+_dgated_gelu_p = register_primitive_legacy(DgatedGeluPrimitive)
 
 
 def dgated_gelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
@@ -592,7 +1240,7 @@ def dgated_gelu(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray) -> jnp.ndarray:
     return _dgated_gelu_p.bind(inputs, gelu_inputs)
 
 
-class DgatedGeluCastTransposePrimitive(BasePrimitive):
+class DgatedGeluCastTransposePrimitive(BasePrimitiveLegacy):
     """
     Dgated Gelu Cast Transpose Primitive
     """
@@ -678,7 +1326,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         return out
 
 
-_dgated_gelu_cast_transpose_p = register_primitive(DgatedGeluCastTransposePrimitive)
+_dgated_gelu_cast_transpose_p = register_primitive_legacy(DgatedGeluCastTransposePrimitive)
 
 
 def dgated_gelu_cast_transpose(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray, amax: jnp.ndarray,
@@ -696,7 +1344,7 @@ def dgated_gelu_cast_transpose(inputs: jnp.ndarray, gelu_inputs: jnp.ndarray, am
                                               out_dtype=out_dtype)
 
 
-class GemmPrimitive(BasePrimitive):
+class GemmPrimitive(BasePrimitiveLegacy):
     """
     Gemm Primitive
     """
@@ -769,7 +1417,7 @@ class GemmPrimitive(BasePrimitive):
         return [out]
 
 
-_gemm_p = register_primitive(GemmPrimitive)
+_gemm_p = register_primitive_legacy(GemmPrimitive)
 
 
 def gemm(A: jnp.ndarray,
@@ -797,103 +1445,7 @@ def gemm(A: jnp.ndarray,
                         use_split_accumulator=use_split_accumulator)
 
 
-class LayerNormFwdPrimitive(BasePrimitive):
-    """
-    Layer Normalization Forward Primitive
-    """
-    name = "te_layernorm_forward"
-    multiple_results = True
-
-    @staticmethod
-    def abstract(x, gamma, beta, **kwargs):    # pylint: disable=unused-argument
-        """
-        LayerNorm fwd abstract
-        """
-        x_dtype = dtypes.canonicalize_dtype(x.dtype)
-        assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-
-        mu_dtype = jnp.float32
-        rsigma_dtype = jnp.float32
-
-        assert gamma.size == beta.size
-        hidden_size = gamma.size
-        assert x.size % hidden_size == 0
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_size
-
-        return (
-            ShapedArray(x.shape, x_dtype, named_shape=x.named_shape),    # output
-            ShapedArray((batch_size,), mu_dtype, named_shape=x.named_shape),    # mu
-            ShapedArray((batch_size,), rsigma_dtype, named_shape=x.named_shape),    # rsigma
-        )
-
-    @staticmethod
-    def lowering(ctx, x, gamma, beta, *, zero_centered_gamma, epsilon):
-        """
-        LayerNorm fwd lowering rules
-        """
-        x_aval, gamma_aval, beta_aval = ctx.avals_in
-        assert gamma_aval.dtype == beta_aval.dtype
-        x_type = ir.RankedTensorType(x.type)
-        x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
-        b_type = ir.RankedTensorType(beta.type)
-        b_shape = b_type.shape
-
-        assert w_type == b_type
-        assert w_shape == b_shape
-
-        # Output shape is same as the input shape, but the output type is same as the weight type.
-        # See ln_api.cpp
-        out_shape = x_shape
-        output_type = w_type.element_type
-        ir_mu_dtype = ir.F32Type.get()
-        ir_rsigma_dtype = ir.F32Type.get()
-
-        hidden_size = reduce(operator.mul, w_shape)
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = reduce(operator.mul, x_shape) // hidden_size
-
-        out_types = [
-            ir.RankedTensorType.get(out_shape, output_type),
-            ir.RankedTensorType.get((batch_size,), ir_mu_dtype),
-            ir.RankedTensorType.get((batch_size,), ir_rsigma_dtype),
-        ]
-        operands = [x, gamma, beta]
-        operand_shapes = [x_shape, w_shape, b_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_norm_descriptor(
-            batch_size,
-            hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(gamma_aval.dtype),
-            zero_centered_gamma,
-            epsilon,
-        )
-
-        out = custom_caller(LayerNormFwdPrimitive.name, args, opaque, False)
-
-        return out
-
-
-_layernorm_fwd_p = register_primitive(LayerNormFwdPrimitive)
-
-
-def layernorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool,
-                  epsilon: float):
-    """
-    Wrapper for TE layernorm fwd
-    """
-    return _layernorm_fwd_p.bind(x,
-                                 gamma,
-                                 beta,
-                                 zero_centered_gamma=zero_centered_gamma,
-                                 epsilon=epsilon)
-
-
-class LayerNormFwdFp8Primitive(BasePrimitive):
+class LayerNormFwdFp8Primitive(BasePrimitiveLegacy):
     """
     Layer Normalization Forward FP8 Primitive
     """
@@ -1000,7 +1552,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         return out
 
 
-_layernorm_fwd_fp8_p = register_primitive(LayerNormFwdFp8Primitive)
+_layernorm_fwd_fp8_p = register_primitive_legacy(LayerNormFwdFp8Primitive)
 
 
 def layernorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, amax: jnp.ndarray,
@@ -1019,175 +1571,7 @@ def layernorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, ama
                                      epsilon=epsilon)
 
 
-class LayerNormBwdPrimitive(BasePrimitive):
-    """
-    Layer Normalization Backward Primitive
-    """
-    name = "te_layernorm_backward"
-    multiple_results = True
-
-    @staticmethod
-    def abstract(grad_output, mu, rsigma, x, gamma, **kwargs):    # pylint: disable=unused-argument
-        """
-        Layernorm bwd abstract
-        """
-        x_dtype = dtypes.canonicalize_dtype(x.dtype)
-        w_dtype = dtypes.canonicalize_dtype(gamma.dtype)
-        mu_dtype = dtypes.canonicalize_dtype(mu.dtype)
-        rsigma_dtype = dtypes.canonicalize_dtype(rsigma.dtype)
-
-        hidden_size = gamma.size
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_size
-
-        assert dtypes.canonicalize_dtype(grad_output.dtype) == w_dtype
-        assert grad_output.shape == x.shape
-        assert mu.shape == rsigma.shape == (batch_size,)
-        assert mu_dtype == rsigma_dtype == jnp.float32
-        assert grad_output.named_shape == x.named_shape
-
-        return (
-            ShapedArray(x.shape, x_dtype, named_shape=grad_output.named_shape),    # grad input
-            ShapedArray(gamma.shape, w_dtype, named_shape=gamma.named_shape),    # grad gamma
-            ShapedArray(gamma.shape, w_dtype, named_shape=gamma.named_shape),    # grad beta
-        )
-
-    @staticmethod
-    def lowering(ctx, grad_output, mu, rsigma, x, gamma, *, zero_centered_gamma, epsilon):
-        """
-        Layernorm bwd lowering rules
-        """
-        _, _, _, x_aval, gamma_aval = ctx.avals_in
-        x_type = ir.RankedTensorType(x.type)
-        x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
-        b_type = ir.RankedTensorType(gamma.type)
-        b_shape = b_type.shape
-        assert w_type == b_type
-        assert w_shape == b_shape
-
-        go_shape = ir.RankedTensorType(grad_output.type).shape
-        mu_shape = ir.RankedTensorType(mu.type).shape
-        rsigma_shape = ir.RankedTensorType(rsigma.type).shape
-
-        hidden_size = reduce(operator.mul, w_shape)
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = reduce(operator.mul, x_shape) // hidden_size
-
-        out_types = [
-            ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(w_shape, w_type.element_type),
-            ir.RankedTensorType.get(b_shape, b_type.element_type),
-        ]
-        operands = [grad_output, mu, rsigma, x, gamma]
-        operand_shapes = [go_shape, mu_shape, rsigma_shape, x_shape, w_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_norm_descriptor(
-            batch_size,
-            hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(gamma_aval.dtype),
-            zero_centered_gamma,
-            epsilon,
-        )
-
-        out = custom_caller(LayerNormBwdPrimitive.name, args, opaque, False)
-
-        return out
-
-
-_layernorm_bwd_p = register_primitive(LayerNormBwdPrimitive)
-
-
-def layernorm_bwd(g: jnp.ndarray, mu: jnp.ndarray, rsigma: jnp.ndarray, x: jnp.ndarray,
-                  gamma: jnp.ndarray, zero_centered_gamma: bool, epsilon: float):
-    """
-    Wrapper for TE layernorm bwd
-    """
-    return _layernorm_bwd_p.bind(g,
-                                 mu,
-                                 rsigma,
-                                 x,
-                                 gamma,
-                                 zero_centered_gamma=zero_centered_gamma,
-                                 epsilon=epsilon)
-
-
-class RmsNormFwdPrimitive(BasePrimitive):
-    """
-    RMS Normalization Forward Primitive
-    """
-    name = "te_rmsnorm_forward"
-    multiple_results = True
-
-    @staticmethod
-    def abstract(x, gamma, **kwargs):    # pylint: disable=unused-argument
-        """
-        RMSNorm fwd abstract
-        """
-        x_dtype = dtypes.canonicalize_dtype(x.dtype)
-        rsigma_dtype = jnp.float32
-
-        hidden_size = gamma.size
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_size
-
-        return (
-            ShapedArray(x.shape, x_dtype, named_shape=x.named_shape),    # output
-            ShapedArray((batch_size,), rsigma_dtype, named_shape=x.named_shape),    # rsigma
-        )
-
-    @staticmethod
-    def lowering(ctx, x, gamma, *, epsilon):
-        """
-        RMSNorm fwd lowering rules
-        """
-        x_aval, gamma_aval = ctx.avals_in
-        x_type = ir.RankedTensorType(x.type)
-        x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
-        iv_element_type = ir.F32Type.get()
-
-        hidden_size = reduce(operator.mul, w_shape)
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = reduce(operator.mul, x_shape) // hidden_size
-
-        out_types = [
-            ir.RankedTensorType.get(x_shape, w_type.element_type),
-            ir.RankedTensorType.get((batch_size,), iv_element_type),
-        ]
-        operands = [x, gamma]
-        operand_shapes = [x_shape, w_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_norm_descriptor(
-            batch_size,
-            hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(gamma_aval.dtype),
-            False,    # RMSNorm doesn't support zero_centered_gamma
-            epsilon,
-        )
-
-        out = custom_caller(RmsNormFwdPrimitive.name, args, opaque, False)
-
-        return out
-
-
-_rmsnorm_fwd_p = register_primitive(RmsNormFwdPrimitive)
-
-
-def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
-    """
-    Wrapper for TE rmsnorm fwd
-    """
-    return _rmsnorm_fwd_p.bind(x, gamma, epsilon=epsilon)
-
-
-class RmsNormFwdFp8Primitive(BasePrimitive):
+class RmsNormFwdFp8Primitive(BasePrimitiveLegacy):
     """
     RMS Normalization Forward FP8 Primitive
     """
@@ -1282,7 +1666,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         return out
 
 
-_rmsnorm_fwd_fp8_p = register_primitive(RmsNormFwdFp8Primitive)
+_rmsnorm_fwd_fp8_p = register_primitive_legacy(RmsNormFwdFp8Primitive)
 
 
 def rmsnorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
@@ -1293,94 +1677,7 @@ def rmsnorm_fwd_fp8(x: jnp.ndarray, gamma: jnp.ndarray, amax: jnp.ndarray, scale
     return _rmsnorm_fwd_fp8_p.bind(x, gamma, amax, scale, scale_inv, epsilon=epsilon)
 
 
-class RmsNormBwdPrimitive(BasePrimitive):
-    """
-    RMS Normalization Backward Primitive
-    """
-    name = "te_rmsnorm_backward"
-    multiple_results = True
-
-    @staticmethod
-    def abstract(
-            grad_output,
-            rsigma,
-            x,
-            gamma,
-            **kwargs    # pylint: disable=unused-argument
-    ):
-        """
-        RMSNorm bwd abstract
-        """
-        w_dtype = dtypes.canonicalize_dtype(gamma.dtype)
-        x_dtype = dtypes.canonicalize_dtype(x.dtype)
-        rsigma_dtype = dtypes.canonicalize_dtype(rsigma.dtype)
-
-        hidden_size = gamma.size
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_size
-
-        assert dtypes.canonicalize_dtype(grad_output.dtype) == w_dtype
-        assert grad_output.shape == x.shape
-        assert rsigma.shape == (batch_size,)
-        assert rsigma_dtype == jnp.float32
-        assert grad_output.named_shape == x.named_shape
-
-        return (
-            ShapedArray(x.shape, x_dtype, named_shape=grad_output.named_shape),    # grad input
-            ShapedArray(gamma.shape, w_dtype, named_shape=gamma.named_shape),    # grad gamma
-        )
-
-    @staticmethod
-    def lowering(ctx, grad_output, inv_var, x, gamma, *, epsilon):
-        """
-        RMSNorm bwd lowering rules
-        """
-        _, _, x_aval, gamma_aval = ctx.avals_in
-        x_type = ir.RankedTensorType(x.type)
-        x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
-        go_shape = ir.RankedTensorType(grad_output.type).shape
-        inv_var_shape = ir.RankedTensorType(inv_var.type).shape
-
-        hidden_size = reduce(operator.mul, w_shape)
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = reduce(operator.mul, x_shape) // hidden_size
-
-        out_types = [
-            ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(w_shape, w_type.element_type),
-        ]
-        operands = [grad_output, inv_var, x, gamma]
-        operand_shapes = [go_shape, inv_var_shape, x_shape, w_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_norm_descriptor(
-            batch_size,
-            hidden_size,
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(gamma_aval.dtype),
-            False,    # RMSNorm doesn't support zero_centered_gamma
-            epsilon,
-        )
-
-        out = custom_caller(RmsNormBwdPrimitive.name, args, opaque, False)
-
-        return out
-
-
-_rmsnorm_bwd_p = register_primitive(RmsNormBwdPrimitive)
-
-
-def rmsnorm_bwd(grad: jnp.ndarray, inv_var: jnp.ndarray, x: jnp.ndarray, gamma: jnp.ndarray,
-                epsilon: float):
-    """
-    Wrapper for TE rmsnorm bwd
-    """
-    return _rmsnorm_bwd_p.bind(grad, inv_var, x, gamma, epsilon=epsilon)
-
-
-class QuantizePrimitive(BasePrimitive):
+class QuantizePrimitive(BasePrimitiveLegacy):
     """
     Quantize Primitive
     """
@@ -1451,7 +1748,7 @@ class QuantizePrimitive(BasePrimitive):
         return out
 
 
-_quantize_p = register_primitive(QuantizePrimitive)
+_quantize_p = register_primitive_legacy(QuantizePrimitive)
 
 
 def quantize(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
@@ -1463,7 +1760,7 @@ def quantize(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_i
     return _quantize_p.bind(inputs, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
-class DequantizePrimitive(BasePrimitive):
+class DequantizePrimitive(BasePrimitiveLegacy):
     """
     Dequantize Primitive
     """
@@ -1525,7 +1822,7 @@ class DequantizePrimitive(BasePrimitive):
         return [out]
 
 
-_dequantize_p = register_primitive(DequantizePrimitive)
+_dequantize_p = register_primitive_legacy(DequantizePrimitive)
 
 
 def dequantize(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
@@ -1542,7 +1839,7 @@ def dequantize(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale
                               out_dtype=out_dtype)
 
 
-class SoftmaxPrimitive(BasePrimitive):
+class SoftmaxPrimitive(BasePrimitiveLegacy):
     """
     Softmax Primitive
     """
@@ -1632,7 +1929,6 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
-        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1694,7 +1990,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
         return [out]
 
 
-_scaled_softmax_fwd_p = register_primitive(ScaledSoftmaxFwdPrimitive)
+_scaled_softmax_fwd_p = register_primitive_legacy(ScaledSoftmaxFwdPrimitive)
 
 
 def scaled_softmax_fwd(inputs: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
@@ -1739,7 +2035,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
         return out    # out is iterable already
 
 
-_scaled_softmax_bwd_p = register_primitive(ScaledSoftmaxBwdPrimitive)
+_scaled_softmax_bwd_p = register_primitive_legacy(ScaledSoftmaxBwdPrimitive)
 
 
 def scaled_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
@@ -1764,7 +2060,6 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
-        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1843,7 +2138,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         return [out]
 
 
-_scaled_masked_softmax_fwd_p = register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
+_scaled_masked_softmax_fwd_p = register_primitive_legacy(ScaledMaskedSoftmaxFwdPrimitive)
 
 
 def scaled_masked_softmax_fwd(inputs: jnp.ndarray, mask: jnp.ndarray,
@@ -1889,7 +2184,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         return out    # out is iterable already
 
 
-_scaled_masked_softmax_bwd_p = register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
+_scaled_masked_softmax_bwd_p = register_primitive_legacy(ScaledMaskedSoftmaxBwdPrimitive)
 
 
 def scaled_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
@@ -1916,7 +2211,6 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
-        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1979,7 +2273,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         return [out]
 
 _scaled_upper_triang_masked_softmax_fwd_p = \
-    register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
+    register_primitive_legacy(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
 
 
 def scaled_upper_triang_masked_softmax_fwd(inputs: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
@@ -2024,7 +2318,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         return out    # out is iterable already
 
 _scaled_upper_triang_masked_softmax_bwd_p = \
-    register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
+    register_primitive_legacy(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
 
 
 def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
@@ -2077,7 +2371,7 @@ class _FusedAttnRNGStateChecker:
         return seed
 
 
-class SelfFusedAttnFwdPrimitive(BasePrimitive):
+class SelfFusedAttnFwdPrimitive(BasePrimitiveLegacy):
     """
     Self Fused Attention Forward Primitive
     """
@@ -2162,7 +2456,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
 
-_self_fused_attn_fwd_p = register_primitive(SelfFusedAttnFwdPrimitive)
+_self_fused_attn_fwd_p = register_primitive_legacy(SelfFusedAttnFwdPrimitive)
 
 
 def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndarray,
@@ -2190,7 +2484,7 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, cu_seqlen: jnp.ndar
                                        is_training=is_training)
 
 
-class SelfFusedAttnBwdPrimitive(BasePrimitive):
+class SelfFusedAttnBwdPrimitive(BasePrimitiveLegacy):
     """
     Self Fused Attention Backward Primitive
     """
@@ -2258,7 +2552,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         return out
 
 
-_self_fused_attn_bwd_p = register_primitive(SelfFusedAttnBwdPrimitive)
+_self_fused_attn_bwd_p = register_primitive_legacy(SelfFusedAttnBwdPrimitive)
 
 
 def self_fused_attn_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, rng_state: jnp.ndarray,
@@ -2282,7 +2576,7 @@ def self_fused_attn_bwd(qkv: jnp.ndarray, softmax_aux: jnp.ndarray, rng_state: j
                                        is_training=is_training)
 
 
-class CrossFusedAttnFwdPrimitive(BasePrimitive):
+class CrossFusedAttnFwdPrimitive(BasePrimitiveLegacy):
     """
     Cross Fused Attention Forward Primitive
     """
@@ -2359,7 +2653,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
 
-_cross_fused_attn_fwd_p = register_primitive(CrossFusedAttnFwdPrimitive)
+_cross_fused_attn_fwd_p = register_primitive_legacy(CrossFusedAttnFwdPrimitive)
 
 
 def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarray,
@@ -2385,7 +2679,7 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, q_cu_seqlen: jnp.ndarr
                                         is_training=is_training)
 
 
-class CrossFusedAttnBwdPrimitive(BasePrimitive):
+class CrossFusedAttnBwdPrimitive(BasePrimitiveLegacy):
     """
     Cross Fused Attention Backward Primitive
     """
@@ -2455,7 +2749,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         return out
 
 
-_cross_fused_attn_bwd_p = register_primitive(CrossFusedAttnBwdPrimitive)
+_cross_fused_attn_bwd_p = register_primitive_legacy(CrossFusedAttnBwdPrimitive)
 
 
 def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
