@@ -230,8 +230,8 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
         # Need to disable one pylint error as the second function
         # parameter name recenctly in JAX. Otherwise we won't be
         # compatible with multiple JAX version.
-        out = custom_call(
-            name,    # pylint: disable=too-many-function-args
+        out = custom_call(    # pylint: disable=too-many-function-args
+            name,
             args.output_types,
             operands=args.operands,
             operand_layouts=args.operand_layouts,
@@ -792,6 +792,773 @@ def rmsnorm_bwd(dz: jnp.ndarray, x: jnp.ndarray, rsigma: jnp.ndarray, gamma: jnp
     return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
 
 
+class SoftmaxPrimitive(BasePrimitive):
+    """
+    Softmax Primitive
+    """
+    max_k_seqlen_supported = 4096
+
+<<<<<<< HEAD
+    q_type: jnp.dtype
+    kv_type: jnp.dtype
+    qkv_layout: NVTE_QKV_Layout
+    attn_bias_type: NVTE_Bias_Type
+    attn_mask_type: NVTE_Mask_Type
+    dropout_probability: float
+    max_seqlen_q: int
+    max_seqlen_kv: int
+    head_dim: int
+=======
+    @staticmethod
+    @abstractmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        raise NotImplementedError
+>>>>>>> Migrating both FWD and BWD of all kinds of softmax from xmap to custom_partitioning.
+
+    @staticmethod
+    def get_batch_per_block(k_seqlen: int) -> int:
+        """Get batch per CTA in Softmax kernels"""
+        threads_per_warp = 32
+        threads_per_block = 128    # Depends on the kernel implmentation
+
+<<<<<<< HEAD
+    def get_fused_attn_backend(self):
+        """Get the fused attention kernel backend"""
+        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
+                                                             jax_dtype_to_te_dtype(self.kv_type),
+                                                             self.qkv_layout, self.attn_bias_type,
+                                                             self.attn_mask_type,
+                                                             self.dropout_probability,
+                                                             self.max_seqlen_q, self.max_seqlen_kv,
+                                                             self.head_dim)
+=======
+        pow2 = 1 << (k_seqlen - 1).bit_length()
+        warp_size = pow2 if pow2 < threads_per_warp else threads_per_warp
+        batches_per_warp = 2 if pow2 <= 128 else 1
+        warps_per_block = threads_per_block // warp_size
+        batches_per_block = warps_per_block * batches_per_warp
+        return batches_per_block
+>>>>>>> Migrating both FWD and BWD of all kinds of softmax from xmap to custom_partitioning.
+
+    @staticmethod
+    def forward_abstract(logits_aval, scale_factor):    # pylint: disable=unused-argument
+        """
+        softmax_forward abstract
+        """
+        del scale_factor
+        i_dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
+        assert i_dtype in [jnp.float16, jnp.bfloat16]
+        i_shape = logits_aval.shape
+        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+        q_seqlen = i_shape[-2]
+        k_seqlen = i_shape[-1]
+        assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
+        assert q_seqlen > 1
+
+        out_aval = core.raise_to_shaped(logits_aval)
+        return out_aval
+
+    @staticmethod
+    def forward_lowering(name, ctx, logits, *, scale_factor):
+        """
+        softmax_forward lowering rules
+        """
+        i_aval, = ctx.avals_in
+        i_type = ir.RankedTensorType(logits.type)
+        i_shape = i_type.shape
+        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+        batch = reduce(operator.mul, i_shape[:-3])
+        pad_batch = batch
+        heads = i_shape[-3]
+        q_seqlen = i_shape[-2]
+        k_seqlen = i_shape[-1]
+
+        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
+        operands = [logits]
+        operand_shapes = [i_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_softmax_descriptor(batch, pad_batch, heads, q_seqlen,
+                                                                k_seqlen,
+                                                                jax_dtype_to_te_dtype(i_aval.dtype),
+                                                                scale_factor)
+
+        out = custom_caller(name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def forward_impl(primitive, logits, scale_factor):
+        """
+        softmax_forward implementation
+        """
+        assert primitive is not None
+        output = primitive.bind(logits, scale_factor=scale_factor)
+        return output
+
+    @staticmethod
+    def forward_batcher(primitive, batched_args, batch_dims, *, scale_factor):
+        """
+        softmax_forward batcher
+        """
+        assert primitive is not None
+        logits, = batched_args
+        logits_bdim, = batch_dims
+
+        out_bdims = logits_bdim
+        return primitive.bind(logits, scale_factor=scale_factor), out_bdims
+
+    @staticmethod
+    def forward_infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        """
+        softmax_forward infer_sharding_from_operands
+        """
+        del scale_factor, result_infos    # Unused.
+        logits_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        return out_sharding
+
+    @staticmethod
+    def forward_partition(impl, scale_factor, mesh, arg_infos, result_infos):
+        """
+        softmax_forward partitioning
+        """
+        del result_infos
+        logits_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        out_spec = logits_spec
+        arg_shardings = (logits_spec,)
+        out_shardings = out_spec
+        impl = partial(impl, scale_factor=scale_factor)
+        return mesh, impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def backward_abstract(dz_aval, softmax_out_aval, scale_factor=None):    # pylint: disable=unused-argument
+        """
+        softmax_backward infer_sharding_from_operands
+        """
+        dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        softmax_out_dtype = dtypes.canonicalize_dtype(softmax_out_aval.dtype)
+        assert dz_dtype == softmax_out_dtype
+        assert dz_dtype in [jnp.float16, jnp.bfloat16]
+        assert softmax_out_dtype in [jnp.float16, jnp.bfloat16]
+
+        assert dz_aval.shape == softmax_out_aval.shape
+
+        dx_aval = core.raise_to_shaped(softmax_out_aval)
+        return dx_aval
+
+    @staticmethod
+    def backward_lowering(name, ctx, dz, softmax_out, *, scale_factor):
+        """
+        softmax_backward lowering rules
+        """
+        dz_aval, _ = ctx.avals_in
+
+        dz_type = ir.RankedTensorType(dz.type)
+        dz_shape = dz_type.shape
+
+        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+        batch = reduce(operator.mul, dz_shape[:-3])
+        pad_batch = batch    # unused
+        heads = dz_shape[-3]
+        q_seqlen = dz_shape[-2]
+        k_seqlen = dz_shape[-1]
+
+        softmax_out_type = ir.RankedTensorType(softmax_out.type)
+        softmax_out_shape = softmax_out_type.shape
+
+        out_types = [ir.RankedTensorType.get(softmax_out_shape, softmax_out_type.element_type)]
+        operands = [dz, softmax_out]
+        operand_shapes = [dz_shape, softmax_out_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_softmax_descriptor(
+            batch, pad_batch, heads, q_seqlen, k_seqlen, jax_dtype_to_te_dtype(dz_aval.dtype),
+            scale_factor)
+
+        out = custom_caller(name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def backward_impl(primitive, dz, softmax_out, scale_factor):
+        """
+        softmax_backward implementation
+        """
+        assert primitive is not None
+        dx = primitive.bind(dz, softmax_out, scale_factor=scale_factor)
+        return dx
+
+    @staticmethod
+    def backward_batcher(primitive, batched_args, batch_dims, *, scale_factor):
+        """
+        softmax_backward batcher
+        """
+        assert primitive is not None
+        dz, softmax_out = batched_args
+        _, softmax_out_bdim = batch_dims
+
+        out_bdims = softmax_out_bdim
+        return primitive.bind(dz, softmax_out, scale_factor=scale_factor), out_bdims
+
+    @staticmethod
+    def backward_infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        """
+        softmax_backward infer_sharding_from_operands
+        """
+        del scale_factor, result_infos    # Unused.
+        softmax_out_spec = get_padded_spec(arg_infos[1])
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*softmax_out_spec))
+        return dx_sharding
+
+    @staticmethod
+    def backward_partition(impl, scale_factor, mesh, arg_infos, result_infos):
+        """
+        softmax_backward partition
+        """
+        del result_infos
+        dz_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        softmax_out_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        dx_spec = softmax_out_spec
+        arg_shardings = (dz_spec, softmax_out_spec)
+        out_shardings = dx_spec
+        impl = partial(impl, scale_factor=scale_factor)
+        return mesh, impl, out_shardings, arg_shardings
+
+
+class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Softmax Fwd Primitive
+    """
+    name = "te_scaled_softmax_forward"
+    multiple_results = False
+    impl_static_args = (1,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        attn_batches = batch * heads
+
+        if (dtype in [jnp.float16, jnp.bfloat16]
+                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
+        # k_seqlen must be 16 ~ 4096
+                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
+                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
+           ):
+            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
+                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
+                return q_seqlen % batch_per_block == 0
+        return False
+
+    @staticmethod
+    def abstract(logits_aval, scale_factor):    # pylint: disable=unused-argument
+        """
+        te_scaled_softmax_forward abstract
+        """
+        return SoftmaxPrimitive.forward_abstract(logits_aval, scale_factor)
+
+    @staticmethod
+    def lowering(ctx, logits, *, scale_factor):
+        """
+        te_scaled_softmax_forward lowering rules
+        """
+        return SoftmaxPrimitive.forward_lowering(ScaledSoftmaxFwdPrimitive.name,
+                                                 ctx,
+                                                 logits,
+                                                 scale_factor=scale_factor)
+
+    @staticmethod
+    def impl(logits, scale_factor):
+        return SoftmaxPrimitive.forward_impl(ScaledSoftmaxFwdPrimitive.inner_primitive, logits,
+                                             scale_factor)
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        return SoftmaxPrimitive.forward_batcher(ScaledSoftmaxFwdPrimitive.outer_primitive,
+                                                batched_args,
+                                                batch_dims,
+                                                scale_factor=scale_factor)
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.forward_infer_sharding_from_operands(scale_factor, mesh, arg_infos,
+                                                                     result_infos)
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.forward_partition(ScaledSoftmaxFwdPrimitive.impl, scale_factor,
+                                                  mesh, arg_infos, result_infos)
+
+
+register_primitive(ScaledSoftmaxFwdPrimitive)
+
+
+def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledSoftmaxFwdPrimitive.outer_primitive.bind(logits, scale_factor=scale_factor)
+
+
+class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Softmax Bwd Primitive
+    """
+    name = "te_scaled_softmax_backward"
+    multiple_results = False
+    impl_static_args = (2,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        return ScaledSoftmaxFwdPrimitive.is_kernel_available(batch, heads, q_seqlen, k_seqlen,
+                                                             dtype)
+
+    @staticmethod
+    def abstract(dz_aval, softmax_out_aval, scale_factor):
+        """
+        te_scaled_softmax_backward abstract
+        """
+        return SoftmaxPrimitive.backward_abstract(dz_aval, softmax_out_aval, scale_factor)
+
+    @staticmethod
+    def lowering(ctx, dz, softmax_out, *, scale_factor):
+        """
+        te_scaled_softmax_backward lowering rules
+        """
+        out = SoftmaxPrimitive.backward_lowering(ScaledSoftmaxBwdPrimitive.name,
+                                                 ctx,
+                                                 dz,
+                                                 softmax_out,
+                                                 scale_factor=scale_factor)
+
+        return out
+
+    @staticmethod
+    def impl(dz, softmax_out, scale_factor):
+        return SoftmaxPrimitive.backward_impl(ScaledSoftmaxBwdPrimitive.inner_primitive,
+                                              dz,
+                                              softmax_out,
+                                              scale_factor=scale_factor)
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        return SoftmaxPrimitive.backward_batcher(ScaledSoftmaxBwdPrimitive.outer_primitive,
+                                                 batched_args,
+                                                 batch_dims,
+                                                 scale_factor=scale_factor)
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_infer_sharding_from_operands(scale_factor, mesh, arg_infos,
+                                                                      result_infos)
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_partition(ScaledSoftmaxBwdPrimitive.impl, scale_factor,
+                                                   mesh, arg_infos, result_infos)
+
+
+register_primitive(ScaledSoftmaxBwdPrimitive)
+
+
+def scaled_softmax_bwd(dz: jnp.ndarray, softmax_out: jnp.ndarray,
+                       scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_backward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledSoftmaxBwdPrimitive.outer_primitive.bind(dz,
+                                                          softmax_out,
+                                                          scale_factor=scale_factor)
+
+
+class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Masked Softmax Fwd Primitive
+    """
+    name = "te_scaled_masked_softmax_forward"
+    multiple_results = False
+    impl_static_args = (2,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        attn_batches = batch * heads
+
+        if (dtype in [jnp.float16, jnp.bfloat16]
+                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
+        # k_seqlen must be 16 ~ 4096
+                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
+                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
+           ):
+            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
+                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
+                return q_seqlen % batch_per_block == 0
+        return False
+
+    @staticmethod
+    def abstract(logits_aval, mask_aval, scale_factor):    # pylint: disable=unused-argument
+        """
+        te_scaled_masked_softmax_forward abstract
+        """
+
+        i_dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
+        assert i_dtype in [jnp.float16, jnp.bfloat16]
+        i_shape = logits_aval.shape
+
+        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+        batch = reduce(operator.mul, i_shape[:-3])
+        q_seqlen = i_shape[-2]
+        k_seqlen = i_shape[-1]
+        assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
+        assert q_seqlen > 1
+
+        mask_dtype = dtypes.canonicalize_dtype(mask_aval.dtype)
+        assert mask_dtype in [
+            jnp.uint8,
+        ]
+        mask_shape = mask_aval.shape
+        pad_batch = batch = reduce(operator.mul, mask_shape[:-3])
+        assert pad_batch in (1, batch)    # 1 means broadcast
+        assert mask_shape[-3] == 1    # 1 means broadcast
+        assert mask_shape[-2] == q_seqlen
+        assert mask_shape[-1] == k_seqlen
+
+        out_aval = core.raise_to_shaped(logits_aval)
+        return out_aval
+
+    @staticmethod
+    def lowering(ctx, logits, mask, *, scale_factor):
+        """
+        te_scaled_masked_softmax_forward lowering rules
+        """
+
+        logits_aval, _ = ctx.avals_in
+        i_type = ir.RankedTensorType(logits.type)
+        i_shape = i_type.shape
+        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+        batch = reduce(operator.mul, i_shape[:-3])
+        heads = i_shape[-3]
+        q_seqlen = i_shape[-2]
+        k_seqlen = i_shape[-1]
+
+        mask_type = ir.RankedTensorType(mask.type)
+        mask_shape = mask_type.shape
+        pad_batch = reduce(operator.mul, mask_shape[:-3])
+
+        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
+        operands = [logits, mask]
+        operand_shapes = [i_shape, mask_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        opaque = transformer_engine_jax.pack_softmax_descriptor(
+            batch, pad_batch, heads, q_seqlen, k_seqlen, jax_dtype_to_te_dtype(logits_aval.dtype),
+            scale_factor)
+
+        out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def impl(logits, mask, scale_factor):
+        assert ScaledMaskedSoftmaxFwdPrimitive.inner_primitive is not None
+        output = ScaledMaskedSoftmaxFwdPrimitive.inner_primitive.bind(logits,
+                                                                      mask,
+                                                                      scale_factor=scale_factor)
+        return output
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        assert ScaledMaskedSoftmaxFwdPrimitive.outer_primitive is not None
+        logits, mask = batched_args
+        logits_bdim, _ = batch_dims
+
+        out_bdims = logits_bdim
+        return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
+            logits, mask, scale_factor=scale_factor), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        del scale_factor, result_infos    # Unused.
+        logits_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        return out_sharding
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        del result_infos
+        logits_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        mask_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        out_spec = logits_spec
+        arg_shardings = (logits_spec, mask_spec)
+        out_shardings = out_spec
+        impl = partial(ScaledMaskedSoftmaxFwdPrimitive.impl, scale_factor=scale_factor)
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
+
+
+def scaled_masked_softmax_fwd(logits: jnp.ndarray, mask: jnp.ndarray,
+                              scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_masked_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(logits,
+                                                                mask,
+                                                                scale_factor=scale_factor)
+
+
+class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Masked Softmax Bwd Primitive
+    """
+    name = "te_scaled_masked_softmax_backward"
+    multiple_results = False
+    impl_static_args = (2,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        return ScaledSoftmaxFwdPrimitive.is_kernel_available(batch, heads, q_seqlen, k_seqlen,
+                                                             dtype)
+
+    @staticmethod
+    def abstract(dz_aval, softmax_out_aval, *, scale_factor):
+        """
+        te_scaled_upper_triang_masked_backward abstract
+        """
+        return SoftmaxPrimitive.backward_abstract(dz_aval, softmax_out_aval, scale_factor)
+
+    @staticmethod
+    def lowering(ctx, dz, softmax_out, *, scale_factor):
+        """
+        te_scaled_upper_triang_masked_backward lowering rules
+        """
+        out = SoftmaxPrimitive.backward_lowering(ScaledMaskedSoftmaxBwdPrimitive.name,
+                                                 ctx,
+                                                 dz,
+                                                 softmax_out,
+                                                 scale_factor=scale_factor)
+
+        return out
+
+    @staticmethod
+    def impl(dz, softmax_out, scale_factor):
+        return SoftmaxPrimitive.backward_impl(ScaledMaskedSoftmaxBwdPrimitive.inner_primitive,
+                                              dz,
+                                              softmax_out,
+                                              scale_factor=scale_factor)
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        return SoftmaxPrimitive.backward_batcher(ScaledMaskedSoftmaxBwdPrimitive.outer_primitive,
+                                                 batched_args,
+                                                 batch_dims,
+                                                 scale_factor=scale_factor)
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_infer_sharding_from_operands(scale_factor, mesh, arg_infos,
+                                                                      result_infos)
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_partition(ScaledMaskedSoftmaxBwdPrimitive.impl,
+                                                   scale_factor, mesh, arg_infos, result_infos)
+
+
+register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
+
+
+def scaled_masked_softmax_bwd(dz: jnp.ndarray, softmax_out: jnp.ndarray,
+                              scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_masked_backward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledMaskedSoftmaxBwdPrimitive.outer_primitive.bind(dz,
+                                                                softmax_out,
+                                                                scale_factor=scale_factor)
+
+
+class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Upper Triang Masked Softmax Fwd Primitive
+    """
+    name = "te_scaled_upper_triang_masked_softmax_forward"
+    multiple_results = False
+    impl_static_args = (1,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        attn_batches = batch * heads
+
+        if (dtype in [jnp.float16, jnp.bfloat16]
+                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
+        # k_seqlen must be 16 ~ 4096
+                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
+                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
+           ):
+            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
+                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
+                return attn_batches % batch_per_block == 0
+        return False
+
+    @staticmethod
+    def abstract(logits_aval, scale_factor):    # pylint: disable=unused-argument
+        """
+        te_scaled_upper_triang_masked_softmax_forward abstract
+        """
+        q_seqlen = logits_aval.shape[2]
+        k_seqlen = logits_aval.shape[3]
+        assert q_seqlen == k_seqlen
+        return SoftmaxPrimitive.forward_abstract(logits_aval, scale_factor)
+
+    @staticmethod
+    def lowering(ctx, logits, *, scale_factor):
+        """
+        te_scaled_upper_triang_masked_softmax_forward lowering rules
+        """
+        return SoftmaxPrimitive.forward_lowering(ScaledUpperTriangMaskedSoftmaxFwdPrimitive.name,
+                                                 ctx,
+                                                 logits,
+                                                 scale_factor=scale_factor)
+
+    @staticmethod
+    def impl(logits, scale_factor):
+        return SoftmaxPrimitive.forward_impl(
+            ScaledUpperTriangMaskedSoftmaxFwdPrimitive.inner_primitive, logits, scale_factor)
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        return SoftmaxPrimitive.forward_batcher(
+            ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive,
+            batched_args,
+            batch_dims,
+            scale_factor=scale_factor)
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.forward_infer_sharding_from_operands(scale_factor, mesh, arg_infos,
+                                                                     result_infos)
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.forward_partition(ScaledUpperTriangMaskedSoftmaxFwdPrimitive.impl,
+                                                  scale_factor, mesh, arg_infos, result_infos)
+
+
+register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
+
+
+def scaled_upper_triang_masked_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_upper_triang_masked_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
+        logits, scale_factor=scale_factor)
+
+
+class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
+    """
+    Scaled Upper Triang Masked Softmax Bwd Primitive
+    """
+    name = "te_scaled_upper_triang_masked_softmax_backward"
+    multiple_results = False
+    impl_static_args = (2,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
+                            dtype: jnp.dtype) -> bool:
+        """Check Softmax kernel availability based on size"""
+        return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
+            batch, heads, q_seqlen, k_seqlen, dtype)
+
+    @staticmethod
+    def abstract(dz_aval, softmax_out_aval, *, scale_factor):
+        """
+        te_scaled_upper_triang_masked_backward abstract
+        """
+        return SoftmaxPrimitive.backward_abstract(dz_aval, softmax_out_aval, scale_factor)
+
+    @staticmethod
+    def lowering(ctx, dz, softmax_out, *, scale_factor):
+        """
+        te_scaled_upper_triang_masked_backward lowering rules
+        """
+        out = SoftmaxPrimitive.backward_lowering(ScaledUpperTriangMaskedSoftmaxBwdPrimitive.name,
+                                                 ctx,
+                                                 dz,
+                                                 softmax_out,
+                                                 scale_factor=scale_factor)
+
+        return out
+
+    @staticmethod
+    def impl(dz, softmax_out, scale_factor):
+        return SoftmaxPrimitive.backward_impl(
+            ScaledUpperTriangMaskedSoftmaxBwdPrimitive.inner_primitive,
+            dz,
+            softmax_out,
+            scale_factor=scale_factor)
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, scale_factor):
+        return SoftmaxPrimitive.backward_batcher(
+            ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive,
+            batched_args,
+            batch_dims,
+            scale_factor=scale_factor)
+
+    @staticmethod
+    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_infer_sharding_from_operands(scale_factor, mesh, arg_infos,
+                                                                      result_infos)
+
+    @staticmethod
+    def partition(scale_factor, mesh, arg_infos, result_infos):
+        return SoftmaxPrimitive.backward_partition(ScaledUpperTriangMaskedSoftmaxBwdPrimitive.impl,
+                                                   scale_factor, mesh, arg_infos, result_infos)
+
+
+register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
+
+
+def scaled_upper_triang_masked_softmax_bwd(dz: jnp.ndarray, softmax_out: jnp.ndarray,
+                                           scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_upper_triang_masked_backward wrapper
+    Return FP16/BF16 tensor
+    """
+    return ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
+        dz, softmax_out, scale_factor=scale_factor)
+
+
 # Deprecating Items ---------------------------------------------------------------
 @dataclass(frozen=True)
 class FusedAttnHelper:
@@ -801,7 +1568,6 @@ class FusedAttnHelper:
 
     q_type: jnp.dtype
     kv_type: jnp.dtype
-    qkv_layout: NVTE_QKV_Layout
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
@@ -815,13 +1581,10 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
-                                                             jax_dtype_to_te_dtype(self.kv_type),
-                                                             self.qkv_layout, self.attn_bias_type,
-                                                             self.attn_mask_type,
-                                                             self.dropout_probability,
-                                                             self.max_seqlen_q, self.max_seqlen_kv,
-                                                             self.head_dim)
+        return transformer_engine_jax.get_fused_attn_backend(
+            jax_dtype_to_te_dtype(self.q_type), jax_dtype_to_te_dtype(self.kv_type),
+            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, self.attn_bias_type, self.attn_mask_type,
+            self.dropout_probability, self.max_seqlen_q, self.max_seqlen_kv, self.head_dim)
 
 
 def merge_named_shape(base, new):
@@ -1837,499 +2600,6 @@ def dequantize(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale
                               scale_inv,
                               fp8_dtype=fp8_dtype,
                               out_dtype=out_dtype)
-
-
-class SoftmaxPrimitive(BasePrimitiveLegacy):
-    """
-    Softmax Primitive
-    """
-    max_k_seqlen_supported = 4096
-
-    @staticmethod
-    def get_batch_per_block(k_seqlen: int) -> int:
-        """Get batch per CTA in Softmax kernels"""
-        threads_per_warp = 32
-        threads_per_block = 128    # Depends on the kernel implmentation
-
-        pow2 = 1 << (k_seqlen - 1).bit_length()
-        warp_size = pow2 if pow2 < threads_per_warp else threads_per_warp
-        batches_per_warp = 2 if pow2 <= 128 else 1
-        warps_per_block = threads_per_block // warp_size
-        batches_per_block = warps_per_block * batches_per_warp
-        return batches_per_block
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        raise NotImplementedError
-
-    @staticmethod
-    def softmax_backward_abstract(grad_outputs, softmax_outputs, scale_factor=None):    # pylint: disable=unused-argument
-        """
-        MLIR abstract
-        """
-        grad_outputs_dtype = dtypes.canonicalize_dtype(grad_outputs.dtype)
-        softmax_outputs_dtype = dtypes.canonicalize_dtype(softmax_outputs.dtype)
-        assert grad_outputs_dtype == softmax_outputs_dtype
-        assert grad_outputs_dtype in [jnp.float16, jnp.bfloat16]
-        assert softmax_outputs_dtype in [jnp.float16, jnp.bfloat16]
-
-        assert grad_outputs.shape == softmax_outputs.shape
-
-        return ShapedArray(softmax_outputs.shape,
-                           softmax_outputs_dtype,
-                           named_shape=softmax_outputs.named_shape)
-
-    @staticmethod
-    def softmax_backward_lowering(name, ctx, grad_outputs, softmax_outputs, scale_factor):
-        """
-        MLIR abstract
-        """
-        grad_outputs_aval, _ = ctx.avals_in
-
-        grad_outputs_type = ir.RankedTensorType(grad_outputs.type)
-        grad_outputs_shape = grad_outputs_type.shape
-
-        batch = grad_outputs_shape[0]
-        pad_batch = batch    # unused
-        heads = grad_outputs_shape[1]
-        q_seqlen = grad_outputs_shape[2]
-        k_seqlen = grad_outputs_shape[3]
-
-        softmax_outputs_type = ir.RankedTensorType(softmax_outputs.type)
-        softmax_outputs_shape = softmax_outputs_type.shape
-
-        out_types = [
-            ir.RankedTensorType.get(softmax_outputs_shape, softmax_outputs_type.element_type)
-        ]
-        operands = [grad_outputs, softmax_outputs]
-        operand_shapes = [grad_outputs_shape, softmax_outputs_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch, pad_batch, heads, q_seqlen, k_seqlen,
-            jax_dtype_to_te_dtype(grad_outputs_aval.dtype), scale_factor)
-
-        out = custom_caller(name, args, opaque, False)
-
-        return [out]
-
-
-class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Softmax Fwd Primitive
-    """
-    name = "te_scaled_softmax_forward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        attn_batches = batch * heads
-
-        if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
-                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
-                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
-           ):
-            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
-                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
-                return q_seqlen % batch_per_block == 0
-        return False
-
-    @staticmethod
-    def abstract(inputs, *, scale_factor):    # pylint: disable=unused-argument
-        """
-        te_scaled_softmax_forward abstract
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_dtype = dtypes.canonicalize_dtype(inputs.dtype)
-        assert i_dtype in [jnp.float16, jnp.bfloat16]
-        i_shape = inputs.shape
-        assert len(i_shape) == shape_rank
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-        assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        assert q_seqlen > 1
-
-        return ShapedArray(inputs.shape, i_dtype, named_shape=inputs.named_shape)
-
-    @staticmethod
-    def lowering(ctx, inputs, *, scale_factor):
-        """
-        te_scaled_softmax_forward lowering rules
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_aval, = ctx.avals_in
-        i_type = ir.RankedTensorType(inputs.type)
-        i_shape = i_type.shape
-        assert len(i_shape) == shape_rank
-        batch = i_shape[0]
-        pad_batch = batch
-        heads = i_shape[1]
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [inputs]
-        operand_shapes = [i_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(batch, pad_batch, heads, q_seqlen,
-                                                                k_seqlen,
-                                                                jax_dtype_to_te_dtype(i_aval.dtype),
-                                                                scale_factor)
-
-        out = custom_caller(ScaledSoftmaxFwdPrimitive.name, args, opaque, False)
-
-        return [out]
-
-
-_scaled_softmax_fwd_p = register_primitive_legacy(ScaledSoftmaxFwdPrimitive)
-
-
-def scaled_softmax_fwd(inputs: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_softmax_fwd_p.bind(inputs, scale_factor=scale_factor)
-
-
-class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Softmax Bwd Primitive
-    """
-    name = "te_scaled_softmax_backward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        return ScaledSoftmaxFwdPrimitive.is_kernel_available(batch, heads, q_seqlen, k_seqlen,
-                                                             dtype)
-
-    @staticmethod
-    def abstract(grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_softmax_backward abstract
-        """
-        return SoftmaxPrimitive.softmax_backward_abstract(grad_outputs, softmax_outputs,
-                                                          scale_factor)
-
-    @staticmethod
-    def lowering(ctx, grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_softmax_backward lowering rules
-        """
-        out = SoftmaxPrimitive.softmax_backward_lowering(ScaledSoftmaxBwdPrimitive.name, ctx,
-                                                         grad_outputs, softmax_outputs,
-                                                         scale_factor)
-
-        return out    # out is iterable already
-
-
-_scaled_softmax_bwd_p = register_primitive_legacy(ScaledSoftmaxBwdPrimitive)
-
-
-def scaled_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
-                       scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_softmax_backward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_softmax_bwd_p.bind(grad_outputs, softmax_outputs, scale_factor=scale_factor)
-
-
-class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Masked Softmax Fwd Primitive
-    """
-    name = "te_scaled_masked_softmax_forward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        attn_batches = batch * heads
-
-        if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
-                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
-                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
-           ):
-            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
-                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
-                return q_seqlen % batch_per_block == 0
-        return False
-
-    @staticmethod
-    def abstract(inputs, mask, *, scale_factor):    # pylint: disable=unused-argument
-        """
-        te_scaled_masked_softmax_forward abstract
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_dtype = dtypes.canonicalize_dtype(inputs.dtype)
-        assert i_dtype in [jnp.float16, jnp.bfloat16]
-        i_shape = inputs.shape
-        assert len(i_shape) == shape_rank
-        batch = i_shape[0]
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-        assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        assert q_seqlen > 1
-
-        mask_dtype = dtypes.canonicalize_dtype(mask.dtype)
-        assert mask_dtype in [
-            jnp.uint8,
-        ]
-        mask_shape = mask.shape
-        assert len(mask_shape) == shape_rank
-        pad_batch = mask_shape[0]
-        assert pad_batch in (1, batch)    # 1 means broadcast
-        assert mask_shape[1] == 1    # 1 means broadcast
-        assert mask_shape[2] == q_seqlen
-        assert mask_shape[3] == k_seqlen
-
-        return ShapedArray(inputs.shape, i_dtype, named_shape=inputs.named_shape)
-
-    @staticmethod
-    def lowering(ctx, inputs, mask, *, scale_factor):
-        """
-        te_scaled_masked_softmax_forward lowering rules
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_aval, _ = ctx.avals_in
-        i_type = ir.RankedTensorType(inputs.type)
-        i_shape = i_type.shape
-        assert len(i_shape) == shape_rank
-        batch = i_shape[0]
-        heads = i_shape[1]
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-
-        mask_type = ir.RankedTensorType(mask.type)
-        mask_shape = mask_type.shape
-        assert len(mask_shape) == shape_rank
-        pad_batch = mask_shape[0]
-
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [inputs, mask]
-        operand_shapes = [i_shape, mask_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(batch, pad_batch, heads, q_seqlen,
-                                                                k_seqlen,
-                                                                jax_dtype_to_te_dtype(i_aval.dtype),
-                                                                scale_factor)
-
-        out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
-
-        return [out]
-
-
-_scaled_masked_softmax_fwd_p = register_primitive_legacy(ScaledMaskedSoftmaxFwdPrimitive)
-
-
-def scaled_masked_softmax_fwd(inputs: jnp.ndarray, mask: jnp.ndarray,
-                              scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_masked_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_masked_softmax_fwd_p.bind(inputs, mask, scale_factor=scale_factor)
-
-
-class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Masked Softmax Bwd Primitive
-    """
-    name = "te_scaled_masked_softmax_backward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        return ScaledSoftmaxFwdPrimitive.is_kernel_available(batch, heads, q_seqlen, k_seqlen,
-                                                             dtype)
-
-    @staticmethod
-    def abstract(grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_masked_softmax_backward abstract
-        """
-        return SoftmaxPrimitive.softmax_backward_abstract(grad_outputs, softmax_outputs,
-                                                          scale_factor)
-
-    @staticmethod
-    def lowering(ctx, grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_masked_softmax_backward lowering rules
-        """
-        out = SoftmaxPrimitive.softmax_backward_lowering(ScaledMaskedSoftmaxBwdPrimitive.name, ctx,
-                                                         grad_outputs, softmax_outputs,
-                                                         scale_factor)
-
-        return out    # out is iterable already
-
-
-_scaled_masked_softmax_bwd_p = register_primitive_legacy(ScaledMaskedSoftmaxBwdPrimitive)
-
-
-def scaled_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
-                              scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_masked_softmax_backward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_masked_softmax_bwd_p.bind(grad_outputs,
-                                             softmax_outputs,
-                                             scale_factor=scale_factor)
-
-
-class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Upper Triang Masked Softmax Fwd Primitive
-    """
-    name = "te_scaled_upper_triang_masked_softmax_forward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        attn_batches = batch * heads
-
-        if (dtype in [jnp.float16, jnp.bfloat16]
-                and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        # k_seqlen must be 16 ~ 4096
-                and q_seqlen % 4 == 0    # q_seqlen must be divisor of 4
-                and attn_batches % 4 == 0    # batch * heads must be divisor of 4
-           ):
-            if 0 <= k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported:
-                batch_per_block = SoftmaxPrimitive.get_batch_per_block(k_seqlen)
-                return attn_batches % batch_per_block == 0
-        return False
-
-    @staticmethod
-    def abstract(inputs, *, scale_factor):    # pylint: disable=unused-argument
-        """
-        te_scaled_upper_triang_masked_softmax_forward abstract
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_dtype = dtypes.canonicalize_dtype(inputs.dtype)
-        assert i_dtype in [jnp.float16, jnp.bfloat16]
-        i_shape = inputs.shape
-        assert len(i_shape) == shape_rank
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-        assert q_seqlen == k_seqlen
-        assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
-        assert q_seqlen > 1
-
-        return ShapedArray(inputs.shape, i_dtype, named_shape=inputs.named_shape)
-
-    @staticmethod
-    def lowering(ctx, inputs, *, scale_factor):
-        """
-        te_scaled_upper_triang_masked_softmax_forward lowering rules
-        """
-        shape_rank = 4    # batch, heads, q_seqlen and k_seqlen
-
-        i_aval, = ctx.avals_in
-        i_type = ir.RankedTensorType(inputs.type)
-        i_shape = i_type.shape
-        assert len(i_shape) == shape_rank
-        batch = i_shape[0]
-        pad_batch = batch
-        heads = i_shape[1]
-        q_seqlen = i_shape[2]
-        k_seqlen = i_shape[3]
-
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [inputs]
-        operand_shapes = [i_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(batch, pad_batch, heads, q_seqlen,
-                                                                k_seqlen,
-                                                                jax_dtype_to_te_dtype(i_aval.dtype),
-                                                                scale_factor)
-
-        out = custom_caller(ScaledUpperTriangMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
-
-        return [out]
-
-_scaled_upper_triang_masked_softmax_fwd_p = \
-    register_primitive_legacy(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
-
-
-def scaled_upper_triang_masked_softmax_fwd(inputs: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_upper_triang_masked_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_upper_triang_masked_softmax_fwd_p.bind(inputs, scale_factor=scale_factor)
-
-
-class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
-    """
-    Scaled Upper Triang Masked Softmax Bwd Primitive
-    """
-    name = "te_scaled_upper_triang_masked_softmax_backward"
-    multiple_results = False
-
-    @staticmethod
-    def is_kernel_available(batch: int, heads: int, q_seqlen: int, k_seqlen: int,
-                            dtype: jnp.dtype) -> bool:
-        """Check Softmax kernel availability based on size"""
-        return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
-            batch, heads, q_seqlen, k_seqlen, dtype)
-
-    @staticmethod
-    def abstract(grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_upper_triang_masked_softmax_backward abstract
-        """
-        return SoftmaxPrimitive.softmax_backward_abstract(grad_outputs, softmax_outputs,
-                                                          scale_factor)
-
-    @staticmethod
-    def lowering(ctx, grad_outputs, softmax_outputs, *, scale_factor):
-        """
-        te_scaled_upper_triang_masked_softmax_backward lowering rules
-        """
-        out = SoftmaxPrimitive.softmax_backward_lowering(
-            ScaledUpperTriangMaskedSoftmaxBwdPrimitive.name, ctx, grad_outputs, softmax_outputs,
-            scale_factor)
-
-        return out    # out is iterable already
-
-_scaled_upper_triang_masked_softmax_bwd_p = \
-    register_primitive_legacy(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
-
-
-def scaled_upper_triang_masked_softmax_bwd(grad_outputs: jnp.ndarray, softmax_outputs: jnp.ndarray,
-                                           scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_upper_triang_masked_softmax_backward wrapper
-    Return FP16/BF16 tensor
-    """
-    return _scaled_upper_triang_masked_softmax_bwd_p.bind(grad_outputs,
-                                                          softmax_outputs,
-                                                          scale_factor=scale_factor)
 
 
 @dataclass(frozen=True)

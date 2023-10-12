@@ -149,8 +149,7 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
             if self.softmax_type is not SoftmaxType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type,
-                              self.sharding_type)
+            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
         else:
             attention_bias = None
             if mask is not None:
@@ -168,8 +167,7 @@ class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
             if is_softmax_kernel_available(SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen,
                                            dtype):
-                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED,
-                                  self.sharding_type)
+                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
 
