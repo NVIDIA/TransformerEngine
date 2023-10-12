@@ -170,10 +170,7 @@ class DotProductAttention(paddle.nn.Layer):
 
         self.backend = backend
 
-        arch = paddle.device.cuda.get_device_capability()
-        self.is_fused_attn_supported = arch in ((8, 0), (9, 0))
-        self.use_fused_attention = (int(os.getenv("NVTE_FUSED_ATTN", "1"))
-                                    and self.is_fused_attn_supported)
+        self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
         if not self.use_fused_attention and backend == 'transformer_engine':
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
@@ -231,7 +228,9 @@ class DotProductAttention(paddle.nn.Layer):
                     Whether to use the fast path to set output tensors to 0 or not.
         """
 
-        if self.backend == 'transformer_engine':
+        backend = self.backend
+
+        if backend == 'transformer_engine':
             max_s_q = query_layer.shape[1]
             max_s_kv = max_s_q if self.attention_type == "self" else key_value_layer.shape[1]
             self.fused_attention_backend = tex.get_fused_attn_backend(
@@ -247,16 +246,16 @@ class DotProductAttention(paddle.nn.Layer):
                 return self._te_forward(query_layer, key_value_layer, attention_mask,
                                         core_attention_bias_type, core_attention_bias, set_zero)
             warnings.warn("Fused attention is not enabled, falling back to Paddle backend")
-            self.backend = 'paddle'
+            backend = 'paddle'
             self.scale_mask_softmax = FusedScaleMaskSoftmax(self.attn_mask_type,
                                                             attention_mask_func,
-                                                            backend=self.backend)
-        if self.backend == 'paddle':
+                                                            backend=backend)
+        if backend == 'paddle':
             if core_attention_bias_type != "no_bias":
                 warnings.warn("Paddle backend dot product attention does not support bias yet. "
                               "Bias will be ignored.")
             return self._pd_forward(query_layer, key_value_layer, attention_mask)
-        raise AttributeError(f"Backend {self.backend} is not supported.")
+        raise AttributeError(f"Backend {backend} is not supported.")
 
     def _te_forward(
         self,
