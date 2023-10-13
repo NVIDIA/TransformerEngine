@@ -2241,14 +2241,12 @@ class LayerNormFwdFp8Primitive(BasePrimitiveLegacy):
 
         assert gamma.size == beta.size
 
-        hidden_szie = gamma.size
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_szie
+        batch_shape = x.shape[:-1]
 
         return (
             ShapedArray(x.shape, out_dtype, named_shape=x.named_shape),    # output
-            ShapedArray((batch_size,), mu_dtype, named_shape=x.named_shape),    # mu
-            ShapedArray((batch_size,), rsigma_dtype, named_shape=x.named_shape),    # rsigma
+            ShapedArray(batch_shape, mu_dtype, named_shape=x.named_shape),    # mu
+            ShapedArray(batch_shape, rsigma_dtype, named_shape=x.named_shape),    # rsigma
             ShapedArray((1,), amax.dtype, named_shape=amax.named_shape),    # amax
         )
 
@@ -2283,12 +2281,13 @@ class LayerNormFwdFp8Primitive(BasePrimitiveLegacy):
 
         hidden_size = reduce(operator.mul, w_shape)
         # In Transformer, batch_size = batch x seqlen
+        batch_shape = x_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
-            ir.RankedTensorType.get((batch_size,), ir_mu_dtype),
-            ir.RankedTensorType.get((batch_size,), ir_rsigma_dtype),
+            ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
+            ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [x, gamma, beta, amax, scale, scale_inv]
@@ -2363,13 +2362,11 @@ class RmsNormFwdFp8Primitive(BasePrimitiveLegacy):
         out_dtype = jnp.int8
         rsigma_dtype = jnp.float32
 
-        hidden_size = gamma.size
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = x.size // hidden_size
+        batch_shape = x.shape[:-1]
 
         return (
             ShapedArray(x.shape, out_dtype, named_shape=x.named_shape),    # output
-            ShapedArray((batch_size,), rsigma_dtype, named_shape=x.named_shape),    # rsigma
+            ShapedArray(batch_shape, rsigma_dtype, named_shape=x.named_shape),    # rsigma
             ShapedArray((1,), amax.dtype, named_shape=amax.named_shape),    # amax
         )
 
@@ -2400,11 +2397,12 @@ class RmsNormFwdFp8Primitive(BasePrimitiveLegacy):
 
         hidden_size = reduce(operator.mul, w_shape)
         # In Transformer, batch_size = batch x seqlen
+        batch_shape = x_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
-            ir.RankedTensorType.get((batch_size,), ir_rsigma_dtype),
+            ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [x, gamma, amax, scale, scale_inv]
