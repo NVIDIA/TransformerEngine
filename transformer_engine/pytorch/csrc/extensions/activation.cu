@@ -294,8 +294,8 @@ at::Tensor qgelu(at::Tensor input,
 }
 
 at::Tensor dqgelu(at::Tensor grad,
-                 at::Tensor input,
-                 transformer_engine::DType otype
+                  at::Tensor input,
+                  transformer_engine::DType otype
 ) {
   using namespace transformer_engine;
 
