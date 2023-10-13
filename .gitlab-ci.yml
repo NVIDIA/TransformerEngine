@@ -737,6 +737,9 @@ L0_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
+    except:
+      variables:
+        - $BUILD_PYTORCH == "0"
 
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
@@ -789,6 +792,9 @@ L0_jax_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
 
 L0_paddle_unittest--V100_1GPU:
     variables:
@@ -830,6 +836,9 @@ L0_paddle_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
+    except:
+      variables:
+        - $BUILD_PADDLE == "0"
 
 L0_cppunittest--V100_1GPU:
     variables:
