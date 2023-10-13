@@ -54,62 +54,24 @@ def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, 
                            head_dim).is_fused_attn_kernel_available()
 
 
-def self_fused_attn(qkv: jnp.ndarray,
-                    bias: jnp.ndarray,
-                    mask: jnp.ndarray,
-                    seed: jnp.ndarray,
-                    attn_bias_type: AttnBiasType,
-                    attn_mask_type: AttnMaskType,
-                    scaling_factor: float,
-                    dropout_probability: float,
-                    is_training: bool,
-                    sharding_type: ShardingType = ShardingType.SINGLE):
+def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
+                    attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+                    scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Self fused attention wrapper
     """
-    assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
-        "self_fused_attn does not support row-split tensor parallelism currently."
+    assert attn_mask_type is not AttnMaskType.NO_MASK, \
+        "Currently not support AttnMaskType.NO_MASK."
 
-    if sharding_type is ShardingType.SINGLE:
-        output = _self_fused_attn(qkv,
-                                  bias,
-                                  mask,
-                                  seed,
-                                  attn_bias_type=attn_bias_type,
-                                  attn_mask_type=attn_mask_type,
-                                  scaling_factor=scaling_factor,
-                                  dropout_probability=dropout_probability,
-                                  is_training=is_training)
-    else:
-        dp_axis_name = "batch"
-        tp_axis_name = "model"
-
-        inputs = [qkv, bias, mask, seed]
-        batch, seqlen, _, num_head, head_dim = qkv.shape
-        output_shape = [batch, seqlen, num_head, head_dim]
-        sharding_meta = get_fused_attn_sharding_meta(
-            sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
-            dp_dims=([0, None, 0, 0], [0]),
-            tp_dims=([3, 1, None, 0], [2]),
-            dp_axis_name=dp_axis_name,
-            tp_axis_name=tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
-
-        inputs_ = tuple(
-            jnp.reshape(x, new_shape) if x is not None else None
-            for x, new_shape in zip(inputs, sharding_meta.input_shapes))
-
-        partial_self_fused_attn = partial(_self_fused_attn,
-                                          attn_bias_type=attn_bias_type,
-                                          attn_mask_type=attn_mask_type,
-                                          scaling_factor=scaling_factor,
-                                          dropout_probability=dropout_probability,
-                                          is_training=is_training)
-
-        output_ = xmap_runner(partial_self_fused_attn, sharding_meta.in_axes,
-                              sharding_meta.out_axes, sharding_meta.axis_resources, inputs_)
-
-        output = jnp.reshape(output_, sharding_meta.output_shapes)
+    output = _self_fused_attn(qkv,
+                              bias,
+                              mask,
+                              seed,
+                              attn_bias_type=attn_bias_type,
+                              attn_mask_type=attn_mask_type,
+                              scaling_factor=scaling_factor,
+                              dropout_probability=dropout_probability,
+                              is_training=is_training)
 
     return output
 
@@ -118,21 +80,26 @@ def self_fused_attn(qkv: jnp.ndarray,
 def _self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
                      attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                      scaling_factor: float, dropout_probability: float, is_training: bool):
-    output, _ = _self_fused_attn_fwd(qkv,
+    seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
+    cu_seqlen = jnp.cumsum(seqlen)
+    cu_seqlen = jnp.hstack((0, cu_seqlen))
+
+    output, *_ = self_fused_attn_fwd(qkv,
                                      bias,
-                                     mask,
+                                     cu_seqlen,
                                      seed,
-                                     attn_bias_type=attn_bias_type,
-                                     attn_mask_type=attn_mask_type,
+                                     attn_bias_type=attn_bias_type.value,
+                                     attn_mask_type=attn_mask_type.value,
                                      scaling_factor=scaling_factor,
                                      dropout_probability=dropout_probability,
                                      is_training=is_training)
     return output
 
 
-def _self_fused_attn_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
-                         dropout_probability, is_training):
-
+def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
+                              seed: jnp.ndarray, attn_bias_type: AttnBiasType,
+                              attn_mask_type: AttnMaskType, scaling_factor: float,
+                              dropout_probability: float, is_training: bool):
     seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
     cu_seqlen = jnp.cumsum(seqlen)
     cu_seqlen = jnp.hstack((0, cu_seqlen))
@@ -149,11 +116,11 @@ def _self_fused_attn_fwd(qkv, bias, mask, seed, attn_bias_type, attn_mask_type, 
     return output, (qkv, softmax_aux, rng_state, output, cu_seqlen)
 
 
-def _self_fused_attn_bwd(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
-                         is_training, ctx, grad):
+def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
+                              is_training, ctx, dz):
     qkv, softmax_aux, rng_state, output, cu_seqlen = ctx
 
-    doutput = grad
+    doutput = dz
 
     grad_qkv, grad_bias = self_fused_attn_bwd(qkv,
                                               softmax_aux,
@@ -167,13 +134,13 @@ def _self_fused_attn_bwd(attn_bias_type, attn_mask_type, scaling_factor, dropout
                                               dropout_probability=dropout_probability,
                                               is_training=is_training)
 
-    if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
+    if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
 
     return grad_qkv, grad_bias, None, None
 
 
-_self_fused_attn.defvjp(_self_fused_attn_fwd, _self_fused_attn_bwd)
+_self_fused_attn.defvjp(_self_fused_attn_fwd_rule, _self_fused_attn_bwd_rule)
 
 
 def cross_fused_attn(q: jnp.ndarray,

@@ -26,6 +26,14 @@ def _get_mesh_info(resource: str):
     return mesh.shape[resource], resource
 
 
+def get_all_mesh_axes():
+    """
+    Get all name of mesh axes
+    """
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    return mesh.axis_names
+
+
 def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
     A wrapper function to jax.lax.with_sharding_constraint to
@@ -45,6 +53,13 @@ def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
         _, resource = _get_mesh_info(mesh_resource)
         return ops(x, resource)
     return x
+
+
+def num_of_devices():
+    """
+    Get total number of detected devices
+    """
+    return len(jax.devices())
 
 
 @dataclass

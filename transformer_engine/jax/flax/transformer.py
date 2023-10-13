@@ -28,7 +28,8 @@ from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import infer_major_sharding_type, infer_sharding_type
-from ..sharding import global_shard_resource, with_sharding_constraint
+from ..sharding import global_shard_resource, num_of_devices
+from ..sharding import with_sharding_constraint
 from ..sharding import ShardingType
 
 PRNGKey = Any
@@ -648,7 +649,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
             seed = None
             if dropout_rng is not None:
-                seed = jax.random.split(dropout_rng, len(jax.devices()))
+                seed = jax.random.split(dropout_rng, num_of_devices())
                 # ensure the old key never used
                 del dropout_rng
 
@@ -665,8 +666,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                     attn_mask_type=attn_mask_type,
                                     scaling_factor=scale_factor,
                                     dropout_probability=self.dropout_rate,
-                                    is_training=not deterministic,
-                                    sharding_type=first_sharding_type)
+                                    is_training=not deterministic)
             else:
                 assert bias is None
                 query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
