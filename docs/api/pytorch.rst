@@ -31,6 +31,9 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.InferenceParams(max_batch_size, max_sequence_length)
   :members: swap_key_value_dict
 
+.. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
+  :members: reset, get_states, set_states, add, fork
+
 .. autoapifunction:: transformer_engine.pytorch.fp8_autocast
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
