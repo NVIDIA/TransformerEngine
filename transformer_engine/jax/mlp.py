@@ -415,16 +415,16 @@ def _fp8_mlp_bwd(
 
     if layernorm_type == 'layernorm':
         grad_input, grad_gamma, grad_beta = layernorm_bwd(dgrad_1,
+                                                          inputs_,
                                                           mu,
                                                           rsigma,
-                                                          inputs_,
                                                           gamma,
                                                           zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        grad_input, grad_gamma = rmsnorm_bwd(dgrad_1, rsigma, inputs_, gamma, epsilon=epsilon)
+        grad_input, grad_gamma = rmsnorm_bwd(dgrad_1, inputs_, rsigma, gamma, epsilon=epsilon)
         grad_beta = None
 
     amax = amax.at[gemm1_input_idx, 0].set(ln_out_amax[0])
