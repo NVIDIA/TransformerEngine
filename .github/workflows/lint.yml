@@ -18,7 +18,7 @@ jobs:
         run: |
           export CPP_ONLY=1
           export TE_PATH=.
-          bash ./qa/L0_lint/test.sh
+          bash ./qa/L0_pytorch_lint/test.sh
   pytorch_pylint:
     name: 'PyTorch Python'
     runs-on: ubuntu-latest
@@ -34,7 +34,7 @@ jobs:
           pip install flash-attn==1.0.2
           export PYTHON_ONLY=1
           export TE_PATH=.
-          bash ./qa/L0_lint/test.sh
+          bash ./qa/L0_pytorch_lint/test.sh
   jax_cpplint:
     name: 'JAX C++'
     runs-on: ubuntu-latest
