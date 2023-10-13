@@ -650,7 +650,7 @@ upload_logs:
 #     tags:
 #     - 1GPU
 
-L0_lint:
+L0_pytorch_lint:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
@@ -686,7 +686,7 @@ L0_paddle_lint:
       variables:
         - $BUILD_PADDLE == "0"
 
-L0_unittest--V100_1GPU:
+L0_pytorch_unittest--V100_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
@@ -697,7 +697,7 @@ L0_unittest--V100_1GPU:
       variables:
         - $BUILD_PYTORCH == "0"
 
-L0_unittest--A100_1GPU:
+L0_pytorch_unittest--A100_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
@@ -708,7 +708,7 @@ L0_unittest--A100_1GPU:
       variables:
         - $BUILD_PYTORCH == "0"
 
-L0_unittest--TU102_R445_1GPU:
+L0_pytorch_unittest--TU102_R445_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
@@ -719,7 +719,7 @@ L0_unittest--TU102_R445_1GPU:
       variables:
         - $BUILD_PYTORCH == "0"
 
-L0_unittest--H100_1GPU:
+L0_pytorch_unittest--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
@@ -730,7 +730,7 @@ L0_unittest--H100_1GPU:
       variables:
         - $BUILD_PYTORCH == "0"
 
-L0_unittest--L40_1GPU:
+L0_pytorch_unittest--L40_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
