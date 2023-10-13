@@ -363,16 +363,16 @@ def _layernorm_fp8_dot_bwd(
 
     if layernorm_type == 'layernorm':
         grad_input, grad_gamma, grad_beta = layernorm_bwd(dgrad,
+                                                          inputs,
                                                           mu,
                                                           rsigma,
-                                                          inputs,
                                                           gamma,
                                                           zero_centered_gamma=zero_centered_gamma,
                                                           epsilon=epsilon)
     else:
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
-        grad_input, grad_gamma = rmsnorm_bwd(dgrad, rsigma, inputs, gamma, epsilon=epsilon)
+        grad_input, grad_gamma = rmsnorm_bwd(dgrad, inputs, rsigma, gamma, epsilon=epsilon)
         grad_beta = None
 
     amax = amax.at[gemm_input_idx, 0].set(input_amax[0])
