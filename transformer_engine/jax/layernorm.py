@@ -41,6 +41,7 @@ def layernorm(inputs: jnp.ndarray,
               epsilon: float = 1e-6):
     """
     LN/RMSNorm  wrapper
+    Only support layernorm_type in ['layernorm', 'rmsnorm']
     """
     output = _layernorm(inputs,
                         gamma,
@@ -58,12 +59,15 @@ def _layernorm(x,
                layernorm_type: str,
                zero_centered_gamma: bool = False,
                epsilon: float = 1e-6):
+    layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'layernorm':
         output, _, _ = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
-    else:
+    elif layernorm_type == 'rmsnorm':
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
         output, _ = rmsnorm_fwd(x, gamma, epsilon)
+    else:
+        raise ValueError(f"{layernorm_type} is not supported.")
     return output
 
 
@@ -73,13 +77,16 @@ def _layernorm_fwd_rule(x,
                         layernorm_type: str,
                         zero_centered_gamma: bool = False,
                         epsilon: float = 1e-6):
+    layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == 'layernorm':
         output, mu, rsigma = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
-    else:
+    elif layernorm_type == 'rmsnorm':
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
         output, rsigma = rmsnorm_fwd(x, gamma, epsilon)
         mu = None
+    else:
+        raise ValueError(f"{layernorm_type} is not supported.")
     return output, (x, mu, rsigma, gamma)
 
 
@@ -93,11 +100,13 @@ def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
                                           gamma,
                                           zero_centered_gamma=zero_centered_gamma,
                                           epsilon=epsilon)
-    else:
+    elif layernorm_type == 'rmsnorm':
         assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
             "if layernorm_type is 'rmsnorm'"
         dx, dgamma = rmsnorm_bwd(dz, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
+    else:
+        raise ValueError(f"{layernorm_type} is not supported.")
 
     return dx, dgamma, dbeta
 

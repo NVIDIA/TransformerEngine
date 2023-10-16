@@ -106,20 +106,6 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array):
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
 
 
-def all_reduce_sum_along_tp(x: jnp.array):
-    """
-    All-Reduce (Sum) along TP mesh axis.
-    """
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().tp_resource)
-
-
-def all_reduce_max_along_all(x: jnp.array):
-    """
-    All-Reduce (Max ) along all mesh axes.
-    """
-    return lax_paral_op(x, jax.lax.pmax, global_mesh_resource().tp_resource)
-
-
 # Deprecating Items ---------------------------------------------------------------
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)

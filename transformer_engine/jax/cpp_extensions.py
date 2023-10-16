@@ -248,7 +248,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
     """
     name = "te_layernorm_forward"
     multiple_results = True
-    impl_static_args = (3, 4)
+    impl_static_args = (3, 4)    # zero_centered_gamma, epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -280,22 +280,22 @@ class LayerNormFwdPrimitive(BasePrimitive):
         assert gamma_aval.dtype == beta_aval.dtype
         x_type = ir.RankedTensorType(x.type)
         x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
+        g_type = ir.RankedTensorType(gamma.type)
+        g_shape = g_type.shape
         b_type = ir.RankedTensorType(beta.type)
         b_shape = b_type.shape
 
-        assert w_type == b_type
-        assert w_shape == b_shape
+        assert g_type == b_type
+        assert g_shape == b_shape
 
         # Output shape is same as the input shape, but the output type is same as the weight type.
         # See ln_api.cpp
-        output_type = w_type.element_type
+        output_type = g_type.element_type
         ir_mu_dtype = ir.F32Type.get()
         ir_rsigma_dtype = ir.F32Type.get()
 
         out_shape = x_shape
-        hidden_size = reduce(operator.mul, w_shape)
+        hidden_size = reduce(operator.mul, g_shape)
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
@@ -305,7 +305,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
         ]
         operands = [x, gamma, beta]
-        operand_shapes = [x_shape, w_shape, b_shape]
+        operand_shapes = [x_shape, g_shape, b_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -352,7 +352,10 @@ class LayerNormFwdPrimitive(BasePrimitive):
         del zero_centered_gamma, epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[0])
         assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}"
+            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}, " \
+            f"since it leads to incorrect results by missing necessary collective ops. " \
+            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
+            f"sharding on the hidden dim."
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         return (out_sharding, mu_sharding, rsigma_sharding)
@@ -362,7 +365,10 @@ class LayerNormFwdPrimitive(BasePrimitive):
         del result_infos
         x_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
         assert x_spec.spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}"
+            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}, " \
+            f"since it leads to incorrect results by missing necessary collective ops. " \
+            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
+            f"sharding on the hidden dim."
         g_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         b_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         out_spec = x_spec
@@ -397,7 +403,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
     """
     name = "te_layernorm_backward"
     multiple_results = True
-    impl_static_args = (5, 6)
+    impl_static_args = (5, 6)    # zero_centered_gamma, epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -427,27 +433,27 @@ class LayerNormBwdPrimitive(BasePrimitive):
         _, x_aval, _, _, gamma_aval = ctx.avals_in
         x_type = ir.RankedTensorType(x.type)
         x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
+        g_type = ir.RankedTensorType(gamma.type)
+        g_shape = g_type.shape
         b_type = ir.RankedTensorType(gamma.type)
         b_shape = b_type.shape
-        assert w_type == b_type
-        assert w_shape == b_shape
+        assert g_type == b_type
+        assert g_shape == b_shape
 
         dz_shape = ir.RankedTensorType(dz.type).shape
         mu_shape = ir.RankedTensorType(mu.type).shape
         rsigma_shape = ir.RankedTensorType(rsigma.type).shape
 
-        hidden_size = reduce(operator.mul, w_shape)
+        hidden_size = reduce(operator.mul, g_shape)
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         out_types = [
             ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(w_shape, w_type.element_type),
+            ir.RankedTensorType.get(g_shape, g_type.element_type),
             ir.RankedTensorType.get(b_shape, b_type.element_type),
         ]
         operands = [dz, mu, rsigma, x, gamma]
-        operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, w_shape]
+        operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -490,7 +496,10 @@ class LayerNormBwdPrimitive(BasePrimitive):
         del zero_centered_gamma, epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[1])
         assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}"
+            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}, " \
+            f"since it leads to incorrect results by missing necessary collective ops. " \
+            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
+            f"sharding on the hidden dim."
         g_b_spec = get_padded_spec(arg_infos[4])
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
@@ -501,7 +510,10 @@ class LayerNormBwdPrimitive(BasePrimitive):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
         assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}"
+            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}, " \
+            f"since it leads to incorrect results by missing necessary collective ops. " \
+            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
+            f"sharding on the hidden dim."
         g_b_spec = get_padded_spec(arg_infos[4])
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
@@ -545,7 +557,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
     """
     name = "te_rmsnorm_forward"
     multiple_results = True
-    impl_static_args = (2,)
+    impl_static_args = (2,)    # epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -575,12 +587,12 @@ class RmsNormFwdPrimitive(BasePrimitive):
         x_aval, gamma_aval = ctx.avals_in
         x_type = ir.RankedTensorType(x.type)
         x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
+        g_type = ir.RankedTensorType(gamma.type)
+        g_shape = g_type.shape
         rsigma_element_type = ir.F32Type.get()
 
         out_shape = x_shape
-        hidden_size = reduce(operator.mul, w_shape)
+        hidden_size = reduce(operator.mul, g_shape)
         batch_shape = out_shape[:-1]
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
@@ -589,7 +601,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(batch_shape, rsigma_element_type),
         ]
         operands = [x, gamma]
-        operand_shapes = [x_shape, w_shape]
+        operand_shapes = [x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -667,7 +679,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
     """
     name = "te_rmsnorm_backward"
     multiple_results = True
-    impl_static_args = (4,)
+    impl_static_args = (4,)    # epsilon
     inner_primitive = None
     outer_primitive = None
 
@@ -702,20 +714,20 @@ class RmsNormBwdPrimitive(BasePrimitive):
         _, x_aval, _, gamma_aval = ctx.avals_in
         x_type = ir.RankedTensorType(x.type)
         x_shape = x_type.shape
-        w_type = ir.RankedTensorType(gamma.type)
-        w_shape = w_type.shape
+        g_type = ir.RankedTensorType(gamma.type)
+        g_shape = g_type.shape
         go_shape = ir.RankedTensorType(dz.type).shape
         rsigma_shape = ir.RankedTensorType(rsigma.type).shape
 
-        hidden_size = reduce(operator.mul, w_shape)
+        hidden_size = reduce(operator.mul, g_shape)
         batch_size = reduce(operator.mul, x_shape) // hidden_size
 
         out_types = [
             ir.RankedTensorType.get(x_shape, x_type.element_type),
-            ir.RankedTensorType.get(w_shape, w_type.element_type),
+            ir.RankedTensorType.get(g_shape, g_type.element_type),
         ]
         operands = [dz, rsigma, x, gamma]
-        operand_shapes = [go_shape, rsigma_shape, x_shape, w_shape]
+        operand_shapes = [go_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -1034,7 +1046,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_softmax_forward"
     multiple_results = False
-    impl_static_args = (1,)
+    impl_static_args = (1,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
@@ -1112,7 +1124,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_softmax_backward"
     multiple_results = False
-    impl_static_args = (2,)
+    impl_static_args = (2,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
@@ -1188,7 +1200,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_masked_softmax_forward"
     multiple_results = False
-    impl_static_args = (2,)
+    impl_static_args = (2,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
@@ -1329,7 +1341,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_masked_softmax_backward"
     multiple_results = False
-    impl_static_args = (2,)
+    impl_static_args = (2,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
@@ -1405,7 +1417,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_upper_triang_masked_softmax_forward"
     multiple_results = False
-    impl_static_args = (1,)
+    impl_static_args = (1,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
@@ -1488,7 +1500,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     """
     name = "te_scaled_upper_triang_masked_softmax_backward"
     multiple_results = False
-    impl_static_args = (2,)
+    impl_static_args = (2,)    # scale_factor
     inner_primitive = None
     outer_primitive = None
 
