@@ -65,6 +65,7 @@ def jax_dtype_to_te_dtype(jax_dtype):
     """
     convert jax dtype to TE dtype
     """
+    jax_dtype = dtypes.canonicalize_dtype(jax_dtype)
     if jax_dtype == jnp.float32:
         return TEDType.kFloat32
     if jax_dtype == jnp.float16:
@@ -1626,6 +1627,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1757,6 +1759,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1908,6 +1911,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
