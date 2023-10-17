@@ -351,31 +351,34 @@ class LayerNormFwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del zero_centered_gamma, epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[0])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}, " \
-            f"since it leads to incorrect results by missing necessary collective ops. " \
-            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
-            f"sharding on the hidden dim."
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         return (out_sharding, mu_sharding, rsigma_sharding)
 
     @staticmethod
     def partition(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del result_infos
-        x_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
-        assert x_spec.spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}, " \
-            f"since it leads to incorrect results by missing necessary collective ops. " \
-            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
-            f"sharding on the hidden dim."
-        g_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        b_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
-        out_spec = x_spec
-        mu_spec = rsigma_spec = NamedSharding(mesh,
-                                              PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
-        arg_shardings = (x_spec, g_spec, b_spec)
-        out_shardings = (out_spec, mu_spec, rsigma_spec)
+        x_spec = get_padded_spec(arg_infos[0])
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
+        x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        b_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        out_sharding = x_sharding
+        mu_sharding = rsigma_sharding = NamedSharding(
+            mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        arg_shardings = (x_sharding, g_sharding, b_sharding)
+        out_shardings = (out_sharding, mu_sharding, rsigma_sharding)
         impl = partial(LayerNormFwdPrimitive.impl,
                        zero_centered_gamma=zero_centered_gamma,
                        epsilon=epsilon)
@@ -495,13 +498,14 @@ class LayerNormBwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del zero_centered_gamma, epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[1])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}, " \
-            f"since it leads to incorrect results by missing necessary collective ops. " \
-            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
-            f"sharding on the hidden dim."
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
         g_b_spec = get_padded_spec(arg_infos[4])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
         return dx_sharding, dgamma_sharding, dbeta_sharding
 
@@ -509,16 +513,17 @@ class LayerNormBwdPrimitive(BasePrimitive):
     def partition(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}, " \
-            f"since it leads to incorrect results by missing necessary collective ops. " \
-            f"To address, you could apply jax.lax.with_sharding_constraint to force no " \
-            f"sharding on the hidden dim."
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {LayerNormBwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
         g_b_spec = get_padded_spec(arg_infos[4])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
-        x_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec)),) * 2
+        x_shardings = (dx_sharding,) * 2
         mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
         arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(*g_b_spec)))
 
@@ -642,23 +647,32 @@ class RmsNormFwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(epsilon, mesh, arg_infos, result_infos):
         del epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[0])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}"
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         return (out_sharding, rsigma_sharding)
 
     @staticmethod
     def partition(epsilon, mesh, arg_infos, result_infos):
         del result_infos
-        x_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
-        assert x_spec.spec[-1] is None, \
-            f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}"
-        g_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        out_spec = x_spec
-        rsigma_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
-        arg_shardings = (x_spec, g_spec)
-        out_shardings = (out_spec, rsigma_spec)
+        x_spec = get_padded_spec(arg_infos[0])
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
+        x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        out_sharding = x_sharding
+        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        arg_shardings = (x_sharding, g_sharding)
+        out_shardings = (out_sharding, rsigma_sharding)
         impl = partial(RmsNormFwdPrimitive.impl, epsilon=epsilon)
         return mesh, impl, out_shardings, arg_shardings
 
@@ -763,10 +777,14 @@ class RmsNormBwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(epsilon, mesh, arg_infos, result_infos):
         del epsilon, result_infos
         x_spec = get_padded_spec(arg_infos[1])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}"
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
         g_spec = get_padded_spec(arg_infos[3])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
         return dx_sharding, dgamma_sharding
 
@@ -774,13 +792,17 @@ class RmsNormBwdPrimitive(BasePrimitive):
     def partition(epsilon, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
-        assert x_spec[-1] is None, \
-            f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}"
+        if x_spec[-1] is not None:
+            warnings.warn(
+                f"Does not support to shard hidden dim in {RmsNormBwdPrimitive.name}! " \
+                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
+                f"and hurt performance."
+            )
         g_spec = get_padded_spec(arg_infos[3])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
+        dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
         out_shardings = dx_sharding, dgamma_sharding
-        x_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec)),) * 2
+        x_shardings = (dx_sharding,) * 2
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(*g_spec)))
 
