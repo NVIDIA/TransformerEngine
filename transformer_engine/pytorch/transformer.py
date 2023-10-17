@@ -425,7 +425,15 @@ class TransformerLayer(torch.nn.Module):
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
-        """Set TP group"""
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
@@ -439,7 +447,19 @@ class TransformerLayer(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group"""
+        """
+        Set the context parallel attributes for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        cp_group : ProcessGroup
+                  context parallel process group.
+        cp_global_ranks : List[int]
+                         list of global ranks in the context group.
+        cp_stream : torch.cuda.Stream
+                   cuda stream for context parallel execution.
+        """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:

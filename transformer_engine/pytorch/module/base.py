@@ -467,7 +467,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
-        """Set TP group."""
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
         self.tp_group = tp_group
         self.tp_group_initialized = True
 
