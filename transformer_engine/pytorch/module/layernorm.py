@@ -14,7 +14,7 @@ import transformer_engine_extensions as tex
 from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
- )
+)
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
