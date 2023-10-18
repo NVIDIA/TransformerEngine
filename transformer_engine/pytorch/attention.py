@@ -390,7 +390,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
                 cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
-                use_fused_attention, fused_attention_backend):
+                use_fused_attention):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -723,7 +723,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         dq = dq.view(q.shape[0], -1, *q.shape[-2:])
         # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
         dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
-        return dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_forward_func_with_cp(q, k, v,
@@ -738,13 +738,12 @@ def flash_attn_forward_func_with_cp(q, k, v,
                                     softmax_scale=None,
                                     causal=False,
                                     deterministic=False,
-                                    use_fused_attention=False,
-                                    fused_attention_backend=None):
+                                    use_fused_attention=False):
     """Flash Attention implementation with context parallelism"""
     out = FlashAttnUnpaddedFuncWithCP.apply(
         q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
         cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
-        use_fused_attention, fused_attention_backend
+        use_fused_attention
     )
     return out
 
@@ -1707,6 +1706,9 @@ class FusedAttention(torch.nn.Module):
                     == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
 
         if context_parallel:
+            assert (fused_attention_backend
+                == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                ), 'Context parallelism is only supported with backend of NVTE_F16_arbitrary_seqlen!'
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
                     query_layer,
@@ -1723,7 +1725,6 @@ class FusedAttention(torch.nn.Module):
                     softmax_scale=1.0/self.norm_factor,
                     causal=attn_mask_type=="causal",
                     use_fused_attention=True,
-                    fused_attention_backend=fused_attention_backend,
                 )
         else:
             with self.attention_dropout_ctx():
