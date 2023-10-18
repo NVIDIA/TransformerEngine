@@ -685,8 +685,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                      attn_mask_type=attn_mask_type,
                                      scaling_factor=scale_factor,
                                      dropout_probability=self.dropout_rate,
-                                     is_training=not deterministic,
-                                     sharding_type=first_sharding_type)
+                                     is_training=not deterministic)
         else:
 
             def convert_to_softmax_type(attn_mask_type, mask):

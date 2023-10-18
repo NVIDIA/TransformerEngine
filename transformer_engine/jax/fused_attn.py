@@ -15,12 +15,6 @@ from transformer_engine_jax import NVTE_QKV_Layout
 from .cpp_extensions import FusedAttnHelper
 from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
 from .cpp_extensions import self_fused_attn_fwd, self_fused_attn_bwd
-from .sharding import get_fused_attn_sharding_meta
-from .sharding import ShardingType
-from .sharding import xmap_runner, extend_fsdp_sharding_meta
-
-jax.config.update('experimental_xmap_spmd_lowering', True)
-jax.config.update('experimental_xmap_spmd_lowering_manual', True)
 
 
 class AttnBiasType(Enum):
@@ -38,13 +32,17 @@ class AttnMaskType(Enum):
     PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
 
 
-class QKVLayout(Enum):
-    """QKV layout"""
-    BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
-    BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
+def generate_cu_seqlen(mask):
+    """
+    Generating cumsum seqlen for a batch
+    """
+    seqlen = jnp.sum(mask == 0, axis=(-1, -2), dtype=jnp.int32)
+    cu_seqlen = jnp.cumsum(seqlen)
+    cu_seqlen = jnp.hstack((0, cu_seqlen))
+    return cu_seqlen
 
 
-def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
+def is_fused_attn_kernel_available(q_type, kv_type, attn_bias_type, attn_mask_type,
                                    dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
     """
     To check whether the fused attention kernel is available
@@ -80,9 +78,7 @@ def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed
 def _self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
                      attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                      scaling_factor: float, dropout_probability: float, is_training: bool):
-    seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
-    cu_seqlen = jnp.cumsum(seqlen)
-    cu_seqlen = jnp.hstack((0, cu_seqlen))
+    cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
 
     output, *_ = self_fused_attn_fwd(qkv,
                                      bias,
@@ -100,9 +96,7 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                               seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                               attn_mask_type: AttnMaskType, scaling_factor: float,
                               dropout_probability: float, is_training: bool):
-    seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
-    cu_seqlen = jnp.cumsum(seqlen)
-    cu_seqlen = jnp.hstack((0, cu_seqlen))
+    cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
 
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
@@ -120,13 +114,11 @@ def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dr
                               is_training, ctx, dz):
     qkv, softmax_aux, rng_state, output, cu_seqlen = ctx
 
-    doutput = dz
-
     grad_qkv, grad_bias = self_fused_attn_bwd(qkv,
                                               softmax_aux,
                                               rng_state,
                                               output,
-                                              doutput,
+                                              dz,
                                               cu_seqlen,
                                               attn_bias_type=attn_bias_type.value,
                                               attn_mask_type=attn_mask_type.value,
@@ -143,61 +135,22 @@ def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dr
 _self_fused_attn.defvjp(_self_fused_attn_fwd_rule, _self_fused_attn_bwd_rule)
 
 
-def cross_fused_attn(q: jnp.ndarray,
-                     kv: jnp.ndarray,
-                     mask: jnp.ndarray,
-                     seed: jnp.ndarray,
-                     attn_bias_type: AttnBiasType,
-                     attn_mask_type: AttnMaskType,
-                     scaling_factor: float,
-                     dropout_probability: float,
-                     is_training: bool,
-                     sharding_type: ShardingType = ShardingType.SINGLE):
+def cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
+                     attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+                     scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Cross multi-head attention wrapper
     """
-    assert sharding_type not in (ShardingType.TP_ROW, ShardingType.DP_TP_ROW), \
-        "cross_fused_attn does not support row-split tensor parallelism currently."
 
-    if sharding_type is ShardingType.SINGLE:
-        output = _cross_fused_attn(q,
-                                   kv,
-                                   mask,
-                                   seed,
-                                   attn_bias_type=attn_bias_type,
-                                   attn_mask_type=attn_mask_type,
-                                   scaling_factor=scaling_factor,
-                                   dropout_probability=dropout_probability,
-                                   is_training=is_training)
-    else:
-        dp_axis_name = "batch"
-        tp_axis_name = "model"
-
-        inputs = [q, kv, mask, seed]
-        output_shape = q.shape
-        sharding_meta = get_fused_attn_sharding_meta(
-            sharding_type, [x.shape if x is not None else None for x in inputs], [output_shape],
-            dp_dims=([0, 0, 0, None], [0]),
-            tp_dims=([2, 3, None, None], [2]),
-            dp_axis_name=dp_axis_name,
-            tp_axis_name=tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: 0, 2: 0})
-
-        inputs_ = tuple(
-            jnp.reshape(x, new_shape) if x is not None else None
-            for x, new_shape in zip(inputs, sharding_meta.input_shapes))
-
-        partial_cross_fused_attn = partial(_cross_fused_attn,
-                                           attn_bias_type=attn_bias_type,
-                                           attn_mask_type=attn_mask_type,
-                                           scaling_factor=scaling_factor,
-                                           dropout_probability=dropout_probability,
-                                           is_training=is_training)
-
-        output_ = xmap_runner(partial_cross_fused_attn, sharding_meta.in_axes,
-                              sharding_meta.out_axes, sharding_meta.axis_resources, inputs_)
-
-        output = jnp.reshape(output_, sharding_meta.output_shapes)
+    output = _cross_fused_attn(q,
+                               kv,
+                               mask,
+                               seed,
+                               attn_bias_type=attn_bias_type,
+                               attn_mask_type=attn_mask_type,
+                               scaling_factor=scaling_factor,
+                               dropout_probability=dropout_probability,
+                               is_training=is_training)
 
     return output
 
@@ -207,28 +160,27 @@ def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: 
                       attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                       scaling_factor: float, dropout_probability: float, is_training: bool):
 
-    output, _ = _cross_fused_attn_fwd(q,
-                                      kv,
-                                      mask,
-                                      seed,
-                                      attn_bias_type=attn_bias_type,
-                                      attn_mask_type=attn_mask_type,
-                                      scaling_factor=scaling_factor,
-                                      dropout_probability=dropout_probability,
-                                      is_training=is_training)
+    q_cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
+    kv_cu_seqlen = generate_cu_seqlen(mask[:, :, 0, :])
+
+    output, _ = cross_fused_attn_fwd(q,
+                                     kv,
+                                     q_cu_seqlen,
+                                     kv_cu_seqlen,
+                                     seed,
+                                     attn_bias_type=attn_bias_type.value,
+                                     attn_mask_type=attn_mask_type.value,
+                                     scaling_factor=scaling_factor,
+                                     dropout_probability=dropout_probability,
+                                     is_training=is_training)
     return output
 
 
-def _cross_fused_attn_fwd(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
-                          dropout_probability, is_training):
+def _cross_fused_attn_fwd_rule(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
+                               dropout_probability, is_training):
 
-    q_seqlen = jnp.sum(mask[:, :, :, 0] == 0, axis=(-1, -2), dtype=jnp.int32)
-    q_cu_seqlen = jnp.cumsum(q_seqlen)
-    q_cu_seqlen = jnp.hstack((0, q_cu_seqlen))
-
-    kv_seqlen = jnp.sum(mask[:, :, 0, :] == 0, axis=(-1, -2), dtype=jnp.int32)
-    kv_cu_seqlen = jnp.cumsum(kv_seqlen)
-    kv_cu_seqlen = jnp.hstack((0, kv_cu_seqlen))
+    q_cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
+    kv_cu_seqlen = generate_cu_seqlen(mask[:, :, 0, :])
 
     output, softmax_aux = cross_fused_attn_fwd(q,
                                                kv,
@@ -243,16 +195,14 @@ def _cross_fused_attn_fwd(q, kv, mask, seed, attn_bias_type, attn_mask_type, sca
     return output, (softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen)
 
 
-def _cross_fused_attn_bwd(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
-                          is_training, ctx, grad):
+def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
+                               is_training, ctx, dz):
     softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen = ctx
-
-    doutput = grad
 
     grad_q, grad_kv = cross_fused_attn_bwd(q,
                                            kv,
                                            softmax_aux,
-                                           doutput,
+                                           dz,
                                            q_cu_seqlen,
                                            kv_cu_seqlen,
                                            attn_bias_type=attn_bias_type.value,
@@ -264,4 +214,4 @@ def _cross_fused_attn_bwd(attn_bias_type, attn_mask_type, scaling_factor, dropou
     return grad_q, grad_kv, None, None
 
 
-_cross_fused_attn.defvjp(_cross_fused_attn_fwd, _cross_fused_attn_bwd)
+_cross_fused_attn.defvjp(_cross_fused_attn_fwd_rule, _cross_fused_attn_bwd_rule)
