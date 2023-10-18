@@ -15,6 +15,7 @@ from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
 from .export import onnx_export
 from .distributed import checkpoint
+from .distributed import CudaRNGStatesTracker
 # Register custom op symbolic ONNX functions
 from .te_onnx_extensions import (
     onnx_cast_to_fp8,
