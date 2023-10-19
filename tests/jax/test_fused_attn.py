@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Tests for fused attention"""
 
+import ctypes
 import os
 from enum import Enum
 from math import sqrt
@@ -159,9 +160,13 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim):
+                      head_dim, pad_ratio):
 
-        assert isinstance(backend, Backend)
+        lib = ctypes.CDLL('libcudnn.so')
+        is_varlen_supported = lib.cudnnGetVersion() >= 8906
+
+        if (s > 512 or backend == Backend.Arbitrary) and pad_ratio != 0 and not is_varlen_supported:
+            pytest.skip("Arbitrary seqlen backend hasn't support padded input.")
 
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
@@ -182,7 +187,8 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d)
+                                     head_dim=d,
+                                     pad_ratio=pad_ratio)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
