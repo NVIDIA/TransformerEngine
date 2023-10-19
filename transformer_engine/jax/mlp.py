@@ -35,47 +35,27 @@ thread_resources = pxla.thread_resources
 
 def geglu(
         inputs: jnp.ndarray,
-        contracting_dims: Sequence[int] = (-1,),
-        sharding_type: ShardingType = ShardingType.SINGLE,
-        dp_dim_index: int = 0,    # pylint: disable=unused-argument
-):
+        contracting_dims: Sequence[int] = (-1,),):
     """
     Gated gelu
     """
     input_shape_suf_size = reduce(operator.mul, inputs.shape[min(contracting_dims):])
     assert input_shape_suf_size % 2 == 0
-    output_shape = (*inputs.shape[:min(contracting_dims)], input_shape_suf_size // 2)
 
-    if sharding_type is ShardingType.SINGLE:
-        output = _geglu(inputs, contracting_dims)
-    else:
-        dp_axis_name = "batch"
-        tp_axis_name = "model"
+    output = _geglu(inputs, contracting_dims)
 
-        sharding_meta = get_elementwise_sharding_meta(sharding_type, inputs.shape, None,
-                                                      dp_dim_index, dp_axis_name, tp_axis_name)
-        sharding_meta, _ = extend_fsdp_sharding_meta(sharding_meta, {0: dp_dim_index})
-
-        inputs_ = jnp.reshape(inputs, sharding_meta.input_shapes[0])    # 0 for input
-
-        partial_geglu = partial(_geglu, contracting_dims=contracting_dims)
-
-        output = xmap_runner(partial_geglu, sharding_meta.in_axes, sharding_meta.out_axes,
-                             sharding_meta.axis_resources, (inputs_,))
-
-    output = jnp.reshape(output, output_shape)
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _geglu(inputs: jnp.ndarray, contracting_dims: Sequence[int] = (-1,)):
 
-    geglu_output, _ = _geglu_fwd(inputs, contracting_dims)
+    geglu_output, _ = _geglu_fwd_rule(inputs, contracting_dims)
 
     return geglu_output
 
 
-def _geglu_fwd(inputs, contracting_dims):
+def _geglu_fwd_rule(inputs, contracting_dims):
     inputs_real_shape = (*inputs.shape[:min(contracting_dims)],
                          reduce(operator.mul, inputs.shape[min(contracting_dims):]))
     inputs_ = jnp.reshape(inputs, inputs_real_shape)
@@ -84,7 +64,7 @@ def _geglu_fwd(inputs, contracting_dims):
     return geglu_output, (inputs_, inputs.shape)
 
 
-def _geglu_bwd(contracting_dims, ctx, g):
+def _geglu_bwd_rule(contracting_dims, ctx, g):
     inputs_, inputs_shape = ctx
     g = jnp.squeeze(g, min(contracting_dims))
     assert inputs_.dtype == g.dtype
@@ -94,7 +74,7 @@ def _geglu_bwd(contracting_dims, ctx, g):
     return (dgelu,)
 
 
-_geglu.defvjp(_geglu_fwd, _geglu_bwd)
+_geglu.defvjp(_geglu_fwd_rule, _geglu_bwd_rule)
 
 
 def fp8_ln_mlp(

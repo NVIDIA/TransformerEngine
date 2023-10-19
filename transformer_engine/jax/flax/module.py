@@ -971,9 +971,7 @@ class LayerNormMLP(TransformerEngineBase):
 
             if self.activations == ('gelu', 'linear'):
                 z = geglu(x,
-                          contracting_dims=(-2, -1),
-                          sharding_type=second_sharding_type,
-                          dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                          contracting_dims=(-2, -1),)
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
