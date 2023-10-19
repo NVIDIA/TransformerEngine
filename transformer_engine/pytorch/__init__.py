@@ -13,6 +13,7 @@ from .attention import InferenceParams
 from .attention import MultiheadAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
+from .fp8 import fp8_init
 from .export import onnx_export
 from .distributed import checkpoint
 from .distributed import CudaRNGStatesTracker
@@ -28,3 +29,5 @@ from .te_onnx_extensions import (
     onnx_rmsnorm_fwd,
     onnx_rmsnorm_fwd_fp8
 )
+
+from .float8_tensor import Float8Tensor

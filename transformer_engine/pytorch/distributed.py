@@ -83,14 +83,16 @@ def initialize_affine_weight_gpu(
     weight: torch.Tensor,
     init_method: Callable,
     get_rng_state_tracker: Callable,
-    partition_dim: int,
+    partition_dim: int = 0,
     stride: int = 1,
+    set_tp_attributes: bool = True,
 ) -> None:
     """Initialize affine weight for model parallel on GPU."""
 
-    set_tensor_model_parallel_attributes(
-        tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
-    )
+    if set_tp_attributes:
+        set_tensor_model_parallel_attributes(
+            tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
+        )
 
     if get_rng_state_tracker is None:
         init_method(weight)

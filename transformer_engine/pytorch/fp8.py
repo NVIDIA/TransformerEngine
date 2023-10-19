@@ -59,6 +59,7 @@ class FP8GlobalStateManager:
     FP8_CALIBRATION = False
     FP8_RECIPE = None
     FP8_DISTRIBUTED_GROUP = None
+    FP8_PARAMETERS = False
     IS_FIRST_FP8_MODULE = False
     FP8_AUTOCAST_COUNTER = 0
     FP8_CURRENT_CONTEXT_ID = 0
@@ -255,6 +256,11 @@ class FP8GlobalStateManager:
         return cls.FP8_CALIBRATION
 
     @classmethod
+    def is_fp8_parameters(cls) -> bool:
+        """Should the parameters be stored as FP8"""
+        return cls.FP8_PARAMETERS
+
+    @classmethod
     def is_first_fp8_module(cls):
         """Returns `True` only the first time when called multiple
         times from within the same `fp8_autocast` context.
@@ -377,6 +383,11 @@ class FP8GlobalStateManager:
         fp8_group: Optional[dist_group_type] = None,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
+        if cls.FP8_AUTOCAST_DEPTH == 0:
+            if callable(cls.amax_forward_global_reduce_func):
+                cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
+            cls.delete_key_from_amax_buffer(forward=True)
+
         cls.FP8_ENABLED = enabled
         cls.FP8_CALIBRATION = calibrating
         cls.FP8_RECIPE = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
@@ -395,11 +406,6 @@ class FP8GlobalStateManager:
     def fp8_autocast_exit(cls):
         """Set state and tracking variables for exit from FP8 region."""
         cls.FP8_AUTOCAST_DEPTH -= 1
-
-        if cls.FP8_AUTOCAST_DEPTH == 0:
-            if callable(cls.amax_forward_global_reduce_func):
-                cls.amax_reduce_handle_fwd = cls.amax_forward_global_reduce_func() # pylint: disable=not-callable
-            cls.delete_key_from_amax_buffer(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -455,6 +461,41 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
+def fp8_init(enabled: bool = False) -> None:
+    """
+    Context manager for FP8 initialization of parameters.
+
+    .. code-block:: python
+
+        with fp8_init(enabled=True):
+            model = transformer_engine.pytorch.Linear(768, 768)
+
+    Parameters
+    ----------
+    enabled: bool, default = `False`
+                  when enabled, Transformer Engine modules created inside this `fp8_autocast`
+                  region will hold only FP8 copies of its parameters, as opposed to the default
+                  behavior where both higher precision and FP8 copies are present. Setting this
+                  option to `True` may result in lower memory consumption and is especially
+                  useful for scenarios like:
+
+                      * full model training using optimizer with master weights, where the high
+                      precision copies of weights are already present in the optimizer
+                      * inference, where only the FP8 copies of the parameters are used
+                      * LoRA-like fine-tuning, where the main parameters of the model do not
+                      change
+
+                  This functionality is *EXPERIMENTAL*.
+    """
+    try:
+        _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+        FP8GlobalStateManager.FP8_PARAMETERS = enabled
+        yield
+    finally:
+        FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters # pylint: disable=used-before-assignment
+
+
+@contextmanager
 def fp8_autocast(
     enabled: bool = False,
     calibrating: bool = False,
@@ -500,7 +541,10 @@ def fp8_autocast(
     """
     try:
         fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
-        FP8GlobalStateManager.fp8_autocast_enter(enabled, calibrating, fp8_recipe, fp8_group)
+        FP8GlobalStateManager.fp8_autocast_enter(enabled=enabled,
+                                                 calibrating=calibrating,
+                                                 fp8_recipe=fp8_recipe,
+                                                 fp8_group=fp8_group)
         yield
     finally:
         FP8GlobalStateManager.set_fp8_autocast_state(fp8_state) # pylint: disable=used-before-assignment

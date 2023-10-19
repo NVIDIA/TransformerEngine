@@ -20,7 +20,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..fp8 import get_fp8_te_dtype
+from ..fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -47,6 +47,7 @@ from .. import cpp_extensions as tex
 from ..constants import dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 
+from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
 
 
@@ -105,14 +106,15 @@ class _LayerNormMLP(torch.autograd.Function):
         fwd_ln_sm_margin: int,
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
+        activation: str,
+        normalization: str,
+        primary_weights_in_fp8: bool,
         ub_bulk_wgrad: bool,
         ub_bulk_dgrad: bool,
         ub_split_rs: bool,
         ub_atomic_gemm_rs: bool,
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
-        activation: str,
-        normalization: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -196,45 +198,68 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_bias = cast_if_needed(fc1_bias, bias_dtype) if use_fc1_bias else fc1_bias
             fc2_bias = cast_if_needed(fc2_bias, bias_dtype) if use_fc2_bias else fc2_bias
 
-            if update_fp8_weights:
+            if primary_weights_in_fp8:
+                # Weights are already in FP8
+                fc1_weight.reset_fp8_meta_scale_inv()
+                fc2_weight.reset_fp8_meta_scale_inv()
+                fc1_weight_fp8 = fc1_weight
+                fc2_weight_fp8 = fc2_weight
+                fc1_weight_t_fp8 = None
+                fc2_weight_t_fp8 = None
                 if is_grad_enabled:
+                    fc1_weight_t_fp8 = fc1_weight_fp8.transpose()
+                    fc2_weight_t_fp8 = fc2_weight_fp8.transpose()
+
+            elif update_fp8_weights:
+                # Need to cast weights to FP8
+                fc1_weight_fp8 = Float8Tensor(
+                    data=fc1_weight_fp8._data,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                )
+                fc2_weight_fp8 = Float8Tensor(
+                    data=fc2_weight_fp8._data,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
+                )
+                if is_grad_enabled:
+                    # Fused cast-transpose kernels
                     tex.fp8_cast_transpose_fused(
                         fc1_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
                         fp8_dtype_forward,
-                        cast_out=fc1_weight_fp8,
-                        transpose_out=fc1_weight_t_fp8,
+                        cast_out=fc1_weight_fp8._data,
+                        transpose_out=fc1_weight_t_fp8._data,
                     )
-
                     tex.fp8_cast_transpose_fused(
                         fc2_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM2_WEIGHT,
                         fp8_dtype_forward,
-                        cast_out=fc2_weight_fp8,
-                        transpose_out=fc2_weight_t_fp8,
+                        cast_out=fc2_weight_fp8._data,
+                        transpose_out=fc2_weight_t_fp8._data,
                     )
                 else:
-                    fc1_weight_t_fp8 = None
-                    fc1_weight_fp8 = tex.cast_to_fp8(
+                    fc1_weight_fp8._data = tex.cast_to_fp8(
                         fc1_weight,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        fp8_dtype_forward,
+                    )
+                    fc1_weight_t_fp8 = None
+                    fc2_weight_fp8._data = tex.cast_to_fp8(
+                        fc2_weight,
+                        fp8_meta["scaling_fwd"],
+                        tex.FP8FwdTensors.GEMM2_WEIGHT,
                         fp8_dtype_forward,
                     )
                     fc2_weight_t_fp8 = None
-                    fc2_weight_fp8 = tex.cast_to_fp8(
-                        fc2_weight,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM2_WEIGHT,
-                        fp8_dtype_forward,
-                    )
 
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG if ub_split_ag else None
             ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ub_atomic_gemm_ag else ub_algo
             fc1_out, _ = tex.fp8_gemm(
-                fc1_weight_fp8,
+                fc1_weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM1_WEIGHT,
                 fp8_dtype_forward,
@@ -283,7 +308,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_algo=tex.UbufOverlapAlgo.ATOMIC_GEMM_RS if ub_atomic_gemm_rs else None
             ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS if ub_split_rs else ub_algo
             _ = tex.fp8_gemm(
-                fc2_weight_fp8,
+                fc2_weight_fp8._data,
                 fp8_meta["scaling_fwd"].scale_inv,
                 tex.FP8FwdTensors.GEMM2_WEIGHT,
                 fp8_dtype_forward,
@@ -530,7 +555,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG if ctx.ub_atomic_gemm_ag else ub_algo
                 # FC2 DGRAD; Unconditional
                 fc2_dgrad, _ = tex.fp8_gemm(
-                    fc2_weight_t_fp8,
+                    fc2_weight_t_fp8._data,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM2_WEIGHT,
                     fp8_dtype_forward,
@@ -645,7 +670,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
-                    fc1_weight_t_fp8,
+                    fc1_weight_t_fp8._data,
                     fwd_scale_inverses,
                     tex.FP8FwdTensors.GEMM1_WEIGHT,
                     fp8_dtype_forward,
@@ -908,6 +933,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1020,12 +1046,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
+        device: Union[torch.device, str] = "cuda",
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_split_rs: bool = False,
         ub_atomic_gemm_rs: bool = False,
         ub_split_ag: bool = False,
-        device: Union[torch.device, str] = "cuda",
         ub_atomic_gemm_ag: bool = False,
     ) -> None:
         super().__init__()
@@ -1043,6 +1069,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                    self.activation == 'gelu')
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.is_fp8_parameters()
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs
@@ -1102,18 +1129,29 @@ class LayerNormMLP(TransformerEngineBaseModule):
         else:
             fc1_output_features = self.size_per_partition
         # FC1 init
-        self.fc1_weight = Parameter(
-            torch.empty(fc1_output_features, hidden_size, device=device, dtype=params_dtype)
-        )
-        self.fp8_weight_shapes.append(self.fc1_weight.shape)
+        fc1_temp_weight = torch.empty(
+            fc1_output_features, hidden_size, device=device, dtype=params_dtype)
 
         initialize_affine_weight_gpu(
-            self.fc1_weight,
+            fc1_temp_weight,
             init_method,
             get_rng_state_tracker,
-            partition_dim=0,
-            stride=1,
+            set_tp_attributes=False,
         )
+
+        if self.primary_weights_in_fp8:
+            self.fp8_init(num_gemms=2)
+            self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+            fc1_temp_weight = Float8Tensor.to_float8(
+                fc1_temp_weight,
+                fp8_meta=self.fp8_meta,
+                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+            )
+
+        self.fc1_weight = Parameter(fc1_temp_weight)
+        set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
+        self.fp8_weight_shapes.append(self.fc1_weight.shape)
 
         if self.use_bias:
             self.fc1_bias = Parameter(
@@ -1127,18 +1165,26 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.fc1_bias.zero_()
 
         # FC2 init
-        self.fc2_weight = Parameter(
-            torch.empty(hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
-        )
-        self.fp8_weight_shapes.append(self.fc2_weight.shape)
+        fc2_temp_weight = torch.empty(
+            hidden_size, self.size_per_partition, device=device, dtype=params_dtype)
 
         initialize_affine_weight_gpu(
-            self.fc2_weight,
+            fc2_temp_weight,
             output_layer_init_method,
             get_rng_state_tracker,
-            partition_dim=1,
-            stride=1,
+            set_tp_attributes=False,
         )
+
+        if self.primary_weights_in_fp8:
+            fc2_temp_weight = Float8Tensor.to_float8(
+                fc2_temp_weight,
+                fp8_meta=self.fp8_meta,
+                fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
+            )
+
+        self.fc2_weight = Parameter(fc2_temp_weight)
+        set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
+        self.fp8_weight_shapes.append(self.fc2_weight.shape)
 
         if self.use_bias:
             self.fc2_bias = Parameter(
@@ -1192,7 +1238,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         `is_first_microbatch` is not `None`) or return empty fp8 weight
         tensors (if `is_first_microbatch is None`)
         """
-        if not self.fp8:
+        if not self.fp8 or self.primary_weights_in_fp8:
             return [None, None, None, None]
 
         if is_first_microbatch is None:
@@ -1235,6 +1281,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
 
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
+            assert self.fp8 or not self.primary_weights_in_fp8, \
+                   "Need to run inside fp8_autocast region when weights are stored in FP8."
             # Fetch the fp8 weights placeholders (for linear/gemm)
             weight1_fp8, weight1_t_fp8, weight2_fp8, weight2_t_fp8 = \
                 self.get_fp8_weights_scratchpad(
@@ -1279,14 +1327,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fwd_ln_sm_margin,
                 self.bwd_ln_sm_margin,
                 self.zero_centered_gamma,
+                self.activation,
+                self.normalization,
+                self.primary_weights_in_fp8,
                 self.ub_bulk_wgrad,
                 self.ub_bulk_dgrad,
                 self.ub_split_rs,
                 self.ub_atomic_gemm_rs,
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
-                self.activation,
-                self.normalization,
             )
             out = fwd_fn(*args)
 
