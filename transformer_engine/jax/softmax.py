@@ -56,14 +56,8 @@ def softmax(logits: jnp.ndarray,
 
 @partial(jax.custom_vjp, nondiff_argnums=(2, 3))
 def _softmax(logits, mask, scale_factor, softmax_type):
-    if softmax_type is SoftmaxType.SCALED_MASKED:
-        assert mask is not None
-        output = scaled_masked_softmax_fwd(logits, mask, scale_factor)
-    elif softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-        output = scaled_upper_triang_masked_softmax_fwd(logits, scale_factor)
-    else:
-        output = scaled_softmax_fwd(logits, scale_factor)
 
+    output, _ = _softmax_fwd_rule(logits, mask, scale_factor, softmax_type)
     return output
 
 

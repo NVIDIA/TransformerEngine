@@ -59,15 +59,7 @@ def _layernorm(x,
                layernorm_type: str,
                zero_centered_gamma: bool = False,
                epsilon: float = 1e-6):
-    layernorm_type = canonicalize_layernorm_type(layernorm_type)
-    if layernorm_type == 'layernorm':
-        output, _, _ = layernorm_fwd(x, gamma, beta, zero_centered_gamma, epsilon)
-    elif layernorm_type == 'rmsnorm':
-        assert not zero_centered_gamma, "zero_centered_gamma is not supported " \
-            "if layernorm_type is 'rmsnorm'"
-        output, _ = rmsnorm_fwd(x, gamma, epsilon)
-    else:
-        raise ValueError(f"{layernorm_type} is not supported.")
+    output, _ = _layernorm_fwd_rule(x, gamma, beta, layernorm_type, zero_centered_gamma, epsilon)
     return output
 
 
