@@ -31,6 +31,7 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cublasLt.h>
+#include <cudnn.h>
 #include <stdexcept>
 #include <memory>
 #include <iomanip>
