@@ -44,7 +44,15 @@ from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
-_cudnn_version = [int(i) for i in os.environ['CUDNN_VERSION'].split('.')]
+
+def _get_cudnn_version():
+    cudnn_version_encoded = ext.get_cudnn_version()
+    cudnn_major = cudnn_version_encoded // 1000
+    cudnn_minor = (cudnn_version_encoded - cudnn_major * 1000) // 100
+    cudnn_patch = cudnn_version_encoded - 1000 * cudnn_major - 100 * cudnn_minor
+    return [cudnn_major, cudnn_minor, cudnn_patch]
+
+_cudnn_version = _get_cudnn_version()
 
 
 class ModelConfig:

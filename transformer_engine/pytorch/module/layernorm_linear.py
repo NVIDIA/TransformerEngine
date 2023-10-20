@@ -114,7 +114,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_obj_lnout = get_ub("qkv_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
-            ln_out_dtype = torch.uint8 if fp8 else inputmat.dtype
+            ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
         if ub_atomic_gemm_ag:
             assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
