@@ -339,8 +339,39 @@ class TorchGPT(nn.Module):
         return x
 
 
-def _test_e2e_selective_recompute(block, bs, dtype, config, fp8, recompute=False):
+def _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False):
     reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    block = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+            params_dtype=dtype,
+        )
+        .cuda()
+    )
 
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
@@ -375,40 +406,8 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8):
 
     config = model_configs[model]
 
-    sigma = 0.023
-    init_method = init_method_normal(sigma)
-    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            params_dtype=dtype,
-        )
-        .cuda()
-        .eval()
-    )
-    recompute_block = copy.deepcopy(block)
-
-    outputs = _test_e2e_selective_recompute(block, bs, dtype, config, fp8, recompute=False)
-    outputs_recompute = _test_e2e_selective_recompute(recompute_block, bs, dtype, config, fp8, recompute=True)
+    outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False)
+    outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
 
 
