@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -23,6 +24,10 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
+
+
+# Only run FP8 tests on H100.
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
 seed = 1234
@@ -90,18 +95,9 @@ def assert_allclose(l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float)
 
 
 def reset_rng_states() -> None:
-    # revert back to initial RNG state.
+    """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
     _set_cuda_rng_state(_cuda_rng_state)
-
-
-_DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-_DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-
-def get_dummy_cuda_rng_tracker():
-    """Get cuda rng tracker."""
-    return _DUMMY_CUDA_RNG_STATE_TRACKER
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -343,7 +339,7 @@ class TorchGPT(nn.Module):
         return x
 
 
-def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
+def _test_e2e_selective_recompute(block, bs, dtype, config, fp8, recompute=False):
     reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
@@ -352,81 +348,11 @@ def _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    te_out = block(
-        te_inp_hidden_states,
-        attention_mask=te_inp_attn_mask,
-        checkpoint_core_attention=recompute,
-    )
-    loss = te_out.sum()
-    loss.backward()
-    torch.cuda.synchronize()
-
-    outputs = [te_out, te_inp_hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            outputs.append(p.grad)
-    return outputs
-
-
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_selective_activation_recompute(dtype, bs, model):
-    config = model_configs[model]
-
-    sigma = 0.023
-    init_method = init_method_normal(sigma)
-    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            params_dtype=dtype,
-        )
-        .cuda()
-        .eval()
-    )
-
-    outputs = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=False)
-    outputs_recompute = _test_e2e_selective_recompute(block, bs, dtype, config, recompute=True)
-    assert_all_equal(outputs, outputs_recompute)
-
-
-def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
-    reset_rng_states()
-
-    te_inp_hidden_states = torch.randn(
-        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
-    ).cuda()
-    te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
-
-    if recompute:
-        te_out = te_checkpoint(
-            block,
-            False,  # distribute_saved_activations
-            get_dummy_cuda_rng_tracker,
-            None,  # tp_group
-            te_inp_hidden_states,
-            attention_mask=te_inp_attn_mask,
-            checkpoint_core_attention=False,
-        )
-    else:
+    with fp8_autocast(enabled=fp8):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
-            checkpoint_core_attention=False,
+            checkpoint_core_attention=recompute,
         )
     loss = te_out.sum()
     loss.backward()
@@ -442,12 +368,23 @@ def _test_e2e_full_recompute(block, bs, dtype, config, recompute=False):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_full_activation_recompute(dtype, bs, model):
+@pytest.mark.parametrize("fp8", all_boolean)
+def test_gpt_selective_activation_recompute(dtype, bs, model, fp8):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     block = (
         TransformerLayer(
@@ -468,9 +405,93 @@ def test_gpt_full_activation_recompute(dtype, bs, model):
         .cuda()
         .eval()
     )
+    recompute_block = copy.deepcopy(block)
 
-    outputs = _test_e2e_full_recompute(block, bs, dtype, config, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(block, bs, dtype, config, recompute=True)
+    outputs = _test_e2e_selective_recompute(block, bs, dtype, config, fp8, recompute=False)
+    outputs_recompute = _test_e2e_selective_recompute(recompute_block, bs, dtype, config, fp8, recompute=True)
+    assert_all_equal(outputs, outputs_recompute)
+
+
+def _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    block = (
+        TransformerLayer(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.num_attention_heads,
+            layernorm_epsilon=config.eps,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            hidden_dropout=0.1,
+            attention_dropout=0.1,
+            kv_channels=config.embed,
+            apply_residual_connection_post_layernorm=False,
+            output_layernorm=False,
+            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+            params_dtype=dtype,
+        )
+        .cuda()
+    )
+
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    te_inp_hidden_states.retain_grad()
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+
+    with fp8_autocast(enabled=fp8):
+        if recompute:
+            te_out = te_checkpoint(
+                block,
+                False,  # distribute_saved_activations
+                get_dummy_cuda_rng_tracker,
+                None,  # tp_group
+                te_inp_hidden_states,
+                attention_mask=te_inp_attn_mask,
+                checkpoint_core_attention=False,
+            )
+        else:
+            te_out = block(
+                te_inp_hidden_states,
+                attention_mask=te_inp_attn_mask,
+                checkpoint_core_attention=False,
+            )
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    outputs = [te_out, te_inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+
+    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False)
+    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
 
 
@@ -565,8 +586,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
-    outputs_recompute = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
-    assert_all_equal(outputs, outputs_recompute)
+    outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
+    assert_all_equal(outputs, outputs_checkpoint)
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
