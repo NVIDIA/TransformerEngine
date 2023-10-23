@@ -13,6 +13,10 @@ size_t get_cublasLt_version() {
     return cublasLtGetVersion();
 }
 
+size_t get_cudnn_version() {
+    return cudnnGetVersion();
+}
+
 
 bool userbuf_comm_available() {  // TODO(ksivamani) check on python side
 #ifdef NVTE_WITH_USERBUFFERS
