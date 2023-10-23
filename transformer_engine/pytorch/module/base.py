@@ -28,6 +28,7 @@ from ..distributed import (
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
+    get_distributed_world_size,
 )
 from ..cpp_extensions import (
     fp8_cast_transpose_fused,
@@ -77,9 +78,7 @@ def _prepare_backward(
             _amax_reduce_handle_bwd = None
 
         # Update amax and scale; Skip all setup for global amax reduction
-        if not fp8_meta["recipe"].reduce_amax:
-            amax_and_scale_update(fp8_meta, False)
-        else:
+        if fp8_meta["recipe"].reduce_amax and get_distributed_world_size(fp8_meta["fp8_group"]) > 1:
             # From previous iteration
             FP8GlobalStateManager.copy_amax_from_global_buffer(fp8_meta, forward=False)
             amax_and_scale_update(fp8_meta, False)
@@ -89,11 +88,14 @@ def _prepare_backward(
             fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd_stack"].pop(0)
 
             FP8GlobalStateManager.add_amax_to_global_buffer(fp8_meta, forward=False)
+        else:
+            amax_and_scale_update(fp8_meta, False)
 
     with torch.cuda.nvtx.range(name + " backward"):
         yield
 
-    if fp8 and fp8_meta["recipe"].reduce_amax:
+    if (fp8 and fp8_meta["recipe"].reduce_amax
+        and get_distributed_world_size(fp8_meta["fp8_group"]) > 1):
         if fp8_meta["first_module"]:
             _amax_reduce_handle_bwd = FP8GlobalStateManager.global_amax_reduction(
                 fp8_meta,
@@ -549,7 +551,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Previous iteration was grad_enabled
             if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-                if self.fp8_meta["recipe"].reduce_amax:
+                if (self.fp8_meta["recipe"].reduce_amax
+                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     FP8GlobalStateManager.copy_amax_from_global_buffer(self.fp8_meta, forward=True)
                     amax_and_scale_update(
                         self.fp8_meta, True, update_weight_scale_inv=update_weight_scale_inv
@@ -562,7 +565,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             if self.fp8 and self.training:
                 # Setup for amax reduction
-                if self.fp8_meta["recipe"].reduce_amax:
+                if (self.fp8_meta["recipe"].reduce_amax
+                    and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
                     self.fp8_meta["first_module"] = FP8GlobalStateManager.is_first_fp8_module()
                     if self.fp8_meta["first_module"]:
                         # Wait for the prior AMAX reduction to finish
@@ -588,7 +592,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.fp8
                 and self.training
                 and is_fp8_activation_recompute_enabled()
-                and not in_fp8_activation_recompute_phase()
             ):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
@@ -599,7 +602,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
             return
 
-        if self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax:
+        if (self.fp8 and self.training and self.fp8_meta["recipe"].reduce_amax
+            and get_distributed_world_size(self.fp8_meta["fp8_group"]) > 1):
             FP8GlobalStateManager.set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
             reduce_func = partial(
                 FP8GlobalStateManager.global_amax_reduction,

@@ -25,8 +25,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
-    fused_attn_bwd_qkvpacked,
-    fused_attn_fwd_qkvpacked,
 )
 import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import (
@@ -38,12 +36,23 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
+from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
 import transformer_engine_extensions as tex
 
-from test_numerics import get_dummy_cuda_rng_tracker, reset_rng_states
+
+# Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+
+
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+# Record initial RNG state from script run.
+_cpu_rng_state = torch.get_rng_state()
+_cuda_rng_state = torch.cuda.get_rng_state()
+
 
 def _get_cudnn_version():
     cudnn_version_encoded = ext.get_cudnn_version()
@@ -51,6 +60,13 @@ def _get_cudnn_version():
     cudnn_minor = (cudnn_version_encoded - cudnn_major * 1000) // 100
     cudnn_patch = cudnn_version_encoded - 1000 * cudnn_major - 100 * cudnn_minor
     return [cudnn_major, cudnn_minor, cudnn_patch]
+
+
+def reset_rng_states() -> None:
+    """revert back to initial RNG state."""
+    torch.set_rng_state(_cpu_rng_state)
+    _set_cuda_rng_state(_cuda_rng_state)
+
 
 _cudnn_version = _get_cudnn_version()
 
@@ -209,6 +225,13 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
                 dtype=dtype).cuda()
     else:
         bias = None
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     block = (
          DotProductAttention(
@@ -732,6 +755,13 @@ def _run_dpa_fp8_ref(dtype, bs, config, backend):
     cu_seqlens = torch.zeros(bs + 1, device=inp.device, dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     op_grad = torch.load('op_grad.pt').cuda().view(bs, config.seq_len, -1).transpose(0,1)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     block = (
          DotProductAttention(
