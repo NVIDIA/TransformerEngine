@@ -2164,19 +2164,6 @@ class DotProductAttention(torch.nn.Module):
                 )
 
         if use_flash_attention:
-            if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.flash_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            attention_mask=attention_mask,
-                                                            qkv_layout=qkv_layout,
-                                                            cu_seqlens_q=cu_seqlens_q,
-                                                            cu_seqlens_kv=cu_seqlens_kv,
-                                                            attn_mask_type=attn_mask_type,
-                                                            cp_group=self.cp_group,
-                                                            cp_global_ranks=self.cp_global_ranks,
-                                                            cp_stream=self.cp_stream)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
