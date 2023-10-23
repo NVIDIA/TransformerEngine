@@ -388,8 +388,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
-                cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
+    def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
                 use_fused_attention):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -441,66 +441,104 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     kv_inputs[i%2] = p2p_comm_buffers[i]
                     if causal:
                         if i == 0:
-                            # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                            q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                            # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
-                            kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                                    dropout_p, softmax_scale, causal=True, return_softmax=False,
+                            if use_fused_attention:
+                                # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                                q_inputs[i%2] = q.view(q.shape[0], -1, *q.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, k.shape[0], -1, *k.shape[-2:])
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
+                                    is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q, cu_seqlens_k,
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    attn_scale=softmax_scale, dropout=dropout_p,
+                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="causal",
                                 )
                             else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k,
-                                    max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
-                                    causal=True, return_softmax=False,
-                                )
+                                # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                                q_inputs[i%2] = q.view(-1, *q.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
+                                if _flash_attn_2_available:
+                                    _, _, _, _, out_per_step[i], \
+                                    softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                                        dropout_p, softmax_scale, causal=True, return_softmax=False,
+                                    )
+                                else:
+                                    out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                    _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        out_per_step[i], cu_seqlens_q, cu_seqlens_k,
+                                        max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
+                                        causal=True, return_softmax=False,
+                                    )
                         elif i <= rank:
-                            # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                            q_inputs[i%2] = q.view(-1, *q.shape[-2:])
-                            # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
-                            kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
-                            kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
-                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
+                            if use_fused_attention:
+                                # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                                q_inputs[i%2] = q.view(q.shape[0], -1, *q.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous()
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
+                                    is_training, max_seqlen_q, max_seqlen_k//2, cu_seqlens_q, cu_seqlens_k//2,
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    attn_scale=softmax_scale, dropout=dropout_p,
+                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="no_mask",
                                 )
                             else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k//2,
-                                    max_seqlen_q, max_seqlen_k//2, dropout_p, softmax_scale,
-                                    causal=False, return_softmax=False,
-                                )
+                                # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                                q_inputs[i%2] = q.view(-1, *q.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous().view(2, -1, *k.shape[-2:])
+                                if _flash_attn_2_available:
+                                    _, _, _, _, out_per_step[i], \
+                                    softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
+                                        dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                    )
+                                else:
+                                    out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                    _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        out_per_step[i], cu_seqlens_q, cu_seqlens_k//2,
+                                        max_seqlen_q, max_seqlen_k//2, dropout_p, softmax_scale,
+                                        causal=False, return_softmax=False,
+                                    )
                         else:
-                            # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                            q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
-                            # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
-                            kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
-                            if _flash_attn_2_available:
-                                _, _, _, _, out_per_step[i], \
-                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
-                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
+                            if use_fused_attention:
+                                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                                q_inputs[i%2] = q[:, 1, ...].contiguous()
+                                # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, k.shape[0], -1, *k.shape[-2:])
+                                out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
+                                    is_training, max_seqlen_q//2, max_seqlen_k, cu_seqlens_q//2, cu_seqlens_k,
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                    tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                    attn_scale=softmax_scale, dropout=dropout_p,
+                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="no_mask",
                                 )
                             else:
-                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
-                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
-                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
-                                    out_per_step[i], cu_seqlens_q//2, cu_seqlens_k,
-                                    max_seqlen_q//2, max_seqlen_k, dropout_p, softmax_scale,
-                                    causal=False, return_softmax=False,
-                                )
+                                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                                q_inputs[i%2] = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
+                                # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
+                                kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
+                                if _flash_attn_2_available:
+                                    _, _, _, _, out_per_step[i], \
+                                    softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
+                                        dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                    )
+                                else:
+                                    out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                    _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
+                                        q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                        out_per_step[i], cu_seqlens_q//2, cu_seqlens_k,
+                                        max_seqlen_q//2, max_seqlen_k, dropout_p, softmax_scale,
+                                        causal=False, return_softmax=False,
+                                    )
                     else:
                         assert False, "Not implemented yet!"
 
@@ -508,6 +546,10 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                 # wait until fwd restuls correction of last step is done
                 if i > 1:
                     flash_attn_streams[(i-1)%2].wait_event(fwd_results_correction_done)
+
+                if use_fused_attention:
+                    # [b, np, sq, 1] -> [b, np, sq]
+                    softmax_lse_per_step[i-1].squeeze_(-1)
 
                 with torch.cuda.stream(flash_attn_streams[(i-1)%2]):
                     if causal:
@@ -548,7 +590,10 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                               softmax_lse_per_step[i])
 
         kv = p2p_comm_buffers[-1]
-        out = out.view(-1, *out.shape[-2:])
+        if use_fused_attention:
+            out = out.view(out.shape[0], -1, *out.shape[-2:])
+        else:
+            out = out.view(-1, *out.shape[-2:])
         ctx.save_for_backward(q, kv, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
         ctx.rng_states = rng_states
         ctx.cp_group = cp_group
@@ -574,6 +619,11 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
         # [b, np, sq] -> [b, np, 2, sq//2]
         softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+        if ctx.use_fused_attention:
+            # [b, np, sq] -> [b, np, sq, 1]
+            softmax_lse.unsqueeze_(-1)
+            # [b, np, 2, sq//2] -> [b, np, 2, sq//2, 1]
+            softmax_lse_.unsqueeze_(-1)
         # [b*sq, np, hn] -> [b, 2, sq//2, np, hn]
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
@@ -615,59 +665,119 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
             # In reversed order of fwd
             if ctx.causal:
                 if i == (cp_size-1):
-                    # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                    q_ = q.view(-1, *q.shape[-2:])
-                    dq_ = torch.empty_like(q_)
-                    # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
-                    kv_ = kv.view(2, -1, *kv.shape[-2:])
-                    dkv_ = torch.empty_like(kv_)
-                    # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                    out_ = out.view(-1, *out.shape[-2:])
-                    dout_ = dout.view(-1, *dout.shape[-2:])
-                    _flash_attn_backward(
-                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
-                        dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
-                        ctx.max_seqlen_q, ctx.max_seqlen_k,
-                        ctx.dropout_p, ctx.softmax_scale, True,
-                        rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
-                    )
+                    if ctx.use_fused_attention:
+                        # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                        q_ = q.view(q.shape[0], -1, *q.shape[-2:])
+                        # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                        kv_ = kv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                        # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                        out_ = out.view(out.shape[0], -1, *out.shape[-2:])
+                        dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
+                        dq_, dk_, dv_, _ = fused_attn_bwd(
+                            ctx.max_seqlen_q, ctx.max_seqlen_k,
+                            cu_seqlens_q, cu_seqlens_k,
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            [softmax_lse, ctx.rng_states[cp_size-i-1]],
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            attn_scale=ctx.softmax_scale,
+                            dropout=ctx.dropout_p,
+                            qkv_layout="sbhd_sbhd_sbhd",
+                            attn_mask_type="causal",
+                        )
+                    else:
+                        # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                        q_ = q.view(-1, *q.shape[-2:])
+                        dq_ = torch.empty_like(q_)
+                        # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
+                        kv_ = kv.view(2, -1, *kv.shape[-2:])
+                        dkv_ = torch.empty_like(kv_)
+                        # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                        out_ = out.view(-1, *out.shape[-2:])
+                        dout_ = dout.view(-1, *dout.shape[-2:])
+                        _flash_attn_backward(
+                            dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
+                            dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
+                            ctx.max_seqlen_q, ctx.max_seqlen_k,
+                            ctx.dropout_p, ctx.softmax_scale, True,
+                            rng_state=ctx.rng_states[cp_size-i-1],
+                            **fa_optional_backward_kwargs
+                        )
                 elif i >= (cp_size-rank-1):
-                    # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                    q_ = q.view(-1, *q.shape[-2:])
-                    dq_ = torch.empty_like(q_)
-                    # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
-                    kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
-                    dkv_ = torch.empty_like(kv_)
-                    # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
-                    out_ = out.view(-1, *out.shape[-2:])
-                    dout_ = dout.view(-1, *dout.shape[-2:])
-                    _flash_attn_backward(
-                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
-                        dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k//2,
-                        ctx.max_seqlen_q, ctx.max_seqlen_k//2,
-                        ctx.dropout_p, ctx.softmax_scale, False,
-                        rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
-                    )
+                    if ctx.use_fused_attention:
+                        # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                        q_ = q.view(q.shape[0], -1, *q.shape[-2:])
+                        # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                        kv_ = kv[:, :, 0, ...].contiguous()
+                        # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                        out_ = out.view(out.shape[0], -1, *out.shape[-2:])
+                        dout_ = dout.view(dout.shape[0], -1, *dout.shape[-2:])
+                        dq_, dk_, dv_, _ = fused_attn_bwd(
+                            ctx.max_seqlen_q, ctx.max_seqlen_k//2,
+                            cu_seqlens_q, cu_seqlens_k//2,
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            [softmax_lse, ctx.rng_states[cp_size-i-1]],
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            attn_scale=ctx.softmax_scale,
+                            dropout=ctx.dropout_p,
+                            qkv_layout="sbhd_sbhd_sbhd",
+                            attn_mask_type="no_mask",
+                        )
+                    else:
+                        # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                        q_ = q.view(-1, *q.shape[-2:])
+                        dq_ = torch.empty_like(q_)
+                        # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
+                        kv_ = kv[:, :, 0, ...].contiguous().view(2, -1, *kv.shape[-2:])
+                        dkv_ = torch.empty_like(kv_)
+                        # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
+                        out_ = out.view(-1, *out.shape[-2:])
+                        dout_ = dout.view(-1, *dout.shape[-2:])
+                        _flash_attn_backward(
+                            dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
+                            dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k//2,
+                            ctx.max_seqlen_q, ctx.max_seqlen_k//2,
+                            ctx.dropout_p, ctx.softmax_scale, False,
+                            rng_state=ctx.rng_states[cp_size-i-1],
+                            **fa_optional_backward_kwargs
+                        )
                 else:
-                    # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                    q_ = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
-                    dq_ = torch.empty_like(q_)
-                    # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
-                    kv_ = kv.view(2, -1, *kv.shape[-2:])
-                    dkv_ = torch.empty_like(kv_)
-                    # [b, sq//2, np, hn] -> [b*sq//2, np, hn]
-                    out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
-                    dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
-                    _flash_attn_backward(
-                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse_[..., 1, :],
-                        dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
-                        ctx.max_seqlen_q//2, ctx.max_seqlen_k,
-                        ctx.dropout_p, ctx.softmax_scale, False,
-                        rng_state=ctx.rng_states[cp_size-i-1],
-                        **fa_optional_backward_kwargs
-                    )
+                    if ctx.use_fused_attention:
+                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                        q_ = q[:, 1, ...].contiguous()
+                        # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+                        kv_ = kv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                        out_ = out[:, 1, ...].contiguous()
+                        dout_ = dout[:, 1, ...].contiguous()
+                        dq_, dk_, dv_, _ = fused_attn_bwd(
+                            ctx.max_seqlen_q//2, ctx.max_seqlen_k,
+                            cu_seqlens_q//2, cu_seqlens_k,
+                            q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
+                            [softmax_lse_[..., 1, :, :], ctx.rng_states[cp_size-i-1]],
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                            attn_scale=ctx.softmax_scale,
+                            dropout=ctx.dropout_p,
+                            qkv_layout="sbhd_sbhd_sbhd",
+                            attn_mask_type="no_mask",
+                        )
+                    else:
+                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                        q_ = q[:, 1, ...].contiguous().view(-1, *q.shape[-2:])
+                        dq_ = torch.empty_like(q_)
+                        # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
+                        kv_ = kv.view(2, -1, *kv.shape[-2:])
+                        dkv_ = torch.empty_like(kv_)
+                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
+                        out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
+                        dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
+                        _flash_attn_backward(
+                            dout_, q_, kv_[0], kv_[1], out_, softmax_lse_[..., 1, :],
+                            dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
+                            ctx.max_seqlen_q//2, ctx.max_seqlen_k,
+                            ctx.dropout_p, ctx.softmax_scale, False,
+                            rng_state=ctx.rng_states[cp_size-i-1],
+                            **fa_optional_backward_kwargs
+                        )
 
                 if i >= (cp_size-rank-1):
                     # [b*sq, np, hn] -> [b, 2, sq//2, np, hn]
@@ -694,6 +804,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     req.wait()
 
                 dkv = p2p_comm_buffers[(i+1)%2][1]
+                if ctx.use_fused_attention:
+                    dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
                 if i >= (cp_size-rank-1) and i != (cp_size-1):
                     # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
                     dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
@@ -723,27 +835,19 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         dq = dq.view(q.shape[0], -1, *q.shape[-2:])
         # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
         dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
-        return dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
+        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
 
 
-def flash_attn_forward_func_with_cp(q, k, v,
-                                    cu_seqlens_q,
-                                    cu_seqlens_k,
-                                    max_seqlen_q,
-                                    max_seqlen_k,
-                                    dropout_p,
-                                    cp_group,
-                                    cp_global_ranks,
-                                    cp_stream,
-                                    softmax_scale=None,
-                                    causal=False,
-                                    deterministic=False,
-                                    use_fused_attention=False):
+def flash_attn_forward_func_with_cp(
+    is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+    dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, causal=False,
+    deterministic=False, use_fused_attention=False
+) -> torch.Tensor:
     """Flash Attention implementation with context parallelism"""
     out = FlashAttnUnpaddedFuncWithCP.apply(
-        q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p,
-        cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
-        use_fused_attention
+        is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+        dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal,
+        deterministic, use_fused_attention
     )
     return out
 
@@ -1347,7 +1451,7 @@ class FlashAttention(torch.nn.Module):
         if context_parallel:
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
-                    query_layer, key_layer, value_layer,
+                    self.training, query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
@@ -1364,7 +1468,8 @@ class FlashAttention(torch.nn.Module):
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
-                    softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
+                    softmax_scale=1.0/self.norm_factor,
+                    causal=attn_mask_type=="causal",
                     **fa_optional_forward_kwargs
                 )
 
@@ -1692,6 +1797,7 @@ class FusedAttention(torch.nn.Module):
                         dtype=torch.int32,
                         device=key_layer.device)
         if qkv_format == 'thd':
+            assert not context_parallel, "thd format is not supported for context parallelism!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
             seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
@@ -1709,23 +1815,23 @@ class FusedAttention(torch.nn.Module):
             assert (fused_attention_backend
                 == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                 ), 'Context parallelism is only supported with backend of NVTE_F16_arbitrary_seqlen!'
+            if qkv_format == 'sbhd':
+                query_layer, key_layer, value_layer = [x.transpose(0,1).contiguous()
+                    for x in (query_layer, key_layer, value_layer)]
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    max_seqlen_q,
-                    max_seqlen_kv,
+                    self.training,
+                    query_layer, key_layer, value_layer,
+                    cu_seqlens_q, cu_seqlens_kv,
+                    max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
-                    cp_group,
-                    cp_global_ranks,
-                    cp_stream,
+                    cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
                     causal=attn_mask_type=="causal",
                     use_fused_attention=True,
                 )
+            if qkv_format == 'sbhd':
+                output = output.transpose(0,1).contiguous()
         else:
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc.apply(
@@ -2228,10 +2334,6 @@ class DotProductAttention(torch.nn.Module):
                                         cp_global_ranks=self.cp_global_ranks,
                                         cp_stream=self.cp_stream)
 
-        assert (
-            self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
-        ), "Context parallelism is only implemented with Flash Attention!"
-
         if use_fused_attention:
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
@@ -2263,6 +2365,10 @@ class DotProductAttention(torch.nn.Module):
                                         cp_group = self.cp_group,
                                         cp_global_ranks = self.cp_global_ranks,
                                         cp_stream = self.cp_stream)
+
+        assert (
+            self.cp_group is None or get_distributed_world_size(self.cp_group) == 1
+        ), "Context parallelism is only implemented with Flash Attention and Fused Attention!"
 
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
