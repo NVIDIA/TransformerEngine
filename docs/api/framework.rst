@@ -10,3 +10,4 @@ Framework-specific API
 
     pytorch
     jax
+    paddle

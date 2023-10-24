@@ -63,7 +63,33 @@ class _LayerNorm(paddle.autograd.PyLayer):
 class LayerNorm(paddle.nn.Layer):
     r"""
     Applies Layer Normalization over a mini-batch of inputs as described in
-    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`
+    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__
+
+    .. math::
+        y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma + \beta
+
+    :math:`\gamma` and :math:`\beta` are learnable affine transform parameters of
+    size :attr:`hidden_size`
+
+    Parameters
+    ----------
+    hidden_size : int
+                size of each input sample.
+    eps : float, default = 1e-5
+        a value added to the denominator of layer normalization for numerical stability.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
+    backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
+             backend to use for softmax operation.
     """
 
     def __init__(
