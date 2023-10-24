@@ -40,7 +40,7 @@ from ..utils import (
     saved_tensor_allow_none,
 )
 
-__all__ = ["LayerNormLinear", "_layernorm_fwd_fp8_cast", "_layernorm_bwd"]
+__all__ = ["LayerNormLinear"]
 
 
 def _layernorm_fwd_fp8_cast(
