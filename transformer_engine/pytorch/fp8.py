@@ -488,6 +488,8 @@ def fp8_init(enabled: bool = False) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
+    Example usage:
+
     .. code-block:: python
 
         with fp8_init(enabled=True):
@@ -496,7 +498,7 @@ def fp8_init(enabled: bool = False) -> None:
     Parameters
     ----------
     enabled: bool, default = `False`
-                  when enabled, Transformer Engine modules created inside this `fp8_autocast`
+                  when enabled, Transformer Engine modules created inside this `fp8_init`
                   region will hold only FP8 copies of its parameters, as opposed to the default
                   behavior where both higher precision and FP8 copies are present. Setting this
                   option to `True` may result in lower memory consumption and is especially
