@@ -6,7 +6,7 @@ Helper module for fp8 meta management
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -59,37 +59,28 @@ def is_fp8_available(gpu_id=None) -> Tuple[bool, str]:
 
 def _format2dtypes(format_: Format):
     if format_ == Format.E4M3:
-        return DType.kFloat8E4M3, DType.kFloat8E4M3
+        return jnp.float8_e4m3fn, jnp.float8_e4m3fn
     if format_ == Format.E5M2:
-        return DType.kFloat8E5M2, DType.kFloat8E5M2
+        return jnp.float8_e5m2, jnp.float8_e5m2
     if format_ == Format.HYBRID:
-        return DType.kFloat8E4M3, DType.kFloat8E5M2
-    return DType.kBFloat16, DType.kBFloat16
+        return jnp.float8_e4m3fn, jnp.float8_e5m2
+    return jnp.bfloat16, jnp.bfloat16
 
 
-class FP8GemmPackage:
+class FP8MetaPackage:
     """
-    A container that contains all required data for
+    A container that contains all required meta data for
     FP8 GEMM
     """
 
     def __init__(
         self,
-        num_of_gemm: int,
-        inputs: jnp.ndarray,
-        kernels: List[jnp.ndarray],
         fp8_max: jnp.ndarray,
         amax: jnp.ndarray,
         scale: jnp.ndarray,
         scale_inv: jnp.ndarray,
     ) -> None:
-        self._num_of_gemm = num_of_gemm
-        self._inputs = inputs
-
-        assert len(kernels) == self._num_of_gemm
-        self._kernels = kernels
-
-        total_num_of_meta = self._num_of_gemm * FP8Helper.NUM_META_PER_GEMM
+        total_num_of_meta = FP8Helper.NUM_META_PER_GEMM
         assert fp8_max.shape[0] == total_num_of_meta
         self._fp8_max = fp8_max
         assert amax.shape[0] == total_num_of_meta
@@ -98,27 +89,6 @@ class FP8GemmPackage:
         self._scale = scale
         assert scale_inv.shape[0] == total_num_of_meta
         self._scale_inv = scale_inv
-
-    @property
-    def num_of_gemm(self) -> int:
-        """
-        num_of_gemm of this package
-        """
-        return self._num_of_gemm
-
-    @property
-    def inputs(self) -> jnp.ndarray:
-        """
-        inputs of this package
-        """
-        return self._inputs
-
-    @property
-    def kernels(self) -> List[jnp.ndarray]:
-        """
-        kernels of this package
-        """
-        return self._kernels
 
     @property
     def fp8_max(self) -> jnp.ndarray:
@@ -162,8 +132,8 @@ class FP8Helper:
     INITIALIZED = False
     MARGIN: float = 0.0
     FP8_FORMAT: Format = Format.HYBRID
-    FWD_DTYPE: DType = DType.kFloat8E4M3
-    BWD_DTYPE: DType = DType.kFloat8E5M2
+    FWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[0]
+    BWD_DTYPE: DType = _format2dtypes(Format.HYBRID)[1]
     UPDATE_FP8META_INTERVAL: int = 1
     AMAX_HISTORY_LEN: int = 1024
     AMAX_COMPUTE_ALGO: AmaxComputeAlgo = AmaxComputeAlgo.MAX
@@ -216,8 +186,8 @@ class FP8Helper:
         FP8Helper.INITIALIZED = False
         FP8Helper.MARGIN = 0.0
         FP8Helper.FP8_FORMAT = Format.HYBRID
-        FP8Helper.FWD_DTYPE = DType.kFloat8E4M3
-        FP8Helper.BWD_DTYPE = DType.kFloat8E5M2
+        FP8Helper.FWD_DTYPE, FP8Helper.BWD_DTYPE = \
+            _format2dtypes(FP8Helper.FP8_FORMAT)
         FP8Helper.UPDATE_FP8META_INTERVAL = 1
         FP8Helper.AMAX_HISTORY_LEN = 1024
         FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
@@ -270,8 +240,8 @@ class FP8Helper:
         Generate the FP8 max array
         """
         num_of_gemm = num_of_meta // FP8Helper.NUM_META_PER_GEMM
-        fp8_max_fwd = FP8Helper.FP8_FORMAT.value.max_fwd
-        fp8_max_bwd = FP8Helper.FP8_FORMAT.value.max_bwd
+        fp8_max_fwd = jnp.finfo(FP8Helper.FWD_DTYPE).max
+        fp8_max_bwd = jnp.finfo(FP8Helper.BWD_DTYPE).max
         fp8_max_per_gemm = []
         for i in range(FP8Helper.NUM_META_PER_GEMM):
             val = fp8_max_bwd if i == FP8Helper.GRAD_META_IDX_PER_GEMM \
