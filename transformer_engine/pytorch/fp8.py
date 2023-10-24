@@ -279,7 +279,7 @@ class FP8GlobalStateManager:
         return cls.FP8_CALIBRATION
 
     @classmethod
-    def is_fp8_parameters(cls) -> bool:
+    def has_fp8_parameters(cls) -> bool:
         """Should the parameters be stored as FP8"""
         return cls.FP8_PARAMETERS
 

@@ -494,12 +494,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def fp8_init(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        self.initialize = FP8GlobalStateManager.is_fp8_parameters()
+        self.fp8_parameters = FP8GlobalStateManager.has_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
-        if self.initialize and not self.fp8_initialized:
+        if self.fp8_parameters and not self.fp8_initialized:
             self.fp8_meta["num_gemms"] = num_gemms
             self.init_fp8_meta_tensors()
 

@@ -684,7 +684,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output = return_layernorm_output
         self.parameters_split = parameters_split
         self.zero_centered_gamma = zero_centered_gamma
-        self.primary_weights_in_fp8 = FP8GlobalStateManager.is_fp8_parameters()
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.has_fp8_parameters()
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag

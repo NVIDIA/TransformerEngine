@@ -361,7 +361,12 @@ class Float8Tensor(torch.Tensor):
         )
 
     def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """Construct plain PyTorch tensor from Float8Tensor"""
+        """
+        Construct plain PyTorch tensor from Float8Tensor
+
+        By default the resulting tensor's dtype is the
+        Float8Tensor's nominal dtype.
+        """
         return _FromFloat8Func.apply(self, dtype)
 
     @classmethod
