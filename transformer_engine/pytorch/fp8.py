@@ -498,19 +498,18 @@ def fp8_init(enabled: bool = True) -> None:
     Parameters
     ----------
     enabled: bool, default = `True`
-                  when enabled, Transformer Engine modules created inside this `fp8_init`
-                  region will hold only FP8 copies of its parameters, as opposed to the default
-                  behavior where both higher precision and FP8 copies are present. Setting this
-                  option to `True` may result in lower memory consumption and is especially
-                  useful for scenarios like:
+             when enabled, Transformer Engine modules created inside this `fp8_init`
+             region will hold only FP8 copies of its parameters, as opposed to the default
+             behavior where both higher precision and FP8 copies are present. Setting this
+             option to `True` may result in lower memory consumption and is especially
+             useful for scenarios like:
 
-                      * full model training using optimizer with master weights, where the high
-                      precision copies of weights are already present in the optimizer
-                      * inference, where only the FP8 copies of the parameters are used
-                      * LoRA-like fine-tuning, where the main parameters of the model do not
-                      change
+             * full model training using optimizer with master weights, where the high
+               precision copies of weights are already present in the optimizer.
+             * inference, where only the FP8 copies of the parameters are used.
+             * LoRA-like fine-tuning, where the main parameters of the model do not change.
 
-                  This functionality is *EXPERIMENTAL*.
+             This functionality is *EXPERIMENTAL*.
     """
     try:
         _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
