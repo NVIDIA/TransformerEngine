@@ -1782,6 +1782,9 @@ class FusedAttention(torch.nn.Module):
             if qkv_format == 'bshd':
                 batch_size, max_seqlen_q, max_seqlen_kv = (
                     query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
+            if context_parallel:
+                assert (cu_seqlens_q is None and cu_seqlens_kv is None), \
+                "Padding masking is not supported with context parallelism!"
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.arange(
                         0,
