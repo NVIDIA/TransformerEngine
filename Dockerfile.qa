@@ -1,26 +1,5 @@
 ARG FROM_IMAGE_DEVEL
 ARG FROM_IMAGE
-ARG FRAMEWORK=pytorch
 
 FROM ${FROM_IMAGE_DEVEL} as devel
 FROM ${FROM_IMAGE}
-
-ARG FRAMEWORK
-WORKDIR /opt/transformerengine/
-SHELL ["bash", "-c"]
-
-# Remove PyTorch tests if not needed
-RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_pytorch_* \
-    || [[ "${FRAMEWORK}" =~ pytorch|all ]]
-RUN rm -r /opt/transformerengine/qa/L1_pytorch_distributed_unittest  # TODO Restore
-
-# Remove PyTorch tests if not needed
-RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_jax_* \
-    || [[ "${FRAMEWORK}" =~ jax|all ]]
-
-# Remove PaddlePaddle tests if not needed
-RUN [[ ! "${FRAMEWORK}" =~ paddle|all ]] \
-    && rm -r /opt/transformerengine/qa/L0_paddle_* \
-    || [[ "${FRAMEWORK}" =~ paddle|all ]]
