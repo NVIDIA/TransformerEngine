@@ -38,7 +38,7 @@ from ..utils import (
     saved_tensor_allow_none,
 )
 
-__all__ = ["Linear", "_linear_fwd", "_linear_fwd_fp8", "_linear_bwd", "_linear_fwd_non_fp8"]
+__all__ = ["Linear"]
 
 
 def _linear_fwd_fp8(
@@ -541,6 +541,29 @@ class _Linear(paddle.autograd.PyLayer):
 class Linear(TransformerEngineBaseLayer):
     """
     Applies a linear transformation to the incoming data :math:`y = xA^T + b`
+
+    Parameters
+    ----------
+    in_features : int
+                 size of each input sample.
+    out_features : int
+                  size of each output sample.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
+    backend: {'transformer_engine', 'paddle'}, default = 'transformer_engine'
+             if set to 'paddle', a framework only no-FP8 path is executed with limited optimization.
+
+    Parallelism parameters
+    ----------------------
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    parallel_mode : {None, 'Column', 'Row'}, default = `None`
+                   used to decide whether this Linear layer is Column Parallel Linear or Row
+                   Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+                   When set to `None`, no communication is performed.
+
     """
 
     def __init__(
@@ -658,7 +681,14 @@ class Linear(TransformerEngineBaseLayer):
         return out
 
     def forward(self, *args, **kwargs):
-        """forward"""
+        """
+        Apply the linear transformation to the input.
+
+        Parameters
+        ----------
+        inp : torch.Tensor
+             Input tensor.
+        """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)
         if self.backend == 'paddle':
