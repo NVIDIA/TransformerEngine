@@ -193,7 +193,8 @@ class _IdentityFunc(torch.autograd.Function):
 
 
 class Float8Tensor(torch.Tensor):
-    """Experimental tensor class with FP8 data
+    """
+    Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
     but the data itself is (scaled) FP8. For most tensor operations,
@@ -229,7 +230,6 @@ class Float8Tensor(torch.Tensor):
                    provided.
     dtype: torch.dtype, default = torch.float32
            Nominal tensor datatype.
-
     """
 
     def __new__(
