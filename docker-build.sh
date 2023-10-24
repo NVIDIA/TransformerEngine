@@ -412,7 +412,9 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   # Create xx.yy-qa image
   docker build --progress=plain -t "${QA_IMAGE_NAME}" -f Dockerfile.qa \
       --build-arg "FROM_IMAGE_DEVEL=${DEVEL_IMAGE_NAME}" \
-      --build-arg "FROM_IMAGE=${BASE_IMAGE}" --network=host .
+      --build-arg "FROM_IMAGE=${BASE_IMAGE}" \
+      --build-arg "FRAMEWORK=${FRAMEWORK}" \
+      --network=host .
   if [[ $? -ne 0 ]]; then
     echo ABORT Failed to create qa image
     exit 1
