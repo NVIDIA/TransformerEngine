@@ -14,12 +14,12 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 project(transformer_engine LANGUAGES CUDA CXX)
 
-list(APPEND CMAKE_CUDA_FLAGS "--threads 4")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads 4")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 find_package(CUDAToolkit REQUIRED cublas nvToolsExt)
 find_package(CUDNN REQUIRED cudnn)
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
