@@ -17,7 +17,7 @@ from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
 
-__all__ = ["fp8_autocast"]
+__all__ = ["fp8_autocast", "fp8_model_init"]
 
 
 def check_fp8_support() -> Tuple[bool, str]:
@@ -484,7 +484,7 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_init(enabled: bool = True) -> None:
+def fp8_model_init(enabled: bool = True) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -492,13 +492,13 @@ def fp8_init(enabled: bool = True) -> None:
 
     .. code-block:: python
 
-        with fp8_init(enabled=True):
+        with fp8_model_init(enabled=True):
             model = transformer_engine.pytorch.Linear(768, 768)
 
     Parameters
     ----------
     enabled: bool, default = `True`
-             when enabled, Transformer Engine modules created inside this `fp8_init`
+             when enabled, Transformer Engine modules created inside this `fp8_model_init`
              region will hold only FP8 copies of its parameters, as opposed to the default
              behavior where both higher precision and FP8 copies are present. Setting this
              option to `True` may result in lower memory consumption and is especially

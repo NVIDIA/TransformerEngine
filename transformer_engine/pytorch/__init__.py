@@ -13,7 +13,7 @@ from .attention import InferenceParams
 from .attention import MultiheadAttention
 from .transformer import TransformerLayer
 from .fp8 import fp8_autocast
-from .fp8 import fp8_init
+from .fp8 import fp8_model_init
 from .export import onnx_export
 from .distributed import checkpoint
 from .distributed import CudaRNGStatesTracker

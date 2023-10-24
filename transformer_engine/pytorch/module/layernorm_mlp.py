@@ -1140,7 +1140,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
 
         if self.primary_weights_in_fp8:
-            self.fp8_init(num_gemms=2)
+            self.init_fp8_metadata(num_gemms=2)
             self.fp8_meta["update_amax_and_scale_fwd"] = True
 
             fc1_temp_weight = Float8Tensor.to_float8(

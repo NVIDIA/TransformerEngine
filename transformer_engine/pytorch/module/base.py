@@ -492,7 +492,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
-    def fp8_init(self, num_gemms: int = 1) -> None:
+    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
         self.fp8_parameters = FP8GlobalStateManager.has_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
@@ -550,7 +550,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert self.tp_group_initialized, "TP group not initialized."
 
             self.set_activation_dtype(inp)
-            self.fp8_init(num_gemms=num_gemms)
+            self.init_fp8_metadata(num_gemms=num_gemms)
 
             # Create persistent tensors for fp8 weights and their transposes
             # only when fp8 weight caching is used.

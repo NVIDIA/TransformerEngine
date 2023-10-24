@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_init
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -354,7 +354,7 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    with fp8_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
             TransformerLayer(
                 config.hidden_size,
@@ -429,7 +429,7 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, rec
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    with fp8_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
         block = (
         TransformerLayer(
             config.hidden_size,
@@ -1135,7 +1135,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    with fp8_init(enabled=fp8_model_params):
+    with fp8_model_init(enabled=fp8_model_params):
         block = (
             TransformerLayer(
                 config.hidden_size,

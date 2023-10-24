@@ -35,7 +35,7 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.fp8_autocast
 
-.. autoapifunction:: transformer_engine.pytorch.fp8_init
+.. autoapifunction:: transformer_engine.pytorch.fp8_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
 

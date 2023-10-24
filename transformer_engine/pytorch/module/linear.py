@@ -648,7 +648,7 @@ class Linear(TransformerEngineBaseModule):
         )
 
         if self.primary_weights_in_fp8:
-            self.fp8_init()
+            self.init_fp8_metadata()
             self.fp8_meta["update_amax_and_scale_fwd"] = True
 
             self.weight_tensor = Float8Tensor.to_float8(
