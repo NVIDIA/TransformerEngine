@@ -22,9 +22,9 @@ __all__ = ["fp8_autocast"]
 
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if get_device_compute_capability() >= 9.0: # hopper and above
+    if get_device_compute_capability() >= (9, 0): # hopper and above
         return True, ""
-    if get_device_compute_capability() < 8.9: # pre-ada
+    if get_device_compute_capability() < (8, 9): # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
     if tex.get_cublasLt_version() < 120103:
         return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
@@ -74,6 +74,29 @@ class FP8GlobalStateManager:
     dp_amax_reduce_interval = None
     dp_amax_reduce_forward_idx = 0
     dp_amax_reduce_backward_idx = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the global state"""
+        cls.FP8_ENABLED = False
+        cls.FP8_CALIBRATION = False
+        cls.FP8_RECIPE = None
+        cls.FP8_DISTRIBUTED_GROUP = None
+        cls.IS_FIRST_FP8_MODULE = False
+        cls.FP8_AUTOCAST_COUNTER = 0
+        cls.FP8_CURRENT_CONTEXT_ID = 0
+        cls.FP8_AUTOCAST_DEPTH = 0
+        cls.global_fp8_buffer = {}
+        cls.fp8_tensors_recompute_buffer = []
+        cls.amax_forward_global_reduce_func = None
+        cls.buffer_delete_key_fwd = None
+        cls.buffer_delete_key_bwd = None
+        cls.amax_reduce_handle_fwd = None
+        cls.fp8_available = None
+        cls.reason_for_no_fp8 = ""
+        cls.dp_amax_reduce_interval = None
+        cls.dp_amax_reduce_forward_idx = 0
+        cls.dp_amax_reduce_backward_idx = 0
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:

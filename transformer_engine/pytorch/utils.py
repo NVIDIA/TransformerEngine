@@ -8,11 +8,10 @@ from typing import Any, Callable, Optional, Tuple
 import torch
 
 
-def get_device_compute_capability() -> float:
-    """Returns the cuda compute capability of current GPU"""
-    major = torch.cuda.get_device_properties(torch.cuda.current_device()).major
-    minor = torch.cuda.get_device_properties(torch.cuda.current_device()).minor
-    return major + minor / 10
+def get_device_compute_capability() -> Tuple[int, int]:
+    """CUDA compute capability of current GPU"""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return (props.major, props.minor)
 
 
 def attention_mask_func(

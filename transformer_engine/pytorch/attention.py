@@ -1619,7 +1619,7 @@ class FusedAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
                         and _flash_attn_2_available
-                        and get_device_compute_capability() == 9.0)
+                        and get_device_compute_capability() == (9, 0))
 
     def forward(
         self,
@@ -1849,7 +1849,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
         if _flash_attn_2_available and self.deterministic:
             self.use_flash_attention = False
@@ -1861,7 +1861,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_fused_attention = (
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
 
         assert (
@@ -1920,7 +1920,19 @@ class DotProductAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group"""
+        """
+        Set the context parallel attributes for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        cp_group : ProcessGroup
+                  context parallel process group.
+        cp_global_ranks : List[int]
+                         list of global ranks in the context group.
+        cp_stream : torch.cuda.Stream
+                   cuda stream for context parallel execution.
+        """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
@@ -2091,9 +2103,12 @@ class DotProductAttention(torch.nn.Module):
 
         # Filter: Device and dimensions.
         if key_layer.shape[-1] > 64:
-            if self.device_compute_capability in (8.6, 8.7):
+            if self.device_compute_capability in ((8, 6), (8, 7)):
                 use_flash_attention = False
-            elif not _flash_attn_2_available and self.device_compute_capability == 8.9:
+            elif (
+                not _flash_attn_2_available
+                and self.device_compute_capability == (8, 9)
+            ):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
@@ -2149,19 +2164,6 @@ class DotProductAttention(torch.nn.Module):
                 )
 
         if use_flash_attention:
-            if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.flash_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            attention_mask=attention_mask,
-                                                            qkv_layout=qkv_layout,
-                                                            cu_seqlens_q=cu_seqlens_q,
-                                                            cu_seqlens_kv=cu_seqlens_kv,
-                                                            attn_mask_type=attn_mask_type,
-                                                            cp_group=self.cp_group,
-                                                            cp_global_ranks=self.cp_global_ranks,
-                                                            cp_stream=self.cp_stream)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
@@ -2557,7 +2559,15 @@ class MultiheadAttention(torch.nn.Module):
         )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
-        """Set TP group"""
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
         self.tp_group = tp_group
 
     def set_context_parallel_group(
@@ -2566,7 +2576,19 @@ class MultiheadAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group"""
+        """
+        Set the context parallel attributes for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        cp_group : ProcessGroup
+                  context parallel process group.
+        cp_global_ranks : List[int]
+                         list of global ranks in the context group.
+        cp_stream : torch.cuda.Stream
+                   cuda stream for context parallel execution.
+        """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:

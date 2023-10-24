@@ -20,7 +20,7 @@ Coding Guidelines
 
   .. code-block:: bash
 
-    TE_PATH=<path to TE source> bash qa/L0_lint/test.sh
+    TE_PATH=<path to TE source> bash qa/L0_<framework>_lint/test.sh
 
 * Avoid introducing unnecessary complexity into existing code so that maintainability and
   readability are preserved.
@@ -41,7 +41,7 @@ Coding Guidelines
 
   - In the :bash:`qa/` directory, there are basic sanity tests scripted in directories named
     `L0_...`. A given test can be executed by running the :bash:`./test.sh` command in each test
-    directory. The :bash:`test.sh` script assume that the TE source can be found under
+    directory. The :bash:`test.sh` script assumes that the TE source can be found under
     :bash:`/opt/transformerengine`. This assumption can be changed by setting :bash:`TE_PATH`
     environment variable to the directory containing TE source.
   - One of the tests, `L0_license` tests for valid NVIDIA copyright and license text. If you create

@@ -24,8 +24,13 @@ from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.mlp import fp8_ln_mlp
 
-GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
-              (16384, 1024, 1024)]
+GEMM_CASES = [
+    (256, 256, 512),
+    (32, 32, 32),
+    (2048, 1024, 2048),
+    (2048, 2048, 1024),
+    (2048, 1024, 1024),
+]
 FP8_COMPUTE_TYPE = [_format2dtypes(Format.E4M3), _format2dtypes(Format.HYBRID)]
 LN_CASES = [(512, 1024)]
 DTYPES = [jnp.bfloat16, jnp.float32]

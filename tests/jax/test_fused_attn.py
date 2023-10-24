@@ -167,6 +167,12 @@ class TestSelfFusedAttn():
                                               dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
+        compute_capability = get_device_compute_capability(0)
+        if (backend == Backend.Max512
+            and not (compute_capability == 80 or compute_capability >= 90)):
+            pytest.skip("Unsupported compute capability for "
+                        "fused attention with <=512 sequence length")
+
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
                     dropout_probability, dtype, is_training, pad_ratio):
         """Setup the test inputs"""
