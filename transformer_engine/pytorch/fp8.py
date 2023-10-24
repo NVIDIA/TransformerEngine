@@ -484,7 +484,7 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_init(enabled: bool = False) -> None:
+def fp8_init(enabled: bool = True) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -497,7 +497,7 @@ def fp8_init(enabled: bool = False) -> None:
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled: bool, default = `True`
                   when enabled, Transformer Engine modules created inside this `fp8_init`
                   region will hold only FP8 copies of its parameters, as opposed to the default
                   behavior where both higher precision and FP8 copies are present. Setting this
@@ -522,7 +522,7 @@ def fp8_init(enabled: bool = False) -> None:
 
 @contextmanager
 def fp8_autocast(
-    enabled: bool = False,
+    enabled: bool = True,
     calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_group: Optional[dist_group_type] = None,
@@ -551,7 +551,7 @@ def fp8_autocast(
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled: bool, default = `True`
              whether or not to enable fp8
     calibrating: bool, default = `False`
                  calibration mode allows collecting statistics such as amax and scale
