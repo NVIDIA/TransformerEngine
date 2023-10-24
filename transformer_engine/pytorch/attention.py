@@ -1423,6 +1423,9 @@ class FlashAttention(torch.nn.Module):
                     query_layer_packed, key_layer_packed, value_layer_packed)
                 cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
             else:
+                if context_parallel:
+                    assert (cu_seqlens_q is None and cu_seqlens_kv is None), \
+                    "Context parallelism does not support padded tokens!"
                 if cu_seqlens_q is None:
                     cu_seqlens_q = torch.arange(
                             0,
@@ -1784,7 +1787,7 @@ class FusedAttention(torch.nn.Module):
                     query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
             if context_parallel:
                 assert (cu_seqlens_q is None and cu_seqlens_kv is None), \
-                "Padding masking is not supported with context parallelism!"
+                "Context parallelism does not support padded tokens!"
             if cu_seqlens_q is None:
                 cu_seqlens_q = torch.arange(
                         0,
