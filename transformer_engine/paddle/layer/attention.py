@@ -391,7 +391,7 @@ class MultiHeadAttention(paddle.nn.Layer):
     zero_centered_gamma: bool, default = `False`
                     whether to zero initialize the gamma of the layernorm operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-             backend to use for attention operation. if set to 'paddle', a framework
+             backend to use for attention operation. If set to 'paddle', a framework
              only no-FP8 path is executed with limited optimization.
 
     Parallelism parameters

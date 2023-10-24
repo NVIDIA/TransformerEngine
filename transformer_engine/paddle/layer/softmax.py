@@ -132,7 +132,7 @@ class FusedScaleMaskSoftmax(paddle.nn.Layer):
                        a value added to the denominator of layer normalization
                        for numerical stability.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-             backend to use for softmax operation.
+             backend to use for operation.
     """
 
     def __init__(
