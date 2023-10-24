@@ -121,6 +121,17 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array):
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
 
 
+def all_reduce_max_along_all_axes_except_PP(x: jnp.array):
+    """
+    All-Reduce (Max) along all mesh axes.
+    """
+    all_axes = get_all_mesh_axes()
+    for axis in all_axes:
+        if axis != global_mesh_resource().pp_resource:
+            x = lax_paral_op(x, jax.lax.pmax, axis)
+    return x
+
+
 # Deprecating Items ---------------------------------------------------------------
 jax.config.update('experimental_xmap_spmd_lowering', True)
 jax.config.update('experimental_xmap_spmd_lowering_manual', True)
