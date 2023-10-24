@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include "common.h"
-#include "../common.h"
+#include "common/common.h"
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,

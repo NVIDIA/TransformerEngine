@@ -39,6 +39,7 @@ from ..utils import (
     saved_tensor_allow_none,
 )
 
+
 __all__ = ["LayerNormMLP"]
 
 
@@ -549,7 +550,47 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
 
 class LayerNormMLP(TransformerEngineBaseLayer):
     r"""
-    Applies layer normalization followed by linear transformation to the incoming data.
+    Applies layer normalization on the input followed by the MLP module, consisting of
+    2 successive linear transformations, separated by the GeLU activation.
+
+    Parameters
+    ----------
+    hidden_size : int
+                 size of each input sample.
+    ffn_hidden_size : int
+                     intermediate size to which input samples are projected.
+    eps : float, default = 1e-5
+         a value added to the denominator of layer normalization for numerical stability.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
+    activation : str, default = 'gelu'
+          activation function used.
+          Options: 'gelu', 'geglu', 'relu', 'reglu', 'squared_relu', 'swiglu'.
+    return_layernorm_output : bool, default = `False`
+                             if set to `True`, output of layernorm is returned from the forward
+                             together with the output of the linear transformation.
+                             Example use case: residual connection for transformer module
+                             is taken post layernorm.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
+    backend: {'transformer_engine', 'paddle'}, default = 'transformer_engine'
+             if set to 'paddle', a framework only no-FP8 path is executed with limited optimization.
+
+    Parallelism parameters
+    ----------------------
+    set_parallel_mode : bool, default = `False`
+                      if set to `True`, FC1 is used as Column Parallel and FC2 is used as Row
+                      Parallel as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    tp_group : paddle.distributed.collective.Group, default = `None`
+               tensor parallel process group.
+
     """
 
     def __init__(
@@ -753,7 +794,14 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         return out
 
     def forward(self, *args, **kwargs):
-        """forward"""
+        """
+        Apply layer normalization to the input followed by a feedforward network (MLP Block).
+
+        Parameters
+        ----------
+        inp : torch.Tensor
+             Input tensor.
+        """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)
         if self.backend == 'paddle':

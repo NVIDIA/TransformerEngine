@@ -7,19 +7,18 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
-#include <cuda_runtime_api.h>
-
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include <cuda_runtime_api.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/logging.h"
-#include "transformer_engine/transformer_engine.h"
+#include "common/util/logging.h"
+#include <transformer_engine/fused_attn.h>
+#include <transformer_engine/transformer_engine.h>
 
 namespace transformer_engine {
 namespace jax {

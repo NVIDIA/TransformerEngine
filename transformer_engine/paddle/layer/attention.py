@@ -29,6 +29,9 @@ from ..utils import attention_mask_func, divide
 from ..recompute import recompute
 
 
+__all__ = ["DotProductAttention", "MultiHeadAttention"]
+
+
 class FusedAttnFuncPackedQKV(paddle.autograd.PyLayer):
     """Function for FusedAttention with packed QKV input"""
 
@@ -129,7 +132,7 @@ class FusedAttnFuncPackedKV(paddle.autograd.PyLayer):
 
 
 class DotProductAttention(paddle.nn.Layer):
-    """Dot Product Attention Layer
+    """
     Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
@@ -150,8 +153,7 @@ class DotProductAttention(paddle.nn.Layer):
     attention_type: {'self', 'cross'}, default = `self`
                     type of attention operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-                backend to use for attention operation.
-
+             backend to use for attention operation.
     """
 
     def __init__(self,
@@ -215,17 +217,17 @@ class DotProductAttention(paddle.nn.Layer):
         Parameters
         ----------
         query_layer : paddle.Tensor
-                     Query tensor.
+                      Query tensor.
         key_value_layer : paddle.Tensor
-                   Key tensor.
+                          Key tensor.
         attention_mask : Optional[paddle.Tensor], default = `None`
-                        Boolean tensor used to mask out softmax input when not using attention.
+                         Boolean tensor used to mask out softmax input when not using attention.
         core_attention_bias_type: str, default = `no_bias`
-                                only support no_bias type currently, {`no_bias`}
+                                  only support no_bias type currently, {`no_bias`}
         core_attention_bias: Optional[paddle.Tensor], default = `None`
-                    Bias tensor for Q * K.T
-        set_zero: bool, defautl = `True`
-                    Whether to use the fast path to set output tensors to 0 or not.
+                             Bias tensor for Q * K.T
+        set_zero: bool, default = `True`
+                  Whether to use the fast path to set output tensors to 0 or not.
         """
 
         backend = self.backend
@@ -358,7 +360,9 @@ class DotProductAttention(paddle.nn.Layer):
 
 
 class MultiHeadAttention(paddle.nn.Layer):
-    """Attention w/ QKV and Proj Gemms
+    """
+    Multi-head Attention (MHA), including Query,
+    Key, Value and Output projection.
 
     Parameters
     ----------
@@ -387,7 +391,8 @@ class MultiHeadAttention(paddle.nn.Layer):
     zero_centered_gamma: bool, default = `False`
                     whether to zero initialize the gamma of the layernorm operation.
     backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
-                backend to use for attention operation.
+             backend to use for attention operation. If set to 'paddle', a framework
+             only no-FP8 path is executed with limited optimization.
 
     Parallelism parameters
     ----------------------
@@ -542,7 +547,6 @@ class MultiHeadAttention(paddle.nn.Layer):
         """
         MultiHeadAttention Layer.
 
-
         Parameters
         ----------
         hidden_states : paddle.Tensor
@@ -555,7 +559,7 @@ class MultiHeadAttention(paddle.nn.Layer):
                                 only support no_bias type currently, {`no_bias`}
         core_attention_bias: Optional[paddle.Tensor], default = `None`
                     Bias tensor for Q * K.T
-        set_zero: bool, defautl = `True`
+        set_zero: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         recompute_core_attention: bool, default = `False`
                                   If true, forward activations for core attention are recomputed

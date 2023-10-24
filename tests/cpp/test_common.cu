@@ -6,12 +6,15 @@
 
 
 #include "test_common.h"
-#include "transformer_engine/logging.h"
-#include "transformer_engine/transformer_engine.h"
-#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <memory>
 #include <random>
+
+#include <gtest/gtest.h>
+
+#include <transformer_engine/transformer_engine.h>
+#include "util/logging.h"
 
 namespace test {
 

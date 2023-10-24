@@ -40,7 +40,7 @@ from ..utils import (
     saved_tensor_allow_none,
 )
 
-__all__ = ["LayerNormLinear", "_layernorm_fwd_fp8_cast", "_layernorm_bwd"]
+__all__ = ["LayerNormLinear"]
 
 
 def _layernorm_fwd_fp8_cast(
@@ -331,6 +331,42 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
 class LayerNormLinear(TransformerEngineBaseLayer):
     r"""
     Applies layer normalization followed by linear transformation to the incoming data.
+
+    Parameters
+    ----------
+    in_features : int
+                 size of each input sample.
+    out_features : int
+                  size of each output sample.
+    eps : float, default = 1e-5
+         a value added to the denominator of layer normalization for numerical stability.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
+    return_layernorm_output : bool, default = `False`
+                             if set to `True`, output of layernorm is returned from the forward
+                             together with the output of the linear transformation.
+                             Example use case: residual connection for transformer module is
+                             taken post layernorm.
+    zero_centered_gamma : bool, default = 'False'
+                         if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
+                         the LayerNorm formula changes to
+
+                         .. math::
+                            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
+                            (1 + \gamma) + \beta
+    backend: {'transformer_engine', 'paddle'}, default = 'transformer_engine'
+             if set to 'paddle', a framework only no-FP8 path is executed with limited optimization.
+
+    Parallelism parameters
+    ----------------------
+    tp_group : ProcessGroup, default = `None`
+              tensor parallel process group.
+    parallel_mode : {None, 'Column', 'Row'}, default = `None`
+                   used to decide whether this Linear layer is Column Parallel Linear or Row
+                   Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+                   When set to `None`, no communication is performed.
     """
 
     def __init__(
@@ -503,7 +539,14 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         return out
 
     def forward(self, *args, **kwargs):
-        """forward"""
+        """
+        Apply layer normalization to the input followed by a linear transformation.
+
+        Parameters
+        ----------
+        inp : torch.Tensor
+             Input tensor.
+        """
         if self.backend == 'transformer_engine':
             return self._te_forward(*args, **kwargs)
         if self.backend == 'paddle':

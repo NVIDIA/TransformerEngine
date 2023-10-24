@@ -4,17 +4,18 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transpose.h>
-#include <transformer_engine/logging.h>
-#include <gtest/gtest.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <memory>
-#include <iostream>
-#include <iomanip>
-#include <random>
-#include <cstring>
 #include <cmath>
+#include <cstring>
+#include <memory>
+#include <iomanip>
+#include <iostream>
+#include <random>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+
+#include <transformer_engine/transpose.h>
 #include "../test_common.h"
 
 using namespace transformer_engine;
