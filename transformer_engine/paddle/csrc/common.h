@@ -5,22 +5,23 @@
  ************************************************************************/
 #pragma once
 
+#include <cstdlib>
+#include <vector>
+
 #include <cublasLt.h>
+#include "paddle/extension.h"
+#include "paddle/phi/backends/all_context.h"
+
+#include "common/util/logging.h"
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/layer_norm.h>
-#include <transformer_engine/logging.h>
 #include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
-#include <cstdlib>
-#include <vector>
-
-#include "paddle/extension.h"
-#include "paddle/phi/backends/all_context.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
