@@ -419,7 +419,12 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
-    def transpose(self, dim0: int = 0, dim1: int = 1) -> Float8Tensor:
+    def transpose(
+        self,
+        dim0: int = 0,
+        dim1: int = 1,
+        update_cache: Optional[bool] = None,
+    ) -> Float8Tensor:
         # TODO Support differentiation # pylint: disable=fixme
         if self.dim() != 2:
             raise RuntimeError(
@@ -428,14 +433,28 @@ class Float8Tensor(torch.Tensor):
             )
         if dim0 == dim1:
             return self
-        if self._transpose is None:
-            self._transpose = Float8Tensor.make_like(
+        # Case 1: No caching. No need to store result in `_transpose`.
+        if update_cache is None:
+            return Float8Tensor.make_like(
                 self,
                 data=tex.fp8_transpose(
                     self._data.contiguous().detach(),
                     self._fp8_dtype,
                 ),
             )
+
+        # Case 2: Use existing cache.
+        if not update_cache and self._transpose is not None:
+            return self._transpose
+
+        # Case 3: Update the cache.
+        self._transpose = Float8Tensor.make_like(
+            self,
+            data=tex.fp8_transpose(
+                self._data.contiguous().detach(),
+                self._fp8_dtype,
+            ),
+        )
         return self._transpose
 
     @torch.no_grad()
