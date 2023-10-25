@@ -1069,7 +1069,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                    self.activation == 'gelu')
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
-        self.primary_weights_in_fp8 = FP8GlobalStateManager.has_fp8_parameters()
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.ub_bulk_wgrad = ub_bulk_wgrad
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_rs = ub_split_rs

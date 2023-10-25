@@ -594,7 +594,7 @@ class Linear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
         self.parameters_split = parameters_split
-        self.primary_weights_in_fp8 = FP8GlobalStateManager.has_fp8_parameters()
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.ub_split_rs = ub_split_rs
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
