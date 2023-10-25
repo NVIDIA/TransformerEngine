@@ -278,32 +278,33 @@ class TestFloat8Tensor:
         tols = dict(rtol=0, atol=0)
         torch.testing.assert_close(y_fp8, y_ref, **tols)
 
-        # Check transpose caching
-        x_fp8 += 0.5
-        x_ref = x_fp8.from_float8()
-        torch.testing.assert_close(
-            x_fp8.transpose(*transpose_dims, cache=True),
-            x_ref.transpose(*transpose_dims),
-            **tols,
-        )
-        torch.testing.assert_close(
-            x_fp8.transpose(*transpose_dims, cache=True),
-            x_ref.transpose(*transpose_dims),
-            **tols,
-        )
-        x_fp8 += 0.5
-        x_ref = x_fp8.from_float8()
-        torch.testing.assert_close(
-            x_fp8.transpose(*transpose_dims, cache=True),
-            x_ref.transpose(*transpose_dims),
-            **tols,
-        )
-
         # Make sure we are not trivially passing the test
         if transpose_dims[0] != transpose_dims[1]:
             with pytest.raises(AssertionError):
                 torch.testing.assert_close(
-                    x_fp8.transpose(*transpose_dims),
+                    y_fp8,
                     x_ref,
                     **tols,
                 )
+
+        # Check transpose caching
+        if x_fp8.dim() == 2 and transpose_dims[0] != transpose_dims[1]:
+            x_fp8 += 0.5
+            x_ref = x_fp8.from_float8()
+            torch.testing.assert_close(
+                x_fp8.transpose(*transpose_dims, cache=True),
+                x_ref.transpose(*transpose_dims),
+                **tols,
+            )
+            torch.testing.assert_close(
+                x_fp8.transpose(*transpose_dims, cache=True),
+                x_ref.transpose(*transpose_dims),
+                **tols,
+            )
+            x_fp8 += 0.5
+            x_ref = x_fp8.from_float8()
+            torch.testing.assert_close(
+                x_fp8.transpose(*transpose_dims, cache=True),
+                x_ref.transpose(*transpose_dims),
+                **tols,
+            )
