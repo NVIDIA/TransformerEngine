@@ -167,7 +167,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8 = weight
                 weight_t_fp8 = None
                 if is_grad_enabled:
-                    weight_t_fp8 = weight_fp8.transpose(update_cache=is_first_microbatch)
+                    weight_t_fp8 = weight_fp8.transpose(cache=True)
 
             elif update_fp8_weights:
                 # Need to cast weights to FP8

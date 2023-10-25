@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 from collections.abc import Iterable
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import pytest
 import torch
@@ -201,3 +201,109 @@ class TestFloat8Tensor:
         # Make sure we are not trivially passing tests
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8 + y_fp8, x_ref - y_fp8, **tols)
+
+    def test_inplace_ops(
+        self,
+        dims: DimsType = 23,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        scale: float = 3.5,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Test in-place ops"""
+
+        # Initialize random data
+        dims = _to_list(dims)
+        x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        y_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        x_fp8 = Float8Tensor.to_float8(
+            x_ref,
+            fp8_dtype=fp8_dtype,
+            scale=torch.full([1], scale),
+        )
+        y_fp8 = Float8Tensor.to_float8(
+            y_ref,
+            fp8_dtype=fp8_dtype,
+            scale=torch.full([1], scale),
+        )
+        x_ref = x_fp8.from_float8()
+        y_ref = y_fp8.from_float8()
+
+        # In-place operations
+        tols = _tols[fp8_dtype]
+        x_fp8 += y_ref
+        x_ref += y_ref
+        torch.testing.assert_close(x_fp8, x_ref, **tols)
+        x_ref = x_fp8.from_float8()
+        x_fp8 -= y_fp8
+        x_ref -= y_fp8
+        torch.testing.assert_close(x_fp8, x_ref, **tols)
+        x_ref = x_fp8.from_float8()
+        x_fp8 *= 2
+        x_ref *= 2
+        torch.testing.assert_close(x_fp8, x_ref, **tols)
+        x_ref = x_fp8.from_float8()
+
+        # Make sure we are not trivially passing tests
+        x_ref += 123
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(x_fp8, x_ref, **tols)
+
+    @pytest.mark.parametrize("dims", [[33, 41], [5, 7, 11]])
+    @pytest.mark.parametrize("transpose_dims", [(0, 1), (-2, -1), (0, 0)])
+    def test_transpose(
+        self,
+        dims: DimsType,
+        transpose_dims: Tuple[int, int],
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        scale: float = 1,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Test transpose"""
+
+        # Initialize random data
+        dims = _to_list(dims)
+        x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        x_fp8 = Float8Tensor.to_float8(
+            x_ref,
+            fp8_dtype=fp8_dtype,
+            scale=torch.full([1], scale),
+        )
+        x_ref = x_fp8.from_float8()
+
+        # Perform transpose
+        y_fp8 = x_fp8.transpose(*transpose_dims)
+        y_ref = x_ref.transpose(*transpose_dims)
+
+        # Check results
+        tols = dict(rtol=0, atol=0)
+        torch.testing.assert_close(y_fp8, y_ref, **tols)
+
+        # Check transpose caching
+        x_fp8 += 0.5
+        x_ref = x_fp8.from_float8()
+        torch.testing.assert_close(
+            x_fp8.transpose(*transpose_dims, cache=True),
+            x_ref.transpose(*transpose_dims),
+            **tols,
+        )
+        torch.testing.assert_close(
+            x_fp8.transpose(*transpose_dims, cache=True),
+            x_ref.transpose(*transpose_dims),
+            **tols,
+        )
+        x_fp8 += 0.5
+        x_ref = x_fp8.from_float8()
+        torch.testing.assert_close(
+            x_fp8.transpose(*transpose_dims, cache=True),
+            x_ref.transpose(*transpose_dims),
+            **tols,
+        )
+
+        # Make sure we are not trivially passing the test
+        if transpose_dims[0] != transpose_dims[1]:
+            with pytest.raises(AssertionError):
+                torch.testing.assert_close(
+                    x_fp8.transpose(*transpose_dims),
+                    x_ref,
+                    **tols,
+                )

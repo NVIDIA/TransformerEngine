@@ -423,18 +423,23 @@ class Float8Tensor(torch.Tensor):
         self,
         dim0: int = 0,
         dim1: int = 1,
-        update_cache: Optional[bool] = None,
-    ) -> Float8Tensor:
+        *,
+        cache: bool = False,
+    ) -> torch.Tensor:
+
+        # Handle caching
+        if cache and self._transpose is None:
+            self._transpose = self.transpose(dim0=dim0, dim1=dim1, cache=False)
+        if self._transpose is not None:
+            return self._transpose
+
+        # Use optimized kernel for basic 2D transpose
         # TODO Support differentiation # pylint: disable=fixme
-        if self.dim() != 2:
-            raise RuntimeError(
-                "Float8Tensor only supports transposing 2D tensors "
-                f"(got ndim={self.dim()})"
-            )
-        if dim0 == dim1:
-            return self
-        # Case 1: No caching. No need to store result in `_transpose`.
-        if update_cache is None:
+        if -self.dim() <= dim0 < 0:
+            dim0 += self.dim()
+        if -self.dim() <= dim1 < 0:
+            dim1 += self.dim()
+        if self.dim() == 2 and dim0 != dim1:
             return Float8Tensor.make_like(
                 self,
                 data=tex.fp8_transpose(
@@ -443,19 +448,8 @@ class Float8Tensor(torch.Tensor):
                 ),
             )
 
-        # Case 2: Use existing cache.
-        if not update_cache and self._transpose is not None:
-            return self._transpose
-
-        # Case 3: Update the cache.
-        self._transpose = Float8Tensor.make_like(
-            self,
-            data=tex.fp8_transpose(
-                self._data.contiguous().detach(),
-                self._fp8_dtype,
-            ),
-        )
-        return self._transpose
+        # Fall back to PyTorch transpose
+        return super().transpose(dim0, dim1)
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
@@ -542,9 +536,6 @@ class Float8Tensor(torch.Tensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=data_slice)
-
-        if func == aten.transpose.int:
-            raise AssertionError("Transpose operation on Float8Tensor is unsupported!")
 
         # Detach op
         if func == aten.detach.default:
