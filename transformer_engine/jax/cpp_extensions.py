@@ -2734,19 +2734,136 @@ class CastTransposePrimitive(BasePrimitive):
 register_primitive(CastTransposePrimitive)
 
 
-def cast_transpose(inputs: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                   scale_inv: jnp.ndarray, out_dtype: TEDType,
+def cast_transpose(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
+                   out_dtype: jnp.dtype,
                    static_axis_boundary: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose wrapper
     Return two tensors, FP8(inputs) and FP8(inputs.T), which are scaled by `scale`
     """
-    return CastTransposePrimitive.outer_primitive.bind(inputs,
+    return CastTransposePrimitive.outer_primitive.bind(x,
                                                        amax,
                                                        scale,
                                                        scale_inv,
                                                        out_dtype=out_dtype,
                                                        static_axis_boundary=static_axis_boundary)
+
+
+class TransposePrimitive(BasePrimitive):
+    """
+    Transpose Primitive
+    """
+    name = "te_transpose"
+    multiple_results = False
+    impl_static_args = (1,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def multidim_transpose(shape, static_axis_boundary):
+        """
+        te_cast_transpose_p multi-dims transpose
+        """
+        if static_axis_boundary < 0:
+            static_axis_boundary = -1    # means no static axes
+        assert static_axis_boundary < len(shape) - 2    # at least 2 remaining for transpose.
+        transpose_start_idx = static_axis_boundary + 1
+        return (*shape[:transpose_start_idx], shape[-1], *shape[transpose_start_idx:-1])
+
+    @staticmethod
+    def abstract(x_aval, *, static_axis_boundary):
+        """
+        _transpose abstract
+        """
+        transposed_x_shape = TransposePrimitive.multidim_transpose(x_aval.shape,
+                                                                   static_axis_boundary)
+        xt_aval = x_aval.update(shape=transposed_x_shape, dtype=x_aval.dtype)
+
+        return xt_aval
+
+    @staticmethod
+    def lowering(ctx, x, *, static_axis_boundary):
+        """
+        _transpose cuda lowering
+        """
+
+        x_aval = ctx.avals_in[0]
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16, jnp.int8]
+
+        ir_x_type = ir.RankedTensorType(x.type)
+        ir_x_shape = ir_x_type.shape
+        ir_out_dtype = jax_dtype_to_ir_dtype(x_aval.dtype)
+        if static_axis_boundary >= 0:
+            for i in range(static_axis_boundary + 1):
+                assert ir_x_shape[i] == 1
+
+        transposed_x_shape = TransposePrimitive.multidim_transpose(ir_x_shape, static_axis_boundary)
+
+        out_types = [ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype)]
+        operands = [x]
+        operand_shapes = [ir_x_shape]
+        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+        te_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
+        contracted_x_shape = (reduce(operator.mul, ir_x_shape[:-1]), ir_x_shape[-1])
+        opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape, te_dtype,
+                                                               te_dtype)
+
+        out = custom_caller(TransposePrimitive.name, args, opaque, False)
+
+        return [out]
+
+    @staticmethod
+    def impl(x, static_axis_boundary):
+        """
+        tcast_transpose implementation
+        """
+        assert TransposePrimitive.inner_primitive is not None
+        transposed_x = \
+            TransposePrimitive.inner_primitive.bind(x, static_axis_boundary=static_axis_boundary)
+        return transposed_x
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, static_axis_boundary):
+        assert TransposePrimitive.outer_primitive is not None
+        assert static_axis_boundary < 0
+
+        x, = batched_args
+        x_bdim, = batch_dims
+
+        out_bdims = x_bdim
+        return TransposePrimitive.outer_primitive.bind(x, static_axis_boundary=x_bdim), out_bdims
+
+    @staticmethod
+    def infer_sharding_from_operands(static_axis_boundary, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        xt_spec = TransposePrimitive.multidim_transpose(x_spec, static_axis_boundary)
+        transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+        return transposed_x_sharding
+
+    @staticmethod
+    def partition(static_axis_boundary, mesh, arg_infos, result_infos):
+        del result_infos
+        x_spec = get_padded_spec(arg_infos[0])
+        xt_spec = TransposePrimitive.multidim_transpose(x_spec, static_axis_boundary)
+        transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = transposed_x_sharding
+
+        impl = partial(TransposePrimitive.impl, static_axis_boundary=static_axis_boundary)
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(TransposePrimitive)
+
+
+def transpose(x: jnp.ndarray, static_axis_boundary: int) -> jnp.ndarray:
+    """
+    transpose wrapper
+    """
+    return TransposePrimitive.outer_primitive.bind(x, static_axis_boundary=static_axis_boundary)
 
 
 # Deprecating Items ---------------------------------------------------------------
@@ -2800,66 +2917,6 @@ def register_primitive_legacy(cls):
     p.def_abstract_eval(cls.abstract)
     mlir.register_lowering(p, cls.lowering, platform='cuda')
     return p
-
-
-class TransposePrimitive(BasePrimitiveLegacy):
-    """
-    Transpose Primitive
-    """
-    name = "te_transpose"
-    multiple_results = False
-
-    @staticmethod
-    def abstract(inputs, *, dtype):
-        """
-        _transpose abstract
-        """
-        in_dtype = dtypes.canonicalize_dtype(inputs.dtype)
-        out_dtype = te_dtype_to_jax_dtype(dtype)
-
-        assert len(inputs.shape) == 2
-        assert isinstance(dtype, TEDType)
-        assert in_dtype == out_dtype
-
-        return ShapedArray((inputs.shape[1], inputs.shape[0]),
-                           in_dtype,
-                           named_shape=inputs.named_shape)
-
-    @staticmethod
-    def lowering(ctx, inputs, *, dtype):
-        """
-        _transpose cuda lowering
-        """
-
-        in_aval = ctx.avals_in[0]
-        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16, jnp.int8]
-
-        ir_in_type = ir.RankedTensorType(inputs.type)
-        ir_in_shape = ir_in_type.shape
-        ir_out_dtype = te_dtype_to_ir_dtype(dtype)
-
-        out_types = [ir.RankedTensorType.get([ir_in_shape[1], ir_in_shape[0]], ir_out_dtype)]
-        operands = [inputs]
-        operand_shapes = [ir_in_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        assert len(ir_in_shape) == 2
-        opaque = transformer_engine_jax.pack_common_descriptor(ir_in_shape, dtype, dtype)
-
-        out = custom_caller(TransposePrimitive.name, args, opaque, False)
-
-        return [out]
-
-
-_transpose_p = register_primitive_legacy(TransposePrimitive)
-
-
-def transpose(inputs: jnp.ndarray, dtype: TEDType) -> jnp.ndarray:
-    """
-    transpose wrapper
-    Assume input has two dimension shape
-    """
-    return _transpose_p.bind(inputs, dtype=dtype)
 
 
 class GatedGeluFp8Primitive(BasePrimitiveLegacy):
