@@ -5,7 +5,10 @@
  ************************************************************************/
 
 #include <transformer_engine/layer_norm.h>
+
+#include <cstdint>
 #include <vector>
+
 #include "ln.h"
 #include "../common.h"
 
@@ -72,11 +75,20 @@ layer_norm::FwdFunction & get_fwd_launcher(DType wtype,
                                            DType itype,
                                            DType otype,
                                            DType ctype,
-                                           uint32_t hidden_size,
-                                           uint32_t batch_size) {
+                                           const layer_norm::FwdParams &params) {
     // Look for tuned kernel
-    auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, hidden_size);
-    if (batch_size % 4 == 0
+    auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, params.cols);
+    auto is_aligned = [](const void *ptr) -> bool {
+      // Assume vectorized memory accesses are <=16B
+      return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
+    };
+    if (params.rows % 4 == 0
+        && is_aligned(params.x)
+        && is_aligned(params.mu)
+        && is_aligned(params.rs)
+        && is_aligned(params.gamma)
+        && is_aligned(params.beta)
+        && is_aligned(params.z)
         && layer_norm::FWD_TUNED_FUNCS.count(tuned_key) > 0) {
         return layer_norm::FWD_TUNED_FUNCS.at(tuned_key);
     }
@@ -87,7 +99,7 @@ layer_norm::FwdFunction & get_fwd_launcher(DType wtype,
         NVTE_ERROR("FWD: Unsupported types.");
     }
     auto& general_func_map = layer_norm::FWD_GENERAL_FUNCS.at(general_key);
-    auto func_iter = general_func_map.lower_bound(hidden_size);
+    auto func_iter = general_func_map.lower_bound(params.cols);
     if (func_iter == general_func_map.end()) {
         // Hidden size is too big, need to use multi-CTA
         return general_func_map.rbegin()->second;
@@ -102,11 +114,24 @@ layer_norm::BwdFunction & get_bwd_launcher(DType wtype,
                                            DType itype,
                                            DType otype,
                                            DType ctype,
-                                           uint32_t hidden_size,
-                                           uint32_t batch_size) {
+                                           const layer_norm::BwdParams &params) {
     // Look for tuned kernel
-    auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, hidden_size);
-    if (batch_size % 4 == 0
+    auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, params.cols);
+    auto is_aligned = [](const void *ptr) -> bool {
+      // Assume vectorized memory accesses are <=16B
+      return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
+    };
+    if (params.rows % 4 == 0
+        && is_aligned(params.x)
+        && is_aligned(params.mu)
+        && is_aligned(params.rs)
+        && is_aligned(params.gamma)
+        && is_aligned(params.dz)
+        && is_aligned(params.dx)
+        && is_aligned(params.dbeta)
+        && is_aligned(params.dgamma)
+        && is_aligned(params.dbeta_part)
+        && is_aligned(params.dgamma_part)
         && layer_norm::BWD_TUNED_FUNCS.count(tuned_key) > 0) {
         return layer_norm::BWD_TUNED_FUNCS.at(tuned_key);
     }
@@ -117,7 +142,7 @@ layer_norm::BwdFunction & get_bwd_launcher(DType wtype,
         NVTE_ERROR("BWD: Unsupported types.");
     }
     auto& general_func_map = layer_norm::BWD_GENERAL_FUNCS.at(general_key);
-    auto func_iter = general_func_map.lower_bound(hidden_size);
+    auto func_iter = general_func_map.lower_bound(params.cols);
     if (func_iter == general_func_map.end()) {
         // Hidden size is too big, need to use multi-CTA
         return general_func_map.rbegin()->second;
@@ -191,10 +216,6 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     launch_params.multiprocessorCount = multiprocessorCount;
     launch_params.stream = stream;
 
-    // Request the kernel launcher.
-    auto launcher = layer_norm::get_fwd_launcher(wtype, itype, otype, ctype,
-                                                 hidden_size, rows);
-
     // Set the kernel runtime parameters.
     layer_norm::FwdParams &params = launch_params.params;
     params.rows = rows;
@@ -210,6 +231,9 @@ void layernorm_fwd(const Tensor& x,        // BxSxhidden_size
     params.scale = z->scale.dptr;
     params.fp8_out = fp8_out;
     params.zero_centered_gamma = zero_centered_gamma;
+
+    // Request the kernel launcher.
+    auto launcher = layer_norm::get_fwd_launcher(wtype, itype, otype, ctype, params);
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -311,9 +335,6 @@ void layernorm_bwd(const Tensor& dz,
     launch_params.stream = stream;
     launch_params.multiprocessorCount = multiprocessorCount;
 
-    auto launcher = layer_norm::get_bwd_launcher(wtype, itype, otype, ctype,
-                                                 hidden_size, rows);
-
     // Set the kernel runtime parameters.
     layer_norm::BwdParams &params = launch_params.params;
     params.rows = rows;
@@ -329,6 +350,8 @@ void layernorm_bwd(const Tensor& dz,
     params.dbeta_part = dbeta_part->data.dptr;
     params.dgamma_part = dgamma_part->data.dptr;
     params.zero_centered_gamma = zero_centered_gamma;
+
+    auto launcher = layer_norm::get_bwd_launcher(wtype, itype, otype, ctype, params);
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);

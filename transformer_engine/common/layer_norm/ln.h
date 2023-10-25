@@ -233,14 +233,6 @@ struct BwdGeneralRegistrar{
     }
 };
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-layer_norm::BwdFunction & get_bwd_launcher(DType wtype,
-                                           DType itype,
-                                           DType otype,
-                                           DType ctype,
-                                           uint32_t hidden_size);
-
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
 }  // namespace layer_norm
