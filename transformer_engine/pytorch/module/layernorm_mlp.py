@@ -207,12 +207,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight_t_fp8 = None
                 fc2_weight_t_fp8 = None
                 if is_grad_enabled:
-                    fc1_weight_t_fp8 = fc1_weight_fp8.transpose(
-                        cache=is_first_microbatch is not None,
-                    )
-                    fc2_weight_t_fp8 = fc2_weight_fp8.transpose(
-                        cache=is_first_microbatch is not None,
-                    )
+                    fc1_weight_t_fp8 = fc1_weight_fp8.transpose(update_cache=is_first_microbatch)
+                    fc2_weight_t_fp8 = fc2_weight_fp8.transpose(update_cache=is_first_microbatch)
 
             elif update_fp8_weights:
                 # Need to cast weights to FP8
