@@ -5,7 +5,6 @@
 # Regression tests for TE-JAX custom ops with xmap-based sharding
 # https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html
 #
-import os
 import pytest
 import numpy as np
 from functools import partial
@@ -23,14 +22,7 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 configs = ShardingConfigs(num_gpus=8)
 helper = CustomOpsTestHelper()
 
-@pytest.fixture(name="backend", params=[FusedAttnBackend.Max512, FusedAttnBackend.Arbitrary])
-def fixture_backend(request):
-    backend = request.param
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = backend.value
-    yield backend
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = ""
-
-
+@pytest.mark.skipif(helper.use_custom_partitioning())
 @pytest.mark.skipif(not is_devices_enough(configs.device_count), reason='Num of GPU is not enough')
 class TestXmapOpsGenerator:
 

@@ -5,7 +5,6 @@
 # Regression tests for TE-JAX custom ops with cpar-based (Custom PARtitioning) sharding
 # https://jax.readthedocs.io/en/latest/jax.experimental.custom_partitioning.html
 #
-import os
 import pytest
 import numpy as np
 from functools import partial
@@ -24,13 +23,7 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 configs = ShardingConfigs(num_gpus=8)
 helper = CustomOpsTestHelper()
 
-@pytest.fixture(name="backend", params=[FusedAttnBackend.Max512, FusedAttnBackend.Arbitrary])
-def fixture_backend(request):
-    backend = request.param
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = backend.value
-    yield backend
-    os.environ["NVTE_FUSED_ATTN_BACKEND"] = ""
-
+@pytest.mark.skipif(not helper.use_custom_partitioning())
 @pytest.mark.skipif(not is_devices_enough(configs.device_count), reason='Num of GPU is not enough')
 class TestCustomPartitioningOpsGenerator:
 
