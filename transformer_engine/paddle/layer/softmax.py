@@ -18,8 +18,13 @@ from transformer_engine.paddle.cpp_extensions import (
     scaled_softmax_backward,
 )
 
+
+__all__ = ["FusedScaleMaskSoftmax"]
+
+
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
+
 
 _default_causal_mask = {}
 
@@ -112,12 +117,22 @@ class ScaledSoftmax(paddle.autograd.PyLayer):
 
 class FusedScaleMaskSoftmax(paddle.nn.Layer):
     """
-    fused operation: scaling + mask + softmax
+    Scaled and masked softmax module for paddle with fused optimizations.
 
-    Arguments:
-        attn_mask_type: attention mask type (pad or causal)
-        mask_func: mask function to be applied.
-        softmax_in_fp32: if true, softmax in performed at fp32 precision.
+    Parameters
+    ----------
+    attn_mask_type : str, default = `causal`
+                     type of attention mask, can be 'causal', 'padding', or 'no_mask'.
+    mask_func : callable
+                custom callable for applying the mask to the softmax input.
+                `masked_input=mask_func(inp, mask)`.
+    softmax_in_fp32 : bool, default = True
+                      perform softmax computation in fp32.
+    layernorm_epsilon : float, default = 1e-5
+                       a value added to the denominator of layer normalization
+                       for numerical stability.
+    backend: {'transformer_engine', 'paddle'}, default = `transformer_engine`
+             backend to use for operation.
     """
 
     def __init__(

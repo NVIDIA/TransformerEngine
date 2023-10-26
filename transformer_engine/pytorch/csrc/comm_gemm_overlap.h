@@ -4,18 +4,21 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "userbuffers/userbuffers.h"
+#include <stdio.h>
+#include <stdlib.h>
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda.h>
 #include <cuda_fp8.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <torch/cuda.h>
 #include <torch/custom_class.h>
 #include <torch/extension.h>
 #include <torch/types.h>
+
+#include "common/util/logging.h"
+#include "userbuffers/userbuffers.h"
 
 #define HALF_BYTES 2
 #define UB_MAX_SM 32

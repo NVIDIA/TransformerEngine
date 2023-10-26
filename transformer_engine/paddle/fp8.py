@@ -15,6 +15,10 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 from .constants import dist_group_type
 from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
 
+
+__all__ = ['fp8_autocast']
+
+
 # FP8 support
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
@@ -166,6 +170,40 @@ def fp8_autocast(
 ) -> None:
     """
     Context manager for FP8 usage.
+
+    .. code-block:: python
+
+        with fp8_autocast(enabled=True):
+            out = model(inp)
+
+    .. note::
+
+        Support for FP8 in the Linear layer of Transformer Engine is currently limited to tensors
+        with shapes where both dimensions are divisible by 16. In terms of the input to the full
+        Transformer network, this typically requires padding sequence length to be multiple of 16.
+
+    .. note::
+
+        When :attr:`fp8_recipe.reduce_amax==True`, any module must not be invoked more than once
+        inside a single `fp8_autocast` region. This is unsupported behavior because the amax
+        reduction is handled during the exit of the `fp8_autocast` context. Calling the same
+        module more than once inside an `fp8_autocast` region overrides the amax tensors
+        before reduction can occur.
+
+    Parameters
+    ----------
+    enabled: bool, default = `False`
+             whether or not to enable fp8
+    calibrating: bool, default = `False`
+                 calibration mode allows collecting statistics such as amax and scale
+                 data of fp8 tensors even when executing without fp8 enabled. This is
+                 useful for saving an inference ready fp8 checkpoint while training
+                 using a higher precision.
+    fp8_recipe: recipe.DelayedScaling, default = `None`
+                recipe used for FP8 training.
+    fp8_group: paddle.distributed.collective.Group, default = `None`
+               distributed group over which amaxes for the fp8 tensors
+               are reduced at the end of each training step.
     """
     try:
         _global_fp8_state.enter(enabled, calibrating, fp8_recipe, fp8_group)

@@ -8,9 +8,9 @@ from typing import Optional, Union
 import paddle
 from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
 
-from . import LayerNormMLP, LayerNorm, MultiHeadAttention
-from ..constants import AttnMaskTypes, LayerTypes, dist_group_type
-from ..distributed import get_tp_group_and_world_size, track_rng_state
+from transformer_engine.paddle.layer import LayerNormMLP, LayerNorm, MultiHeadAttention
+from transformer_engine.paddle.constants import AttnMaskTypes, LayerTypes, dist_group_type
+from transformer_engine.paddle.distributed import get_tp_group_and_world_size, track_rng_state
 
 
 class TransformerLayer(paddle.nn.Layer):
@@ -33,6 +33,10 @@ class TransformerLayer(paddle.nn.Layer):
                    dropout probability for the dropout op after FC2 layer.
     attention_dropout: float, default = 0.1
                       dropout probability for the dropout op during multi-head attention.
+    weight_attr: Union[paddle.ParamAttr, None], default = None
+                optional `paddle.ParamAttr` for weight.
+    bias_attr: Union[paddle.ParamAttr, None, bool], default = None
+              optional `paddle.ParamAttr` for bias.
     self_attn_mask_type: {'causal', 'padding'}, default = `causal`
                         type of attention mask passed into softmax operation.
     apply_residual_connection_post_layernorm : bool, default = `False`
@@ -62,6 +66,8 @@ class TransformerLayer(paddle.nn.Layer):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    backend: {'transformer_engine', 'paddle'}, default = 'transformer_engine'
+             if set to 'paddle', a framework only no-FP8 path is executed with limited optimization.
 
     Parallelism parameters
     ----------------------
