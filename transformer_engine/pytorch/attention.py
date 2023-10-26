@@ -390,7 +390,9 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                 dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal, deterministic,
-                use_fused_attention):
+                use_fused_attention, qkv_format):
+        assert (qkv_format in ["bshd", "sbhd"]), f"{qkv_format} is an unsupported qkv_format for context parallelism!"
+
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -605,6 +607,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         ctx.causal = causal
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.qkv_format = qkv_format
         return out
 
     @staticmethod
@@ -835,19 +838,19 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         dq = dq.view(q.shape[0], -1, *q.shape[-2:])
         # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
         dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
-        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
+        return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_forward_func_with_cp(
     is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
     dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale=None, causal=False,
-    deterministic=False, use_fused_attention=False
+    deterministic=False, use_fused_attention=False, qkv_format="bshd"
 ) -> torch.Tensor:
     """Flash Attention implementation with context parallelism"""
     out = FlashAttnUnpaddedFuncWithCP.apply(
         is_training, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
         dropout_p, cp_group, cp_global_ranks, cp_stream, softmax_scale, causal,
-        deterministic, use_fused_attention
+        deterministic, use_fused_attention, qkv_format
     )
     return out
 
@@ -1835,6 +1838,7 @@ class FusedAttention(torch.nn.Module):
                     softmax_scale=1.0/self.norm_factor,
                     causal=attn_mask_type=="causal",
                     use_fused_attention=True,
+                    qkv_format=qkv_format
                 )
             if qkv_format == 'sbhd':
                 output = output.transpose(0,1).contiguous()
