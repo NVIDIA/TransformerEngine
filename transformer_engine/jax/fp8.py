@@ -193,15 +193,6 @@ class FP8Helper:
         FP8Helper.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
 
     @staticmethod
-    def update_amax_history(amax_buffers: jnp.ndarray) -> jnp.ndarray:
-        """
-        Update the amax history
-        """
-        updated_amax_buffers = jnp.roll(amax_buffers, -1, 1)
-        updated_amax_buffers = updated_amax_buffers.at[:, 0].set(0)
-        return updated_amax_buffers
-
-    @staticmethod
     def update_collections(new: Collection, original: Collection) -> Collection:
         """
         Update the collections
@@ -287,6 +278,35 @@ class FP8Helper:
             fp8_meta_arrays[fp8_scale_inv_idx] = 1 / sf
 
         return jax.tree_util.tree_unflatten(treedef, fp8_meta_arrays)
+
+    @staticmethod
+    def update_amax_history(amax: jnp.ndarray) -> jnp.ndarray:
+        """
+        Update the amax history
+        """
+        updated_amax = jnp.roll(amax, -1, -1)
+        updated_amax = updated_amax.at[..., 0].set(0)
+        return updated_amax
+
+    @staticmethod
+    @jax.jit
+    def update_fp8_scale(fp8_max: jnp.ndarray, amax: jnp.ndarray,
+                         scale: jnp.ndarray) -> jnp.ndarray:
+        """
+        Calculate fp8 scale and scale_inv based on given amax.
+        """
+        if FP8Helper.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
+            amax = jnp.max(amax, axis=-1, keepdims=True)
+        else:
+            amax = amax[..., 0:1]
+
+        sf = (fp8_max / amax) / (2**FP8Helper.MARGIN)
+        sf = jnp.where(amax > 0.0, sf, scale)
+        sf = jnp.where(jnp.isfinite(amax), sf, scale)
+        scale = sf
+        scale_inv = 1 / sf
+
+        return scale, scale_inv
 
 
 @contextmanager
