@@ -419,6 +419,24 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
+    def _transpose_no_cache(self) -> torch.Tensor:
+        """
+        Swap tensor dimensions
+
+        For basic 2D matrix transposes, an optimized transpose kernel
+        is applied and a Float8Tensor is returned.
+        """
+
+        # Use optimized kernel for basic 2D transpose
+        # TODO Support differentiation # pylint: disable=fixme
+        return Float8Tensor.make_like(
+            self,
+            data=tex.fp8_transpose(
+                self._data.contiguous().detach(),
+                self._fp8_dtype,
+            ),
+        )
+
     def transpose(
         self,
         dim0: int = 0,
@@ -426,7 +444,8 @@ class Float8Tensor(torch.Tensor):
         *,
         cache: bool = False,
     ) -> torch.Tensor:
-        """Swap tensor dimensions
+        """
+        Swap tensor dimensions
 
         For basic 2D matrix transposes, an optimized transpose kernel
         is applied and a Float8Tensor is returned.
@@ -441,7 +460,6 @@ class Float8Tensor(torch.Tensor):
                Whether to cache the result. Caching is only supported
                for basic 2D transposes and the cache is reset after
                any in-place operations.
-
         """
 
         # Handle non-2D transposes
@@ -457,20 +475,16 @@ class Float8Tensor(torch.Tensor):
                 )
             return super().transpose(dim0, dim1)
 
+        # No caching.
         if not cache:
-            # Use optimized kernel for basic 2D transpose
-            # TODO Support differentiation # pylint: disable=fixme
-            return Float8Tensor.make_like(
-                self,
-                data=tex.fp8_transpose(
-                    self._data.contiguous().detach(),
-                    self._fp8_dtype,
-                ),
-            )
+            return self._transpose_no_cache()
 
-        # Handle caching
-        if self._transpose is None:
-            self._transpose = self.transpose()
+        # Reuse cache.
+        if self._transpose is not None:
+            return self._transpose
+
+        # Update cache.
+        self._transpose = self._transpose_no_cache()
         return self._transpose
 
     @torch.no_grad()
