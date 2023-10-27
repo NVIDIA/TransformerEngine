@@ -469,7 +469,7 @@ class Float8Tensor(torch.Tensor):
             )
 
         # Handle caching
-        if cache or self._transpose is None:
+        if self._transpose is None:
             self._transpose = self.transpose()
         return self._transpose
 
