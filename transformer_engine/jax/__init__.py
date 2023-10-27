@@ -5,6 +5,7 @@
 
 from . import flax
 from .fp8 import fp8_autocast, update_collections, update_fp8_metas, get_delayed_scaling
+from .fp8 import NVTE_FP8_COLLECTION_NAME
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
 
@@ -19,6 +20,7 @@ ShardingResource = deprecate_wrapper(
     "ShardingResource is renaming to MeshResource, and will be removed in the near feature.")
 
 __all__ = [
+    'NVTE_FP8_COLLECTION_NAME',
     'fp8_autocast',
     'update_collections',
     'update_fp8_metas',

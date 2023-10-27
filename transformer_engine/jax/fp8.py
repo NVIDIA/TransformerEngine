@@ -17,7 +17,7 @@ from transformer_engine_jax import get_cublasLt_version
 from transformer_engine_jax import get_cuda_version, get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax.sharding import global_shard_guard
-from transformer_engine.jax.sharding import ShardingResource
+from transformer_engine.jax.sharding import MeshResource
 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
@@ -125,6 +125,9 @@ class AmaxComputeAlgo(Enum):
     MOST_RECENT = "most_recent"
 
 
+NVTE_FP8_COLLECTION_NAME = "fp8_meta_collection"
+
+
 class FP8Helper:
     """
     FP8 helper to manage the FP8 meta
@@ -141,7 +144,7 @@ class FP8Helper:
     INPUT_META_IDX_PER_GEMM: int = 0
     KERNEL_META_IDX_PER_GEMM: int = 1
     GRAD_META_IDX_PER_GEMM: int = 2
-    FP8_COLLECTION_NAME: str = "fp8_meta_collection"
+    FP8_COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
     FP8_AMAX_NAME: str = "fp8_meta_amax"
     FP8_SCALE_NAME: str = "fp8_meta_scale"
     FP8_SCALE_INV_NAME: str = "fp8_meta_scale_inv"
@@ -312,7 +315,7 @@ class FP8Helper:
 @contextmanager
 def fp8_autocast(enabled: bool = False,
                  fp8_recipe: Optional[DelayedScaling] = None,
-                 sharding_resource: Optional[ShardingResource] = None) -> None:
+                 meta_resource: Optional[MeshResource] = None) -> None:
     r"""
     Context manager for FP8 usage.
 
@@ -324,9 +327,9 @@ def fp8_autocast(enabled: bool = False,
         devices = np.asarray(jax.devices()).reshape(*mesh_shape)
 
         with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
-            sharding_resource=ShardingResource(dp_mesh_axis_name, tp_mesh_axis_name)
+            meta_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
 
-            with fp8_autocast(enabled=True, sharding_resource=sharding_resource):
+            with fp8_autocast(enabled=True, meta_resource=meta_resource):
                 rules = extend_logical_axis_rules(tuple())
                 transformer = TransformerLayer()
 
@@ -346,7 +349,7 @@ def fp8_autocast(enabled: bool = False,
         Whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
         Recipe used for FP8 training.
-    sharding_resource: ShardingResource, default = None
+    meta_resource: MeshResource, default = None
         Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then no data or tensor parallelism will be used.
 
@@ -363,11 +366,11 @@ def fp8_autocast(enabled: bool = False,
         "DelayedScaling override_linear_precision isn't supported by TE/JAX.")
     assert fp8_recipe.reduce_amax, ("DelayedScaling reduce_amax should be enabled for TE/JAX.")
 
-    if sharding_resource is None:
-        sharding_resource = ShardingResource()
+    if meta_resource is None:
+        meta_resource = MeshResource()
 
     try:
-        with global_shard_guard(sharding_resource):
+        with global_shard_guard(meta_resource):
             if enabled:
                 fp8_available, reason_for_no_fp8 = is_fp8_available()
                 assert fp8_available, reason_for_no_fp8
