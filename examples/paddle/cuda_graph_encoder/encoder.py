@@ -25,7 +25,7 @@ hidden_size = 1024
 num_heads = 16
 intermediate_size = 4096
 num_encoder_layers = 12
-batch_size = 4
+batch_size = 24
 
 
 class EncoderLayers(nn.Layer):
@@ -119,13 +119,13 @@ def train(args, model, train_data_loader, optimizer):
 
         print_tensor(loss, "loss", print_ptr=False)
 
-        if args.use_cuda_graph and batch_id >= model.num_cuda_graph_warmup_steps:
+        if args.use_cuda_graph:
             global_fp8_state = get_global_fp8_state()
             global_fp8_bwd_buffer = global_fp8_state.get_fp8_bwd_buffer()
             fp8_meta, tp_group, tp_size = global_fp8_state.get_first_module_state()
             global_fp8_bwd_buffer.finalize(fp8_meta, tp_group, tp_size)
 
-        if batch_id >= 15:
+        if batch_id >= 30:
             break
     return loss.item()
 
