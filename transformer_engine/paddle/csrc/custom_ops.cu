@@ -6,9 +6,9 @@
 
 #include <cub/cub.cuh>
 #include <vector>
-
+#include "../common.h"
 #include "common.h"
-#include "common/common.h"
+#include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
@@ -544,9 +544,34 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
     return {dx, dgamma};
 }
 
-__global__ void set_rng_state(std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
+__global__ void set_rng_state(
+    unsigned int identifier,  // This is used to relate kernel to cudaGraph nodes
+    std::pair<uint64_t, uint64_t> seed_offset, int64_t *rng_state_ptr) {
     rng_state_ptr[0] = static_cast<int64_t>(seed_offset.first);
     rng_state_ptr[1] = static_cast<int64_t>(seed_offset.second);
+}
+
+void UpdateRandomGenerator(phi::Place place, cudaStream_t stream, int rng_elts_per_thread,
+                           paddle::Tensor &rng_state) {
+    // extract random number generator seed and offset
+    const phi::DeviceContext *dev_ctx =
+        paddle::experimental::DeviceContextPool::Instance().Get(place);
+    phi::Generator *gen_cuda = dev_ctx->GetGenerator();
+    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+    int64_t *rng_state_p = static_cast<int64_t *>(rng_state.data());
+
+    auto parameterSetter = [gen_cuda,
+                            rng_elts_per_thread](phi::backends::gpu::CUDAKernelParams &params) {
+        auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
+        params.As<std::pair<int64_t, int64_t>>(1) = seed_offset;
+    };
+    void *functionPtr = reinterpret_cast<void *>(&set_rng_state);
+    cudaFunction_t cudaFunc;
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaGetFuncBySymbol(&cudaFunc, functionPtr));
+    phi::backends::gpu::CUDAGraphNodeLauncher::cudaKernelCallback_t cudaKernelCallback =
+        [=](unsigned int id) { set_rng_state<<<1, 1, 0, stream>>>(id, seed_offset, rng_state_p); };
+    phi::backends::gpu::CUDAGraphNodeLauncher::Instance().KernelNodeLaunch(
+        cudaFunc, parameterSetter, cudaKernelCallback);
 }
 
 void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor &cu_seqlens,
@@ -586,12 +611,7 @@ void te_fused_attn_fwd_qkvpacked(const paddle::Tensor &QKV, const paddle::Tensor
     NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
-    // extract random number generator seed and offset
-    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(QKV.place());
-    auto gen_cuda = dev_ctx->GetGenerator();
-    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-    set_rng_state<<<1, 1, 0, QKV.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
-
+    UpdateRandomGenerator(QKV.place(), QKV.stream(), rng_elts_per_thread, rng_state);
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors
@@ -757,10 +777,7 @@ void te_fused_attn_fwd_kvpacked(
     NVTE_Bias_Type bias_type_enum = get_nvte_bias_type(bias_type);
     NVTE_Mask_Type attn_mask_type_enum = get_nvte_mask_type(attn_mask_type);
 
-    auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(Q.place());
-    auto gen_cuda = dev_ctx->GetGenerator();
-    auto seed_offset = gen_cuda->IncrementOffset(rng_elts_per_thread);
-    set_rng_state<<<1, 1, 0, Q.stream()>>>(seed_offset, static_cast<int64_t *>(rng_state.data()));
+    UpdateRandomGenerator(Q.place(), Q.stream(), rng_elts_per_thread, rng_state);
     auto te_rng_state = MakeNvteTensor(rng_state);
 
     // create auxiliary output tensors

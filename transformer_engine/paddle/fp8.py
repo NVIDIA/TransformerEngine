@@ -67,6 +67,9 @@ class FP8State:
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
         self._fp8_recompute_buffer = FP8RecomputeBuffer()
+        self._fp8_first_module_fp8_meta = None
+        self._fp8_first_module_tp_group = None
+        self._fp8_first_module_tp_size = 1
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -119,6 +122,19 @@ class FP8State:
     def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
         """Returns global fp8 recompute buffer."""
         return self._fp8_recompute_buffer
+
+    def set_first_module_state(self,
+                               fp8_meta: Dict[str, Any],
+                               tp_group: dist_group_type,
+                               tp_size: int):
+        self._fp8_first_module_fp8_meta = fp8_meta
+        self._fp8_first_module_tp_group = tp_group
+        self._fp8_first_module_tp_size = tp_size
+
+    def get_first_module_state(self) -> (Dict[str, Any], dist_group_type, int):
+        return (self._fp8_first_module_fp8_meta,
+                self._fp8_first_module_tp_group,
+                self._fp8_first_module_tp_size)
 
     def enter(
         self,
@@ -239,7 +255,8 @@ def amax_and_scale_update(
                                           _scale=fp8_meta[fp8_meta_tensor_key].scale,
                                           _scale_inv=fp8_meta[fp8_meta_tensor_key].scale_inv,
                                           fp8_max=fp8_meta[fp8_max_key],
-                                          margin=float(fp8_meta["recipe"].margin),
+                                          margin=float(
+                                              fp8_meta["recipe"].margin),
                                           amax_compute=amax_compute)
     else:
         raise ValueError("We only support the fp8 recipe with 'max' or 'most_recent' "
@@ -272,9 +289,10 @@ class FP8TensorMeta():
                 extra_rows = amax_history_len - curr_len
                 self.amax_history = paddle.concat([
                     self.amax_history,
-                    paddle.zeros((extra_rows, num_fp8_tensors), dtype='float32')
+                    paddle.zeros((extra_rows, num_fp8_tensors),
+                                 dtype='float32')
                 ],
-                                                  axis=0)
+                    axis=0)
             return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -283,7 +301,8 @@ class FP8TensorMeta():
 
         self.scale = paddle.ones(num_fp8_tensors, dtype='float32')
         self.scale_inv = paddle.ones(num_fp8_tensors, dtype='float32')
-        self.amax_history = paddle.zeros([amax_history_len, num_fp8_tensors], dtype='float32')
+        self.amax_history = paddle.zeros(
+            [amax_history_len, num_fp8_tensors], dtype='float32')
         self.is_initialized = True
 
     def to_numpy(self):

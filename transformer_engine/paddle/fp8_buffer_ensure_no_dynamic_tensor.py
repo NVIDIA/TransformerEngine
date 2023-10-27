@@ -14,7 +14,7 @@ import paddle
 import transformer_engine_paddle as tex
 
 from .constants import dist_group_type, RecomputeFunctionNames
-
+from .utils import print_tensor, print_function_details
 
 class FP8MetaBufferBase(ABC):
     """
@@ -22,7 +22,7 @@ class FP8MetaBufferBase(ABC):
     """
 
     def __init__(self):
-        self._global_amax = {}
+        self._amax_histories = {}
         self._buffer_delete_key = None
         self._amax_reduce_wait_func = None
         self._dp_amax_reduce_interval = None
@@ -44,14 +44,15 @@ class FP8MetaBufferBase(ABC):
         """Returns autocast id key in `fp8_meta`."""
 
     def _get_amax_buffer_key(self, fp8_meta: Dict[str, Any]) -> str:
-        """Return a key in `_global_amax` for the AMAX storage."""
+        """Return a key in `_amax_histories` for the AMAX storage."""
         return f"AMAX_{fp8_meta[self._get_autocast_key()]}"
 
     def _execute_deletion(self) -> None:
         """Delete the key from global amax buffer."""
-        if (self._buffer_delete_key is not None and self._buffer_delete_key in self._global_amax):
-            del self._global_amax[self._buffer_delete_key]
+        if (self._buffer_delete_key is not None and self._buffer_delete_key in self._amax_histories):
+            del self._amax_histories[self._buffer_delete_key]
 
+    @print_function_details
     def _wait_handle_and_split(
         self,
         contiguous_amax: paddle.Tensor,
@@ -62,9 +63,12 @@ class FP8MetaBufferBase(ABC):
         """Wait for amax reduction to finish and then copy reduced amax to buffer"""
         if wait_handle is not None:
             wait_handle.wait()
-        self._global_amax[amax_buffer_key] = list(
-            contiguous_amax.split(chunk_sizes))
+        self._amax_histories[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
 
+    def _concat_amax_histories_into_contiguous_amax(self, amax_histories):
+        return paddle.concat([amax_history[0] for amax_history in amax_histories])
+
+    @print_function_details
     def _global_amax_reduction(
         self,
         fp8_meta: Dict[str, Any],
@@ -86,21 +90,20 @@ class FP8MetaBufferBase(ABC):
 
         amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         # Key already deleted.
-        if amax_buffer_key not in self._global_amax:
+        if amax_buffer_key not in self._amax_histories:
             return None
+        amax_histories = self._amax_histories[amax_buffer_key]
 
         # Reduce AMAX in DP-domain at an interval.
         if self._dp_amax_reduce_interval is None:
-            self._dp_amax_reduce_interval = int(
-                os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
+            self._dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
         tp_amax_reduce = False
         if self._dp_amax_reduce_idx == 0:
             reduce_group = fp8_meta["fp8_group"]
         else:
             tp_amax_reduce = True
-        self._dp_amax_reduce_idx = (
-            self._dp_amax_reduce_idx + 1) % self._dp_amax_reduce_interval
+        self._dp_amax_reduce_idx = (self._dp_amax_reduce_idx + 1) % self._dp_amax_reduce_interval
 
         if tp_amax_reduce:
             if tp_size > 1:
@@ -108,8 +111,8 @@ class FP8MetaBufferBase(ABC):
             else:
                 return None
 
-        chunk_sizes = [x.shape[0] for x in self._global_amax[amax_buffer_key]]
-        contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
+        chunk_sizes = [amax_history[0].shape[0] for amax_history in amax_histories]
+        contiguous_amax = self._concat_amax_histories_into_contiguous_amax(amax_histories)
 
         wait_handle = _reduce_tensor_across_group_op_max(
             contiguous_amax,
@@ -127,23 +130,22 @@ class FP8MetaBufferBase(ABC):
 
     def add_amax(self, fp8_meta: Dict[str, Any]) -> None:
         """Append `amax_history` to global buffer."""
-        buffer_key = self._get_amax_buffer_key(fp8_meta)
+        amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
         fp8_meta_tensor_key = self._get_meta_tensor_key()
         buffer_position_key = self._get_buffer_position_key()
 
-        if buffer_key not in self._global_amax:
-            self._global_amax[buffer_key] = [
-                fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+        if amax_buffer_key not in self._amax_histories:
+            self._amax_histories[amax_buffer_key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
         else:
-            self._global_amax[buffer_key].append(
-                fp8_meta[fp8_meta_tensor_key].amax_history[0])
+            self._amax_histories[amax_buffer_key].append(fp8_meta[fp8_meta_tensor_key].amax_history)
 
+        # print(f"{fp8_meta_tensor_key} amax_history", fp8_meta[fp8_meta_tensor_key].amax_history[:3])
+        # print(f"{fp8_meta_tensor_key} self._amax_histories[amax_buffer_key][-1]", hex(self._amax_histories[amax_buffer_key][-1].data_ptr()))
         if buffer_position_key not in fp8_meta:
-            fp8_meta[buffer_position_key] = len(
-                self._global_amax[buffer_key]) - 1
+            fp8_meta[buffer_position_key] = len(self._amax_histories[amax_buffer_key]) - 1
 
         # Catch incorrect fp8_autocast usage.
-        assert fp8_meta[buffer_position_key] == len(self._global_amax[buffer_key]) - 1, \
+        assert fp8_meta[buffer_position_key] == len(self._amax_histories[amax_buffer_key]) - 1, \
             "Same module is being invoked more than once inside an `fp8_autocast` " \
             "region when using FP8 with amax reduction. This behavior is currently " \
             "unsupported. For more details and correct usage, please see " \
@@ -157,12 +159,16 @@ class FP8MetaBufferBase(ABC):
             return
 
         amax_buffer_key = self._get_amax_buffer_key(fp8_meta)
-        assert amax_buffer_key in self._global_amax, "TE internal error."
+        assert amax_buffer_key in self._amax_histories, "TE internal error."
+
+        amax_history = self._amax_histories[amax_buffer_key][fp8_meta[buffer_position_key]]
 
         # Copy amax to amax_history[0]
+        print("fp8_meta[fp8_meta_tensor_key].amax_history[0]", fp8_meta[fp8_meta_tensor_key].amax_history)
+        print("amax_history", amax_history[0])
         tex.update_latest_amax_history_inplace(
             _history=fp8_meta[fp8_meta_tensor_key].amax_history,
-            amax=self._global_amax[amax_buffer_key][fp8_meta[buffer_position_key]])
+            amax=amax_history[0])
 
     def set_for_deletion(self, fp8_meta: Dict[str, Any]) -> None:
         """Delete this amax key from global buffer during autocast end."""
@@ -183,14 +189,21 @@ class FP8MetaBufferBase(ABC):
     def to_numpy(self) -> Dict[str, List[np.array]]:
         """Convert to numpy arrays"""
         out = {}
-        for k, v in self._global_amax.items():
+        for k, v in self._amax_histories.items():
             out[k] = [tensor.numpy() for tensor in v]
         return out
 
     def from_numpy(self, buffer: Dict[str, np.array]) -> None:
         """Set buffer values from numpy arrays"""
         for k, v in buffer.items():
-            self._global_amax[k] = [paddle.to_tensor(arr) for arr in v]
+            self._amax_histories[k] = [paddle.to_tensor(arr) for arr in v]
+
+    def print(self):
+        print(f"Printing {self.__class__.__name__}".center(50, "="))
+        for k, amax_histories in self._amax_histories.items():
+            for i, amax_history in enumerate(amax_histories):
+                print_tensor(amax_history, f"{k}_amax_history_layer_{i}",print_ptr=True, hash=lambda x: list(x[0].numpy().flatten()))
+        print(f"".center(50, "="))
 
 
 class FP8MetaFwdBuffer(FP8MetaBufferBase):
@@ -225,6 +238,7 @@ class FP8MetaFwdBuffer(FP8MetaBufferBase):
             tp_size,
         )
 
+    @print_function_details
     def finalize(self) -> None:
         """
         Called at FP8 autocast end.
@@ -253,6 +267,7 @@ class FP8MetaBwdBuffer(FP8MetaBufferBase):
         """Returns module position key in `fp8_meta`."""
         return "autocast_id_bwd"
 
+    @print_function_details
     def finalize(
         self,
         fp8_meta: Dict[str, Any],
@@ -263,8 +278,7 @@ class FP8MetaBwdBuffer(FP8MetaBufferBase):
         Called at FP8 autocast end in backward.
         Performs AMAX reduction and delete unused buffer entries.
         """
-        self._amax_reduce_wait_func = self._global_amax_reduction(
-            fp8_meta, tp_group, tp_size)
+        self._amax_reduce_wait_func = self._global_amax_reduction(fp8_meta, tp_group, tp_size)
         self._execute_deletion()
 
 
@@ -272,7 +286,7 @@ class FP8RecomputeBuffer:
     """Buffer used to hold FP8 meta tensors for recompute"""
 
     def __init__(self):
-        self._global_amax = []
+        self._amax_histories = []
 
     @staticmethod
     def get_buffer_position_key():
@@ -290,11 +304,11 @@ class FP8RecomputeBuffer:
         ]
 
         if buffer_position_key in fp8_meta:
-            self._global_amax[fp8_meta[buffer_position_key]].append(to_copy)
+            self._amax_histories[fp8_meta[buffer_position_key]].append(to_copy)
         else:
-            self._global_amax.append(deque())
-            self._global_amax[-1].append(to_copy)
-            fp8_meta[buffer_position_key] = len(self._global_amax) - 1
+            self._amax_histories.append(deque())
+            self._amax_histories[-1].append(to_copy)
+            fp8_meta[buffer_position_key] = len(self._amax_histories) - 1
 
     def retrieve_fp8_meta_tensors(self, fp8_meta: Dict[str, Any]) -> None:
         """Switch to the previously saved scaling factors and amaxes"""
@@ -305,8 +319,7 @@ class FP8RecomputeBuffer:
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = self.get_buffer_position_key()
-        stashed_fp8_meta = self._global_amax[fp8_meta[buffer_position_key]].popleft(
-        )
+        stashed_fp8_meta = self._amax_histories[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
         fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]

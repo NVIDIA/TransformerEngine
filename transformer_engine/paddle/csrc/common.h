@@ -9,10 +9,10 @@
 #include <vector>
 
 #include <cublasLt.h>
+#include "common/util/logging.h"
 #include "paddle/extension.h"
 #include "paddle/phi/backends/all_context.h"
 
-#include "common/util/logging.h"
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
