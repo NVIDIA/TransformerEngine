@@ -424,7 +424,7 @@ class Float8Tensor(torch.Tensor):
         dim0: int = 0,
         dim1: int = 1,
         *,
-        update_cache: Optional[bool] = None,
+        cache: bool = False,
     ) -> torch.Tensor:
         """Swap tensor dimensions
 
@@ -437,12 +437,11 @@ class Float8Tensor(torch.Tensor):
               The first dimension to be transposed
         dim1: int, default = 1
               The second dimension to be transposed
-        update_cache: Optional[bool], default = None
-                      If set to `True`, the result is computed and stored in a cache.
-                      If set to `False`, the result is computed only if the cache is
-                      empty, otherwise the cache is returned. If set to `None`, the
-                      result is not cached. Caching is only supported for basic 2D
-                      transposes and the cache is reset after any in-place operations.
+        cache: bool, default = False
+               Whether to cache the result. Caching is only supported
+               for basic 2D transposes and the cache is reset after
+               any in-place operations.
+
         """
 
         # Handle non-2D transposes
@@ -451,15 +450,14 @@ class Float8Tensor(torch.Tensor):
         if -self.dim() <= dim1 < 0:
             dim1 += self.dim()
         if self.dim() != 2 or dim0 == dim1:
-            if update_cache is not None:
+            if cache:
                 raise ValueError(
                     "Transpose caching is only supported for basic 2D transposes "
                     f"(ndims={self.dim()}, dim0={dim0}, dim1={dim1})"
                 )
             return super().transpose(dim0, dim1)
 
-        # No caching.
-        if update_cache is None:
+        if not cache:
             # Use optimized kernel for basic 2D transpose
             # TODO Support differentiation # pylint: disable=fixme
             return Float8Tensor.make_like(
@@ -471,7 +469,7 @@ class Float8Tensor(torch.Tensor):
             )
 
         # Handle caching
-        if update_cache or self._transpose is None:
+        if cache or self._transpose is None:
             self._transpose = self.transpose()
         return self._transpose
 
