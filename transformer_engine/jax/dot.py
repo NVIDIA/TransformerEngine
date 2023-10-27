@@ -37,6 +37,16 @@ def type_safe_dot_general(
                     contracting_dims)
 
 
+def quantize(x, q_dtype, scale):
+    """
+    Quantize with scale.
+    """
+    dtype_max = (jnp.finfo(q_dtype).max).astype(x.dtype)
+    scale = scale.astype(x.dtype)
+    clipped_scaled_x = jnp.clip((x * scale), -dtype_max, dtype_max)
+    return clipped_scaled_x.astype(q_dtype)
+
+
 def dequantize(x, dq_dtype, scale_inv):
     """
     Dequantize with scale_inv.
