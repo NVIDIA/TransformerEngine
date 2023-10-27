@@ -26,6 +26,7 @@ class FP8MetaBufferBase(ABC):
         self._buffer_delete_key = None
         self._amax_reduce_wait_func = None
         self._dp_amax_reduce_interval = None
+        self._contiguous_amax = None
         self._dp_amax_reduce_idx = 0
 
     @staticmethod
@@ -62,8 +63,7 @@ class FP8MetaBufferBase(ABC):
         """Wait for amax reduction to finish and then copy reduced amax to buffer"""
         if wait_handle is not None:
             wait_handle.wait()
-        self._global_amax[amax_buffer_key] = list(
-            contiguous_amax.split(chunk_sizes))
+        self._global_amax[amax_buffer_key] = list(contiguous_amax.split(chunk_sizes))
 
     def _global_amax_reduction(
         self,
@@ -91,16 +91,14 @@ class FP8MetaBufferBase(ABC):
 
         # Reduce AMAX in DP-domain at an interval.
         if self._dp_amax_reduce_interval is None:
-            self._dp_amax_reduce_interval = int(
-                os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
+            self._dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
         tp_amax_reduce = False
         if self._dp_amax_reduce_idx == 0:
             reduce_group = fp8_meta["fp8_group"]
         else:
             tp_amax_reduce = True
-        self._dp_amax_reduce_idx = (
-            self._dp_amax_reduce_idx + 1) % self._dp_amax_reduce_interval
+        self._dp_amax_reduce_idx = (self._dp_amax_reduce_idx + 1) % self._dp_amax_reduce_interval
 
         if tp_amax_reduce:
             if tp_size > 1:
@@ -109,17 +107,20 @@ class FP8MetaBufferBase(ABC):
                 return None
 
         chunk_sizes = [x.shape[0] for x in self._global_amax[amax_buffer_key]]
-        contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
+        if self._contiguous_amax is None:
+            self._contiguous_amax = paddle.concat(self._global_amax[amax_buffer_key])
+        else:
+            self._contiguous_amax.copy_(paddle.concat(self._global_amax[amax_buffer_key]), False)
 
         wait_handle = _reduce_tensor_across_group_op_max(
-            contiguous_amax,
+            self._contiguous_amax,
             reduce_group,
             not fp8_meta["async_amax_reduction"],
         )
 
         return partial(
             self._wait_handle_and_split,
-            contiguous_amax,
+            self._contiguous_amax,
             chunk_sizes,
             amax_buffer_key,
             wait_handle,
@@ -132,15 +133,12 @@ class FP8MetaBufferBase(ABC):
         buffer_position_key = self._get_buffer_position_key()
 
         if buffer_key not in self._global_amax:
-            self._global_amax[buffer_key] = [
-                fp8_meta[fp8_meta_tensor_key].amax_history[0]]
+            self._global_amax[buffer_key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
         else:
-            self._global_amax[buffer_key].append(
-                fp8_meta[fp8_meta_tensor_key].amax_history[0])
+            self._global_amax[buffer_key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
 
         if buffer_position_key not in fp8_meta:
-            fp8_meta[buffer_position_key] = len(
-                self._global_amax[buffer_key]) - 1
+            fp8_meta[buffer_position_key] = len(self._global_amax[buffer_key]) - 1
 
         # Catch incorrect fp8_autocast usage.
         assert fp8_meta[buffer_position_key] == len(self._global_amax[buffer_key]) - 1, \
@@ -263,8 +261,7 @@ class FP8MetaBwdBuffer(FP8MetaBufferBase):
         Called at FP8 autocast end in backward.
         Performs AMAX reduction and delete unused buffer entries.
         """
-        self._amax_reduce_wait_func = self._global_amax_reduction(
-            fp8_meta, tp_group, tp_size)
+        self._amax_reduce_wait_func = self._global_amax_reduction(fp8_meta, tp_group, tp_size)
         self._execute_deletion()
 
 
@@ -305,8 +302,7 @@ class FP8RecomputeBuffer:
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = self.get_buffer_position_key()
-        stashed_fp8_meta = self._global_amax[fp8_meta[buffer_position_key]].popleft(
-        )
+        stashed_fp8_meta = self._global_amax[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
         fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]

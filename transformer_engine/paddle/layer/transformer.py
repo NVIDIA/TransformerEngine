@@ -90,27 +90,30 @@ class TransformerLayer(paddle.nn.Layer):
                    .add(rng_state_name, seed)`.
     """
 
-    def __init__(self,
-                 hidden_size: int,
-                 ffn_hidden_size: int,
-                 num_attention_heads: int,
-                 layernorm_epsilon: float = 1e-5,
-                 hidden_dropout: float = 0.1,
-                 attention_dropout: float = 0.1,
-                 weight_attr: Union[paddle.ParamAttr, None] = None,
-                 bias_attr: Union[paddle.ParamAttr, None, bool] = None,
-                 self_attn_mask_type: str = "causal",
-                 params_dtype: Optional[paddle.dtype] = None,
-                 apply_residual_connection_post_layernorm: bool = False,
-                 output_layernorm: bool = False,
-                 layer_type: str = "encoder",
-                 zero_centered_gamma: bool = False,
-                 activation: str = 'gelu',
-                 set_parallel_mode: bool = False,
-                 tp_group: Optional[dist_group_type] = None,
-                 attention_dropout_rng_state_name: str = 'local_seed',
-                 hidden_dropout_rng_state_name: str = 'global_seed',
-                 backend: str = 'transformer_engine') -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        num_attention_heads: int,
+        layernorm_epsilon: float = 1e-5,
+        hidden_dropout: float = 0.1,
+        attention_dropout: float = 0.1,
+        weight_attr: Union[paddle.ParamAttr, None] = None,
+        bias_attr: Union[paddle.ParamAttr, None, bool] = None,
+        self_attn_mask_type: str = "causal",
+        params_dtype: Optional[paddle.dtype] = None,
+        apply_residual_connection_post_layernorm: bool = False,
+        output_layernorm: bool = False,
+        layer_type: str = "encoder",
+        zero_centered_gamma: bool = False,
+        activation: str = 'gelu',
+        set_parallel_mode: bool = False,
+        tp_group: Optional[dist_group_type] = None,
+        attention_dropout_rng_state_name: str = 'local_seed',
+        hidden_dropout_rng_state_name: str = 'global_seed',
+        backend: str = 'transformer_engine',
+        assume_static_shape: bool = True,
+    ) -> None:
         super().__init__()
 
         params_dtype = paddle.get_default_dtype() if params_dtype is None else params_dtype
@@ -123,6 +126,7 @@ class TransformerLayer(paddle.nn.Layer):
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
+        self.assume_static_shape = assume_static_shape
 
         assert (self_attn_mask_type
                 in AttnMaskTypes), f"self_attn_mask_type {self_attn_mask_type} not supported"
@@ -146,22 +150,20 @@ class TransformerLayer(paddle.nn.Layer):
             "backend": backend,
         }
 
-        self.self_attention = MultiHeadAttention(
-            *attention_args,
-            **common_attention_kwargs,
-            attn_mask_type=self_attn_mask_type,
-            input_layernorm=not output_layernorm,
-            attention_type="self",
-        )
+        self.self_attention = MultiHeadAttention(*attention_args,
+                                                 **common_attention_kwargs,
+                                                 attn_mask_type=self_attn_mask_type,
+                                                 input_layernorm=not output_layernorm,
+                                                 attention_type="self",
+                                                 assume_static_shape=self.assume_static_shape)
 
         if layer_type == "decoder":
-            self.inter_attention = MultiHeadAttention(
-                *attention_args,
-                **common_attention_kwargs,
-                attn_mask_type="padding",
-                input_layernorm=True,
-                attention_type="cross",
-            )
+            self.inter_attention = MultiHeadAttention(*attention_args,
+                                                      **common_attention_kwargs,
+                                                      attn_mask_type="padding",
+                                                      input_layernorm=True,
+                                                      attention_type="cross",
+                                                      assume_static_shape=self.assume_static_shape)
 
         self.layernorm_mlp = LayerNormMLP(
             hidden_size,

@@ -404,27 +404,35 @@ def rmsnorm_bwd(
     return tex.te_rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin)
 
 
-def mask_to_cu_seqlens(
-    mask: paddle.Tensor,
-    need_kv: bool = False,
-) -> paddle.Tensor:
+def mask_to_cu_seqlens(mask: paddle.Tensor,
+                       need_kv: bool = False,
+                       assume_static_shape: bool = True) -> paddle.Tensor:
     """Convert mask to cu_seqlens"""
     # mask shape: [b, 1, s_q, s_kv]
-    q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
-    if "q_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+    if assume_static_shape:
+        q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
+        if "q_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+            q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+            q_cu_seqlens[0] = 0
+            cudagraph_fp8_meta_update_manager["q_cu_seqlens"] = q_cu_seqlens
+        q_cu_seqlens = cudagraph_fp8_meta_update_manager["q_cu_seqlens"]
+
+        kv_cu_seqlens = None
+        if need_kv:
+            if "kv_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+                kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
+                kv_cu_seqlens[0] = 0
+                cudagraph_fp8_meta_update_manager["kv_cu_seqlens"] = kv_cu_seqlens
+            kv_cu_seqlens = cudagraph_fp8_meta_update_manager["kv_cu_seqlens"]
+    else:
+        q_seqlen, kv_seqlen = mask.shape[2], mask.shape[3]
         q_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
         q_cu_seqlens[0] = 0
-        cudagraph_fp8_meta_update_manager["q_cu_seqlens"] = q_cu_seqlens
-    q_cu_seqlens = cudagraph_fp8_meta_update_manager["q_cu_seqlens"] 
-
-    kv_cu_seqlens = None
-    if need_kv:
-        if "kv_cu_seqlens" not in cudagraph_fp8_meta_update_manager:
+        kv_cu_seqlens = None
+        if need_kv:
             kv_cu_seqlens = paddle.empty(shape=[mask.shape[0] + 1], dtype=paddle.int32)
             kv_cu_seqlens[0] = 0
-            cudagraph_fp8_meta_update_manager["kv_cu_seqlens"] = kv_cu_seqlens
-        kv_cu_seqlens = cudagraph_fp8_meta_update_manager["kv_cu_seqlens"] 
-        
+
     tex.mask_to_cu_seqlens(mask, q_cu_seqlens, kv_cu_seqlens, q_seqlen, kv_seqlen, need_kv)
     return q_cu_seqlens, kv_cu_seqlens
 

@@ -28,7 +28,6 @@ from ..distributed import get_tp_group_and_world_size, track_rng_state
 from ..utils import attention_mask_func, divide
 from ..recompute import recompute
 
-
 __all__ = ["DotProductAttention", "MultiHeadAttention"]
 
 
@@ -156,12 +155,15 @@ class DotProductAttention(paddle.nn.Layer):
              backend to use for attention operation.
     """
 
-    def __init__(self,
-                 norm_factor: float,
-                 attention_dropout: float = 0.1,
-                 attn_mask_type: str = "causal",
-                 attention_type: str = "self",
-                 backend: str = 'transformer_engine') -> None:
+    def __init__(
+        self,
+        norm_factor: float,
+        attention_dropout: float = 0.1,
+        attn_mask_type: str = "causal",
+        attention_type: str = "self",
+        backend: str = 'transformer_engine',
+        assume_static_shape: bool = True,
+    ) -> None:
         super().__init__()
 
         self.norm_factor = norm_factor
@@ -171,6 +173,7 @@ class DotProductAttention(paddle.nn.Layer):
         self.qkv_layout = "qkv_interleaved" if attention_type == "self" else "kv_interleaved"
 
         self.backend = backend
+        self.assume_static_shape = assume_static_shape
 
         self.use_fused_attention = bool(int(os.getenv("NVTE_FUSED_ATTN", "1")))
 
@@ -280,7 +283,9 @@ class DotProductAttention(paddle.nn.Layer):
                                            step=query_layer.shape[1],
                                            dtype='int32')
             else:
-                cu_seqlens, _ = mask_to_cu_seqlens(attention_mask, need_kv=False)
+                cu_seqlens, _ = mask_to_cu_seqlens(attention_mask,
+                                                   need_kv=False,
+                                                   assume_static_shape=self.assume_static_shape)
             qkv_dtype = TE_DType[query_layer.dtype]
 
             output = FusedAttnFuncPackedQKV.apply(query_layer, cu_seqlens, core_attention_bias,
@@ -300,7 +305,8 @@ class DotProductAttention(paddle.nn.Layer):
                     is not None), "attention_mask must be provided for cross attention"
             max_seqlen_q = query_layer.shape[1]
             max_seqlen_kv = key_value_layer.shape[1]
-            cu_seqlens_q, cu_seqlens_kv = mask_to_cu_seqlens(attention_mask, need_kv=True)
+            cu_seqlens_q, cu_seqlens_kv = mask_to_cu_seqlens(
+                attention_mask, need_kv=True, assume_static_shape=self.assume_static_shape)
             qkv_dtype = TE_DType[query_layer.dtype]
             output = FusedAttnFuncPackedKV.apply(query_layer, key_value_layer, cu_seqlens_q,
                                                  cu_seqlens_kv, core_attention_bias, max_seqlen_q,
@@ -429,6 +435,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         tp_group: Optional[dist_group_type] = None,
         rng_state_name: str = 'local_seed',
         backend: str = 'transformer_engine',
+        assume_static_shape: bool = True,
     ) -> None:
         super().__init__()
         self.input_layernorm = input_layernorm
@@ -451,6 +458,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         self.set_parallel_mode = set_parallel_mode
         self.rng_state_name = rng_state_name
         self.backend = backend
+        self.assume_static_shape = assume_static_shape
 
         self.num_attention_heads_per_partition = divide(self.num_attention_heads, self.tp_size)
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -515,13 +523,12 @@ class MultiHeadAttention(paddle.nn.Layer):
             )
 
         # Attention.
-        self.core_attention = DotProductAttention(
-            norm_factor,
-            attention_dropout,
-            attn_mask_type=attn_mask_type,
-            attention_type=self.attention_type,
-            backend=self.backend,
-        )
+        self.core_attention = DotProductAttention(norm_factor,
+                                                  attention_dropout,
+                                                  attn_mask_type=attn_mask_type,
+                                                  attention_type=self.attention_type,
+                                                  backend=self.backend,
+                                                  assume_static_shape=self.assume_static_shape)
 
         # Linear
         self.proj = Linear(

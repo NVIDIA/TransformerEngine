@@ -8,12 +8,11 @@ from typing import Optional, Tuple, Union
 import paddle
 import paddle.nn.functional as F
 
+
 class _cudaGraphEmptyTensorManager:
+
     def __init__(self):
-        self.tensor = dict()
-    
-    def report(self, key, t):
-        self.history[key] = t.clone()
+        self.tensor = {}
 
     def __contains__(self, key):
         return self.tensor.__contains__(key)
@@ -23,9 +22,10 @@ class _cudaGraphEmptyTensorManager:
 
     def __getitem__(self, key):
         return self.tensor[key].zero_()
-            
+
 
 cudagraph_fp8_meta_update_manager = _cudaGraphEmptyTensorManager()
+
 
 def cast_if_needed(tensor: Union[paddle.Tensor, None],
                    dtype: paddle.dtype) -> Union[paddle.Tensor, None]:
