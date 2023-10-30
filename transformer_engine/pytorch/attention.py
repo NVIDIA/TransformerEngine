@@ -451,7 +451,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="causal",
+                                    qkv_layout="bshd_bshd_bshd", attn_mask_type="causal",
                                 )
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -484,7 +484,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="no_mask",
+                                    qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                                 )
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
@@ -517,7 +517,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
                                     tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                                     attn_scale=softmax_scale, dropout=dropout_p,
-                                    qkv_layout="sbhd_sbhd_sbhd", attn_mask_type="no_mask",
+                                    qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
                                 )
                             else:
                                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
@@ -681,7 +681,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
-                            qkv_layout="sbhd_sbhd_sbhd",
+                            qkv_layout="bshd_bshd_bshd",
                             attn_mask_type="causal",
                         )
                     else:
@@ -719,7 +719,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
-                            qkv_layout="sbhd_sbhd_sbhd",
+                            qkv_layout="bshd_bshd_bshd",
                             attn_mask_type="no_mask",
                         )
                     else:
@@ -757,7 +757,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
-                            qkv_layout="sbhd_sbhd_sbhd",
+                            qkv_layout="bshd_bshd_bshd",
                             attn_mask_type="no_mask",
                         )
                     else:
