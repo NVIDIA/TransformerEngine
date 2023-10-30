@@ -18,6 +18,29 @@ aten = torch.ops.aten
 c10d = torch.ops.c10d
 
 
+def _make_fp8_attr_property_funcs(name: str) -> Any:
+    """Make accessors for an FP8 attribute
+
+    We store FP8 attributes in a dictionary so we can share them
+    between tensors with the same data, e.g. detached tensors. For
+    convenience, we also expose them as property attributes. This
+    function creates the accessors for property attributes.
+
+    Parameters
+    ----------
+    name: str
+          Key in dictionary of FP8 attributes
+
+    """
+    def get_func(self) -> Any:
+        return self._fp8_attrs[name]
+    def set_func(self, value: Any) -> None:
+        self._fp8_attrs[name] = value
+    def del_func(self) -> None:
+        del self._fp8_attrs[name]
+    return dict(fget=get_func, fset=set_func, fdel=del_func)
+
+
 class _FromFloat8Func(torch.autograd.Function):
     """Cast from FP8 to other dtype"""
     @staticmethod
@@ -82,6 +105,7 @@ class _ToFloat8Func(torch.autograd.Function):
                 amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
             if scale_inv is None:
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
+                scale_inv = scale_inv.detach().clone()
             if fp8_dtype is None:
                 fp8_dtype = get_fp8_te_dtype(
                     fp8_meta["recipe"],
@@ -193,26 +217,22 @@ class _IdentityFunc(torch.autograd.Function):
 
 
 class Float8Tensor(torch.Tensor):
-    """
-    Experimental tensor class with FP8 data
+    """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
     but the data itself is (scaled) FP8. For most tensor operations,
     the data will be cast to the nominal dtype before performing the
     operation.
 
-    Changes to the FP8 scaling factors, e.g. from the FP8 recipe, are
-    handled outside this class. If a tensor is initialized with an FP8
-    metadata object, it extracts the information it needs so it isn't
-    affected by later changes in the FP8 metadata (although its design
-    does cause us to leak some subtle side-effects into FP8 metadata).
-
     Parameters
     ----------
     data: torch.Tensor
           Raw FP8 data in a uint8 tensor
+    fp8_attrs: dict, optional
+               FP8 metadata, primarily managed by Float8Tensor. If
+               provided, all other FP8 configuration is ignored.
     fp8_meta: dict, optional
-              FP8 metadata object
+              FP8 metadata object, primarily managed by TE modules.
     fp8_meta_forward: bool, default = `True`
                       Whether to access the FP8 metadata for the
                       forward pass. Ignored if fp8_meta is not
@@ -230,12 +250,14 @@ class Float8Tensor(torch.Tensor):
                    provided.
     dtype: torch.dtype, default = torch.float32
            Nominal tensor datatype.
+
     """
 
     def __new__(
         cls,
         *,
         data: torch.Tensor,
+        fp8_attrs: Optional[Dict[str, Any]] = None,
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
@@ -269,6 +291,15 @@ class Float8Tensor(torch.Tensor):
         )
         self._data: torch.Tensor = data
 
+        # Initialize dict of class attributes
+        # Note: We store FP8 attributes in a dictionary so we can
+        # share them between tensors with the same data, e.g. detached
+        # tensors.
+        self._fp8_attrs: dict = {}
+        if fp8_attrs is not None:
+            self._fp8_attrs = fp8_attrs
+            return self
+
         # FP8 meta tensors
         if fp8_meta is not None and fp8_meta_index is None:
             raise ValueError(
@@ -296,7 +327,6 @@ class Float8Tensor(torch.Tensor):
 
         # FP8 scale-inverse
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
-
         if self._scale_inv is None and self._fp8_meta is not None:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                 forward=self._fp8_meta_forward,
@@ -331,6 +361,7 @@ class Float8Tensor(torch.Tensor):
         tensor: Float8Tensor,
         *,
         data: torch.Tensor,
+        fp8_attrs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Float8Tensor:
         """Use attributes of a Float8Tensor to create another Float8Tensor
@@ -349,7 +380,7 @@ class Float8Tensor(torch.Tensor):
         for key, val in default_kwargs.items():
             if key not in kwargs:
                 kwargs[key] = val
-        return Float8Tensor(data=data, **kwargs)
+        return Float8Tensor(data=data, fp8_attrs=fp8_attrs, **kwargs)
 
     def __repr__(self):
         return (
@@ -510,7 +541,12 @@ class Float8Tensor(torch.Tensor):
         The new tensor has the same underlying FP8 data.
 
         """
-        return Float8Tensor.make_like(self, data=self._data, dtype=dtype)
+        return Float8Tensor.make_like(
+            self,
+            data=self._data,
+            fp8_attrs=self._fp8_attrs,
+            dtype=dtype,
+        )
 
     def _reset_caches(self) -> None:
         """Reset cached values
@@ -545,10 +581,20 @@ class Float8Tensor(torch.Tensor):
                 memory_format=torch.contiguous_format,
             )
 
+            # Update scaling factor if FP8 meta tensors are available
+            if dst._fp8_meta is None:
+                scale = dst._scale_inv.reciprocal()
+            else:
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                    forward=dst._fp8_meta_forward,
+                )
+                scale = dst._fp8_meta[fp8_meta_key].scale[dst._fp8_meta_index]
+                dst._scale_inv = scale.detach().view(1).reciprocal()
+
             # Cast to FP8
             tex.cast_to_fp8_noalloc(
                 src.view(1,-1),
-                dst._scale_inv.reciprocal(),
+                scale,
                 dst._data.view(1,-1),
                 torch.empty_like(dst._scale_inv),  # amax
                 dst._scale_inv,
@@ -576,7 +622,11 @@ class Float8Tensor(torch.Tensor):
         # Detach op
         if func == aten.detach.default:
             # Simply return a new Float8Tensor with the same attrs
-            return Float8Tensor.make_like(args[0], data=args[0]._data.detach())
+            return Float8Tensor.make_like(
+                args[0],
+                data=args[0]._data,
+                fp8_attrs=args[0]._fp8_attrs,
+            )
 
         # Find FP8 tensor so we can get its FP8 scaling factors
         base_fp8_tensor = None
@@ -663,6 +713,17 @@ class Float8Tensor(torch.Tensor):
 
     # Cast to FP8 when setting Float8Tensor.data
     data = property(_get_data, _set_data)
+
+    # Accessors for objects in self._fp8_attrs
+    # Note: We store FP8 attributes in a dictionary so we can share
+    # them between tensors with the same data, e.g. detached tensors.
+    # For convenience, we also expose them as property attributes.
+    _fp8_meta = property(**_make_fp8_attr_property_funcs("fp8_meta"))
+    _fp8_meta_forward = property(**_make_fp8_attr_property_funcs("fp8_meta_forward"))
+    _fp8_meta_index = property(**_make_fp8_attr_property_funcs("fp8_meta_index"))
+    _fp8_dtype = property(**_make_fp8_attr_property_funcs("dtype"))
+    _transpose = property(**_make_fp8_attr_property_funcs("transpose"))
+    _scale_inv = property(**_make_fp8_attr_property_funcs("scale_inv"))
 
     # Do not force the Float8Tensor type on the returned tensor
     __torch_function__ = torch._C._disabled_torch_function_impl

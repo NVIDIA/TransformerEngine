@@ -128,6 +128,7 @@ class TestFloat8Tensor:
             _ = module(torch.zeros([8, 32], device="cuda"))
         fp8_meta = module.fp8_meta
         fp8_meta_index = tex.FP8FwdTensors.GEMM1_WEIGHT
+        fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
 
         # Initialize random data
         dims = _to_list(dims)
@@ -139,25 +140,32 @@ class TestFloat8Tensor:
             fp8_meta=fp8_meta,
             fp8_meta_index=fp8_meta_index,
         )
+        x_ref = x_fp8.from_float8()
         assert list(x_fp8.size()) == dims, "Incorrect dims"
         assert x_fp8.dtype == dtype, "Incorrect nominal dtype"
         assert x_fp8.is_cuda, "Incorrect device"
         assert x_fp8._fp8_dtype == fp8_dtype, "Incorrect FP8 dtype"
 
-        # Do something weird to FP8 metadata
-        fp8_meta.clear()
-        fp8_meta["I"] = ["have", None, {1: "d", 3: "a"}, "what is happening!"]
-        assert x_fp8._fp8_meta is fp8_meta, "Incorrect FP8 metadata"
-
-        # Cast back from FP8
-        x_fp8 = x_fp8.from_float8().cpu()
+        # Change FP8 metadata scale
+        fp8_meta[fp8_meta_key].scale[fp8_meta_index] = 2
+        fp8_meta[fp8_meta_key].scale_inv.fill_(123)
 
         # Check results
         torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
-
-        # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
+            # Make sure we are not trivially passing the test
             torch.testing.assert_close(x_fp8, -x_ref, **_tols[fp8_dtype])
+
+        # Check if scaling factor is updated after in-place ops
+        x_fp8 += 0
+        fp8_meta[fp8_meta_key].scale[fp8_meta_index] = 4
+        fp8_meta[fp8_meta_key].scale_inv.fill_(321)
+        assert x_fp8._scale_inv.item() == 0.5, "Incorrect FP8 scale_inv"
+        torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
+        y = x_fp8.detach()
+        y += 0
+        assert x_fp8._scale_inv.item() == 0.25, "Incorrect FP8 scale_inv"
+        torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
 
     def test_basic_ops(
         self,
@@ -292,19 +300,19 @@ class TestFloat8Tensor:
             x_fp8 += 0.5
             x_ref = x_fp8.from_float8()
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, cache=True),
+                x_fp8.transpose(*transpose_dims, update_cache=True),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, cache=True),
+                x_fp8.transpose(*transpose_dims, update_cache=True),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
             x_fp8 += 0.5
             x_ref = x_fp8.from_float8()
             torch.testing.assert_close(
-                x_fp8.transpose(*transpose_dims, cache=True),
+                x_fp8.transpose(*transpose_dims, update_cache=True),
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
