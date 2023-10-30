@@ -5,7 +5,7 @@
 """Python interface for c++ extensions"""
 from transformer_engine_extensions import *
 
-from .fused_attn import *
+#from .fused_attn import *
 from .gemm import *
 from .transpose import *
 from .activation import *
