@@ -2358,46 +2358,45 @@ class GatedGeluPrimitive(BasePrimitive):
     impl_static_args = ()
 
     @staticmethod
-    def abstract(inputs):
+    def abstract(x_aval):
         """
         gated_gelu abstract
         """
-        dtype = dtypes.canonicalize_dtype(inputs.dtype)
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        inputs_shape = inputs.shape
-        hidden_size = inputs_shape[-1]
+        x_shape = x_aval.shape
+        hidden_size = x_shape[-1]
         # In Transformer, batch_shape = (batch,  seqlen, )
-        batch_shapes = inputs_shape[:-1]
+        batch_shapes = x_shape[:-1]
         assert hidden_size % 2 == 0
-        inputs_shape = inputs.shape
-        out_aval = core.raise_to_shaped(inputs)
+        x_shape = x_aval.shape
+        out_aval = core.raise_to_shaped(x_aval)
         out_shape = (batch_shapes) + (hidden_size // 2,)
         out_aval = out_aval.update(shape=out_shape, dtype=dtype)
 
         return out_aval
 
     @staticmethod
-    def lowering(ctx, inputs):
+    def lowering(ctx, x):
         """
         gated_gelu lowering rules
         """
-        (in_aval,) = ctx.avals_in
-        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        ir_in_type = ir.RankedTensorType(inputs.type)
-        ir_in_shape = ir_in_type.shape
-        out_shape = ir_in_shape[:-1] + [ir_in_shape[-1] // 2]
+        (x_aval,) = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        ir_x_type = ir.RankedTensorType(x.type)
+        ir_x_shape = ir_x_type.shape
+        out_shape = ir_x_shape[:-1] + [ir_x_shape[-1] // 2]
 
         out_types = [
-            ir.RankedTensorType.get(out_shape, ir_in_type.element_type),
+            ir.RankedTensorType.get(out_shape, ir_x_type.element_type),
         ]
-        operands = [inputs]
-        operand_shapes = [ir_in_shape]
+        operands = [x]
+        operand_shapes = [ir_x_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        hidden_size = ir_in_shape[-1]
-        # In Transformer, batch_size = batch x seqlen
-        batch_size = reduce(operator.mul, ir_in_shape[:-1])
-        in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
+        hidden_size = ir_x_shape[-1]
+        batch_size = reduce(operator.mul, ir_x_shape[:-1])
+        in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
         opaque = transformer_engine_jax.pack_common_descriptor((batch_size, hidden_size // 2),
                                                                in_dtype, in_dtype)
 
@@ -2439,12 +2438,11 @@ class GatedGeluPrimitive(BasePrimitive):
         gated_gelu partitioning
         """
         del result_infos
-        input_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
-        out_spec = input_spec
-        arg_shardings = (input_spec,)
-        out_shardings = out_spec
+        x_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
+        arg_shardings = (x_sharding,)
+        out_sharding = x_sharding
         impl = GatedGeluPrimitive.impl
-        return mesh, impl, out_shardings, arg_shardings
+        return mesh, impl, out_sharding, arg_shardings
 
 
 register_primitive(GatedGeluPrimitive)
@@ -2470,20 +2468,20 @@ class DgatedGeluPrimitive(BasePrimitive):
     impl_static_args = ()
 
     @staticmethod
-    def abstract(dz, x):
+    def abstract(dz_aval, x_aval):
         """
         dgated_gelu abstract
         """
-        dtype = dtypes.canonicalize_dtype(dz.dtype)
+        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert x.dtype == dtype
-        for axis in range(len(dz.shape) - 1):
-            assert dz.shape[axis] == x.shape[axis]
+        assert x_aval.dtype == dtype
+        for axis in range(len(dz_aval.shape) - 1):
+            assert dz_aval.shape[axis] == x_aval.shape[axis]
 
-        i_hidden_size = dz.shape[-1]
-        g_hidden_size = x.shape[-1]
+        i_hidden_size = dz_aval.shape[-1]
+        g_hidden_size = x_aval.shape[-1]
         assert i_hidden_size * 2 == g_hidden_size
-        out_aval = core.raise_to_shaped(x)
+        out_aval = core.raise_to_shaped(x_aval)
         return out_aval
 
     @staticmethod
@@ -2501,7 +2499,6 @@ class DgatedGeluPrimitive(BasePrimitive):
         for axis in range(len(ir_in_shape) - 1):
             assert ir_in_shape[axis] == gi_shape[axis]
 
-        # In Transformer, batch_size = batch x seqlen
         ir_batch_size = reduce(operator.mul, ir_in_shape[:-1])
         i_hidden_size = ir_in_shape[-1]
         g_hidden_size = gi_shape[-1]
@@ -2553,7 +2550,7 @@ class DgatedGeluPrimitive(BasePrimitive):
         del result_infos    # Unused.
         gelu_out_spec = get_padded_spec(arg_infos[1])
         dx_sharding = NamedSharding(mesh, PartitionSpec(*gelu_out_spec))
-        return (dx_sharding)
+        return dx_sharding
 
     @staticmethod
     def partition(mesh, arg_infos, result_infos):
@@ -3275,7 +3272,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
     """
     name = "te_gated_gelu_fp8"
     multiple_results = True
-    impl_static_args = (4,)   #out_dtype
+    impl_static_args = (4,)    #out_dtype
     inner_primitive = None
     outer_primitive = None
 
@@ -3293,25 +3290,26 @@ class GatedGeluFp8Primitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
 
         hidden_size = x_aval.shape[-1]
-        batch_size = x_aval.shape[:-1]
-        out_shape = (batch_size) + (hidden_size // 2,)
+        assert hidden_size % 2 == 0
+        batch_shape = x_aval.shape[:-1]
+        out_shape = (batch_shape) + (hidden_size // 2,)
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
 
         return out_aval, updated_amax_aval
 
     @staticmethod
-    def lowering(ctx, inputs, amax, scale, scale_inv, *, out_dtype):
+    def lowering(ctx, x, amax, scale, scale_inv, *, out_dtype):
         """
         te_gated_gelu_p lowering rules
         """
-        in_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
-        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_in_type = ir.RankedTensorType(inputs.type)
-        ir_in_shape = ir_in_type.shape
+        ir_x_type = ir.RankedTensorType(x.type)
+        ir_x_shape = ir_x_type.shape
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
         ir_amax_dtype = ir_amax_type.element_type
@@ -3319,20 +3317,21 @@ class GatedGeluFp8Primitive(BasePrimitive):
         ir_scale_shape = ir_amax_shape
         ir_scale_inv_shape = ir_amax_shape
 
-        hidden_size = ir_in_shape[-1]
-        batch_size = ir_in_shape[:-1]    # In Transformer, batch_size = batch x seqlen
-        out_shape = batch_size + [hidden_size//2]
+        hidden_size = ir_x_shape[-1]
+        batch_shape = ir_x_shape[:-1]
+        batch_size = reduce(operator.mul, batch_shape)
+        out_shape = batch_shape + [hidden_size // 2]
         out_types = [
             ir.RankedTensorType.get(out_shape, ir_out_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
-        operands = [inputs, amax, scale, scale_inv]
-        operand_shapes = [ir_in_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+        operands = [x, amax, scale, scale_inv]
+        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (out_shape), jax_dtype_to_te_dtype(in_aval.dtype), 
-            jax_dtype_to_te_dtype(out_dtype))
+        opaque = transformer_engine_jax.pack_common_descriptor((batch_size, out_shape[-1]),
+                                                               jax_dtype_to_te_dtype(x_aval.dtype),
+                                                               jax_dtype_to_te_dtype(out_dtype))
 
         out = custom_caller(GatedGeluFp8Primitive.name,
                             args,
@@ -3341,19 +3340,18 @@ class GatedGeluFp8Primitive(BasePrimitive):
                             operand_output_aliases={1: 1})
 
         return out
-    
+
     @staticmethod
     def impl(x, amax, scale, scale_inv, out_dtype):
         """
         to describe implementation
         """
         assert GatedGeluFp8Primitive.inner_primitive is not None
-        out, updated_amax = GatedGeluFp8Primitive.inner_primitive.bind(
-            x,
-            amax,
-            scale,
-            scale_inv,
-            out_dtype=out_dtype)
+        out, updated_amax = GatedGeluFp8Primitive.inner_primitive.bind(x,
+                                                                       amax,
+                                                                       scale,
+                                                                       scale_inv,
+                                                                       out_dtype=out_dtype)
         return out, updated_amax
 
     @staticmethod
@@ -3366,24 +3364,17 @@ class GatedGeluFp8Primitive(BasePrimitive):
         x_bdim, amax_bdim, _, _ = batch_dims
 
         out_bdims = x_bdim, amax_bdim
-        return GatedGeluFp8Primitive.outer_primitive.bind(
-            x,
-            amax,
-            scale,
-            scale_inv,
-            out_dtype=out_dtype), out_bdims
+        return GatedGeluFp8Primitive.outer_primitive.bind(x,
+                                                          amax,
+                                                          scale,
+                                                          scale_inv,
+                                                          out_dtype=out_dtype), out_bdims
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, mesh, arg_infos, result_infos):
-        del out_dtype
+        del out_dtype, result_infos
         x_spec = get_padded_spec(arg_infos[0])
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {GatedGeluFp8Primitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance.")
-        
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         return (out_sharding, amax_sharding)
 
@@ -3391,20 +3382,17 @@ class GatedGeluFp8Primitive(BasePrimitive):
     def partition(out_dtype, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[0])
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {GatedGeluFp8Primitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance."
-            )
-        x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+        x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (x_sharding, amax_sharding)
 
         def sharded_impl(x, amax, scale, scale_inv):
-            local_x, local_amax = GatedGeluFp8Primitive.impl(x, amax, scale, scale_inv,
-                                            out_dtype=out_dtype)
+            local_x, local_amax = GatedGeluFp8Primitive.impl(x,
+                                                             amax,
+                                                             scale,
+                                                             scale_inv,
+                                                             out_dtype=out_dtype)
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
 
             return local_x, global_updated_amax
@@ -3415,15 +3403,18 @@ class GatedGeluFp8Primitive(BasePrimitive):
 register_primitive(GatedGeluFp8Primitive)
 
 
-def gated_gelu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-                   scale_inv: jnp.ndarray,
+def gated_gelu_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
                    out_dtype: jnp.dtype) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     gated gelu wrapper
     Return FP8(geglu(x))
     Assume x has two dimensions shape and the memory layout is (N, 2, H)
     """
-    return GatedGeluFp8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
+    return GatedGeluFp8Primitive.outer_primitive.bind(x,
+                                                      amax,
+                                                      scale,
+                                                      scale_inv,
+                                                      out_dtype=out_dtype)
 
 
 class DgatedGeluCastTransposePrimitive(BasePrimitive):
@@ -3448,22 +3439,24 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         return (*shape[:transpose_start_idx], shape[-1], *shape[transpose_start_idx:-1])
 
     @staticmethod
-    def abstract(dz, x, amax_aval, scale_aval, scale_inv_aval, *, out_dtype, static_axis_boundary):
+    def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
+                 static_axis_boundary):
         """
         te_dgated_gelu_cast_transpose_p abstract
         """
-        dtype = dtypes.canonicalize_dtype(dz.dtype)
+        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert x.dtype == dtype
+        assert x_aval.dtype == dtype
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_hidden_szie = dz.shape[-1]
-        gi_hidden_size = x.shape[-1]
+        ir_hidden_szie = dz_aval.shape[-1]
+        gi_hidden_size = x_aval.shape[-1]
         assert ir_hidden_szie * 2 == gi_hidden_size
-        t_shape = DgatedGeluCastTransposePrimitive.multidim_transpose(x.shape, static_axis_boundary)
-        out = dz.update(shape=x.shape, dtype=out_dtype)
-        t_out = dz.update(shape=t_shape, dtype=out_dtype)
+        t_shape = DgatedGeluCastTransposePrimitive.multidim_transpose(x_aval.shape,
+                                                                      static_axis_boundary)
+        out = dz_aval.update(shape=x_aval.shape, dtype=out_dtype)
+        t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
         return out, t_out, updated_amax_aval
 
@@ -3472,20 +3465,21 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         """
         te_dgated_gelu_cast_transpose_p lowering rules
         """
-        in_aval, gi_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
-        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert gi_aval.dtype == in_aval.dtype
+        dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
+        assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_aval.dtype
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_in_type = ir.RankedTensorType(dz.type)
-        ir_in_shape = ir_in_type.shape
-        gi_type = ir.RankedTensorType(x.type)
-        gi_shape = gi_type.shape
-        ir_batch_szie = ir_in_shape[0]
-        gi_batch_size = gi_shape[0]
-        ir_hidden_szie = ir_in_shape[-1]
-        gi_hidden_size = gi_shape[-1]
+        ir_dz_type = ir.RankedTensorType(dz.type)
+        ir_dz_shape = ir_dz_type.shape
+        x_type = ir.RankedTensorType(x.type)
+        x_shape = x_type.shape
+        dz_batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        x_batch_size = reduce(operator.mul, x_shape[:-1])
+        assert dz_batch_szie == x_batch_size
+        ir_hidden_szie = ir_dz_shape[-1]
+        gi_hidden_size = x_shape[-1]
         assert ir_hidden_szie * 2 == gi_hidden_size
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
         ir_amax_type = ir.RankedTensorType(amax.type)
@@ -3493,18 +3487,19 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         ir_amax_shape = ir_amax_type.shape
         ir_scale_shape = ir_amax_shape
         ir_scale_inv_shape = ir_amax_shape
-        transposed_x_shape = DgatedGeluCastTransposePrimitive.multidim_transpose(gi_shape, static_axis_boundary)
+        transposed_x_shape = DgatedGeluCastTransposePrimitive.multidim_transpose(
+            x_shape, static_axis_boundary)
         out_types = [
-            ir.RankedTensorType.get(gi_shape, ir_out_dtype),
+            ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
             ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
         ]
         operands = [dz, x, amax, scale, scale_inv]
-        operand_shapes = [ir_in_shape, gi_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+        operand_shapes = [ir_dz_shape, x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        contracted_x_shape = (reduce(operator.mul, gi_shape[:-1]), gi_shape[-1])
+        contracted_x_shape = (reduce(operator.mul, x_shape[:-1]), x_shape[-1])
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
-                                                               jax_dtype_to_te_dtype(in_aval.dtype),
+                                                               jax_dtype_to_te_dtype(dz_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
 
         out = custom_caller(DgatedGeluCastTransposePrimitive.name,
@@ -3536,38 +3531,29 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        del static_axis_boundary
         assert DgatedGeluCastTransposePrimitive.outer_primitive is not None
         dz, x, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
 
         out_bdims = x_bdim, x_bdim, amax_bdim
         return DgatedGeluCastTransposePrimitive.outer_primitive.bind(
-            dz,
-            x,
-            amax,
-            scale,
-            scale_inv,
-            out_dtype=out_dtype,
+            dz, x, amax, scale, scale_inv, out_dtype=out_dtype,
             static_axis_boundary=x_bdim), out_bdims
 
     @staticmethod
-    def infer_sharding_from_operands(out_dtype, static_axis_boundary, mesh, arg_infos, result_infos):
-        del out_dtype, static_axis_boundary
-        x_spec = get_padded_spec(arg_infos[0])
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {DgatedGeluCastTransposePrimitive.name}! " \
-                f"Force to not shard the hidden dim, which might introduce extra collective ops, " \
-                f"and hurt performance.")
-        
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
+    def infer_sharding_from_operands(out_dtype, static_axis_boundary, mesh, arg_infos,
+                                     result_infos):
+        del out_dtype, static_axis_boundary, result_infos
+        x_spec = get_padded_spec(arg_infos[1])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         return (out_sharding, out_sharding, amax_sharding)
 
     @staticmethod
     def partition(out_dtype, static_axis_boundary, mesh, arg_infos, result_infos):
         del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
+        x_spec = get_padded_spec(arg_infos[1])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         xt_spec = DgatedGeluCastTransposePrimitive.multidim_transpose(x_spec, static_axis_boundary)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
@@ -3577,29 +3563,39 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         out_shardings = (casted_x_sharding, casted_transposed_x_sharding, amax_sharding)
 
         def sharded_impl(dz, x, amax, scale, scale_inv):
-            local_out, local_t_out, local_amax = DgatedGeluCastTransposePrimitive.impl(dz, x, amax, scale, scale_inv,
-                                            out_dtype=out_dtype, static_axis_boundary=static_axis_boundary)
+            local_out, local_t_out, local_amax = DgatedGeluCastTransposePrimitive.impl(
+                dz,
+                x,
+                amax,
+                scale,
+                scale_inv,
+                out_dtype=out_dtype,
+                static_axis_boundary=static_axis_boundary)
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
             return local_out, local_t_out, global_updated_amax
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
+
 register_primitive(DgatedGeluCastTransposePrimitive)
 
-def dgated_gelu_cast_transpose(dz: jnp.ndarray, x: jnp.ndarray, amax: jnp.ndarray,
-                               scale: jnp.ndarray, scale_inv: jnp.ndarray,
-                               out_dtype: TEDType, static_axis_boundary: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+
+def dgated_gelu_cast_transpose(
+        dz: jnp.ndarray, x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
+        scale_inv: jnp.ndarray, out_dtype: TEDType,
+        static_axis_boundary: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose d_gated_gelu fusion wrapper
     Return FP8(dgeglu(inputs))
     """
-    return DgatedGeluCastTransposePrimitive.outer_primitive.bind(dz,
-                                                                 x,
-                                                                 amax, 
-                                                                 scale, 
-                                                                 scale_inv, 
-                                                                 out_dtype=out_dtype,
-                                                                 static_axis_boundary=static_axis_boundary)
+    return DgatedGeluCastTransposePrimitive.outer_primitive.bind(
+        dz,
+        x,
+        amax,
+        scale,
+        scale_inv,
+        out_dtype=out_dtype,
+        static_axis_boundary=static_axis_boundary)
 
 
 # Deprecating Items ---------------------------------------------------------------
