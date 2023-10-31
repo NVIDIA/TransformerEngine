@@ -16,7 +16,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine_extensions as tex
-from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8, cast_from_fp8
+from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8
 from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
@@ -93,7 +93,7 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
 
     model_in = Test_TE_Export(precision, True)
     with te.fp8_autocast(enabled=True):
-        model_in.fp8_init()
+        model_in.init_fp8_metadata()
         # scaling fwd
         model_in.fp8_meta["scaling_fwd"].scale = torch.ones(3, dtype=torch.float32, device="cuda") * scale_fwd
         model_in.fp8_meta["scaling_fwd"].scale_inv = torch.ones(3, dtype=torch.float32, device="cuda") / scale_fwd
