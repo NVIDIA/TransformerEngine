@@ -527,7 +527,7 @@ class Float8Tensor(torch.Tensor):
             forward=self._fp8_meta_forward,
         )
         scale_inv = self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index]
-        scale_inv.copy_(self._scale_inv)
+        scale_inv.view(1).copy_(self._scale_inv.view(1))
 
     def to_dtype(self, dtype: torch.dtype) -> Float8Tensor:
         """Create `Float8Tensor` with given nominal dtype
