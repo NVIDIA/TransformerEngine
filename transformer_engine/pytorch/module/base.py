@@ -458,7 +458,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         device=torch.cuda.current_device(),
                         dtype=torch.uint8,
                     ),
-                    fp8_dtype=get_default_fp8_recipe().fp8_format,
+                    fp8_dtype=tex.DType.kFloat8E4M3,
                     fp8_scale_inv=1,
                 )
             )
@@ -472,7 +472,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         device=torch.cuda.current_device(),
                         dtype=torch.uint8,
                     ),
-                    fp8_dtype=get_default_fp8_recipe().fp8_format,
+                    fp8_dtype=tex.DType.kFloat8E4M3,
                     fp8_scale_inv=1,
                 )
             )
@@ -801,7 +801,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         device=torch.cuda.current_device(),
                         dtype=torch.uint8,
                     ),
-                    fp8_dtype=get_default_fp8_recipe().fp8_format,
+                    fp8_dtype=tex.DType.kFloat8E4M3,
                     fp8_scale_inv=1,
                 )
             )
@@ -813,7 +813,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         device=torch.cuda.current_device(),
                         dtype=torch.uint8,
                     ),
-                    fp8_dtype=get_default_fp8_recipe().fp8_format,
+                    fp8_dtype=tex.DType.kFloat8E4M3,
                     fp8_scale_inv=1,
                 )
             )

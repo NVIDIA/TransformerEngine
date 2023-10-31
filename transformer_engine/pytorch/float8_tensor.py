@@ -11,7 +11,7 @@ from torch.utils._pytree import tree_map
 import transformer_engine_extensions as tex
 
 from .constants import TE_DType
-from .fp8 import FP8GlobalStateManager, get_fp8_te_dtype
+from .fp8 import FP8GlobalStateManager
 
 
 aten = torch.ops.aten
@@ -76,7 +76,7 @@ class _ToFloat8Func(torch.autograd.Function):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: Optional[tex.DType] = None,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
@@ -106,8 +106,6 @@ class _ToFloat8Func(torch.autograd.Function):
             if scale_inv is None:
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
                 scale_inv = scale_inv.detach().view(1).clone()
-            if fp8_dtype is None:
-                fp8_dtype = tex.DType.kFloat8E4M3
 
         # Check input tensor
         tensor = tensor.contiguous().cuda().detach()
@@ -141,10 +139,6 @@ class _ToFloat8Func(torch.autograd.Function):
         if not (amax.numel() == 1 and amax.is_cuda and amax.dtype == torch.float32):
             raise ValueError(
                 "Attempted to initialize Float8Tensor with invalid amax tensor"
-            )
-        if fp8_dtype is None:
-            raise ValueError(
-                "Attempted to initialize Float8Tensor without specifying FP8 dtype"
             )
 
         # Cast data to FP8
@@ -237,8 +231,8 @@ class Float8Tensor(torch.Tensor):
     fp8_meta_index: int, optional
                     Index to access in FP8 meta tensors. Required if
                     fp8_meta is provided and otherwise ignored.
-    fp8_dtype: transformer_engine_extensions.DType, optional
-               FP8 format. Can be inferred from fp8_meta if provided.
+    fp8_dtype: transformer_engine_extensions.DType, tex.DType.kFloat8E4M3
+               FP8 format.
     fp8_scale_inv: torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
@@ -258,7 +252,7 @@ class Float8Tensor(torch.Tensor):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: Optional[tex.DType] = None,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         fp8_scale_inv: Optional[torch.Tensor] = None,
         dtype: torch.dtype = torch.float32,
     ):
@@ -308,13 +302,10 @@ class Float8Tensor(torch.Tensor):
         self._fp8_meta_index: Optional[int] = fp8_meta_index
 
         # FP8 dtype
+        assert (
+            fp8_dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
+        ), f"Unsupported fp8_dtype {fp8_dtype}."
         self._fp8_dtype: tex.DType = fp8_dtype
-        if self._fp8_dtype is None and self._fp8_meta is not None:
-            self._fp8_dtype = tex.DType.kFloat8E4M3
-        if self._fp8_dtype is None:
-            raise ValueError(
-                "Attempted to initialize Float8Tensor without specifying FP8 dtype"
-            )
 
         # Cached transpose
         self._transpose: Optional[Float8Tensor] = None
@@ -402,7 +393,7 @@ class Float8Tensor(torch.Tensor):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: Optional[tex.DType] = None,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
