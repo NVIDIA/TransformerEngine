@@ -105,7 +105,7 @@ class _ToFloat8Func(torch.autograd.Function):
                 amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
             if scale_inv is None:
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
-                scale_inv = scale_inv.detach().clone()
+                scale_inv = scale_inv.detach().view(1).clone()
             if fp8_dtype is None:
                 fp8_dtype = get_fp8_te_dtype(
                     fp8_meta["recipe"],
