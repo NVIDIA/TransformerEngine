@@ -107,10 +107,7 @@ class _ToFloat8Func(torch.autograd.Function):
                 scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
                 scale_inv = scale_inv.detach().view(1).clone()
             if fp8_dtype is None:
-                fp8_dtype = get_fp8_te_dtype(
-                    fp8_meta["recipe"],
-                    fprop_tensor=fp8_meta_forward,
-                )
+                fp8_dtype = tex.DType.kFloat8E4M3
 
         # Check input tensor
         tensor = tensor.contiguous().cuda().detach()
@@ -313,10 +310,7 @@ class Float8Tensor(torch.Tensor):
         # FP8 dtype
         self._fp8_dtype: tex.DType = fp8_dtype
         if self._fp8_dtype is None and self._fp8_meta is not None:
-            self._fp8_dtype = get_fp8_te_dtype(
-                self._fp8_meta["recipe"],
-                fprop_tensor=self._fp8_meta_forward,
-            )
+            self._fp8_dtype = tex.DType.kFloat8E4M3
         if self._fp8_dtype is None:
             raise ValueError(
                 "Attempted to initialize Float8Tensor without specifying FP8 dtype"
@@ -628,34 +622,9 @@ class Float8Tensor(torch.Tensor):
                 fp8_attrs=args[0]._fp8_attrs,
             )
 
-        # Find FP8 tensor so we can get its FP8 scaling factors
-        base_fp8_tensor = None
-        for t in args:
-            if isinstance(t, Float8Tensor):
-                base_fp8_tensor = t
-                break
-
         def maybe_unwrap(t):
             if isinstance(t, Float8Tensor):
                 return t.from_float8()
-            return t
-
-        def maybe_wrap(t): # pylint: disable=unused-variable
-            if not isinstance(t, Float8Tensor):
-                assert base_fp8_tensor is not None, (
-                    "Could not find Float8Tensor. "
-                    "Unclear what scaling factors to use for FP8 casts."
-                )
-                return Float8Tensor.to_float8(
-                    t,
-                    fp8_meta=base_fp8_tensor._fp8_meta,
-                    fp8_meta_forward=base_fp8_tensor._fp8_meta_forward,
-                    fp8_meta_index=base_fp8_tensor._fp8_meta_index,
-                    fp8_dtype=base_fp8_tensor._fp8_dtype,
-                    scale=base_fp8_tensor._scale_inv.reciprocal(),
-                    amax=torch.empty_like(base_fp8_tensor._scale_inv),
-                    scale_inv=base_fp8_tensor._scale_inv,
-                )
             return t
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
