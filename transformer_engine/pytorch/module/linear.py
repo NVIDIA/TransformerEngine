@@ -79,6 +79,7 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
+        ub_name: str,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -163,7 +164,7 @@ class _Linear(torch.autograd.Function):
             proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                 None, None, None, activation_dtype)
             if ub_split_rs or ub_atomic_gemm_rs:
-                ub_obj_projout = get_ub("proj_fprop")
+                ub_obj_projout = get_ub(ub_name+"_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
@@ -265,6 +266,7 @@ class _Linear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.ub_split_ag = ub_split_ag
             ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+            ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
@@ -303,7 +305,7 @@ class _Linear(torch.autograd.Function):
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ctx.ub_obj_gradout = get_ub("proj_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name+"_dgrad")
             (
                 grad_output,
                 grad_output_c,
@@ -470,6 +472,7 @@ class _Linear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -559,6 +562,7 @@ class Linear(TransformerEngineBaseModule):
         device: Union[torch.device, str] = "cuda",
         ub_atomic_gemm_rs: bool = False,
         ub_atomic_gemm_ag: bool = False,
+        ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -574,6 +578,9 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        if any([i for i in [ub_atomic_gemm_rs, ub_atomic_gemm_ag] if i]):
+            assert ub_name is not None, "Userbuffer name [string] is not set."
+        self.ub_name = ub_name
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -794,6 +801,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_split_ag,
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag,
+                self.ub_name,
             )
             out = linear_fn(*args)
 
