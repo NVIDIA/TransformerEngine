@@ -147,7 +147,7 @@ def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
     """Initialize the FP8 quantization scales in module"""
     NB_SCALES_PER_GEMM = 3  # One scale per: input, weights, and output GEMM tensors.
     nb_total_scales = num_gemms * NB_SCALES_PER_GEMM
-    module.fp8_init(num_gemms)
+    module.init_fp8_metadata(num_gemms)
     module.fp8_meta["scaling_fwd"].scale = torch.ones(
         nb_total_scales, dtype=torch.float32, device="cuda") / scale
     module.fp8_meta["scaling_fwd"].scale_inv = torch.ones(
