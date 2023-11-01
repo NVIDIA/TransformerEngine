@@ -166,9 +166,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
                 weight_t_fp8 = None
-                if is_grad_enabled:
-                    weight_t_fp8 = weight_fp8.transpose(update_cache=is_first_microbatch)
-
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -302,6 +299,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            if ctx.fp8 and weight_t_fp8 is None:
+                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
 
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
