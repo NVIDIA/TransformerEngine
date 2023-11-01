@@ -400,8 +400,9 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         recv_src = cp_global_ranks[(rank + cp_size - 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
-        # [b, s, np, hn] -> [b, 2, s//2, np, hn]
-        q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
+        if causal:
+            # [b, s, np, hn] -> [b, 2, s//2, np, hn]
+            q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
         if _flash_attn_2_available:
             assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
         # Flash Attn inputs
@@ -540,7 +541,34 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                         causal=False, return_softmax=False,
                                     )
                     else:
-                        assert False, "Not implemented yet!"
+                        if use_fused_attention:
+                            out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
+                                is_training, max_seqlen_q, max_seqlen_k, cu_seqlens_q, cu_seqlens_k,
+                                q, kv_inputs[i%2][0], kv_inputs[i%2][1], TE_DType[q.dtype],
+                                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                                attn_scale=softmax_scale, dropout=dropout_p,
+                                qkv_layout="bshd_bshd_bshd", attn_mask_type="no_mask",
+                            )
+                        else:
+                            # [b, sq, np, hn] -> [b*sq, np, hn]
+                            q_inputs[i%2] = q.view(-1, *q.shape[-2:])
+                            # [2, b, sk, np, hn] -> [2, b*sk, np, hn]
+                            kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
+                            if _flash_attn_2_available:
+                                _, _, _, _, out_per_step[i], \
+                                softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                                    dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                )
+                            else:
+                                out_per_step[i] = torch.empty_like(q_inputs[i%2])
+                                _, softmax_lse_per_step[i], rng_states[i], _ = _flash_attn_forward( # pylint: disable=unbalanced-tuple-unpacking
+                                    q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
+                                    out_per_step[i], cu_seqlens_q, cu_seqlens_k,
+                                    max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale,
+                                    causal=False, return_softmax=False,
+                                )
 
             if i > 0:
                 # wait until fwd restuls correction of last step is done
@@ -552,22 +580,20 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     softmax_lse_per_step[i-1].squeeze_(-1)
 
                 with torch.cuda.stream(flash_attn_streams[(i-1)%2]):
-                    if causal:
-                        if i == 1:
-                            out = torch.empty_like(q).zero_()
-                            softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                    if i == 1:
+                        out = torch.empty_like(q).zero_()
+                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        if causal:
                             # [b, np, sq] -> [b, np, 2, sq//2]
                             softmax_lse_ = softmax_lse.view(
                                 *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2
                             )
-                        elif (i-1) <= rank:
-                            flash_attn_fwd_softmax_lse_correction(softmax_lse,
-                                                                  softmax_lse_per_step[i-1])
-                        else:
-                            flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
-                                                                  softmax_lse_per_step[i-1])
+                    elif (i-1) <= rank or not causal:
+                        flash_attn_fwd_softmax_lse_correction(softmax_lse,
+                                                              softmax_lse_per_step[i-1])
                     else:
-                        assert False, "Not implemented yet!"
+                        flash_attn_fwd_softmax_lse_correction(softmax_lse_[..., 1, :],
+                                                              softmax_lse_per_step[i-1])
 
                 if i < cp_size:
                     flash_attn_streams[(i-1)%2].record_event(fwd_results_correction_done)
@@ -578,7 +604,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         for i in range(cp_size):
             # [b*sq, np, hn] -> [b, sq, np, hn] or [b*sq//2, np, hn] -> [b, sq//2, np, hn]
             out_ = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
-            if i <= rank:
+            if i <= rank or not causal:
                 flash_attn_fwd_out_correction(out.view(*out_.shape),
                                               out_,
                                               softmax_lse,
@@ -617,15 +643,16 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
-        # [b, np, sq] -> [b, np, 2, sq//2]
-        softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
-        softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
+        if ctx.causal:
+            # [b, np, sq] -> [b, np, 2, sq//2]
+            softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+            softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
+            if ctx.use_fused_attention:
+                # [b, np, sq//2] -> [b, np, sq//2, 1]
+                softmax_lse_.unsqueeze_(-1)
         if ctx.use_fused_attention:
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
-            # [b, np, 2, sq//2] -> [b, np, 2, sq//2, 1]
-            softmax_lse_.unsqueeze_(-1)
-        # [b*sq, np, hn] -> [b, 2, sq//2, np, hn]
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
         # Flash Attn outputs
@@ -779,14 +806,47 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             rng_state=ctx.rng_states[cp_size-i-1],
                             **fa_optional_backward_kwargs
                         )
-
-                if i >= (cp_size-rank-1):
-                    # [b*sq, np, hn] -> [b, 2, sq//2, np, hn]
-                    dq_ = dq_.view(*dq.shape)
+            else:
+                if ctx.use_fused_attention:
+                    dq_, dk_, dv_, _ = fused_attn_bwd(
+                        ctx.max_seqlen_q, ctx.max_seqlen_k,
+                        cu_seqlens_q, cu_seqlens_k,
+                        q, kv[0], kv[1], out, dout, TE_DType[q.dtype],
+                        [softmax_lse, ctx.rng_states[cp_size-i-1]],
+                        tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                        attn_scale=ctx.softmax_scale,
+                        dropout=ctx.dropout_p,
+                        qkv_layout="bshd_bshd_bshd",
+                        attn_mask_type="no_mask",
+                    )
                 else:
-                    # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
-                    dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
+                    # [b, sq, np, hn] -> [b*sq, np, hn]
+                    q_ = q.view(-1, *q.shape[-2:])
+                    dq_ = torch.empty_like(q_)
+                    # [2, b, sk, np, hn] -> [2, b*sk, np, hn]
+                    kv_ = kv.view(2, -1, *kv.shape[-2:])
+                    dkv_ = torch.empty_like(kv_)
+                    # [b, sq, np, hn] -> [b*sq, np, hn]
+                    out_ = out.view(-1, *out.shape[-2:])
+                    dout_ = dout.view(-1, *dout.shape[-2:])
+                    _flash_attn_backward(
+                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
+                        dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
+                        ctx.max_seqlen_q, ctx.max_seqlen_k,
+                        ctx.dropout_p, ctx.softmax_scale, False,
+                        rng_state=ctx.rng_states[cp_size-i-1],
+                        **fa_optional_backward_kwargs
+                    )
 
+            if i >= (cp_size-rank-1) and not ctx.causal:
+                # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
+                # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
+                dq_ = dq_.view(*dq.shape)
+            else:
+                # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
+                dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
+
+            if ctx.causal:
                 if i > (cp_size-rank-1):
                     dq.add_(dq_)
                 elif i == (cp_size-rank-1):
@@ -799,21 +859,28 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     dq[:, 1, ...].add_(dq_)
                 else:
                     dq[:, 1, ...].copy_(dq_)
-
-                # wait until dKV is received
-                for req in send_recv_reqs:
-                    req.wait()
-
-                dkv = p2p_comm_buffers[(i+1)%2][1]
-                if ctx.use_fused_attention:
-                    dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
-                if i >= (cp_size-rank-1) and i != (cp_size-1):
-                    # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                    dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
+            else:
+                if i == 0:
+                    dq.copy_(dq_)
                 else:
-                    # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn]
-                    dkv_ = dkv_.view(*dkv.shape)
+                    dq.add_(dq_)
 
+            # wait until dKV is received
+            for req in send_recv_reqs:
+                req.wait()
+
+            dkv = p2p_comm_buffers[(i+1)%2][1]
+            if ctx.use_fused_attention:
+                dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
+            if ctx.causal and i >= (cp_size-rank-1) and i != (cp_size-1):
+                # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
+                dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
+            else:
+                # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn] if causal
+                # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
+                dkv_ = dkv_.view(*dkv.shape)
+
+            if ctx.causal:
                 if i == (cp_size-1):
                     if rank == 0:
                         dkv[:, :, 0, ...].add_(dkv_[:, :, 0, ...])
@@ -830,12 +897,16 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                 else:
                     dkv.copy_(dkv_)
             else:
-                assert False, "Not implemented yet!"
+                if i == 0:
+                    dkv.copy_(dkv_)
+                else:
+                    dkv.add_(dkv_)
 
-        # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
-        dq = dq.view(q.shape[0], -1, *q.shape[-2:])
-        # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
-        dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
+        if ctx.causal:
+            # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+            dq = dq.view(q.shape[0], -1, *q.shape[-2:])
+            # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
+            dkv = dkv.view(*kv.shape[0:2], -1, *kv.shape[-2:])
         return None, dq, dkv[0], dkv[1], None, None, None, None, None, None, None, None, None, None, None, None
 
 
