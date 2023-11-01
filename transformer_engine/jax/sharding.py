@@ -34,6 +34,16 @@ def get_all_mesh_axes():
     return mesh.axis_names
 
 
+def get_padded_spec(spec, ndim):
+    """
+    Get padded spec for partitioning from arguments' information
+    """
+    if spec is None:
+        return (None,) * ndim
+    assert len(spec) <= ndim
+    return spec + (None,) * (ndim - len(spec))
+
+
 def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
     A wrapper function to jax.lax.with_sharding_constraint to
