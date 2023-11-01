@@ -3,9 +3,7 @@
 # See LICENSE for license information.
 """JAX layernorm modules"""
 
-from typing import Tuple, Sequence
-from functools import partial, reduce
-import operator
+from functools import partial
 import jax
 import jax.numpy as jnp
 
@@ -104,7 +102,6 @@ def layernorm_fp8_dot(x: jnp.ndarray,
                       beta: jnp.ndarray,
                       fp8_meta_pkg: FP8MetaPackage,
                       layernorm_type: str,
-                      contracting_dims: Tuple[Sequence[int], Sequence[int]],
                       zero_centered_gamma: bool = False,
                       epsilon: float = 1e-6) -> jnp.ndarray:
     """
@@ -117,19 +114,17 @@ def layernorm_fp8_dot(x: jnp.ndarray,
     fwd_dtype = FP8Helper.FWD_DTYPE
     bwd_dtype = FP8Helper.BWD_DTYPE
     output = _layernorm_fp8_dot(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
-                                layernorm_type, fwd_dtype, bwd_dtype, contracting_dims,
-                                zero_centered_gamma, epsilon)
+                                layernorm_type, fwd_dtype, bwd_dtype, zero_centered_gamma, epsilon)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13))
+@partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12))
 def _layernorm_fp8_dot(x: jnp.ndarray, kernel: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                        fp8_max: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
                        scale_inv: jnp.ndarray, layernorm_type: str, fwd_dtype: jnp.dtype,
-                       bwd_dtype: jnp.dtype, contracting_dims: Tuple[Sequence[int], Sequence[int]],
-                       zero_centered_gamma: bool, epsilon: float):
+                       bwd_dtype: jnp.dtype, zero_centered_gamma: bool, epsilon: float):
     output, _ = _layernorm_fp8_dot_fwd_rule(x, kernel, gamma, beta, fp8_max, amax, scale, scale_inv,
-                                            layernorm_type, fwd_dtype, bwd_dtype, contracting_dims,
+                                            layernorm_type, fwd_dtype, bwd_dtype,
                                             zero_centered_gamma, epsilon)
     return output
 
@@ -146,17 +141,12 @@ def _layernorm_fp8_dot_fwd_rule(
         layernorm_type,
         fwd_dtype,
         bwd_dtype,    # pylint: disable=unused-argument
-        contracting_dims,
         zero_centered_gamma,
         epsilon):
-    lhs_contracting_dims, rhs_contracting_dims = contracting_dims
-    x_shape_pre = x.shape[:min(lhs_contracting_dims)]
-    x_shape_suf = x.shape[min(lhs_contracting_dims):]
-    kernel_shape_pre = kernel.shape[:max(rhs_contracting_dims) + 1]
-    kernel_shape_suf = kernel.shape[max(rhs_contracting_dims) + 1:]
-    x_contracting_size = reduce(operator.mul, x_shape_suf)
-    kernel_contracting_size = reduce(operator.mul, kernel_shape_pre)
-    assert x_contracting_size == kernel_contracting_size
+
+    x_contracting_dims = (len(x.shape) - 1,)
+    k_contracting_dims = (0,)
+    assert x.shape[-1] == kernel.shape[0]
 
     amax = FP8Helper.update_amax_history(amax)
 
@@ -190,26 +180,24 @@ def _layernorm_fp8_dot_fwd_rule(
         mu = None
 
     assert x.shape == ln_out.shape
-    ln_out_ = jnp.reshape(ln_out, (-1, x_contracting_size))
-    kernel_ = jnp.reshape(kernel, (kernel_contracting_size, -1))
-
-    output_shape = x_shape_pre + kernel_shape_suf
 
     kernel_amax = amax[gemm_kernel_idx, 0:1]
     kernel_scale = scale[gemm_kernel_idx]
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
 
+    # Kernel in (hidden_in, hidden_out...)
     casted_kerenl, casted_kerenl_t, updated_kernel_amax = \
-        cast_transpose(kernel_, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype,
-                       static_axis_boundary=-1)
+        cast_transpose(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype,
+                       static_axis_boundary=-1, transpose_axis_boundary=1)
 
-    output = fp8_dot_impl(ln_out_, casted_kerenl_t, x_scale_inv, kernel_scale_inv, x.dtype, False,
-                          True)
+    # (batch..., hidden_in) x (hidden_in, hidden_out...)
+    kt_contracting_dims = tuple(i for i in range(1, kernel.ndim))
+    output = fp8_dot_impl(ln_out, casted_kerenl_t, x_scale_inv, kernel_scale_inv, x.dtype,
+                          (x_contracting_dims, kt_contracting_dims))
 
-    output = jnp.reshape(output, output_shape)
-
-    ctx = (ln_out_, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
-           updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma)
+    ctx = (ln_out, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
+           updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, x_contracting_dims,
+           k_contracting_dims)
 
     return output, ctx
 
@@ -218,20 +206,18 @@ def _layernorm_fp8_dot_bwd_rule(
         layernorm_type,
         fwd_dtype,    # pylint: disable=unused-argument
         bwd_dtype,
-        contracting_dims,    # pylint: disable=unused-argument
         zero_centered_gamma,
         epsilon,
         ctx,
         grad):
     ln_out_, casted_kerenl, fp8_max, amax, scale, scale_inv, \
     updated_x_amax, updated_kernel_amax, \
-    x_shape, kernel_shape, mu, rsigma, x, gamma = ctx
+    x_shape, kernel_shape, mu, rsigma, x, gamma, \
+    x_contracting_dims, k_contracting_dims = ctx
 
-    ln_out_t = transpose(ln_out_, static_axis_boundary=-1)
+    ln_out_t = transpose(ln_out_, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
-
-    grad = jnp.reshape(grad, (ln_out_t.shape[1], -1))
 
     grad_amax = amax[gemm_grad_idx, 0:1]
     grad_scale = scale[gemm_grad_idx]
@@ -239,18 +225,20 @@ def _layernorm_fp8_dot_bwd_rule(
 
     casted_grad, casted_grad_t, updated_grad_amax = \
         cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
-                       static_axis_boundary=-1)
+                       static_axis_boundary=-1, transpose_axis_boundary=min(x_contracting_dims))
 
+    xt_constracting_dim = tuple(i for i in range(len(x_contracting_dims), len(x_shape)))
+    gt_constracting_dim = tuple(i for i in range(grad.ndim - len(xt_constracting_dim), grad.ndim))
     x_scale_inv = scale_inv[gemm_x_idx]
-    wgrad = fp8_dot_impl(ln_out_t, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype, False,
-                         True)
+    wgrad = fp8_dot_impl(ln_out_t, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
+                         (xt_constracting_dim, gt_constracting_dim))
 
+    g_constracting_dim = tuple(
+        i for i in range(grad.ndim - len(kernel_shape) + len(k_contracting_dims), grad.ndim))
+    k_constracting_dim = tuple(i for i in range(len(k_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
-                         False, True)
-
-    dgrad = jnp.reshape(dgrad, x_shape)
-    wgrad = jnp.reshape(wgrad, kernel_shape)
+                         (g_constracting_dim, k_constracting_dim))
 
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dgrad,

@@ -75,12 +75,14 @@ class FP8MetaPackage:
 
     def __init__(
         self,
+        num_of_gemm: int,
         fp8_max: jnp.ndarray,
         amax: jnp.ndarray,
         scale: jnp.ndarray,
         scale_inv: jnp.ndarray,
     ) -> None:
-        total_num_of_meta = FP8Helper.NUM_META_PER_GEMM
+        total_num_of_meta = num_of_gemm * FP8Helper.NUM_META_PER_GEMM
+        self._num_of_gemm = num_of_gemm
         assert fp8_max.shape[0] == total_num_of_meta
         self._fp8_max = fp8_max
         assert amax.shape[0] == total_num_of_meta
@@ -89,6 +91,13 @@ class FP8MetaPackage:
         self._scale = scale
         assert scale_inv.shape[0] == total_num_of_meta
         self._scale_inv = scale_inv
+
+    @property
+    def num_of_gemm(self) -> int:
+        """
+        num_of_gemm of this package
+        """
+        return self._num_of_gemm
 
     @property
     def fp8_max(self) -> jnp.ndarray:
