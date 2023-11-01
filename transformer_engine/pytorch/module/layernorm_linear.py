@@ -674,7 +674,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
-        if any([i for i in [ub_bulk_wgrad, ub_bulk_dgrad, ub_split_ag] if i]):
+        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_split_ag]):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
