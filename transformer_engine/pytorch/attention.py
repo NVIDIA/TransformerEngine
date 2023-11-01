@@ -619,6 +619,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
         # [b, np, sq] -> [b, np, 2, sq//2]
         softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+        softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
         if ctx.use_fused_attention:
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
@@ -753,7 +754,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             cu_seqlens_q//2, cu_seqlens_k,
                             q_, kv_[0], kv_[1], out_, dout_, TE_DType[q.dtype],
-                            [softmax_lse_[..., 1, :, :], ctx.rng_states[cp_size-i-1]],
+                            [softmax_lse_, ctx.rng_states[cp_size-i-1]],
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
@@ -771,7 +772,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
                         dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
                         _flash_attn_backward(
-                            dout_, q_, kv_[0], kv_[1], out_, softmax_lse_[..., 1, :],
+                            dout_, q_, kv_[0], kv_[1], out_, softmax_lse_,
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
                             ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                             ctx.dropout_p, ctx.softmax_scale, False,
