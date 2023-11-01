@@ -739,15 +739,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             auto sAfterMaskTensor = createCausalMask(
                                 b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
 
-            std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
+            std::unique_ptr<cudnn_frontend::Tensor> softmaxInput;
 
             if (variable_sequence_length) {
                 auto sAfterPaddingMaskTensor = createPaddingMask(
                     b, h, s_q, s_kv, d, layout, tensorType, &ops, sAfterMaskTensor);
-                softmaxInput = std::make_shared<cudnn_frontend::Tensor>(
+                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
                     std::move(sAfterPaddingMaskTensor));
             } else {
-                softmaxInput = std::make_shared<cudnn_frontend::Tensor>(
+                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
                     std::move(sAfterMaskTensor));
             }
 
@@ -1058,15 +1058,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             auto pAfterMaskTensor = createCausalMask(
                             b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
 
-            std::shared_ptr<cudnn_frontend::Tensor> softmaxInput;
+            std::unique_ptr<cudnn_frontend::Tensor> softmaxInput;
 
             if (variable_sequence_length) {
                 auto pAfterPaddingMaskTensor = createPaddingMask(
                     b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterMaskTensor);
-                softmaxInput = std::make_shared<cudnn_frontend::Tensor>(
+                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
                     std::move(pAfterPaddingMaskTensor));
             } else {
-                softmaxInput = std::make_shared<cudnn_frontend::Tensor>(
+                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
                     std::move(pAfterMaskTensor));
             }
 
