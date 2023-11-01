@@ -774,13 +774,13 @@ L0_jax_unittest--A100_1GPU:
       variables:
         - $BUILD_JAX == "0"
 
-L0_jax_unittest--H100_1GPU:
+L0_jax_unittest--H100_4GPU:
     variables:
       FRAMEWORK: jax
     needs: [ jax-py3-devel ]
     extends:
     - .L0_test
-    - .H100_1GPU
+    - .H100_4GPU
     except:
       variables:
         - $BUILD_JAX == "0"
