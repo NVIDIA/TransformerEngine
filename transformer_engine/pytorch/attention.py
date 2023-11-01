@@ -838,7 +838,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         **fa_optional_backward_kwargs
                     )
 
-            if i >= (cp_size-rank-1) and not ctx.causal:
+            if i >= (cp_size-rank-1) or not ctx.causal:
                 # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
                 # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
                 dq_ = dq_.view(*dq.shape)
