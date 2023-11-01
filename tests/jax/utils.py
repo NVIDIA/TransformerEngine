@@ -4,7 +4,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Tuple, Sequence, Union, Iterable, Optional
+from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +15,8 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
+from transformer_engine.jax.fp8 import DType as TEDType
+
 PRNGKey = Any
 Shape = Tuple[int, ...]
 DType = jnp.dtype
@@ -22,7 +24,6 @@ Array = Any
 PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision,
                                                                        lax.Precision]]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
-
 
 def is_devices_enough(required):
     return len(jax.devices()) >= required
@@ -1008,15 +1009,95 @@ class DecoderLayer(nn.Module):
         return z
 
 
-def assert_allclose(actual,
-                    desired,
-                    rtol=1e-05,
-                    atol=1e-08,
-                    equal_nan=True,
-                    err_msg='',
-                    verbose=True):
+def assert_allclose(
+    actual: Array,
+    desired: Array,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
+    dtype: Optional[Union[DType, TEDType, np.dtype, str]] = None,
+    **kwargs,
+) -> None:
+    """Check if two tensors are close
+
+    Floating-point tolerances are based on
+    https://pytorch.org/docs/stable/testing.html#torch.testing.assert_close
+
+    Args:
+      actual: test tensor
+      desired: reference tensor
+      dtype: data type or data type name (default: inferred from
+        `actual`)
+      rtol: relative tolerance (default: based on `dtype`)
+      atol: absolute tolerance (default: based on `dtype`)
+      **kwargs: keyword arguments to pass to np.testing.assert_allclose
+    """
+
+    # Infer data type if needed
+    if dtype is None:
+        if isinstance(actual, float):
+            dtype = "float32"
+        else:
+            dtype = actual.dtype
+
+    # Determine tolerances
+    tols = dtype_tols(dtype)
+    if rtol is not None:
+        tols["rtol"] = rtol
+    if atol is not None:
+        tols["atol"] = atol
+
+    # Cast tensors to fp32
     if not isinstance(actual, float):
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
-    np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
+
+    # Check if tensors are close
+    np.testing.assert_allclose(actual, desired, **tols, **kwargs)
+
+
+def dtype_tols(dtype: Union[DType, TEDType, np.dtype, str]) -> Dict[str, float]:
+    """Expected numerical tolerance for a data type
+
+    Floating-point tolerances are based on
+    https://pytorch.org/docs/stable/testing.html#torch.testing.assert_close
+
+    Args:
+      dtype: data type or data type name.
+
+    Returns:
+      Dictionary with "rtol" and "atol" as keys
+
+    """
+
+    # Convert dtype to str
+    if isinstance(dtype, TEDType):
+        dtype = {
+            TEDType.kByte: "uint8",
+            TEDType.kInt32: "int32",
+            TEDType.kInt64: "int64",
+            TEDType.kFloat32: "float32",
+            TEDType.kFloat16: "float16",
+            TEDType.kBFloat16: "bfloat16",
+            TEDType.kFloat8E4M3: "float8e4m3",
+            TEDType.kFloat8E5M2: "float8e5m2",
+        }[dtype]
+    dtype = str(dtype).strip().lower()
+    if dtype.startswith("fp"):
+        dtype = dtype.replace("fp", "float", 1)
+    if dtype == "bf16":
+        dtype = "bfloat16"
+    if dtype == "float8":
+        dtype = "float8e4m3"
+
+    # Return tolerances
+    if dtype.startswith("int") or dtype.startswith("uint"):
+        return dict(rtol=0, atol=0)
+    return dict(
+        float32=dict(rtol=1.3e-6, atol=1e-5),
+        float64=dict(rtol=1e-7, atol=1e-7),
+        float16=dict(rtol=1e-3, atol=1e-5),
+        bfloat16=dict(rtol=1.6e-2, atol=1e-5),
+        float8e4m3=dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
+        float8e5m2=dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
+    )[dtype]

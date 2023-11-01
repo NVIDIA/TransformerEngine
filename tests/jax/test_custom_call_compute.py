@@ -48,7 +48,7 @@ class TestFP8Dot:
         scale_inv = (1 / scale).reshape(1)
 
         y, new_amax = quantize(x, amax, scale, scale_inv, out_dtype=DType.kFloat8E4M3)
-        assert_allclose(new_amax, 3.0)
+        assert_allclose(new_amax, 3.0, rtol=0, atol=0)
 
         no_use = jnp.zeros(1, jnp.float32)
         z = dequantize(y,
@@ -57,7 +57,7 @@ class TestFP8Dot:
                        scale_inv,
                        fp8_dtype=DType.kFloat8E4M3,
                        out_dtype=DType.kFloat32)
-        assert_allclose(z, x, rtol=5e-2, atol=5e-2)
+        assert_allclose(z, x, dtype=DType.kFloat8E4M3)
 
     def test_compile_bf16(self):
         key = jax.random.PRNGKey(0)
@@ -117,10 +117,11 @@ class TestFP8Dot:
         fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
         fp8_gemm_pkg = FP8GemmPackage(1, a, [b], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                       fp8_metas_scale_inv)
-        primitive_out = fp8_dot(fp8_gemm_pkg, *_format2dtypes(None))
+        fwd_dtype, bwd_dtype = _format2dtypes(None)
+        primitive_out = fp8_dot(fp8_gemm_pkg, fwd_dtype, bwd_dtype)
         ref_out = jnp.dot(a, b)
 
-        assert_allclose(primitive_out, ref_out)
+        assert_allclose(primitive_out, ref_out, dtype=DType.kFloat8E4M3)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -154,7 +155,7 @@ class TestFP8Dot:
         ref_out = ref_out.astype(jnp.float32)
         primitive_out = primitive_out.astype(jnp.float32)
 
-        assert_allclose(primitive_out, ref_out)
+        assert_allclose(primitive_out, ref_out, dtype=compute_type[0])
 
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_grad_bf16(self, m, n, k):
@@ -162,6 +163,7 @@ class TestFP8Dot:
         subkeys = jax.random.split(key, 2)
         a = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
         b = jax.random.normal(subkeys[1], (k, n), jnp.bfloat16)
+        fwd_dtype, bwd_dtype = _format2dtypes(None)
 
         def primitive_func(x, y):
             fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM)
@@ -171,7 +173,7 @@ class TestFP8Dot:
             fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.mean(fp8_dot(fp8_gemm_pkg, *_format2dtypes(None)))
+            return jnp.mean(fp8_dot(fp8_gemm_pkg, fwd_dtype, bwd_dtype))
 
         def ref_func(x, y):
             return jnp.mean(jnp.dot(x, y))
@@ -183,9 +185,9 @@ class TestFP8Dot:
         primitive_out, (primitive_a_grad, primitive_b_grad) = value_n_grad_primitive_func(a, b)
         ref_out, (ref_a_grad, ref_b_grad) = value_n_grad_ref_func(a, b)
 
-        assert_allclose(primitive_out, ref_out)
-        assert_allclose(primitive_a_grad, ref_a_grad)
-        assert_allclose(primitive_b_grad, ref_b_grad, atol=1e-5)
+        assert_allclose(primitive_out, ref_out, dtype=fwd_dtype)
+        assert_allclose(primitive_a_grad, ref_a_grad, dtype=bwd_dtype)
+        assert_allclose(primitive_b_grad, ref_b_grad, dtype=bwd_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -227,15 +229,16 @@ class TestFP8Dot:
         primitive_out, (primitive_a_grad,
                         primitive_b_grad) = value_n_grad_primitive_func(a, b, fp8_meta)
 
-        assert_allclose(primitive_out, ref_out)
-        assert_allclose(primitive_a_grad, ref_a_grad)
-        assert_allclose(primitive_b_grad, ref_b_grad)
+        assert_allclose(primitive_out, ref_out, dtype=compute_type[0])
+        assert_allclose(primitive_a_grad, ref_a_grad, dtype=compute_type[1])
+        assert_allclose(primitive_b_grad, ref_b_grad, dtype=compute_type[1])
 
     def test_contracting_dims_bf16(self):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         a = jax.random.normal(subkeys[0], (32, 8, 16, 64), jnp.bfloat16)
         b = jax.random.normal(subkeys[1], (16, 64, 128), jnp.bfloat16)
+        fwd_dtype, bwd_dtype = _format2dtypes(None)
 
         def primitive_func(x, y):
             fp8_max = FP8Helper.generate_fp8_max_array(FP8Helper.NUM_META_PER_GEMM)
@@ -245,7 +248,7 @@ class TestFP8Dot:
             fp8_metas_scale_inv = jnp.ones((FP8Helper.NUM_META_PER_GEMM, 1), jnp.float32)
             fp8_gemm_pkg = FP8GemmPackage(1, x, [y], fp8_max, fp8_metas_amax, fp8_metas_scale,
                                           fp8_metas_scale_inv)
-            return jnp.sum(fp8_dot(fp8_gemm_pkg, *_format2dtypes(None), ((2, 3), (0, 1))))
+            return jnp.sum(fp8_dot(fp8_gemm_pkg, fwd_dtype, bwd_dtype, ((2, 3), (0, 1))))
 
         def ref_func(x, y):
             return jnp.sum(lax.dot_general(x, y, dimension_numbers=(((2, 3), (0, 1)), ((), ()))))
@@ -255,9 +258,9 @@ class TestFP8Dot:
         primitive_out, (primitive_a_grad, primitive_b_grad) = value_n_grad_primitive_func(a, b)
         ref_out, (ref_a_grad, ref_b_grad) = value_n_grad_ref_func(a, b)
 
-        assert_allclose(primitive_out, ref_out)
-        assert_allclose(primitive_a_grad, ref_a_grad)
-        assert_allclose(primitive_b_grad, ref_b_grad)
+        assert_allclose(primitive_out, ref_out, dtype=fwd_dtype)
+        assert_allclose(primitive_a_grad, ref_a_grad, dtype=bwd_dtype)
+        assert_allclose(primitive_b_grad, ref_b_grad, dtype=bwd_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
@@ -370,19 +373,19 @@ class TestFP8Dot:
         primitive_out, (primitive_a_grad, primitive_s_grad, primitive_k1_grad,
                         primitive_k2_grad) = value_n_grad_primitive_func(a, s, k1, k2, fp8_meta)
 
-        assert_allclose(primitive_out, ref_out, rtol=1e-2)
+        assert_allclose(primitive_out, ref_out, dtype=compute_type[0])
         assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
                         jnp.asarray(ref_a_grad, np.float32),
-                        rtol=1e-2)
+                        dtype=compute_type[1])
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
-                        rtol=1e-2)
+                        dtype=compute_type[1])
         assert_allclose(jnp.asarray(primitive_k2_grad, np.float32),
                         jnp.asarray(ref_k2_grad, np.float32),
-                        rtol=1e-2)
+                        dtype=compute_type[1])
         assert_allclose(jnp.asarray(primitive_s_grad, np.float32),
                         jnp.asarray(ref_s_grad, np.float32),
-                        rtol=1e-2)
+                        dtype=compute_type[1])
 
 
 @pytest.fixture(name="random_inputs")
