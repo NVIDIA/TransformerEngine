@@ -79,7 +79,7 @@ createScale(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 
 static cudnn_frontend::Tensor
 createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-           bool variable_sequence_length, NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
+           bool padding_aware, NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops) {
     // Creates the necessary tensor descriptors
     int64_t q_dim[4] = {b, h, s_q, d};
@@ -125,7 +125,7 @@ createQKBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                      .setcMatDesc(sTensor)
                      .setmatmulDesc(matmul_1_Desc);
 
-    if (variable_sequence_length) {
+    if (padding_aware) {
         matmul_op_builder.setmOverrideDesc(seqlenQTensor).setnOverrideDesc(seqlenKTensor);
     }
 
@@ -634,7 +634,7 @@ createDropoutBackward(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d
 
 static void
 createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
-           bool variable_sequence_length, NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
+           bool padding_aware, NVTE_QKV_Layout layout, cudnnDataType_t tensorType,
            std::vector<cudnn_frontend::Operation>* ops,
            cudnn_frontend::Tensor const &afterScaleDropoutTensor) {
     NVTE_CHECK(ops->size() != 0, "BMM2 op constructed incorrectly as the first one");
@@ -674,7 +674,7 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                      .setcMatDesc(oTensor)
                      .setmatmulDesc(matmul_2_Desc);
 
-    if (variable_sequence_length) {
+    if (padding_aware) {
         matmul_op_builder.setmOverrideDesc(seqlenQTensor).setkOverrideDesc(seqlenKTensor);
     }
 
@@ -686,7 +686,7 @@ createSVBMM(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
 void fused_attn_arbitrary_seqlen_fwd_impl(
                                 int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                                 bool is_training, float scaling_factor, float dropout_probability,
-                                NVTE_QKV_Layout layout,
+                                NVTE_QKV_Layout layout, NVTE_Mask_Type mask_type,
                                 void *devPtrQ, void *devPtrK, void *devPtrV,
                                 void *devPtrSoftmaxStats, void *devPtrO,
                                 void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
@@ -701,15 +701,17 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           dropout_probability = 0.0f;
         }
 
-        bool variable_sequence_length = cudnnGetVersion() >= 8906;
+        // also known as variable_sequence_length
+        bool padding_aware = (mask_type == NVTE_PADDING_MASK) ||
+                             (mask_type == NVTE_PADDING_CAUSAL_MASK);
 
         FADescriptor descriptor{b,           h,
                                 s_q,         s_kv,
                                 d,           scaling_factor,
                                 is_training, dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
-                                false, variable_sequence_length};
+                                mask_type,   tensorType,
+                                false, padding_aware};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
@@ -729,39 +731,35 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
             // Q * K^T
             auto sTensor = createQKBMM(
-                b, h, s_q, s_kv, d, variable_sequence_length, layout, tensorType, &ops);
+                b, h, s_q, s_kv, d, padding_aware, layout, tensorType, &ops);
 
             // Q * K^T * bmmScale
             auto sScaleTensor = createScale(
                                 b, h, s_q, s_kv, d, layout, CUDNN_DATA_FLOAT, sTensor, &ops);
 
-            // Causual mask
-            auto sAfterMaskTensor = createCausalMask(
-                                b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
+            auto& sAfterMaskTensor = sScaleTensor;
 
-            std::unique_ptr<cudnn_frontend::Tensor> softmaxInput;
+            if (mask_type == NVTE_CAUSAL_MASK || mask_type == NVTE_PADDING_CAUSAL_MASK) {
+                sAfterMaskTensor = createCausalMask(
+                    b, h, s_q, s_kv, d, layout, tensorType, &ops, sScaleTensor);
+            }
 
-            if (variable_sequence_length) {
-                auto sAfterPaddingMaskTensor = createPaddingMask(
+            if (padding_aware) {
+                sAfterMaskTensor = createPaddingMask(
                     b, h, s_q, s_kv, d, layout, tensorType, &ops, sAfterMaskTensor);
-                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
-                    std::move(sAfterPaddingMaskTensor));
-            } else {
-                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
-                    std::move(sAfterMaskTensor));
             }
 
             NVTE_CHECK(dropout_probability != 1.0f,
                                 "Dropout probability cannot be 1.0");
 
             auto softmax_output = createSoftmaxForward(
-                                b, h, s_q, s_kv, is_training, &ops, *softmaxInput.get());
+                                b, h, s_q, s_kv, is_training, &ops, sAfterMaskTensor);
 
             // Dropout(softmax)
             auto dropout_output = createDropoutForward(
                                 b, h, s_q, s_kv, d,
                                 dropout_probability, tensorType, &ops, softmax_output);
-            createSVBMM(b, h, s_q, s_kv, d, variable_sequence_length,
+            createSVBMM(b, h, s_q, s_kv, d, padding_aware,
                 layout, tensorType, &ops, dropout_output);
 
             for (unsigned int i = 0; i < ops.size(); i++) {
@@ -812,7 +810,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
         void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
 
-        if (variable_sequence_length) {
+        if (padding_aware) {
             cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
                 b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
                 static_cast<const int32_t *>(devPtrCuSeqlenKV),
@@ -836,7 +834,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_CONST_ID, &scale_dropout));
 
-        if (variable_sequence_length) {
+        if (padding_aware) {
             data_ptrs.insert(std::pair<uint64_t, void*>(Q_SEQLEN_ID, devActualSeqlenQ));
             data_ptrs.insert(std::pair<uint64_t, void*>(K_SEQLEN_ID, devActualSeqlenK));
         }
@@ -861,8 +859,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 void fused_attn_arbitrary_seqlen_bwd_impl(
                             int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                             float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
-                            void* devPtrQ, void* devPtrKTranspose, void* devPtrVTranspose,
-                            void* devPtrO, void* devPtrSoftmaxStats,
+                            NVTE_Mask_Type mask_type, void* devPtrQ, void* devPtrKTranspose,
+                            void* devPtrVTranspose, void* devPtrO, void* devPtrSoftmaxStats,
                             void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO,
                             void *devPtrCuSeqlenQ, void *devPtrCuSeqlenKV,
                             void* devPtrDropoutSeed, void* devPtrDropoutOffset,
@@ -871,15 +869,17 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     try {
         NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
-        bool variable_sequence_length = cudnnGetVersion() >= 8906;
+        // also known as variable_sequence_length
+        bool padding_aware = (mask_type == NVTE_PADDING_MASK) ||
+                             (mask_type == NVTE_PADDING_CAUSAL_MASK);
 
         FADescriptor descriptor{b,           h,
                                 s_q,         s_kv,
                                 d,           scaling_factor,
                                 true,        dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
-                                NVTE_Mask_Type::NVTE_CAUSAL_MASK,   tensorType,
-                                use_workspace_opt, variable_sequence_length};
+                                mask_type,   tensorType,
+                                use_workspace_opt, padding_aware};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_bprop_cache;
@@ -1031,7 +1031,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                              .setcMatDesc(pTensor)
                              .setmatmulDesc(matmul_0_Desc);
 
-            if (variable_sequence_length) {
+            if (padding_aware) {
                 matmul_op_builder.setmOverrideDesc(seqlenQTensor).setnOverrideDesc(seqlenKTensor);
             }
 
@@ -1055,19 +1055,16 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             /*******************************************************************************
              *                          Causal masking -> pAfterMaskTensor                */
 
-            auto pAfterMaskTensor = createCausalMask(
-                            b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
+            auto& pAfterMaskTensor = pAfterScaleTensor;
 
-            std::unique_ptr<cudnn_frontend::Tensor> softmaxInput;
+            if (mask_type == NVTE_CAUSAL_MASK || mask_type == NVTE_PADDING_CAUSAL_MASK) {
+                pAfterMaskTensor = createCausalMask(
+                    b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterScaleTensor);
+            }
 
-            if (variable_sequence_length) {
-                auto pAfterPaddingMaskTensor = createPaddingMask(
+            if (padding_aware) {
+                pAfterMaskTensor = createPaddingMask(
                     b, h, s_q, s_kv, d, layout, tensorType, &ops, pAfterMaskTensor);
-                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
-                    std::move(pAfterPaddingMaskTensor));
-            } else {
-                softmaxInput = std::make_unique<cudnn_frontend::Tensor>(
-                    std::move(pAfterMaskTensor));
             }
 
             /*******************************************************************************
@@ -1081,7 +1078,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             reduction_stride, false, false);  // not virtual
             auto subtractDesc = pw_desc_create(CUDNN_DATA_FLOAT, CUDNN_POINTWISE_SUB);
             auto subtract_op = binary_pw_op_create(
-                            *softmaxInput.get(), softmaxStatsTensor,
+                            pAfterMaskTensor, softmaxStatsTensor,
                             pAfterSubtractTensor, subtractDesc);
             ops.push_back(std::move(subtract_op));
 
@@ -1157,7 +1154,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                               .setcMatDesc(dVTensor)
                               .setmatmulDesc(matmul_1_Desc);
 
-            if (variable_sequence_length) {
+            if (padding_aware) {
                 matmul_op1_builder.setmOverrideDesc(seqlenKTensor).setkOverrideDesc(seqlenQTensor);
             }
 
@@ -1188,7 +1185,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                               .setcMatDesc(dSTensor)
                               .setmatmulDesc(matmul_2_Desc);
 
-            if (variable_sequence_length) {
+            if (padding_aware) {
                 matmul_op2_builder.setmOverrideDesc(seqlenQTensor).setnOverrideDesc(seqlenKTensor);
             }
 
@@ -1305,7 +1302,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 matmul_op3_builder.setcMatDesc(dqAccumTensor);
             }
 
-            if (variable_sequence_length) {
+            if (padding_aware) {
                 matmul_op3_builder.setmOverrideDesc(seqlenQTensor).setkOverrideDesc(seqlenKTensor);
             }
 
@@ -1339,7 +1336,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                               .setcMatDesc(dKTensor)
                               .setmatmulDesc(matmul_4_Desc);
 
-            if (variable_sequence_length) {
+            if (padding_aware) {
                 matmul_op4_builder.setmOverrideDesc(seqlenKTensor).setkOverrideDesc(seqlenQTensor);
             }
 
@@ -1439,7 +1436,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         data_ptrs.insert(std::pair<uint64_t, void*>(D_SEED_ID, devPtrDropoutSeed));
         data_ptrs.insert(std::pair<uint64_t, void*>(D_OFFSET_ID, devPtrDropoutOffset));
         data_ptrs.insert(std::pair<uint64_t, void*>(MASK_VAL_ID, &negInfinity));
-        if (variable_sequence_length) {
+        if (padding_aware) {
             data_ptrs.insert(std::pair<uint64_t, void *>(Q_SEQLEN_ID, devActualSeqlenQ));
             data_ptrs.insert(std::pair<uint64_t, void *>(K_SEQLEN_ID, devActualSeqlenK));
         }
@@ -1513,7 +1510,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
-                                is_training, attn_scale, p_dropout, qkv_layout,
+                                is_training, attn_scale, p_dropout, qkv_layout, mask_type,
                                 devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
@@ -1603,7 +1600,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen, 
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen, max_seqlen, head_dim,
-                                attn_scale, p_dropout, qkv_layout,
+                                attn_scale, p_dropout, qkv_layout, mask_type,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
@@ -1673,7 +1670,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
-                                is_training, attn_scale, p_dropout, qkv_layout,
+                                is_training, attn_scale, p_dropout, qkv_layout, mask_type,
                                 devPtrQ, devPtrK, devPtrV, devPtrS, devPtrO,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
@@ -1759,7 +1756,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
 #endif
 
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_head, max_seqlen_q, max_seqlen_kv, head_dim,
-                                attn_scale, p_dropout, qkv_layout,
+                                attn_scale, p_dropout, qkv_layout, mask_type,
                                 devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,

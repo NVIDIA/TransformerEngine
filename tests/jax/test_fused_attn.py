@@ -67,7 +67,7 @@ def jax_self_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
     Self attention with JAX native implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if attn_mask_type == AttnMaskType.CAUSAL_MASK:
+    if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
         mask = make_decoder_mask(q_token)
     else:
         mask = make_attention_mask(q_token > 0, kv_token > 0)
@@ -96,7 +96,7 @@ def jax_cross_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
     assert q.dtype == kv.dtype
 
     attn_mask_type = kwargs['attn_mask_type']
-    if attn_mask_type == AttnMaskType.CAUSAL_MASK:
+    if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
         raise NotImplementedError
     mask = make_attention_mask(q_token > 0, kv_token > 0)
 
@@ -121,7 +121,7 @@ def customcall_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwar
     """
     Self fused attention
     """
-    if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
+    if kwargs['attn_mask_type'] == AttnMaskType.PADDING_CAUSAL_MASK:
         mask = make_decoder_mask(q_token)
     else:
         mask = make_attention_mask(q_token > 0, kv_token > 0)
@@ -138,7 +138,7 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     """
     assert q.dtype == kv.dtype
 
-    if kwargs['attn_mask_type'] == AttnMaskType.CAUSAL_MASK:
+    if kwargs['attn_mask_type'] == AttnMaskType.PADDING_CAUSAL_MASK:
         raise NotImplementedError
     mask = make_attention_mask(q_token > 0, kv_token > 0)
 
@@ -150,7 +150,8 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
 
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
 @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
-@pytest.mark.parametrize('attn_mask_type', [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK])
+@pytest.mark.parametrize('attn_mask_type',
+                         [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK])
 @pytest.mark.parametrize('dropout_probability', [0., 0.1])
 @pytest.mark.parametrize('dtype', DTYPES)
 @pytest.mark.parametrize('is_training', [True, False])
@@ -174,7 +175,7 @@ class TestSelfFusedAttn():
 
         compute_capability = get_device_compute_capability(0)
         if (backend == Backend.Max512
-            and not (compute_capability == 80 or compute_capability >= 90)):
+                and not (compute_capability == 80 or compute_capability >= 90)):
             pytest.skip("Unsupported compute capability for "
                         "fused attention with <=512 sequence length")
 
@@ -292,7 +293,7 @@ class TestSelfFusedAttn():
         def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 1000 if dtype == jnp.bfloat16 else 10000
-            if attn_mask_type == AttnMaskType.CAUSAL_MASK:
+            if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
             # fused_attn output has shape (b, s, h, d)
@@ -488,7 +489,7 @@ class TestCrossFusedAttn():
         def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 10000
-            if attn_mask_type == AttnMaskType.CAUSAL_MASK:
+            if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
             # fused_attn output has shape (b, s_q, h, d)

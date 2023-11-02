@@ -34,6 +34,7 @@ class AttnMaskType(Enum):
     NO_MASK = NVTE_Mask_Type.NVTE_NO_MASK
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
+    PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
 
 
 def is_fused_attn_kernel_available(q_type, kv_type, attn_bias_type, attn_mask_type,

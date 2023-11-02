@@ -146,6 +146,8 @@ enum NVTE_Mask_Type {
     NVTE_PADDING_MASK = 1,
     /*! Causal attention mask */
     NVTE_CAUSAL_MASK = 2,
+    /*! Padding and causal attention mask */
+    NVTE_PADDING_CAUSAL_MASK = 3,
 };
 
 /*! \enum NVTE_Fused_Attn_Backend
