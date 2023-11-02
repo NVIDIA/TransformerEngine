@@ -21,10 +21,8 @@ from transformer_engine.jax.sharding import ShardingType
 try:
     # try importing the new custom partitioning implementation
     from transformer_engine.jax.sharding import MeshResource
-    ShardingResource = None
 except ImportError:
     # must be using an older TE/JAX version so fall back on the xmap sharding implementation
-    from transformer_engine.jax.sharding import ShardingResource
     MeshResource = None
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.softmax import SoftmaxType, softmax
@@ -77,11 +75,8 @@ class CustomOpsTestHelper:
             tp_r = mesh_names[0]
         if sharding_type in (ShardingType.DP_TP_COL, ShardingType.DP_TP_ROW):
             tp_r = mesh_names[1]
-            
-        if CustomOpsTestHelper.use_custom_partitioning():
-            return MeshResource(dp_r, tp_r)
-        else:
-            return ShardingResource(dp_r, tp_r)
+
+        return MeshResource(dp_r, tp_r)
 
     @staticmethod
     def make_mask(q_tokens, kv_tokens, mask_type, dtype=jnp.uint8):
@@ -109,10 +104,27 @@ class CustomOpsTestHelper:
                     result["other"] += 1
         return result
 
+    def get_tolerance(self, ref_val, relaxation=2./3., dtype=None):
+        if dtype is None:
+            dtype = self.dtype
+
+        # slightly relax the machine epsilon for minimum tolerance
+        eps_relaxed = jax.lax.pow(jnp.finfo(dtype).eps, dtype(relaxation))
+
+        # calculate the "Unit of Least Precision" -- i.e. distance to the next representable number
+        spacing_high = jnp.nextafter(dtype(ref_val), jnp.finfo(dtype).max) - dtype(ref_val)
+        spacing_low = dtype(ref_val) - jnp.nextafter(dtype(ref_val, jnp.finfo(dtype).min))
+        ulp = jax.lax.max(spacing_low, spacing_high)
+
+        return jax.lax.max(eps_relaxed, ulp)
+
     def compare_ops(self, custom_func, ref_func, ref_count,
-                    *args, grad_args=None,
+                    *args, grad_args=None, dtype=None,
                     in_shardings=_UNSPECIFIED, out_shardings=_UNSPECIFIED,
                     **kwargs):
+        if dtype is None:
+            dtype = self.dtype
+
         if isinstance(custom_func, partial):
             func_name = custom_func.func.__name__
         else:
@@ -136,7 +148,7 @@ class CustomOpsTestHelper:
 
         ref_gradded = jax.value_and_grad(ref_func, argnums=grad_args)
         ref_fwd, ref_grads = ref_gradded(*args, **kwargs)
-        fwd_tol = max(np.finfo(jnp.float16).eps, np.spacing(jnp.float16(ref_fwd))) ** (2./3.)
+        fwd_tol = self.get_tolerance(ref_fwd, dtype=dtype)
         assert jnp.allclose(test_fwd, ref_fwd, rtol=0.0, atol=fwd_tol), \
             f"`{func_name}`: Output (fwd) error {jnp.max(jnp.abs(test_fwd - ref_fwd))}" + \
             f" exceeds tolerance ({fwd_tol})."
@@ -149,8 +161,7 @@ class CustomOpsTestHelper:
             test_grad, ref_grad = grads
             if test_grad is None and ref_grad is None:
                 continue
-            bwd_tol = max(np.finfo(jnp.float32).eps,
-                        np.spacing(jnp.max(jnp.abs(ref_grad)).astype(jnp.float32))) ** (2./3.)
+            bwd_tol = self.get_tolerance(ref_grad, dtype=dtype)
             if not jnp.allclose(test_grad, ref_grad, rtol=0.0, atol=bwd_tol):
                 failed_grads[i] = jnp.max(jnp.abs(test_grad - ref_grad))
         assert len(failed_grads) == 0, \
@@ -158,15 +169,16 @@ class CustomOpsTestHelper:
             f" [{', '.join([f'Arg{k}={v}' for k,v in failed_grads.items()])}]" + \
             f" exceed tolerance ({bwd_tol})."
 
+    @staticmethod
     def check_fused_attn_inputs(self, q_seq, kv_seq, head_dim, pad_ratio, dropout_probability,
-                                attn_bias_type, attn_mask_type, backend):
+                                attn_bias_type, attn_mask_type, backend, dtype=jnp.float16):
         if (q_seq > 512 or kv_seq > 512 or backend == FusedAttnBackend.Arbitrary) \
             and pad_ratio != 0:
             pytest.skip(
                 "`fused_attention`: Arbitrary seqlen backend does not support padded input.")
 
         if not is_fused_attn_kernel_available(
-            self.dtype, self.dtype, attn_bias_type, attn_mask_type,
+            dtype, dtype, attn_bias_type, attn_mask_type,
             dropout_probability, q_seq, kv_seq, head_dim):
             pytest.skip(
                 "`fused_attention`: Unsupported inputs combination or device compute capability.")
@@ -187,17 +199,17 @@ class CustomOpsTestHelper:
             attn_weights = scale_factor * attn_weights
         # padding mask
         if attn_mask_type != AttnMaskType.NO_MASK and mask is not None:
-            big_neg = jnp.finfo(self.dtype).min
+            big_neg = jnp.finfo(query.dtype).min
             attn_weights = jnp.where(mask, attn_weights, big_neg)
         # softmax
-        attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
+        attn_weights = jax.nn.softmax(attn_weights).astype(query.dtype)
         # dropout
         if dropout_prob == 1.0:
             attn_weights = jnp.zeros_like(attn_weights)
         elif dropout_prob > 0.0:
             keep_prob = 1.0 - dropout_prob
             keep = random.bernoulli(dropout_rng, p=keep_prob, shape=attn_weights.shape)
-            multiplier = keep.astype(self.dtype) / jnp.asarray(keep_prob, dtype=self.dtype)
+            multiplier = keep.astype(query.dtype) / jnp.asarray(keep_prob, dtype=query.dtype)
             attn_weights = attn_weights * multiplier
         # QK*V matmul
         result =  jnp.einsum('...hqk,...khd->...qhd', attn_weights, value)
@@ -219,9 +231,9 @@ class CustomOpsTestHelper:
         var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
         normed_input = (x_ - mean) * jax.lax.rsqrt(var + epsilon)
         if zero_centered_gamma:
-            result = jnp.asarray(normed_input * (gamma + 1) + beta).astype(self.dtype)
+            result = jnp.asarray(normed_input * (gamma + 1) + beta).astype(x.dtype)
         else:
-            result = jnp.asarray(normed_input * gamma + beta).astype(self.dtype)
+            result = jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
         return jnp.mean(result)
 
     @staticmethod
@@ -237,7 +249,7 @@ class CustomOpsTestHelper:
     def reference_rmsnorm(self, x, gamma, epsilon):
         x = jnp.asarray(x, jnp.float32)
         mean2 = jnp.mean(jax.lax.square(x), axis=-1, keepdims=True)
-        y = jnp.asarray(x * jax.lax.rsqrt(mean2 + epsilon), self.dtype)
+        y = jnp.asarray(x * jax.lax.rsqrt(mean2 + epsilon), x.dtype)
         result = y * gamma
         return jnp.mean(result)
 
@@ -252,9 +264,9 @@ class CustomOpsTestHelper:
     def reference_softmax(self, x, mask, scale_factor, softmax_type):
         attn_weights = scale_factor * x
         if softmax_type != SoftmaxType.SCALED:
-            big_neg = jnp.finfo(self.dtype).min
+            big_neg = jnp.finfo(x.dtype).min
             attn_weights = jnp.where(mask, attn_weights, big_neg)
-        result = jax.nn.softmax(attn_weights).astype(self.dtype)
+        result = jax.nn.softmax(attn_weights).astype(x.dtype)
         return jnp.mean(result)
 
     @staticmethod

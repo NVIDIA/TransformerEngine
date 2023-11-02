@@ -13,13 +13,13 @@ class ShardingConfigs(object):
     def __init__(self, num_gpus=len(jax.devices())):
         super().__init__()
         if num_gpus < 2:
-            raise ValueError(f"ShardingConfig: Need at least 2 GPUs, but got {num_gpus}.")
+            raise ValueError(f"ShardingConfig: Need at least 2 GPUs.")
         
         self.device_count = min(num_gpus, 8)
         mesh_configs = [
             ((self.device_count, 1),    ("dp", None), ShardingType.DP),
             ((self.device_count, 1),    ("tp", None), ShardingType.TP_COL),
-            ((self.device_count, 1),    ("tp", None), ShardingType.TP_ROW),
+            ((self.device_count, 1),    ("tp", None), ShardingType.TP_ROW)
         ]
         if self.device_count >= 4:
             mesh_configs += [
