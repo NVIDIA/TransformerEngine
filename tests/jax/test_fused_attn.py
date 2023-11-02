@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """Tests for fused attention"""
 
-import ctypes
 import os
 from enum import Enum
 from math import sqrt
@@ -85,8 +84,8 @@ def jax_self_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
                                    deterministic=not kwargs['is_training'],
                                    dropout_rate=kwargs['dropout_probability'],
                                    dropout_rng=dropout_rng,
-                                   dtype=qkv.dtype)
-    return output
+                                   dtype=jnp.float32)
+    return output.astype(qkv.dtype)
 
 
 def jax_cross_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
@@ -161,23 +160,13 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim, pad_ratio):
+                      head_dim):
 
-        lib = ctypes.CDLL('libcudnn.so')
-        is_varlen_supported = lib.cudnnGetVersion() >= 8906
-
-        if (s > 512 or backend == Backend.Arbitrary) and pad_ratio != 0 and not is_varlen_supported:
-            pytest.skip("Arbitrary seqlen backend hasn't support padded input.")
+        assert isinstance(backend, Backend)
 
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
-
-        compute_capability = get_device_compute_capability(0)
-        if (backend == Backend.Max512
-                and not (compute_capability == 80 or compute_capability >= 90)):
-            pytest.skip("Unsupported compute capability for "
-                        "fused attention with <=512 sequence length")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
                     dropout_probability, dtype, is_training, pad_ratio):
@@ -188,8 +177,7 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d,
-                                     pad_ratio=pad_ratio)
+                                     head_dim=d)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 

@@ -422,7 +422,7 @@ class MultiHeadAttention(nn.Module):
             Convert the string to AttnMaskType
             """
             if attn_mask_type == 'causal':
-                return AttnMaskType.CAUSAL_MASK
+                return AttnMaskType.PADDING_CAUSAL_MASK
             if attn_mask_type == 'padding':
                 return AttnMaskType.PADDING_MASK
             raise ValueError(f"Unsupported {attn_mask_type=}, "
