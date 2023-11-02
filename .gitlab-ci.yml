@@ -796,6 +796,17 @@ L0_jax_unittest--L40_1GPU:
       variables:
         - $BUILD_JAX == "0"
 
+L0_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_4GPU
+    except:
+      variables:
+        - $BUILD_JAX == "0"
+
 L0_paddle_unittest--V100_1GPU:
     variables:
       FRAMEWORK: paddle
