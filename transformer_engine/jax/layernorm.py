@@ -191,7 +191,7 @@ def _layernorm_fp8_dot_fwd_rule(
                        static_axis_boundary=-1, transpose_axis_boundary=1)
 
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
-    kt_contracting_dims = tuple(i for i in range(1, kernel.ndim))
+    kt_contracting_dims = (kernel.ndim - 1,)
     output = fp8_dot_impl(ln_out, casted_kerenl_t, x_scale_inv, kernel_scale_inv, x.dtype,
                           (x_contracting_dims, kt_contracting_dims))
 

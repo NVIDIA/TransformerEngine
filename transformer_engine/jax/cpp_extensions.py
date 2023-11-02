@@ -3508,7 +3508,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         operands = [dz, x, amax, scale, scale_inv]
         operand_shapes = [ir_dz_shape, x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-        contracted_x_shape = (reduce(operator.mul, x_shape[:-1]), x_shape[-1])
+        contracted_x_shape = (x_batch_size, x_shape[-1])
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
                                                                jax_dtype_to_te_dtype(dz_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
