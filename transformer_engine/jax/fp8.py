@@ -127,6 +127,19 @@ class FP8MetaPackage:
         """
         return self._scale_inv
 
+    def get_package_by_gemm_idx(self, gemm_idx):
+        """
+        Get a sub package by gemm_idx
+        """
+        assert self.num_of_gemm > gemm_idx
+
+        meta_start_idx = gemm_idx * FP8Helper.NUM_META_PER_GEMM
+        meta_end_idx = (gemm_idx + 1) * FP8Helper.NUM_META_PER_GEMM
+        return FP8MetaPackage(1, self.fp8_max[meta_start_idx:meta_end_idx],
+                              self.amax[meta_start_idx:meta_end_idx],
+                              self.scale[meta_start_idx:meta_end_idx],
+                              self.scale_inv[meta_start_idx:meta_end_idx])
+
 
 class AmaxComputeAlgo(Enum):
     """AmaxComputeAlgo."""
@@ -324,7 +337,7 @@ class FP8Helper:
 @contextmanager
 def fp8_autocast(enabled: bool = False,
                  fp8_recipe: Optional[DelayedScaling] = None,
-                 meta_resource: Optional[MeshResource] = None) -> None:
+                 mesh_resource: Optional[MeshResource] = None) -> None:
     r"""
     Context manager for FP8 usage.
 
@@ -336,9 +349,9 @@ def fp8_autocast(enabled: bool = False,
         devices = np.asarray(jax.devices()).reshape(*mesh_shape)
 
         with maps.Mesh(devices, (dp_mesh_axis_name, tp_mesh_axis_name)):
-            meta_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
+            mesh_resource=MeshResource(dp_mesh_axis_name, tp_mesh_axis_name)
 
-            with fp8_autocast(enabled=True, meta_resource=meta_resource):
+            with fp8_autocast(enabled=True, mesh_resource=mesh_resource):
                 rules = extend_logical_axis_rules(tuple())
                 transformer = TransformerLayer()
 
@@ -358,7 +371,7 @@ def fp8_autocast(enabled: bool = False,
         Whether or not to enable fp8
     fp8_recipe: recipe.DelayedScaling, default = None
         Recipe used for FP8 training.
-    meta_resource: MeshResource, default = None
+    mesh_resource: MeshResource, default = None
         Specify the mesh axes for data and tensor parallelism to shard along.
         If set to None, then no data or tensor parallelism will be used.
 
@@ -375,11 +388,11 @@ def fp8_autocast(enabled: bool = False,
         "DelayedScaling override_linear_precision isn't supported by TE/JAX.")
     assert fp8_recipe.reduce_amax, ("DelayedScaling reduce_amax should be enabled for TE/JAX.")
 
-    if meta_resource is None:
-        meta_resource = MeshResource()
+    if mesh_resource is None:
+        mesh_resource = MeshResource()
 
     try:
-        with global_shard_guard(meta_resource):
+        with global_shard_guard(mesh_resource):
             if enabled:
                 fp8_available, reason_for_no_fp8 = is_fp8_available()
                 assert fp8_available, reason_for_no_fp8
