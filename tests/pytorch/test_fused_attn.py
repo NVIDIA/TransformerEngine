@@ -191,7 +191,7 @@ def test_dot_product_attention(
     dtype: torch.dtype,
     checkpoint_attention: bool = False,
 ) -> None:
-    """Test DotProductAttention module"""
+    """Test dot-product attention"""
 
     # Get configs
     config = _test_dot_product_attention_configs[config_name]
@@ -209,18 +209,18 @@ def test_dot_product_attention(
 
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
-        dtype,
-        config,
         "UnfusedDotProductAttention",
+        config,
+        dtype,
         checkpoint_attention,
     )
 
     # FusedAttention backend
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype,
-            config,
             "FusedAttention",
+            config,
+            dtype,
             checkpoint_attention,
         )
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
@@ -229,20 +229,25 @@ def test_dot_product_attention(
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype,
-            config,
             "FlashAttention",
+            config,
+            dtype,
             checkpoint_attention,
         )
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dot_product_attention(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
     checkpoint_attention: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run dot-product attention with provided backend
+
+    Performs a forward and backward pass.
+
+    """
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -338,6 +343,7 @@ def test_dot_product_attention_checkpoint(
     config_name: str,
     dtype: torch.dtype = _default_dtype(),
 ) -> None:
+    """Test dot-product attention with activation checkpointing"""
     test_dot_product_attention(
         config_name=config_name,
         dtype=dtype,
@@ -375,7 +381,7 @@ def test_dot_product_attention_qkv_layout(
     workspace_opt: bool,
     dtype: torch.dtype = _default_dtype(),
 ) -> None:
-    """Test DotProductAttention module with different QKV layouts"""
+    """Test dot-product attention with different QKV layouts"""
 
     # Get configs
     config = _test_dot_product_attention_qkv_layout_configs[config_name]
@@ -393,12 +399,22 @@ def test_dot_product_attention_qkv_layout(
 
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention_qkv_layout(
-        dtype, config, "UnfusedDotProductAttention", qkv_layout, workspace_opt)
+        "UnfusedDotProductAttention",
+        config,
+        dtype,
+        qkv_layout,
+        workspace_opt,
+    )
 
     # FusedAttention backend
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention_qkv_layout(
-            dtype, config, "FusedAttention", qkv_layout, workspace_opt)
+            "FusedAttention",
+            config,
+            dtype,
+            qkv_layout,
+            workspace_opt,
+        )
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i in range(len(unfused_attn_bwd)):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
@@ -406,18 +422,29 @@ def test_dot_product_attention_qkv_layout(
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention_qkv_layout(
-            dtype, config, "FlashAttention", qkv_layout, workspace_opt)
+            "FlashAttention",
+            config,
+            dtype,
+            qkv_layout,
+            workspace_opt,
+        )
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i in range(len(unfused_attn_bwd)):
             torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], **tols)
 
 def _run_dot_product_attention_qkv_layout(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
     qkv_layout: str,
     workspace_opt: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Run dot-product attention with provided backend
+
+    Supports different QKV layouts. Performs a forward and backward
+    pass.
+
+    """
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -537,8 +564,7 @@ def test_transformer_layer(
     dtype: torch.dtype = _default_dtype(),
     RoPE: bool = False,
 ) -> None:
-    """Test TransformerLayer module when its DotProductAttention is enabled with
-    FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
+    """Test Transformer layer"""
 
     # Get configs
     config = _test_transformer_layer_configs[config_name]
@@ -558,9 +584,9 @@ def test_transformer_layer(
 
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
-        dtype,
-        config,
         "UnfusedDotProductAttention",
+        config,
+        dtype,
         fused_qkv_params,
         RoPE,
     )
@@ -568,9 +594,9 @@ def test_transformer_layer(
     # FusedAttention backend
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype,
-            config,
             "FusedAttention",
+            config,
+            dtype,
             fused_qkv_params,
             RoPE,
         )
@@ -580,9 +606,9 @@ def test_transformer_layer(
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
-            dtype,
-            config,
             "FlashAttention",
+            config,
+            dtype,
             fused_qkv_params,
             RoPE,
         )
@@ -590,12 +616,17 @@ def test_transformer_layer(
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_transformer_layer(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
     fused_qkv_params: bool,
     RoPE: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run Transformer layer with provided backend
+
+    Performs a forward and backward pass.
+
+    """
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -704,6 +735,7 @@ def test_transformer_layer_rope(
     config_name: str,
     fused_qkv_params: bool = True,
 ) -> None:
+    """Test Transformer layer with rotary position embeddings"""
     test_transformer_layer(
         config_name=config_name,
         fused_qkv_params=fused_qkv_params,
@@ -716,8 +748,7 @@ def test_transformer_layer_gqa(
     config_name: str,
     dtype: torch.dtype = torch.float16,
 ) -> None:
-    """Test TransformerLayer module when its DotProductAttention is enabled with
-    FlashAttention or UnfusedDotProductAttention backend"""
+    """Test Transformer layer with grouped quary attention"""
 
     config = _test_transformer_layer_configs[config_name]
     def find_factors(x):
@@ -737,15 +768,15 @@ def test_transformer_layer_gqa(
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer_gqa(
-            dtype,
-            config,
             "FlashAttention",
+            config,
+            dtype,
             num_q_per_gqa_group,
         )
         unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer_gqa(
-            dtype,
-            config,
             "UnfusedDotProductAttention",
+            config,
+            dtype,
             num_q_per_gqa_group,
         )
 
@@ -754,11 +785,16 @@ def test_transformer_layer_gqa(
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, atol=atol, rtol=rtol)
 
 def _run_transformer_layer_gqa(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
     num_querys_per_gqa_group: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run GQA Transformer layer with provided backend
+
+    Performs a forward and backward pass.
+
+    """
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -864,13 +900,7 @@ def test_dot_product_attention_fp8(
     config_name: str,
     dtype: torch.dtype = torch.float16,
 ) -> None:
-    """Test FP8 dot-product attention with different backends
-
-    FusedAttention uses fused_attn_fwd/bwd_qkvpacked from
-    cpp_extensions. UnfusedDotProductAttention uses plain PyTorch
-    operations.
-
-    """
+    """Test FP8 dot-product attention"""
 
     config = _test_dot_product_attention_fp8_configs[config_name]
 
@@ -880,14 +910,14 @@ def test_dot_product_attention_fp8(
 
     # Run dot-product attention with different backends
     fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention_fp8(
-        dtype,
+        "FusedAttention",
         config,
-        "FusedAttention"
+        dtype,
     )
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention_fp8_ref(
-        dtype,
-        config,
         "UnfusedDotProductAttention",
+        config,
+        dtype,
     )
 
     # Check that results match
@@ -896,10 +926,19 @@ def test_dot_product_attention_fp8(
     torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dot_product_attention_fp8(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run FP8 dot-product attention with provided backend
+
+    Performs a forward and backward pass.
+
+    FusedAttention uses fused_attn_fwd/bwd_qkvpacked from
+    cpp_extensions. UnfusedDotProductAttention uses plain PyTorch
+    operations.
+
+    """
 
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -963,10 +1002,18 @@ def _run_dot_product_attention_fp8(
     )
 
 def _run_dpa_fp8_ref(
-    dtype: torch.dtype,
-    config: ModelConfig,
     backend: str,
+    config: ModelConfig,
+    dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run dot-product attention with provided backend
+
+    Performs a forward and backward pass.
+
+    This uses plain PyTorch operations and is intended as a reference
+    implementation for testing FP8 dot-product attention.
+
+    """
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
