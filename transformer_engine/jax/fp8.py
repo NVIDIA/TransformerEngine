@@ -69,8 +69,7 @@ def _format2dtypes(format_: Format):
 
 class FP8MetaPackage:
     """
-    A container that contains all required meta data for
-    FP8 GEMM
+    A container that contains all required meta data for FP8
     """
 
     def __init__(

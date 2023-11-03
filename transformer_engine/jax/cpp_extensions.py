@@ -963,7 +963,7 @@ class SoftmaxPrimitive(BasePrimitive):
     @staticmethod
     def backward_abstract(dz_aval, softmax_out_aval, scale_factor=None):    # pylint: disable=unused-argument
         """
-        softmax_backward infer_sharding_from_operands
+        softmax_backward abstract
         """
         dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         softmax_out_dtype = dtypes.canonicalize_dtype(softmax_out_aval.dtype)
@@ -1329,9 +1329,8 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         del result_infos
         logits_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])))
         mask_spec = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        out_spec = logits_spec
         arg_shardings = (logits_spec, mask_spec)
-        out_shardings = out_spec
+        out_shardings = logits_spec
         impl = partial(ScaledMaskedSoftmaxFwdPrimitive.impl, scale_factor=scale_factor)
         return mesh, impl, out_shardings, arg_shardings
 

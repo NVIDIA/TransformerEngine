@@ -17,7 +17,7 @@ MajorShardingType = DeprecatedEnum(MajorShardingType,
 ShardingType = DeprecatedEnum(ShardingType, "ShardingType is deprecating in the near feature.")
 ShardingResource = deprecate_wrapper(
     ShardingResource,
-    "ShardingResource is renaming to MeshResource, and will be removed in the near feature.")
+    "ShardingResource is renamed to MeshResource, and will be removed in the near feature.")
 
 __all__ = [
     'NVTE_FP8_COLLECTION_NAME',
