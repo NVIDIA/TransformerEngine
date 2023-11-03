@@ -16,7 +16,7 @@ from custom_ops_helper import *
 from transformer_engine.jax.sharding import global_shard_guard
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 
-configs = ShardingConfigs(num_gpus=4)
+configs = ShardingConfigs()   # default device count is len(jax.devices())
 helper = CustomOpsTestHelper()
 
 @pytest.mark.skipif(not helper.use_custom_partitioning(),
