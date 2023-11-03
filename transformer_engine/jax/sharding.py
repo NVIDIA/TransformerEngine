@@ -149,6 +149,8 @@ global_shard_resource = global_mesh_resource
 class MajorShardingType(Enum):
     r"""
     The major sharding type to indicate sharding pattern.
+    .. warning::
+        MajorShardingType is deprecating in the near feature.
 
     Values
     ----------
@@ -170,6 +172,8 @@ class MajorShardingType(Enum):
 class ShardingType(Enum):
     """
     The sharding type to indicate sharding pattern.
+    .. warning::
+        ShardingType is deprecating in the near feature.
 
     Values
     ----------
