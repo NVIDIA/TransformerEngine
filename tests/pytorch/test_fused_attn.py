@@ -28,6 +28,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_bwd,
     fused_attn_fwd,
 )
+from transformer_engine.pytorch.distributed import (
+    _set_cuda_rng_state,
+    CudaRNGStatesTracker,
+)
 import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import (
     TransformerEngineBaseModule,
@@ -38,23 +42,23 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state, CudaRNGStatesTracker
 import transformer_engine_extensions as tex
 
 
-# Only run FP8 tests on H100.
+# Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
-_flash_attn_version = packaging.version.Version(version("flash-attn"))
-_flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 
-
+# Initialize RNG state
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-# Record initial RNG state from script run.
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+def reset_rng_states() -> None:
+    """Revert back to initial RNG state."""
+    torch.set_rng_state(_cpu_rng_state)
+    _set_cuda_rng_state(_cuda_rng_state)
 
 @functools.cache
 def _cudnn_version() -> Tuple[int, int, int]:
@@ -64,6 +68,9 @@ def _cudnn_version() -> Tuple[int, int, int]:
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
 
+_dtypes = [torch.float16]
+if torch.cuda.is_bf16_supported():
+    _dtypes.append(torch.bfloat16)
 
 @functools.cache
 def _default_dtype() -> torch.dtype:
@@ -73,21 +80,14 @@ def _default_dtype() -> torch.dtype:
     else:
         return torch.float16
 
-
-def reset_rng_states() -> None:
-    """Revert back to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
-
-
 @dataclass
 class ModelConfig:
-
-    seq_len: int = 32
-    batch_size: int = 2
-    num_heads: int = 2
-    head_dim: int = 16
-    attn_mask_type: str = "no_mask"
+    """Configuration for multi-head attention"""
+    seq_len: int
+    batch_size: int
+    num_heads: int
+    head_dim: int
+    attn_mask_type: str = "causal"
     bias_type: str = "no_bias"
     num_layers: int = 1
     dropout_prob: float = 0.0
@@ -96,45 +96,12 @@ class ModelConfig:
     def hidden_size(self) -> int:
         return self.num_heads * self.head_dim
 
-model_configs = {
-    "s32-h2-d32-no_mask": ModelConfig(
-        seq_len=32,
-        num_heads=2,
-        head_dim=32,
-        attn_mask_type="no_mask",
-    ),
-
-    ### TODO Restore
-    # "s128-h16-d64-causal": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
-    # "s2048-h16-d64-causal": ModelConfig(1, 1024, 16, 64, 2048, 0.0, "causal"),
-    # "s128-h16-d128-causal": ModelConfig(1, 2048, 16, 128, 128, 0.0, "causal"),
-    # "s2048-h24-d128-causal": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
-    # "s128-h16-d64-no_mask": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
-
-    "s512-h16-d64-no_mask": ModelConfig(
-        seq_len=512,
-        num_heads=16,
-        head_dim=64,
-        attn_mask_type="no_mask",
-    ),
-    "s1024-h16-d64-causal": ModelConfig(
-        seq_len=1024,
-        num_heads=16,
-        head_dim=64,
-        attn_mask_type="causal",
-    ),
-}
-
-dtypes = [torch.float16]
-if torch.cuda.is_bf16_supported():
-    dtypes.append(torch.bfloat16)
-
-
 def _is_fused_attention_supported(
     config: ModelConfig,
     dtype: torch.dtype,
     qkv_layout: str = "sbh3d",
 ) -> bool:
+    """Check if cuDNN fused attention supports a model configuration"""
     backend = tex.get_fused_attn_backend(
         TE_DType[dtype],
         TE_DType[dtype],
@@ -148,24 +115,86 @@ def _is_fused_attention_supported(
     )
     return backend != FusedAttnBackend["No_Backend"]
 
+@functools.cache
+def _is_flash_attention_2_available() -> bool:
+    """Check if Flash Attention 2.0+ is available"""
+    Version = packaging.version.Version
+    return Version(version("flash-attn")) > Version("2")
+
 def _is_flash_attention_supported(config: ModelConfig) -> bool:
+    """Check if Flash Attention supports a model configuration"""
     if get_device_compute_capability() < (8, 0):
         return False
     if config.bias_type != "no_bias":
         return False
     return True
 
-@pytest.mark.parametrize("model_name", model_configs.keys())
-@pytest.mark.parametrize("dtype", dtypes)
+
+_test_dot_product_attention_configs = {
+    # Baseline cases
+    "s128-b4-h16-d64": ModelConfig(128, 4, 16, 64),
+    "s1024-b4-h16-d64": ModelConfig(1024, 4, 16, 64),
+
+    # Small case
+    "s32-b2-h2-d32": ModelConfig(32, 2, 2, 32),
+
+    # Large case
+    "s2048-b32-h16-d64-no_mask-post_scale_bias": ModelConfig(
+        2048, 32, 16, 64,
+        attn_mask_type="no_mask",
+        bias_type="post_scale_bias",
+    ),
+
+    # Sequence length
+    "s512-b4-h16-d64": ModelConfig(512, 4, 16, 64),
+    "s2048-b4-h16-d64": ModelConfig(2048, 4, 16, 64),
+
+    # Batch size
+    "s128-b1-h16-d64": ModelConfig(128, 1, 16, 64),
+    "s128-b32-h16-d64": ModelConfig(128, 32, 16, 64),
+    "s1024-b1-h16-d64": ModelConfig(1024, 1, 16, 64),
+    "s1024-b32-h16-d64": ModelConfig(1024, 32, 16, 64),
+
+    # Num heads
+    "s128-b4-h24-d64": ModelConfig(128, 4, 24, 64),
+    "s1024-b4-h24-d64": ModelConfig(1024, 4, 24, 64),
+
+    # Head dim
+    "s128-b4-h16-d128": ModelConfig(128, 4, 16, 128),
+    "s1024-b4-h16-d128": ModelConfig(1024, 4, 16, 128),
+
+    # Attention mask type
+    "s128-b32-h16-d64-no_mask": ModelConfig(
+        128, 32, 16, 64,
+        attn_mask_type="no_mask",
+    ),
+    "s1024-b32-h16-d64-no_mask": ModelConfig(
+        1024, 32, 16, 64,
+        attn_mask_type="no_mask",
+    ),
+
+    # Bias type
+    "s128-b4-h16-d64-post_scale_bias": ModelConfig(
+        128, 4, 16, 64,
+        bias_type="post_scale_bias",
+    ),
+    "s1024-b4-h16-d64": ModelConfig(
+        1024, 4, 16, 64,
+        bias_type="post_scale_bias",
+    ),
+}
+
+@pytest.mark.parametrize("config_name", _test_dot_product_attention_configs.keys())
+@pytest.mark.parametrize("dtype", _dtypes)
 def test_dot_product_attention(
-    model_name: str,
+    config_name: str,
     dtype: torch.dtype,
     checkpoint_attention: bool = False,
 ) -> None:
-    """Test DotProductAttention module with given model config"""
+    """Test DotProductAttention module"""
 
     # Get configs
-    config = model_configs[model_name]
+    config = _test_dot_product_attention_configs[config_name]
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
@@ -303,32 +332,45 @@ def _run_dot_product_attention(
 
     return op, inp.grad
 
-@pytest.mark.parametrize("model_name", ["s32-h2-d32-no_mask"])
-def test_dot_product_attention_checkpoint(model_name: str) -> None:
+
+@pytest.mark.parametrize("config_name", ["s128-b4-h16-d64"])
+def test_dot_product_attention_checkpoint(
+    config_name: str,
+    dtype: torch.dtype = _default_dtype(),
+) -> None:
     test_dot_product_attention(
-        model_name=model_name,
-        dtype=_default_dtype(),
+        config_name=config_name,
+        dtype=dtype,
         checkpoint_attention=True,
     )
 
-qkv_layouts = [
+
+_qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',
     # will add tests for thd layouts later when the support is available in fused attention
     #'t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd',
 ]
 
-_test_dpa_qkv_layout_models = [
-    "s512-h16-d64-no_mask",
-    "s1024-h16-d64-causal",
-]
+_test_dpa_qkv_layout_configs = {
+    "s128-b4-h16-d64": ModelConfig(128, 4, 16, 64),
+    "s1024-b4-h16-d64": ModelConfig(1024, 4, 16, 64),
+    "s128-b4-h16-d64_no_mask": ModelConfig(
+        128, 4, 16, 64,
+        attn_mask_type="no_mask",
+    ),
+    "s1024-b4-h16-d64_no_mask": ModelConfig(
+        1024, 4, 16, 64,
+        attn_mask_type="no_mask",
+    ),
+}
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required")
-@pytest.mark.parametrize("model_name", _test_dpa_qkv_layout_models)
-@pytest.mark.parametrize("qkv_layout", qkv_layouts)
+@pytest.mark.parametrize("config_name", _test_dpa_qkv_layout_configs.keys())
+@pytest.mark.parametrize("qkv_layout", _qkv_layouts)
 @pytest.mark.parametrize("workspace_opt", [True, False])
 def test_dpa_qkv_layout(
-    model_name: str,
+    config_name: str,
     qkv_layout: str,
     workspace_opt: bool,
     dtype: torch.dtype = _default_dtype(),
@@ -336,7 +378,7 @@ def test_dpa_qkv_layout(
     """Test DotProductAttention module with different QKV layouts"""
 
     # Get configs
-    config = model_configs[model_name]
+    config = _test_dpa_qkv_layout_configs[config_name]
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
@@ -473,25 +515,33 @@ def _run_dpa_qkv_layout(
 
     return op, (inp[0].grad, inp[1].grad, inp[2].grad)
 
-_test_transformer_layer_models = [
-    "s512-h16-d64-no_mask",
-    "s1024-h16-d64-causal",
-]
 
-@pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model_name", _test_transformer_layer_models)
+_test_transformer_layer_configs = {
+    "s32-b2-h2-d32": ModelConfig(32, 2, 2, 32),
+    "s1024-b2-h2-d32": ModelConfig(1024, 2, 2, 32),
+    "s32-b2-h2-d32_no_mask": ModelConfig(
+        32, 2, 2, 32,
+        attn_mask_type="no_mask",
+    ),
+    "s32-b2-h2-d32_post_scale_bias": ModelConfig(
+        32, 2, 2, 32,
+        bias_type="post_scale_bias",
+    ),
+}
+
+@pytest.mark.parametrize("config_name", _test_transformer_layer_configs.keys())
 @pytest.mark.parametrize("fused_qkv_params", [True, False])
 def test_transformer_layer(
-    dtype: torch.dtype,
-    model_name: str,
+    config_name: str,
     fused_qkv_params: bool,
+    dtype: torch.dtype = _default_dtype(),
     RoPE: bool = False,
 ) -> None:
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention, FusedAttention, or UnfusedDotProductAttention backend"""
 
     # Get configs
-    config = model_configs[model_name]
+    config = _test_transformer_layer_configs[config_name]
     tols = dict(atol=5e-1, rtol=5e-2)
 
     # Skip if only unfused backend is supported
@@ -649,33 +699,27 @@ def _run_transformer_layer(
     return op, inp.grad
 
 
-@pytest.mark.parametrize("model_name", ["s32-h2-d32-no_mask"])
+@pytest.mark.parametrize("config_name", ["s32-b2-h2-d32"])
 def test_transformer_layer_rope(
-    model_name: str,
-    dtype: torch.dtype = _default_dtype(),
+    config_name: str,
     fused_qkv_params: bool = True,
 ) -> None:
     test_transformer_layer(
-        dtype=dtype,
-        model_name=model_name,
+        config_name=config_name,
         fused_qkv_params=fused_qkv_params,
         RoPE=True,
     )
 
-_test_transformer_layer_gqa_models = [
-    "s512-h16-d64-no_mask",
-    "s1024-h16-d64-causal",
-]
 
-@pytest.mark.parametrize("model_name", _test_transformer_layer_gqa_models)
+@pytest.mark.parametrize("config_name", _test_transformer_layer_configs.keys())
 def test_transformer_layer_gqa(
-    model_name: str,
+    config_name: str,
     dtype: torch.dtype = torch.float16,
 ) -> None:
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention or UnfusedDotProductAttention backend"""
 
-    config = model_configs[model_name]
+    config = _test_transformer_layer_configs[config_name]
     def find_factors(x):
        f = []
        for i in range(1, x + 1):
@@ -684,7 +728,9 @@ def test_transformer_layer_gqa(
        return f
 
     # Skip if only unfused backend is supported
-    if not (_flash_attn_2_available and _is_flash_attention_supported(config)):
+    if not _is_flash_attention_2_available():
+        pytest.skip("FlashAttention 1 does not support GQA")
+    if not _is_flash_attention_supported(config):
         pytest.skip("FlashAttention does not support this model config")
 
     num_querys_per_gqa_group = find_factors(config.num_heads)
@@ -800,14 +846,22 @@ def _run_transformer_layer_gqa(
 
     return op, inp.grad
 
-model_configs_fp8 = {
-    "test1": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
+
+_test_dpa_fp8_configs = {
+    "s128-b4-h16-d64-no_mask": ModelConfig(
+        128, 4, 16, 64,
+        attn_mask_type="no_mask",
+    ),
+    "s1024-b4-h16-d64-no_mask": ModelConfig(
+        1024, 4, 16, 64,
+        attn_mask_type="no_mask",
+    ),
 }
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("model_name", ["s512-h16-d64-no_mask"])
+@pytest.mark.parametrize("config_name", _test_dpa_fp8_configs.keys())
 def test_dpa_fp8(
-    model_name: str,
+    config_name: str,
     dtype: torch.dtype = torch.float16,
 ) -> None:
     """Test FP8 dot-product attention with different backends
@@ -818,7 +872,7 @@ def test_dpa_fp8(
 
     """
 
-    config = model_configs[model_name]
+    config = _test_dpa_fp8_configs[config_name]
 
     # Skip if not supported
     if not _is_fused_attention_supported(config, dtype):
