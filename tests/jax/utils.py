@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import functools
+import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
 
@@ -1017,19 +1018,16 @@ def assert_allclose(
     dtype: Optional[Union[DType, TEDType, np.dtype, str]] = None,
     **kwargs,
 ) -> None:
-    """Check if two tensors are close
-
-    Floating-point tolerances are based on
-    https://pytorch.org/docs/stable/testing.html#torch.testing.assert_close
+    """Check if two tensors are close.
 
     Args:
-      actual: test tensor
-      desired: reference tensor
+      actual: test tensor.
+      desired: reference tensor.
       dtype: data type or data type name (default: inferred from
-        `actual`)
-      rtol: relative tolerance (default: based on `dtype`)
-      atol: absolute tolerance (default: based on `dtype`)
-      **kwargs: keyword arguments to pass to np.testing.assert_allclose
+        `actual`).
+      rtol: relative tolerance (default: based on `dtype`).
+      atol: absolute tolerance (default: based on `dtype`).
+      **kwargs: keyword arguments to pass to np.testing.assert_allclose.
     """
 
     # Infer data type if needed
@@ -1040,7 +1038,9 @@ def assert_allclose(
             dtype = actual.dtype
 
     # Determine tolerances
-    tols = dtype_tols(dtype)
+    tols = dict()
+    if rtol is None or atol is None:
+        tols = dtype_tols(dtype)
     if rtol is not None:
         tols["rtol"] = rtol
     if atol is not None:
@@ -1056,48 +1056,52 @@ def assert_allclose(
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 
 
-def dtype_tols(dtype: Union[DType, TEDType, np.dtype, str]) -> Dict[str, float]:
-    """Expected numerical tolerance for a data type
-
-    Floating-point tolerances are based on
-    https://pytorch.org/docs/stable/testing.html#torch.testing.assert_close
+def dtype_tols(
+    dtype: Union[DType, TEDType, np.dtype],
+    reference_value: float = 1.0,
+) -> Dict[str, float]:
+    """Expected numerical tolerance for a data type.
 
     Args:
-      dtype: data type or data type name.
+      dtype: data type.
+      reference_value: reference value (default: 1).
 
     Returns:
       Dictionary with "rtol" and "atol" as keys
 
     """
 
-    # Convert dtype to str
+    # Convert to JAX dtype if needed
     if isinstance(dtype, TEDType):
         dtype = {
-            TEDType.kByte: "uint8",
-            TEDType.kInt32: "int32",
-            TEDType.kInt64: "int64",
-            TEDType.kFloat32: "float32",
-            TEDType.kFloat16: "float16",
-            TEDType.kBFloat16: "bfloat16",
-            TEDType.kFloat8E4M3: "float8e4m3",
-            TEDType.kFloat8E5M2: "float8e5m2",
+            TEDType.kByte: jnp.uint8,
+            TEDType.kInt32: jnp.int32,
+            TEDType.kInt64: jnp.int64,
+            TEDType.kFloat32: jnp.float32,
+            TEDType.kFloat16: jnp.float16,
+            TEDType.kBFloat16: jnp.bfloat16,
+            TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
+            TEDType.kFloat8E5M2: jnp.float8_e5m2,
         }[dtype]
-    dtype = str(dtype).strip().lower()
-    if dtype.startswith("fp"):
-        dtype = dtype.replace("fp", "float", 1)
-    if dtype == "bf16":
-        dtype = "bfloat16"
-    if dtype == "float8":
-        dtype = "float8e4m3"
+    elif isinstance(dtype, np.dtype):
+        dtype = jnp.dtype(dtype)
 
-    # Return tolerances
-    if dtype.startswith("int") or dtype.startswith("uint"):
+    # Expect bit-wise accuracy for integer dtypes
+    if not jnp.issubdtype(dtype, jnp.floating):
         return dict(rtol=0, atol=0)
+
+    # Estimate floating-point error
+    finfo = jnp.finfo(dtype)
+    eps_relaxed = math.pow(finfo.eps, 2/3)
+    with jax.default_device(jax.devices("cpu")[0]):
+        if isinstance(reference_value, (float, int)):
+            reference_value = jnp.array(reference_value, dtype=dtype)
+        else:
+            reference_value = reference_value.astype(dtype)
+        spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
+        spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
+        ulp = max(spacing_high.item(), spacing_low.item())
     return dict(
-        float32=dict(rtol=1.3e-6, atol=1e-5),
-        float64=dict(rtol=1e-7, atol=1e-7),
-        float16=dict(rtol=1e-3, atol=1e-5),
-        bfloat16=dict(rtol=1.6e-2, atol=1e-5),
-        float8e4m3=dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
-        float8e5m2=dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
-    )[dtype]
+        rtol=eps_relaxed,
+        atol=max(ulp, eps_relaxed),
+    )

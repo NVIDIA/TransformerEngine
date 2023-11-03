@@ -121,7 +121,7 @@ class TestFP8Dot:
         primitive_out = fp8_dot(fp8_gemm_pkg, fwd_dtype, bwd_dtype)
         ref_out = jnp.dot(a, b)
 
-        assert_allclose(primitive_out, ref_out, dtype=DType.kFloat8E4M3)
+        assert_allclose(primitive_out, ref_out, dtype=fwd_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
