@@ -52,6 +52,13 @@ CROSS_CASES = [(32, 128, 512, 16, 64)]
 DTYPES = [jnp.bfloat16, jnp.float16]
 
 
+def is_causal_mask(mask: AttnMaskType):
+    """
+    Check if the mask is a causal mask
+    """
+    return mask in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]
+
+
 def make_decoder_mask(tokens: Array) -> Array:
     """
     Create padded causal mask
@@ -66,7 +73,7 @@ def jax_self_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
     Self attention with JAX native implementation
     """
     attn_mask_type = kwargs['attn_mask_type']
-    if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
+    if is_causal_mask(attn_mask_type):
         mask = make_decoder_mask(q_token)
     else:
         mask = make_attention_mask(q_token > 0, kv_token > 0)
@@ -95,7 +102,7 @@ def jax_cross_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
     assert q.dtype == kv.dtype
 
     attn_mask_type = kwargs['attn_mask_type']
-    if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
+    if is_causal_mask(attn_mask_type):
         raise NotImplementedError
     mask = make_attention_mask(q_token > 0, kv_token > 0)
 
@@ -112,15 +119,16 @@ def jax_cross_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs):
                                    deterministic=not kwargs['is_training'],
                                    dropout_rate=kwargs['dropout_probability'],
                                    dropout_rng=dropout_rng,
-                                   dtype=q.dtype)
-    return output
+                                   dtype=jnp.float32)
+    return output.astype(q.dtype)
 
 
 def customcall_self_fused_attn(qkv, bias, q_token, kv_token, dropout_rng, **kwargs):
     """
     Self fused attention
     """
-    if kwargs['attn_mask_type'] == AttnMaskType.PADDING_CAUSAL_MASK:
+    attn_mask_type = kwargs['attn_mask_type']
+    if is_causal_mask(attn_mask_type):
         mask = make_decoder_mask(q_token)
     else:
         mask = make_attention_mask(q_token > 0, kv_token > 0)
@@ -137,7 +145,8 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     """
     assert q.dtype == kv.dtype
 
-    if kwargs['attn_mask_type'] == AttnMaskType.PADDING_CAUSAL_MASK:
+    attn_mask_type = kwargs['attn_mask_type']
+    if is_causal_mask(attn_mask_type):
         raise NotImplementedError
     mask = make_attention_mask(q_token > 0, kv_token > 0)
 
@@ -149,8 +158,10 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
 
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
 @pytest.mark.parametrize('attn_bias_type', [AttnBiasType.NO_BIAS, AttnBiasType.POST_SCALE_BIAS])
-@pytest.mark.parametrize('attn_mask_type',
-                         [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK])
+@pytest.mark.parametrize('attn_mask_type', [
+    AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK,
+    AttnMaskType.PADDING_CAUSAL_MASK
+])
 @pytest.mark.parametrize('dropout_probability', [0., 0.1])
 @pytest.mark.parametrize('dtype', DTYPES)
 @pytest.mark.parametrize('is_training', [True, False])
@@ -160,9 +171,12 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim):
+                      head_dim, pad_ratio):
 
         assert isinstance(backend, Backend)
+
+        if pad_ratio != 0 and (attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]):
+            pytest.skip(f"{AttnMaskType=} only supports non-padded inputs.")
 
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
@@ -177,7 +191,8 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d)
+                                     head_dim=d,
+                                     pad_ratio=pad_ratio)
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -281,7 +296,7 @@ class TestSelfFusedAttn():
         def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
             gradient_multiplier = 1000 if dtype == jnp.bfloat16 else 10000
-            if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
+            if is_causal_mask(attn_mask_type):
                 gradient_multiplier = gradient_multiplier / 10
             # Keep only valid result for the gradient
             # fused_attn output has shape (b, s, h, d)
@@ -327,15 +342,15 @@ class TestSelfFusedAttn():
                                    rtol=1e-4,
                                    atol=1e-5)
 
-        valid_primitive_dqkv, invalid_primitive_dqkv = jnp.split(primitive_dqkv, (self.valid_len,),
-                                                                 axis=1)
-        valid_reference_dqkv, invalid_reference_dqkv = jnp.split(reference_dqkv, (self.valid_len,),
-                                                                 axis=1)
+        valid_primitive_dqkv, invalid_primitive_dqkv = \
+            jnp.split(primitive_dqkv.astype(jnp.float32), (self.valid_len,), axis=1)
+        valid_reference_dqkv, invalid_reference_dqkv = \
+            jnp.split(reference_dqkv.astype(jnp.float32), (self.valid_len,), axis=1)
 
-        valid_primitive_dq, valid_primitive_dk, valid_primitive_dv = jnp.split(
-            valid_primitive_dqkv.astype(jnp.float32), 3, axis=2)
-        valid_reference_dq, valid_reference_dk, valid_reference_dv = jnp.split(
-            valid_reference_dqkv.astype(jnp.float32), 3, axis=2)
+        valid_primitive_dq, valid_primitive_dk, valid_primitive_dv = \
+            jnp.split(valid_primitive_dqkv, 3, axis=2)
+        valid_reference_dq, valid_reference_dk, valid_reference_dv = \
+            jnp.split(valid_reference_dqkv, 3, axis=2)
 
         np.testing.assert_allclose(valid_primitive_dq, valid_reference_dq, rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(valid_primitive_dk, valid_reference_dk, rtol=1e-4, atol=1e-5)
@@ -476,9 +491,7 @@ class TestCrossFusedAttn():
 
         def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
-            gradient_multiplier = 10000
-            if attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK:
-                gradient_multiplier = gradient_multiplier / 10
+            gradient_multiplier = 1e4
             # Keep only valid result for the gradient
             # fused_attn output has shape (b, s_q, h, d)
             valid_fused_attn_ret, _ = jnp.split(fused_attn_func(*args, **kwargs),

@@ -298,7 +298,8 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
 
     /////////////////// Apply the mask //////////////////////////
 
-    auto maskTensor = (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+    auto maskTensor = (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                       mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                           ? std::move(causalMaskTensor)
                           : std::move(paddingMaskTensor);
 
@@ -314,7 +315,8 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
     ops.push_back(std::move(lessThanRow_op));
     ops.push_back(std::move(lessThanCol_op));
     ops.push_back(std::move(paddingMaskAnd_op));
-    if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+        mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
         ops.push_back(std::move(rowGreaterCol_op));
         ops.push_back(std::move(causalMaskAnd_op));
     }
@@ -680,7 +682,8 @@ void fused_attn_max_512_fwd_impl(
             // WAR: causal_mask without bias needs memset the S buffer
             // inference mode doesn't need the S auxiliary
             auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) && is_training;
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) && is_training;
             std::shared_ptr<cudnn_frontend::Tensor> maskInput;
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
