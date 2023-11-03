@@ -2660,7 +2660,8 @@ class CastTransposePrimitive(BasePrimitive):
         operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        contracted_x_shape = (reduce(operator.mul, ir_x_shape[:-1]), ir_x_shape[-1])
+        contracted_x_shape = (reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
+                              reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape,
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
@@ -2813,7 +2814,8 @@ class TransposePrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         te_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-        contracted_x_shape = (reduce(operator.mul, ir_x_shape[:-1]), ir_x_shape[-1])
+        contracted_x_shape = (reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
+                              reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]))
         opaque = transformer_engine_jax.pack_common_descriptor(contracted_x_shape, te_dtype,
                                                                te_dtype)
 
@@ -3445,34 +3447,34 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
     """
     name = "te_dgated_gelu_cast_transpose"
     multiple_results = True
-    impl_static_args = (5, 6, 7)    # out_dtype, static_axis_boundary, transpose_axis_boundary
+    impl_static_args = (5, 6)    # out_dtype, static_axis_boundary
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
     def abstract(dz_aval, x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype,
-                 static_axis_boundary, transpose_axis_boundary):
+                 static_axis_boundary):
         """
         te_dgated_gelu_cast_transpose_p abstract
         """
         dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dtype
+        assert x_aval.shape[-2] == 2    # Linear + GeLU
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
         ir_hidden_szie = dz_aval.shape[-1]
         gi_hidden_size = x_aval.shape[-1]
         assert ir_hidden_szie == gi_hidden_size
-        t_shape = _multidim_transpose(x_aval.shape, static_axis_boundary, transpose_axis_boundary)
+        t_shape = _multidim_transpose(x_aval.shape, static_axis_boundary, -2)
         out = dz_aval.update(shape=x_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
         return out, t_out, updated_amax_aval
 
     @staticmethod
-    def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary,
-                 transpose_axis_boundary):
+    def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary):
         """
         te_dgated_gelu_cast_transpose_p lowering rules
         """
@@ -3489,6 +3491,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         dz_batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
         x_batch_size = reduce(operator.mul, x_shape[:-2])
         assert dz_batch_szie == x_batch_size
+        assert x_shape[-2] == 2    # Linear + GeLU
         ir_hidden_szie = ir_dz_shape[-1]
         gi_hidden_size = x_shape[-1]
         assert ir_hidden_szie == gi_hidden_size
@@ -3498,8 +3501,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         ir_amax_shape = ir_amax_type.shape
         ir_scale_shape = ir_amax_shape
         ir_scale_inv_shape = ir_amax_shape
-        transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary,
-                                                 transpose_axis_boundary)
+        transposed_x_shape = _multidim_transpose(x_shape, static_axis_boundary, -2)
         out_types = [
             ir.RankedTensorType.get(x_shape, ir_out_dtype),
             ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
@@ -3522,8 +3524,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(dz, x, amax, scale, scale_inv, out_dtype, static_axis_boundary,
-             transpose_axis_boundary):
+    def impl(dz, x, amax, scale, scale_inv, out_dtype, static_axis_boundary):
         """
         to describe implementation
         """
@@ -3535,13 +3536,11 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
             scale,
             scale_inv,
             out_dtype=out_dtype,
-            static_axis_boundary=static_axis_boundary,
-            transpose_axis_boundary=transpose_axis_boundary)
+            static_axis_boundary=static_axis_boundary)
         return out, t_out, updated_amax
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary,
-                transpose_axis_boundary):
+    def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary):
         """
         to describe batch rules for vmap
         """
@@ -3550,39 +3549,28 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         dz, x, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
 
-        # Minus batch dim.
-        transpose_axis_boundary = _normalize_axis_boundary(transpose_axis_boundary, x.ndim - 1)
-        transpose_axis_boundary += 1    # Plus batch dim
-
         out_bdims = x_bdim, x_bdim, amax_bdim
         return DgatedGeluCastTransposePrimitive.outer_primitive.bind(
-            dz,
-            x,
-            amax,
-            scale,
-            scale_inv,
-            out_dtype=out_dtype,
-            static_axis_boundary=x_bdim,
-            transpose_axis_boundary=transpose_axis_boundary), out_bdims
+            dz, x, amax, scale, scale_inv, out_dtype=out_dtype,
+            static_axis_boundary=x_bdim), out_bdims
 
     @staticmethod
-    def infer_sharding_from_operands(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh,
-                                     arg_infos, result_infos):
+    def infer_sharding_from_operands(out_dtype, static_axis_boundary, mesh, arg_infos,
+                                     result_infos):
         del out_dtype, result_infos
         x_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, -2)
         tranposed_out_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
         return (out_sharding, tranposed_out_sharding, amax_sharding)
 
     @staticmethod
-    def partition(out_dtype, static_axis_boundary, transpose_axis_boundary, mesh, arg_infos,
-                  result_infos):
+    def partition(out_dtype, static_axis_boundary, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
         casted_x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
-        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, transpose_axis_boundary)
+        xt_spec = _multidim_transpose(x_spec, static_axis_boundary, -2)
         casted_transposed_x_sharding = NamedSharding(mesh, PartitionSpec(*xt_spec))
 
         amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
@@ -3597,8 +3585,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
                 scale,
                 scale_inv,
                 out_dtype=out_dtype,
-                static_axis_boundary=static_axis_boundary,
-                transpose_axis_boundary=transpose_axis_boundary)
+                static_axis_boundary=static_axis_boundary)
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
             return local_out, local_t_out, global_updated_amax
 
@@ -3610,8 +3597,8 @@ register_primitive(DgatedGeluCastTransposePrimitive)
 
 def dgated_gelu_cast_transpose(
         dz: jnp.ndarray, x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray,
-        scale_inv: jnp.ndarray, out_dtype: TEDType, static_axis_boundary: int,
-        transpose_axis_boundary: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        scale_inv: jnp.ndarray, out_dtype: TEDType,
+        static_axis_boundary: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     cast transpose d_gated_gelu fusion wrapper
     Return FP8(dgeglu(inputs))
@@ -3623,5 +3610,4 @@ def dgated_gelu_cast_transpose(
         scale,
         scale_inv,
         out_dtype=out_dtype,
-        static_axis_boundary=static_axis_boundary,
-        transpose_axis_boundary=transpose_axis_boundary)
+        static_axis_boundary=static_axis_boundary)
