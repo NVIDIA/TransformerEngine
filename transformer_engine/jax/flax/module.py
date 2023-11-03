@@ -859,31 +859,31 @@ class LayerNormMLP(TransformerEngineBase):
         axis = _canonicalize_tuple(self.axis)
         axis = _normalize_axes(axis, y.ndim)
 
+        intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
+        kernel_1_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
+        kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
+        kernel_1 = nn_partitioning.param_with_axes('wi_kernel',
+                                                   kernel_1_init,
+                                                   num_activations,
+                                                   -2,
+                                                   kernel_1_each_shape,
+                                                   jnp.float32,
+                                                   axes=self.kernel_axes_1)
+        kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
+        hidden_size = inputs.shape[-1]
+        hidden_size_tuple = _canonicalize_tuple(hidden_size)
+        kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
+        kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
+        kernel_2 = nn_partitioning.param_with_axes('wo_kernel',
+                                                   self.kernel_init,
+                                                   kernel_2_param_shape,
+                                                   jnp.float32,
+                                                   axes=self.kernel_axes_2)
+        kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
+        contract_ind = tuple(range(0, len(axis)))
+
         if use_fused_ln_mlp:
             assert self.axis == -1    # Only support axis = =-1 at this moment
-
-            intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
-            kernel_1_shape = tuple(inputs.shape[ax] for ax in axis) + intermediate_dim
-            kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
-            kernel_1 = nn_partitioning.param_with_axes('wi_kernel',
-                                                       kernel_1_init,
-                                                       num_activations,
-                                                       -2,
-                                                       kernel_1_each_shape,
-                                                       jnp.float32,
-                                                       axes=self.kernel_axes_1)
-            kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
-            hidden_size = inputs.shape[-1]
-            hidden_size_tuple = _canonicalize_tuple(hidden_size)
-            kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
-            kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
-            kernel_2 = nn_partitioning.param_with_axes('wo_kernel',
-                                                       self.kernel_init,
-                                                       kernel_2_param_shape,
-                                                       jnp.float32,
-                                                       axes=self.kernel_axes_2)
-            kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
-            contract_ind = tuple(range(0, len(axis)))
 
             out = layernrom_geglu_fp8_mlp(y,
                                           scale,
@@ -895,24 +895,11 @@ class LayerNormMLP(TransformerEngineBase):
         else:    # not use_fused_ln_mlp
 
             # DenseGeneral 1
-            intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
-            kernel_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
-            kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
-            kernel = nn_partitioning.param_with_axes('wi_kernel',
-                                                     kernel_1_init,
-                                                     num_activations,
-                                                     -2,
-                                                     kernel_1_each_shape,
-                                                     jnp.float32,
-                                                     axes=self.kernel_axes_1)
-            kernel = jnp.reshape(kernel, kernel_shape)
-            contract_ind = tuple(range(0, len(axis)))
-
             gemm1_fp8_meta_package = None if fp8_meta_package is None \
                                      else fp8_meta_package.get_package_by_gemm_idx(0)
             if fuse_layernorm:
                 x = layernorm_fp8_dot(y,
-                                      kernel,
+                                      kernel_1,
                                       scale,
                                       ln_bias,
                                       gemm1_fp8_meta_package,
@@ -921,7 +908,7 @@ class LayerNormMLP(TransformerEngineBase):
                                       epsilon=self.epsilon)
             else:
                 x = type_safe_dot_general(y,
-                                          kernel,
+                                          kernel_1,
                                           fp8_meta_pkg=gemm1_fp8_meta_package,
                                           contracting_dims=(axis, contract_ind))
 
@@ -953,27 +940,11 @@ class LayerNormMLP(TransformerEngineBase):
                                z, deterministic=deterministic)
 
             # DenseGeneral 2
-            hidden_size = inputs.shape[-1]
-            hidden_size_tuple = _canonicalize_tuple(hidden_size)
-            axis = _canonicalize_tuple(self.axis)
-            axis = _normalize_axes(axis, z.ndim)
-
-            kernel_shape = tuple(z.shape[ax] for ax in axis) + hidden_size_tuple
-            kernel_param_shape = (np.prod([z.shape[ax] for ax in axis]), np.prod(hidden_size_tuple))
-            kernel = nn_partitioning.param_with_axes('wo_kernel',
-                                                     self.kernel_init,
-                                                     kernel_param_shape,
-                                                     jnp.float32,
-                                                     axes=self.kernel_axes_2)
-            kernel = jnp.reshape(kernel, kernel_shape)
-
-            contract_ind = tuple(range(0, len(axis)))
-
             gemm2_fp8_meta_package = None if fp8_meta_package is None \
                                      else fp8_meta_package.get_package_by_gemm_idx(1)
 
             out = type_safe_dot_general(z,
-                                        kernel,
+                                        kernel_2,
                                         fp8_meta_pkg=gemm2_fp8_meta_package,
                                         contracting_dims=(axis, contract_ind))
 
