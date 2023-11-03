@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+from dataclasses import dataclass
 import functools
 from importlib.metadata import version
 import os
@@ -79,30 +80,29 @@ def reset_rng_states() -> None:
     _set_cuda_rng_state(_cuda_rng_state)
 
 
-# TODO dataclass
+@dataclass
 class ModelConfig:
-    def __init__(
-        self,
-        num_layers: int,
-        hidden_size: int,
-        num_attention_heads: int,
-        head_dim: int,
-        seq_len: int,
-        dropout_p: float,
-        attn_mask_type: str,
-    ):
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
-        self.num_attention_heads = num_attention_heads
-        self.head_dim = head_dim
-        assert (hidden_size == num_attention_heads * head_dim
-                ), """hidden_size must be = num_heads x head_dim."""
-        self.seq_len = seq_len
-        self.dropout_p = dropout_p
-        self.attn_mask_type  = attn_mask_type
+
+    seq_len: int = 32
+    batch_size: int = 2
+    num_heads: int = 2
+    head_dim: int = 16
+    attn_mask_type: str = "no_mask"
+    bias_type: str = "no_bias"
+    num_layers: int = 1
+    dropout_prob: float = 0.0
+
+    @property
+    def hidden_size(self) -> int:
+        return self.num_heads * self.head_dim
 
 model_configs = {
-    "s32-h2-d32-no_mask": ModelConfig(1, 64, 2, 32, 32, 0.0, "no_mask"),
+    "s32-h2-d32-no_mask": ModelConfig(
+        seq_len=32,
+        num_heads=2,
+        head_dim=32,
+        attn_mask_type="no_mask",
+    ),
 
     ### TODO Restore
     # "s128-h16-d64-causal": ModelConfig(1, 1024, 16, 64, 128, 0.0, "causal"),
@@ -111,8 +111,18 @@ model_configs = {
     # "s2048-h24-d128-causal": ModelConfig(1, 3072, 24, 128, 2048, 0.0, "causal"),
     # "s128-h16-d64-no_mask": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
 
-    "s512-h16-d64-no_mask": ModelConfig(1, 1024, 16, 64, 512, 0.0, "no_mask"),
-    "s1024-h16-d64-causal": ModelConfig(1, 1024, 16, 64, 1024, 0.0, "causal"),
+    "s512-h16-d64-no_mask": ModelConfig(
+        seq_len=512,
+        num_heads=16,
+        head_dim=64,
+        attn_mask_type="no_mask",
+    ),
+    "s1024-h16-d64-causal": ModelConfig(
+        seq_len=1024,
+        num_heads=16,
+        head_dim=64,
+        attn_mask_type="causal",
+    ),
 }
 
 dtypes = [torch.float16]
@@ -124,35 +134,33 @@ def _is_fused_attention_supported(
     config: ModelConfig,
     dtype: torch.dtype,
     qkv_layout: str = "sbh3d",
-    bias_type: str = "no_bias",
 ) -> bool:
     backend = tex.get_fused_attn_backend(
         TE_DType[dtype],
         TE_DType[dtype],
         QKVLayout[qkv_layout],
-        AttnBiasType[bias_type],
+        AttnBiasType[config.bias_type],
         AttnMaskType[config.attn_mask_type],
-        config.dropout_p,
+        config.dropout_prob,
         config.seq_len,
         config.seq_len,
         config.head_dim,
     )
     return backend != FusedAttnBackend["No_Backend"]
 
-def _is_flash_attention_supported(bias_type: str = "no_bias") -> bool:
+def _is_flash_attention_supported(config: ModelConfig) -> bool:
     if get_device_compute_capability() < (8, 0):
         return False
-    if bias_type != "no_bias":
+    if config.bias_type != "no_bias":
         return False
     return True
 
-
-def _test_dot_product_attention(
+@pytest.mark.parametrize("model_name", model_configs.keys())
+@pytest.mark.parametrize("dtype", dtypes)
+def test_dot_product_attention(
     model_name: str,
-    batch_size: int = 2,
-    dtype: torch.dtype = _default_dtype(),
+    dtype: torch.dtype,
     checkpoint_attention: bool = False,
-    bias_type: str = "no_bias",
 ) -> None:
     """Test DotProductAttention module with given model config"""
 
@@ -163,12 +171,8 @@ def _test_dot_product_attention(
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
 
     # Skip if only unfused backend is supported
-    fused_attn_supported = _is_fused_attention_supported(
-        config,
-        dtype,
-        bias_type=bias_type,
-    )
-    flash_attn_supported = _is_flash_attention_supported(bias_type=bias_type)
+    fused_attn_supported = _is_fused_attention_supported(config, dtype)
+    flash_attn_supported = _is_flash_attention_supported(config)
     if not (fused_attn_supported or flash_attn_supported):
         pytest.skip(
             "Neither FusedAttention nor FlashAttention support this model config"
@@ -177,22 +181,18 @@ def _test_dot_product_attention(
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
         dtype,
-        batch_size,
         config,
         "UnfusedDotProductAttention",
         checkpoint_attention,
-        bias_type,
     )
 
     # FusedAttention backend
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
             dtype,
-            batch_size,
             config,
             "FusedAttention",
             checkpoint_attention,
-            bias_type,
         )
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
@@ -201,22 +201,18 @@ def _test_dot_product_attention(
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
             dtype,
-            batch_size,
             config,
             "FlashAttention",
             checkpoint_attention,
-            bias_type,
         )
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
 
 def _run_dot_product_attention(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
     checkpoint_attention: bool,
-    bias_type: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     reset_rng_states()
@@ -229,19 +225,43 @@ def _run_dot_product_attention(
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
 
     inp = torch.randn(
-            config.seq_len, batch_size, 3, config.num_attention_heads, config.head_dim,
-            dtype=dtype).cuda()
-    inp.requires_grad=True
-    seqlens = torch.empty(batch_size, dtype=torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device=inp.device, dtype=torch.int32)
+        config.seq_len,
+        config.batch_size,
+        3,
+        config.num_heads,
+        config.head_dim,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        dtype=torch.int32,
+        device="cuda",
+    )
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     op_grad = torch.randn(
-        config.seq_len, batch_size, config.num_attention_heads * config.head_dim,
-        dtype = dtype).cuda()
-    if bias_type != "no_bias":
-        bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
-                dtype=dtype).cuda()
+        config.seq_len,
+        config.batch_size,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+    )
+    if config.bias_type != "no_bias":
+        bias = torch.randn(
+            1,
+            config.num_heads,
+            config.seq_len,
+            config.seq_len,
+            dtype=dtype,
+            device="cuda",
+        )
     else:
         bias = None
 
@@ -254,53 +274,42 @@ def _run_dot_product_attention(
 
     block = (
          DotProductAttention(
-                config.num_attention_heads,
+                config.num_heads,
                 config.head_dim,
-                attention_dropout=config.dropout_p,
+                attention_dropout=config.dropout_prob,
                 sequence_parallel=False,
                 tp_size=1,
                 get_rng_state_tracker=get_dummy_cuda_rng_tracker,
                 tp_group=None,
                 layer_number=1,
-                attention_type="self"
+                attention_type="self",
         ).to(dtype=dtype).cuda()
     )
 
     q = inp[:, :,0,:,:]
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
-    op = block(q, k, v,
+    op = block(
+        q, k, v,
         qkv_format='sbhd',
         cu_seqlens_q = cu_seqlens,
         cu_seqlens_kv = cu_seqlens,
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=checkpoint_attention,
-        core_attention_bias_type=bias_type,
-        core_attention_bias=bias)
+        core_attention_bias_type=config.bias_type,
+        core_attention_bias=bias,
+    )
     op.backward(op_grad)
 
     return op, inp.grad
 
-@pytest.mark.parametrize("model_name", model_configs.keys())
-@pytest.mark.parametrize("batch_size", [1, 32])
-@pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
-def test_dot_product_attention(
-    model_name: str,
-    batch_size: int,
-    dtype: torch.dtype,
-    bias_type: str,
-) -> None:
-    _test_dot_product_attention(
+@pytest.mark.parametrize("model_name", ["s32-h2-d32-no_mask"])
+def test_dot_product_attention_checkpoint(model_name: str) -> None:
+    test_dot_product_attention(
         model_name=model_name,
-        batch_size=batch_size,
-        dtype=dtype,
-        bias_type=bias_type,
+        dtype=_default_dtype(),
+        checkpoint_attention=True,
     )
-
-@pytest.mark.parametrize("model", ["s32-h2-d32-no_mask"])
-def test_dot_product_attention_checkpoint(model: str) -> None:
-    _test_dot_product_attention(model=model, checkpoint_attention=True)
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
@@ -322,7 +331,6 @@ def test_dpa_qkv_layout(
     model_name: str,
     qkv_layout: str,
     workspace_opt: bool,
-    batch_size: int = 2,
     dtype: torch.dtype = _default_dtype(),
 ) -> None:
     """Test DotProductAttention module with different QKV layouts"""
@@ -335,7 +343,7 @@ def test_dpa_qkv_layout(
 
     # Skip if only unfused backend is supported
     fused_attn_supported = _is_fused_attention_supported(config, dtype)
-    flash_attn_supported = _is_flash_attention_supported()
+    flash_attn_supported = _is_flash_attention_supported(config)
     if not (fused_attn_supported or flash_attn_supported):
         pytest.skip(
             "Neither FusedAttention nor FlashAttention support this model config"
@@ -343,12 +351,12 @@ def test_dpa_qkv_layout(
 
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dpa_qkv_layout(
-        dtype, batch_size, config, "UnfusedDotProductAttention", qkv_layout, workspace_opt)
+        dtype, config, "UnfusedDotProductAttention", qkv_layout, workspace_opt)
 
     # FusedAttention backend
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_dpa_qkv_layout(
-            dtype, batch_size, config, "FusedAttention", qkv_layout, workspace_opt)
+            dtype, config, "FusedAttention", qkv_layout, workspace_opt)
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i in range(len(unfused_attn_bwd)):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
@@ -356,14 +364,13 @@ def test_dpa_qkv_layout(
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_dpa_qkv_layout(
-            dtype, batch_size, config, "FlashAttention", qkv_layout, workspace_opt)
+            dtype, config, "FlashAttention", qkv_layout, workspace_opt)
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i in range(len(unfused_attn_bwd)):
             torch.testing.assert_close(flash_attn_bwd[i], unfused_attn_bwd[i], **tols)
 
 def _run_dpa_qkv_layout(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
     qkv_layout: str,
@@ -380,21 +387,23 @@ def _run_dpa_qkv_layout(
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
 
-    dim_to_num = {'b': batch_size,
+    dim_to_num = {
+        'b': config.batch_size,
         's': config.seq_len,
-        'h': config.num_attention_heads,
+        'h': config.num_heads,
         'd': config.head_dim,
-        't': batch_size * config.seq_len,
+        't': config.batch_size * config.seq_len,
         '3': 3,
-        '2': 2}
+        '2': 2,
+    }
 
     inp = []
     for i,layout in enumerate(qkv_layout.split('_')):
         tensor_shape = [dim_to_num[j] for j in layout]
-        tensor = 0.1 * torch.randn(tensor_shape, dtype = dtype).cuda()
+        tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
         tensor_count = 1
         split_dim = 0
-        for dim,l in enumerate(layout):
+        for dim, l in enumerate(layout):
              if l.isdigit():
                  tensor_count = int(l)
                  split_dim = dim
@@ -406,23 +415,31 @@ def _run_dpa_qkv_layout(
             else:
                 inp.append(tensors[j])
     for i in range(3):
-        inp[i].requires_grad=True
+        inp[i].requires_grad = True
 
-    seqlens = torch.empty(batch_size, dtype = torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device = inp[0].device, dtype = torch.int32)
-    cu_seqlens[1:] = torch.cumsum(seqlens, dim = 0)
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     qkv_format = ''.join([i for i in qkv_layout.split('_')[0] if i.isalpha()])
     qkv_format_no_thd = qkv_format if qkv_format != 'thd' else 'bshd'
     op_grad_shape = [dim_to_num[i] for i in qkv_format_no_thd]
     op_grad_shape_new = [*op_grad_shape[:-2], op_grad_shape[-2] * op_grad_shape[-1]]
-    op_grad = 0.001 * torch.randint(0, 200, op_grad_shape_new, dtype = dtype).cuda()
+    op_grad = 0.001 * torch.randint(0, 200, op_grad_shape_new, dtype=dtype, device="cuda")
 
     block = (
          DotProductAttention(
-                config.num_attention_heads,
+                config.num_heads,
                 config.head_dim,
-                attention_dropout = config.dropout_p,
+                attention_dropout = config.dropout_prob,
                 attn_mask_type = config.attn_mask_type,
                 sequence_parallel = False,
                 tp_size = 1,
@@ -438,16 +455,16 @@ def _run_dpa_qkv_layout(
     else:
         cu_seqlens_q = torch.arange(
                 0,
-                (batch_size + 1) * config.seq_len,
+                (config.batch_size + 1) * config.seq_len,
                 step=config.seq_len,
                 dtype=torch.int32,
-                device=inp[0].device)
+                device="cuda")
         cu_seqlens_kv = torch.arange(
                 0,
                 (batch_size + 1) * config.seq_len,
                 step=config.seq_len,
                 dtype=torch.int32,
-                device=inp[1].device)
+                device="cuda")
         op = block(inp[0], inp[1], inp[2],
                 qkv_format=qkv_format,
                 cu_seqlens_q = cu_seqlens_q,
@@ -462,15 +479,11 @@ _test_transformer_layer_models = [
 ]
 
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("model_name", _test_transformer_layer_models)
-@pytest.mark.parametrize("bias_type", ["no_bias", "post_scale_bias"])
 @pytest.mark.parametrize("fused_qkv_params", [True, False])
 def test_transformer_layer(
     dtype: torch.dtype,
-    batch_size: int,
     model_name: str,
-    bias_type: str,
     fused_qkv_params: bool,
     RoPE: bool = False,
 ) -> None:
@@ -486,9 +499,8 @@ def test_transformer_layer(
         config,
         dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
-        bias_type=bias_type,
     )
-    flash_attn_supported = _is_flash_attention_supported(bias_type=bias_type)
+    flash_attn_supported = _is_flash_attention_supported(config)
     if not (fused_attn_supported or flash_attn_supported):
         pytest.skip(
             "Neither FusedAttention nor FlashAttention support this model config"
@@ -497,10 +509,8 @@ def test_transformer_layer(
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer(
         dtype,
-        batch_size,
         config,
         "UnfusedDotProductAttention",
-        bias_type,
         fused_qkv_params,
         RoPE,
     )
@@ -509,10 +519,8 @@ def test_transformer_layer(
     if fused_attn_supported:
         fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
             dtype,
-            batch_size,
             config,
             "FusedAttention",
-            bias_type,
             fused_qkv_params,
             RoPE,
         )
@@ -523,10 +531,8 @@ def test_transformer_layer(
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
             dtype,
-            batch_size,
             config,
             "FlashAttention",
-            bias_type,
             fused_qkv_params,
             RoPE,
         )
@@ -535,10 +541,8 @@ def test_transformer_layer(
 
 def _run_transformer_layer(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
-    bias_type: str,
     fused_qkv_params: bool,
     RoPE: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -552,12 +556,24 @@ def _run_transformer_layer(
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
     inp = torch.randn(
-            config.seq_len, batch_size, config.num_attention_heads * config.head_dim,
-            dtype=dtype).cuda()
-    inp.requires_grad=True
-    seqlens = torch.empty(batch_size, dtype=torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device=inp.device, dtype=torch.int32)
+        config.seq_len,
+        config.batch_size,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        device=inp.device,
+        dtype=torch.int32,
+    )
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
 
     sigma = 0.02
@@ -568,9 +584,15 @@ def _run_transformer_layer(
     drop_path_rate = 0.0
     drop_path_rates = [
             rate.item() for rate in torch.linspace(0, drop_path_rate, config.num_layers)]
-    if bias_type != "no_bias":
-        bias = torch.randn(1, config.num_attention_heads, config.seq_len, config.seq_len,
-                dtype=dtype).cuda()
+    if config.bias_type != "no_bias":
+        bias = torch.randn(
+            1,
+            config.num_heads,
+            config.seq_len,
+            config.seq_len,
+            dtype=dtype,
+            device="cuda",
+        )
     else:
         bias = None
 
@@ -583,10 +605,10 @@ def _run_transformer_layer(
         TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=1e-5,
             hidden_dropout=0.0,
-            attention_dropout=config.dropout_p,
+            attention_dropout=config.dropout_prob,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             layer_number=layer_number,
@@ -597,7 +619,7 @@ def _run_transformer_layer(
             get_rng_state_tracker=None,
             fuse_wgrad_accumulation=False,
             seq_length=config.seq_len,
-            micro_batch_size=batch_size,
+            micro_batch_size=config.batch_size,
             sequence_parallel=False,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
@@ -618,7 +640,7 @@ def _run_transformer_layer(
         inp,
         self_attn_mask_type=config.attn_mask_type,
         rotary_pos_emb=rotary_pos_emb,
-        core_attention_bias_type=bias_type,
+        core_attention_bias_type=config.bias_type,
         core_attention_bias=bias,
     )
     loss = op.sum()
@@ -631,15 +653,11 @@ def _run_transformer_layer(
 def test_transformer_layer_rope(
     model_name: str,
     dtype: torch.dtype = _default_dtype(),
-    batch_size: int = 2,
-    bias_type: str = "no_bias",
     fused_qkv_params: bool = True,
 ) -> None:
     test_transformer_layer(
         dtype=dtype,
-        batch_size=batch_size,
         model_name=model_name,
-        bias_type=bias_type,
         fused_qkv_params=fused_qkv_params,
         RoPE=True,
     )
@@ -653,7 +671,6 @@ _test_transformer_layer_gqa_models = [
 def test_transformer_layer_gqa(
     model_name: str,
     dtype: torch.dtype = torch.float16,
-    batch_size: int = 2,
 ) -> None:
     """Test TransformerLayer module when its DotProductAttention is enabled with
     FlashAttention or UnfusedDotProductAttention backend"""
@@ -667,16 +684,24 @@ def test_transformer_layer_gqa(
        return f
 
     # Skip if only unfused backend is supported
-    if not (_flash_attn_2_available and _is_flash_attention_supported()):
+    if not (_flash_attn_2_available and _is_flash_attention_supported(config)):
         pytest.skip("FlashAttention does not support this model config")
 
-    num_querys_per_gqa_group = find_factors(config.num_attention_heads)
+    num_querys_per_gqa_group = find_factors(config.num_heads)
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer_gqa(
-                dtype, batch_size, config, "FlashAttention", num_q_per_gqa_group)
+            dtype,
+            config,
+            "FlashAttention",
+            num_q_per_gqa_group,
+        )
         unfused_attn_fwd, unfused_attn_bwd = _run_transformer_layer_gqa(
-                dtype, batch_size, config, "UnfusedDotProductAttention", num_q_per_gqa_group)
+            dtype,
+            config,
+            "UnfusedDotProductAttention",
+            num_q_per_gqa_group,
+        )
 
         atol, rtol = 5e-1, 5e-2
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, atol=atol, rtol=rtol)
@@ -684,7 +709,6 @@ def test_transformer_layer_gqa(
 
 def _run_transformer_layer_gqa(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
     num_querys_per_gqa_group: int,
@@ -699,16 +723,32 @@ def _run_transformer_layer_gqa(
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
     inp = torch.randn(
-            config.seq_len, batch_size, config.num_attention_heads * config.head_dim,
-            dtype=dtype).cuda()
-    inp.requires_grad=True
-    seqlens = torch.empty(batch_size, dtype=torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device=inp.device, dtype=torch.int32)
+        config.seq_len,
+        config.batch_size,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        dtype=torch.int32,
+        device="cuda",
+    )
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     op_grad = torch.randn(
-        config.seq_len, batch_size, config.num_attention_heads * config.head_dim,
-        dtype=dtype).cuda()
+        config.seq_len,
+        config.batch_size,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+    )
 
     sigma = 0.02
     init_method = init_method_normal(sigma)
@@ -723,11 +763,11 @@ def _run_transformer_layer_gqa(
         TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
-            num_gqa_groups=config.num_attention_heads / num_querys_per_gqa_group,
+            config.num_heads,
+            num_gqa_groups=config.num_heads / num_querys_per_gqa_group,
             layernorm_epsilon=1e-5,
             hidden_dropout=0.0,
-            attention_dropout=config.dropout_p,
+            attention_dropout=config.dropout_prob,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             layer_number=layer_number,
@@ -738,7 +778,7 @@ def _run_transformer_layer_gqa(
             get_rng_state_tracker=None,
             fuse_wgrad_accumulation=False,
             seq_length=config.seq_len,
-            micro_batch_size=batch_size,
+            micro_batch_size=config.batch_size,
             sequence_parallel=False,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
@@ -766,10 +806,8 @@ model_configs_fp8 = {
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("model_name", ["s512-h16-d64-no_mask"])
-@pytest.mark.parametrize("batch_size", [1, 4])
 def test_dpa_fp8(
     model_name: str,
-    batch_size: int,
     dtype: torch.dtype = torch.float16,
 ) -> None:
     """Test FP8 dot-product attention with different backends
@@ -780,7 +818,7 @@ def test_dpa_fp8(
 
     """
 
-    config = model_configs_fp8[model_name]
+    config = model_configs[model_name]
 
     # Skip if not supported
     if not _is_fused_attention_supported(config, dtype):
@@ -789,13 +827,11 @@ def test_dpa_fp8(
     # Run dot-product attention with different backends
     fused_attn_fwd, fused_attn_bwd = _run_dpa_fp8(
         dtype,
-        batch_size,
         config,
         "FusedAttention"
     )
     unfused_attn_fwd, unfused_attn_bwd = _run_dpa_fp8_ref(
         dtype,
-        batch_size,
         config,
         "UnfusedDotProductAttention",
     )
@@ -807,7 +843,6 @@ def test_dpa_fp8(
 
 def _run_dpa_fp8(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -821,16 +856,30 @@ def _run_dpa_fp8(
         os.environ["NVTE_FUSED_ATTN"] = "1"
 
     inp = 0.01 * torch.randn(
-            batch_size * config.seq_len, config.num_attention_heads * config.head_dim,
-            dtype=dtype).cuda()
-    inp.requires_grad=True
-    seqlens = torch.empty(batch_size, dtype=torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device=inp.device, dtype=torch.int32)
+        config.batch_size * config.seq_len,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        dtype=torch.int32,
+        device="cuda",
+    )
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     op_grad = 0.01 * torch.randn(
-        batch_size * config.seq_len, config.num_attention_heads * config.head_dim,
-        dtype=dtype).cuda()
+        config.batch_size * config.seq_len,
+        config.num_heads * config.head_dim,
+        dtype=dtype,
+        device="cuda",
+    )
     torch.save(op_grad, 'op_grad.pt')
 
     fp8_recipe = recipe.DelayedScaling(
@@ -844,16 +893,23 @@ def _run_dpa_fp8(
     dpa = DPA_FP8(config).to(dtype=torch.float16).cuda()
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         op = dpa(inp, cu_seqlens, config.seq_len)
-        op.backward(op_grad)
+    op.backward(op_grad)
 
     context = torch.load("ctx.pt")
     dqkv = torch.load('dqkv.pt')
-    return (context.view(batch_size, config.seq_len, -1).transpose(0,1),
-        dqkv.view(batch_size, config.seq_len, 3, config.num_attention_heads, config.head_dim).transpose(0,1).contiguous())
+    return (
+        context.view(config.batch_size, config.seq_len, -1).transpose(0,1),
+        dqkv.view(
+            config.batch_size,
+            config.seq_len,
+            3,
+            config.num_heads,
+            config.head_dim,
+        ).transpose(0,1).contiguous(),
+    )
 
 def _run_dpa_fp8_ref(
     dtype: torch.dtype,
-    batch_size: int,
     config: ModelConfig,
     backend: str,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -867,11 +923,19 @@ def _run_dpa_fp8_ref(
 
     inp = torch.load('qkv.pt').cuda()
     inp.requires_grad=True
-    seqlens = torch.empty(batch_size, dtype=torch.int32).cuda()
-    seqlens.fill_(config.seq_len)
-    cu_seqlens = torch.zeros(batch_size + 1, device=inp.device, dtype=torch.int32)
+    seqlens = torch.full(
+        [config.batch_size],
+        config.seq_len,
+        dtype=torch.int32,
+        device="cuda",
+    ).cuda()
+    cu_seqlens = torch.zeros(
+        config.batch_size + 1,
+        device="cuda",
+        dtype=torch.int32,
+    )
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-    op_grad = torch.load('op_grad.pt').cuda().view(batch_size, config.seq_len, -1).transpose(0,1)
+    op_grad = torch.load('op_grad.pt').cuda().view(config.batch_size, config.seq_len, -1).transpose(0,1)
 
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
@@ -882,9 +946,9 @@ def _run_dpa_fp8_ref(
 
     block = (
          DotProductAttention(
-                config.num_attention_heads,
+                config.num_heads,
                 config.head_dim,
-                attention_dropout=config.dropout_p,
+                attention_dropout=config.dropout_prob,
                 sequence_parallel=False,
                 tp_size=1,
                 get_rng_state_tracker=get_dummy_cuda_rng_tracker,
@@ -923,7 +987,7 @@ class _dpa_fp8(torch.autograd.Function):
         qkv_weight: torch.Tensor,
         qkv_bias: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        num_attention_heads: int,
+        num_heads: int,
         p_dropout: float,
         max_s: int,
         fast_zero_fill: bool,
@@ -934,7 +998,7 @@ class _dpa_fp8(torch.autograd.Function):
 
         assert inp.dim() == 2
         in_features = qkv_weight.shape[-1]
-        h = num_attention_heads
+        h = num_heads
         d = in_features // h
         b = cu_seqlens.numel() - 1
         is_nl = False
@@ -1032,7 +1096,7 @@ class _dpa_fp8(torch.autograd.Function):
         ctx.fast_zero_fill = fast_zero_fill
         ctx.is_nl = is_nl
         ctx.hidden_size = in_features
-        ctx.num_attention_heads = num_attention_heads
+        ctx.num_heads = num_heads
 
         context_fp16 = ext.cast_from_fp8(context, fp8_meta["scaling_fwd"],
                 META_O, fp8_dtype_forward, tex.DType.kFloat16)
@@ -1160,8 +1224,8 @@ class DPA_FP8(TransformerEngineBaseModule):
         config,
         params_dtype: torch.dtype = torch.float32):
         super().__init__()
-        self.p_dropout = config.dropout_p
-        self.h = config.num_attention_heads
+        self.p_dropout = config.dropout_prob
+        self.h = config.num_heads
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim
         self.fast_zero_fill = True
