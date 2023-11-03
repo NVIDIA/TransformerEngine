@@ -711,7 +711,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 is_training, dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
                                 mask_type,   tensorType,
-                                false, padding_aware};
+                                false};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_fprop_cache;
@@ -879,7 +879,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 true,        dropout_probability,
                                 layout,      NVTE_Bias_Type::NVTE_NO_BIAS,
                                 mask_type,   tensorType,
-                                use_workspace_opt, padding_aware};
+                                use_workspace_opt};
 
         using CacheType = std::map<FADescriptor, cudnn_frontend::ExecutionPlan>;
         static thread_local CacheType fmha_bprop_cache;
