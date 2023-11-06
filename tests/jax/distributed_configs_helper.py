@@ -8,14 +8,21 @@ from transformer_engine.jax.softmax import SoftmaxType
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType\
 
 
-class ShardingConfigs(object):
+class DistributedConfigsHelper(object):
     
     def __init__(self, num_gpus=len(jax.devices())):
         super().__init__()
-        if num_gpus < 2:
-            raise ValueError(f"ShardingConfig: Need at least 2 GPUs.")
-        
         self.device_count = min(num_gpus, 8)
+        if self.device_count < 2:
+            self.layernorm_refs = None
+            self.softmax_types = None
+            self.self_attn_bias_types = None
+            self.self_attn_mask_types = None
+            self.self_attn_refs = None
+            self.cross_attn_mask_types = None
+            self.cross_attn_refs = None
+            return
+
         mesh_configs = [
             ((self.device_count, 1),    ("dp", None), ShardingType.DP),
             ((self.device_count, 1),    ("tp", None), ShardingType.TP_COL),
