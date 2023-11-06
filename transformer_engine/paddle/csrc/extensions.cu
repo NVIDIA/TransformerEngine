@@ -15,6 +15,7 @@ PYBIND11_MODULE(transformer_engine_paddle, m) {
     // Misc
     m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version");
     m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend");
+    m.def("get_nvte_qkv_layout", &get_nvte_qkv_layout, "Get qkv layout enum by the string");
     // Data structures
     py::enum_<DType>(m, "DType", py::module_local())
         .value("kByte", DType::kByte)
