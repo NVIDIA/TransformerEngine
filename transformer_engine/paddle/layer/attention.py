@@ -168,7 +168,7 @@ class DotProductAttention(paddle.nn.Layer):
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
-        self.qkv_layout = "qkv_interleaved" if attention_type == "self" else "kv_interleaved"
+        self.qkv_layout = "bs3hd" if attention_type == "self" else "bshd_bs2hd"
 
         self.backend = backend
 

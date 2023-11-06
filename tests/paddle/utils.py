@@ -107,7 +107,7 @@ def get_fused_attention_backend(
     kv_seqlen: int,
     dtype: Union[paddle.dtype, str],
     dropout: float,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     mask_type: str = "causal",
 ) -> tex.NVTE_Fused_Attn_Backend:
@@ -136,7 +136,7 @@ def is_fused_attention_supported(
     kv_seqlen: int,
     dtype: Union[paddle.dtype, str],
     dropout: float,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     mask_type: str = "causal",
 ) -> bool:

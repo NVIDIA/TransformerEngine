@@ -54,9 +54,21 @@ dist_group_type = paddle.distributed.collective.Group
 RecomputeFunctionNames = ('unpack', 'backward')
 
 QKVLayout = {
-    "not_interleaved": tex.NVTE_QKV_Layout.NVTE_NOT_INTERLEAVED,
-    "qkv_interleaved": tex.NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED,
-    "kv_interleaved": tex.NVTE_QKV_Layout.NVTE_KV_INTERLEAVED,
+    "sb3hd": tex.NVTE_QKV_Layout.NVTE_SB3HD,
+    "sbh3d": tex.NVTE_QKV_Layout.NVTE_SBH3D,
+    "sbhd_sb2hd": tex.NVTE_QKV_Layout.NVTE_SBHD_SB2HD,
+    "sbhd_sbh2d": tex.NVTE_QKV_Layout.NVTE_SBHD_SBH2D,
+    "sbhd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_SBHD_SBHD_SBHD,
+    "bs3hd": tex.NVTE_QKV_Layout.NVTE_BS3HD,
+    "bsh3d": tex.NVTE_QKV_Layout.NVTE_BSH3D,
+    "bshd_bs2hd": tex.NVTE_QKV_Layout.NVTE_BSHD_BS2HD,
+    "bshd_bsh2d": tex.NVTE_QKV_Layout.NVTE_BSHD_BSH2D,
+    "bshd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+    "t3hd": tex.NVTE_QKV_Layout.NVTE_T3HD,
+    "th3d": tex.NVTE_QKV_Layout.NVTE_TH3D,
+    "thd_t2hd": tex.NVTE_QKV_Layout.NVTE_THD_T2HD,
+    "thd_th2d": tex.NVTE_QKV_Layout.NVTE_THD_TH2D,
+    "thd_thd_thd": tex.NVTE_QKV_Layout.NVTE_THD_THD_THD,
 }
 
 AttnBiasType = {

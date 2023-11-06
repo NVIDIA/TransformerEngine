@@ -16,12 +16,10 @@ namespace paddle_ext {
 // MHA utils
 // convert QKV layout to enum
 NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout) {
-    if (qkv_layout == "not_interleaved") {
-        return NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED;
-    } else if (qkv_layout == "qkv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
-    } else if (qkv_layout == "kv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
+    if (qkv_layout == "bs3hd") {
+        return NVTE_QKV_Layout::NVTE_BS3HD;
+    } else if (qkv_layout == "bshd_bs2hd") {
+        return NVTE_QKV_Layout::NVTE_BSHD_BS2HD;
     } else {
         NVTE_ERROR("Invalid QKV layout. \n");
     }
