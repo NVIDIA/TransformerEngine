@@ -2103,13 +2103,20 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         # Filter: Device and dimensions.
-        if key_layer.shape[-1] > 64:
-            if self.device_compute_capability in ((8, 6), (8, 7)):
+        # FAv1 supports head_dim <= 128, and for >64 requires sm80/sm90
+        # FAv2 supports head_dim <= 256, and for >192 requires sm80/sm90
+        # Both FAv1 and FAv2 require head_dim % 8 == 0
+        if not _flash_attn_2_available:
+            if (key_layer.shape[-1] > 128
+                or key_layer.shape[-1] % 8 != 0
+                or (key_layer.shape[-1] > 64
+                    and self.device_compute_capability not in ((8, 0), (9, 0)))):
                 use_flash_attention = False
-            elif (
-                not _flash_attn_2_available
-                and self.device_compute_capability == (8, 9)
-            ):
+        if _flash_attn_2_available:
+            if (key_layer.shape[-1] > 256
+                or key_layer.shape[-1] % 8 != 0
+                or (key_layer.shape[-1] > 192
+                    and self.device_compute_capability not in ((8, 0), (9, 0)))):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
