@@ -18,7 +18,7 @@ from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
 from jax import value_and_grad, jit
 
-from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
+from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 from transformer_engine_jax import get_device_compute_capability
@@ -163,13 +163,13 @@ class TestSelfFusedAttn():
         if (s > 512 or backend == Backend.Arbitrary) and pad_ratio != 0:
             pytest.skip("Arbitrary seqlen backend hasn't support padded input.")
 
-        if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
-                                              dropout_probability, s, s, head_dim):
+        if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
+                                              attn_mask_type, dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
         compute_capability = get_device_compute_capability(0)
         if (backend == Backend.Max512
-            and not (compute_capability == 80 or compute_capability >= 90)):
+                and not (compute_capability == 80 or compute_capability >= 90)):
             pytest.skip("Unsupported compute capability for "
                         "fused attention with <=512 sequence length")
 

@@ -23,7 +23,7 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import AttnBiasType, AttnMaskType
+from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
@@ -428,6 +428,8 @@ class MultiHeadAttention(nn.Module):
             raise ValueError(f"Unsupported {attn_mask_type=}, "
                              "supported attn_mask_type = {'causal', 'padding'}")
 
+        is_self_attn = (inputs_q is inputs_kv)
+        qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
@@ -441,7 +443,7 @@ class MultiHeadAttention(nn.Module):
         def _check_head_dim(head_dim):
             return head_dim in [64, 128]
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype,
+        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.dropout_rate, q_seqlen,
                                                                kv_seqlen, self.head_dim)
@@ -484,7 +486,7 @@ class MultiHeadAttention(nn.Module):
 
         residual = inputs_q
         if self.fuse_qkv:
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
@@ -571,7 +573,7 @@ class MultiHeadAttention(nn.Module):
                 kernel_init=query_init,
                 name='query')(inputs_q)
 
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 assert ln_out is not None
                 inputs_kv = ln_out
 
@@ -650,7 +652,7 @@ class MultiHeadAttention(nn.Module):
                 # ensure the old key never used
                 del dropout_rng
 
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
                 qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                            HIDDEN_AXES)
