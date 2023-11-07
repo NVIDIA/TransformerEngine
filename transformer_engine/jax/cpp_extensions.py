@@ -2612,6 +2612,23 @@ def _normalize_axis_boundary(axis, ndim):
 def _multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
     """
     te_cast_transpose_p multi-dims transpose
+
+    static_axis_boundary: int, Indicate those axes <= static_axis_boundary would not be
+        involved into transpose, -1 means all axes involve into transpose.
+    transpose_axis_boundary: int, Indicate how to split multi-dimensions tensors to 2D matrix for
+        transpose. Note, transpose_axis_boundary should be greater than static_axis_boundary
+
+    examples:
+        X in shape (dim0, dim1, dim2, dim3, dim4)
+
+        static_axis_boundary == -1, transpose_axis_boundary == 2
+            Xt = (dim2, dim3, dim4, dim0, dim1)
+
+        static_axis_boundary == 0, transpose_axis_boundary == 2
+            Xt = (dim0, dim2, dim3, dim4, dim1)
+
+        static_axis_boundary == 0, transpose_axis_boundary == 3
+            Xt = (dim0, dim3, dim4, dim1. dim2)
     """
     if static_axis_boundary < 0:
         static_axis_boundary = -1    # means no static axes
