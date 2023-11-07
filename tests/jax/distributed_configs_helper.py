@@ -16,6 +16,7 @@ class DistributedConfigsHelper(object):
         if self.device_count < 2:
             self.layernorm_refs = None
             self.softmax_types = None
+            self.softmax_refs = None
             self.self_attn_bias_types = None
             self.self_attn_mask_types = None
             self.self_attn_refs = None
