@@ -108,6 +108,16 @@ def get_padded_spec(arg_info):
     return te_get_padded_spec(spec, ndim)
 
 
+def assert_not_supported_batch_dim(bdims):
+    """
+    Assert out non-supported bath dims
+    """
+    for dim in bdims:
+        assert dim in [0, None], \
+            "Currently only support batch_dim in [0, None], " \
+            f"but got {dim=}"
+
+
 class BasePrimitive(metaclass=ABCMeta):
     """
     jax premitive
@@ -354,6 +364,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert LayerNormFwdPrimitive.outer_primitive is not None
         x, gamma, beta = batched_args
         x_bdim, _, _ = batch_dims
@@ -499,6 +510,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, zero_centered_gamma, epsilon):
+        assert_not_supported_batch_dim(batch_dims)
         assert LayerNormBwdPrimitive.outer_primitive is not None
         dz, x, mu, rsigma, gamma = batched_args
         _, x_bdim, _, _, gamma_bdim = batch_dims
@@ -654,6 +666,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert RmsNormFwdPrimitive.outer_primitive is not None
         x, gamma = batched_args
         x_bdim, _ = batch_dims
@@ -783,6 +796,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, epsilon):
+        assert_not_supported_batch_dim(batch_dims)
         assert RmsNormBwdPrimitive.outer_primitive is not None
         dz, x, rsigma, gamma = batched_args
         _, x_bdim, _, gamma_bdim = batch_dims
@@ -1108,6 +1122,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         return SoftmaxPrimitive.forward_batcher(ScaledSoftmaxFwdPrimitive.outer_primitive,
                                                 batched_args,
                                                 batch_dims,
@@ -1181,6 +1196,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         return SoftmaxPrimitive.backward_batcher(ScaledSoftmaxBwdPrimitive.outer_primitive,
                                                  batched_args,
                                                  batch_dims,
@@ -1312,6 +1328,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         assert ScaledMaskedSoftmaxFwdPrimitive.outer_primitive is not None
         logits, mask = batched_args
         logits_bdim, _ = batch_dims
@@ -1398,6 +1415,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         return SoftmaxPrimitive.backward_batcher(ScaledMaskedSoftmaxBwdPrimitive.outer_primitive,
                                                  batched_args,
                                                  batch_dims,
@@ -1483,6 +1501,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         return SoftmaxPrimitive.forward_batcher(
             ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive,
             batched_args,
@@ -1559,6 +1578,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
+        assert_not_supported_batch_dim(batch_dims)
         return SoftmaxPrimitive.backward_batcher(
             ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive,
             batched_args,
@@ -1757,6 +1777,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
+        assert_not_supported_batch_dim(batch_dims)
         assert SelfFusedAttnFwdPrimitive.outer_primitive is not None
         qkv, bias, cu_seqlen, seed = batched_args
         qkv_bdim, _, _, seed_bdim = batch_dims
@@ -1921,6 +1942,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
+        assert_not_supported_batch_dim(batch_dims)
         assert SelfFusedAttnBwdPrimitive.outer_primitive is not None
         qkv, softmax_aux, rng_state, output, doutput, cu_seqlen = batched_args
         qkv_bdim, *_ = batch_dims
@@ -2111,6 +2133,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
+        assert_not_supported_batch_dim(batch_dims)
         assert CrossFusedAttnFwdPrimitive.outer_primitive is not None
         q, kv, q_cu_seqlen, kv_cu_seqlen, seed = batched_args
         q_bdim, *_ = batch_dims
@@ -2274,6 +2297,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
+        assert_not_supported_batch_dim(batch_dims)
         assert CrossFusedAttnBwdPrimitive.outer_primitive is not None
         q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen = batched_args
         q_bdim, kv_bdim, *_ = batch_dims
@@ -2416,6 +2440,7 @@ class GatedGeluPrimitive(BasePrimitive):
         """
         gated_gelu batcher
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert GatedGeluPrimitive.outer_primitive is not None
         inputs, = batched_args
         inputs_bdim, = batch_dims
@@ -2538,6 +2563,7 @@ class DgatedGeluPrimitive(BasePrimitive):
         """
         dgated_gelu batcher
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert DgatedGeluPrimitive.outer_primitive is not None
         dz, x = batched_args
         _, x_bdim = batch_dims
@@ -2693,6 +2719,7 @@ class CastTransposePrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary,
                 transpose_axis_boundary):
+        assert_not_supported_batch_dim(batch_dims)
         assert CastTransposePrimitive.outer_primitive is not None
         assert static_axis_boundary < 0
 
@@ -2840,6 +2867,7 @@ class TransposePrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, static_axis_boundary, transpose_axis_boundary):
+        assert_not_supported_batch_dim(batch_dims)
         assert TransposePrimitive.outer_primitive is not None
         assert static_axis_boundary < 0
 
@@ -3020,6 +3048,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert LayerNormFwdFp8Primitive.outer_primitive is not None
         x, gamma, beta, amax, scale, scale_inv = batched_args
         x_bdim, _, _, amax_bdim, _, _ = batch_dims
@@ -3220,6 +3249,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert RmsNormFwdFp8Primitive.outer_primitive is not None
         x, gamma, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
@@ -3387,6 +3417,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
+        assert_not_supported_batch_dim(batch_dims)
         assert GatedGeluFp8Primitive.outer_primitive is not None
         x, amax, scale, scale_inv = batched_args
         x_bdim, amax_bdim, _, _ = batch_dims
@@ -3548,6 +3579,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         to describe batch rules for vmap
         """
         del static_axis_boundary
+        assert_not_supported_batch_dim(batch_dims)
         assert DgatedGeluCastTransposePrimitive.outer_primitive is not None
         dz, x, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
