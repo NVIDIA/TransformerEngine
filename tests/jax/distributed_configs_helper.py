@@ -9,19 +9,19 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType\
 
 
 class DistributedConfigsHelper(object):
-    
+
     def __init__(self, num_gpus=len(jax.devices())):
         super().__init__()
         self.device_count = min(num_gpus, 8)
         if self.device_count < 2:
-            self.layernorm_refs = None
-            self.softmax_types = None
-            self.softmax_refs = None
-            self.self_attn_bias_types = None
-            self.self_attn_mask_types = None
-            self.self_attn_refs = None
-            self.cross_attn_mask_types = None
-            self.cross_attn_refs = None
+            self.layernorm_refs = []
+            self.softmax_types = []
+            self.softmax_refs = []
+            self.self_attn_bias_types = []
+            self.self_attn_mask_types = []
+            self.self_attn_refs = []
+            self.cross_attn_mask_types = []
+            self.cross_attn_refs = []
             return
 
         mesh_configs = [
