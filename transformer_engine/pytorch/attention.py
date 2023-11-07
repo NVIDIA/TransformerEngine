@@ -1178,7 +1178,8 @@ def _get_qkv_layout(
             and not check_last_dim_offsets_qkv):
             # sb3hd, bs3hd, t3hd
             qkv_layout = qkv_format[:-2] + '3' + qkv_format[-2:]
-        elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_dim_offsets_qkv:
+        elif (check_ptrs_qkv and check_strides_qkv and check_shapes_qkv
+            and check_last_dim_offsets_qkv):
             # sbh3d, bsh3d, th3d
             qkv_layout = qkv_format[:-1] + '3' + qkv_format[-1:]
         elif (check_ptrs_kv and check_strides_kv and check_shapes_kv
