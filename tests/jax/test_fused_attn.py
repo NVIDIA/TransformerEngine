@@ -18,10 +18,10 @@ from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
 from jax import value_and_grad, jit
 
-from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+from transformer_engine_jax import get_device_compute_capability    # pylint: disable=wrong-import-order
 
 # Type annotations
 Array = jnp.ndarray
