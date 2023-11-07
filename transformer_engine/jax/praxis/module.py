@@ -49,7 +49,7 @@ class TransformerEngineBaseLayer(BaseLayer):
         fp8_collection_map = {
             FP8Helper.FP8_COLLECTION_NAME: [
                 WeightHParamsCollection.SKIP_LP_REGULARIZATION,
-                WeightHParamsCollection.NON_TRAINABLE,
+                WeightHParamsCollection.OVERWRITE_WITH_GRADIENT,
                 WeightHParamsCollection.DISALLOW_BFLOAT16_CONVERSION
             ]
         }
