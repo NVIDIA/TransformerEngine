@@ -12,7 +12,6 @@ import warnings
 
 import numpy as np
 import jax.numpy as jnp
-import jax.random as jax_random
 from jax.lib import xla_client
 from jax import core, dtypes
 from jax.interpreters import xla, mlir
@@ -1660,7 +1659,7 @@ class _FusedAttnRNGStateChecker:
             dropout_enabled = dropout_probability > 0 and is_training
             assert not dropout_enabled, "seed is not allowed to be None when dropout is enabled."
             seed = jnp.zeros(2, dtype=self.rng_state_dtype)
-            seed = jax_random.split(seed, num_of_devices())
+            seed = jnp.repeat(seed, num_of_devices())
 
         if seed.dtype != self.rng_state_dtype:
             warnings.warn(
