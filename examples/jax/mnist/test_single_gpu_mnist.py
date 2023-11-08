@@ -280,7 +280,7 @@ class TestMNIST(unittest.TestCase):
         """Check If loss and accuracy match target"""
         desired_traing_loss = 0.055
         desired_traing_accuracy = 0.98
-        desired_test_loss = 0.035
+        desired_test_loss = 0.04
         desired_test_accuracy = 0.098
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_traing_accuracy

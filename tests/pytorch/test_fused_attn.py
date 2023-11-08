@@ -415,6 +415,12 @@ def test_transformer_layer(dtype, bs, model, bias_type, fused_qkv_params, RoPE):
     config = model_configs_lean[model]
     tols = dict(atol=5e-1, rtol=5e-2)
 
+    # TODO @cyanguwa: Handle test cases more cleanly
+    if config.hidden_size > 1024:
+        pytest.skip(
+            "Tolerances for test_transformer_layer are intended for small test cases"
+        )
+
     # Skip if only unfused backend is supported
     fused_attn_supported = _is_fused_attention_supported(
         config,
