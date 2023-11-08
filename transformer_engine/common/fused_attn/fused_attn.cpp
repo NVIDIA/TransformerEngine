@@ -134,10 +134,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-                || (cudnn_runtime_version >= 8906 &&
-                    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK))
+                || ((cudnn_runtime_version >= 8906) &&
+                    (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
                 || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
