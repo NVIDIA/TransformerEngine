@@ -44,7 +44,7 @@ def fixture_backend(request):
 
 
 @dataclass
-class CustomOpsTestHelper:
+class DistributedOpsHelper:
     qkv_shape: Tuple[int,int,int,int] = (32, 128, 16, 64)
     pad_ratio: float = 0.3
     dropout_prob: float = 0.1
