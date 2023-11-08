@@ -762,7 +762,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BS3HD;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -845,7 +845,7 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BS3HD;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -929,7 +929,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BS2HD;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
@@ -1064,9 +1064,8 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
-        query_workspace_tensor.data(), stream);
+        descriptor.scaling_factor, descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD,
+        descriptor.bias_type, descriptor.mask_type, query_workspace_tensor.data(), stream);
 
     size_t workspace_size =
         query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
@@ -1081,9 +1080,8 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
-        workspace_tensor.data(), stream);
+        descriptor.scaling_factor, descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD,
+        descriptor.bias_type, descriptor.mask_type, workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
