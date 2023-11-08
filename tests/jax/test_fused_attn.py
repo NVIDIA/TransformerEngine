@@ -165,25 +165,21 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
 @pytest.mark.parametrize('dropout_probability', [0., 0.1])
 @pytest.mark.parametrize('dtype', DTYPES)
 @pytest.mark.parametrize('is_training', [True, False])
-@pytest.mark.parametrize('pad_ratio', [0, 0.3])
 class TestSelfFusedAttn():
     """Tests for transformer_engine.jax.fused_attn.self_fused_attn"""
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim, pad_ratio):
+                      head_dim):
 
         assert isinstance(backend, Backend)
-
-        if pad_ratio != 0 and (attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]):
-            pytest.skip(f"{AttnMaskType=} only supports non-padded inputs.")
 
         if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
                                               dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
-                    dropout_probability, dtype, is_training, pad_ratio):
+                    dropout_probability, dtype, is_training):
         """Setup the test inputs"""
         self.__class__._check_inputs(s,
                                      attn_bias_type=attn_bias_type,
@@ -191,8 +187,13 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d,
-                                     pad_ratio=pad_ratio)
+                                     head_dim=d)
+
+        if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+            pad_ratio = 0.0
+        else:
+            pad_ratio = 0.3
+
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -221,7 +222,7 @@ class TestSelfFusedAttn():
         self.is_training = is_training
 
     def test_forward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend, dropout_probability,
-                     dtype, is_training, pad_ratio):
+                     dtype, is_training):
         """
         Test forward without using JIT
         """
@@ -234,8 +235,7 @@ class TestSelfFusedAttn():
                          backend=backend,
                          dropout_probability=dropout_probability,
                          dtype=dtype,
-                         is_training=is_training,
-                         pad_ratio=pad_ratio)
+                         is_training=is_training)
 
         primitive_out = customcall_self_fused_attn(self.qkv,
                                                    self.bias,
@@ -274,7 +274,7 @@ class TestSelfFusedAttn():
                                    jnp.zeros_like(pri_invalid, jnp.float32))
 
     def test_forward_backward(self, b, s, h, d, attn_bias_type, attn_mask_type, backend,
-                              dropout_probability, dtype, is_training, pad_ratio):
+                              dropout_probability, dtype, is_training):
         """
         Test forward, backward, and autodiff by jax.value_and_grad
         """
@@ -290,8 +290,7 @@ class TestSelfFusedAttn():
                          backend=backend,
                          dropout_probability=dropout_probability,
                          dtype=dtype,
-                         is_training=is_training,
-                         pad_ratio=pad_ratio)
+                         is_training=is_training)
 
         def grad_func(fused_attn_func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the graident
