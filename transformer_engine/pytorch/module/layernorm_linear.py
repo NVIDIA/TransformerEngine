@@ -672,7 +672,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_split_ag: bool = False,
         ub_atomic_gemm_ag: bool = False,
         ub_name: Optional[str] = None,
-        device: Union[torch.device, str] = "cuda",
     ) -> None:
         super().__init__()
 
