@@ -898,7 +898,6 @@ class _LayerNormMLP(torch.autograd.Function):
                                         device=torch.cuda.current_device(),
                                         requires_grad=False
                                         )
- 
             elif ctx.fuse_wgrad_accumulation:
                 fc2_wgrad = None
         else:
