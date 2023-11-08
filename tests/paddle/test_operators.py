@@ -683,9 +683,9 @@ class TestFusedAttn:
         kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
 
         qkv_layout = (
-            "qkv_interleaved"
+            "bs3hd"
             if self.attn_mode == "self_attn"
-            else "kv_interleaved"
+            else "bshd_bs2hd"
         )
         fused_attention_backend = get_fused_attention_backend(
             head_size=self.head_size,
@@ -779,7 +779,7 @@ class TestFusedAttn:
             kv_seqlen=s,
             dtype=dtype,
             dropout=0.0,
-            qkv_layout="qkv_interleaved",
+            qkv_layout="bs3hd",
             bias_type="no_bias",
             mask_type="causal" if is_causal_masking else "padding",
         ):
@@ -804,7 +804,7 @@ class TestFusedAttn:
             kv_seqlen=s_kv,
             dtype=dtype,
             dropout=0.0,
-            qkv_layout="kv_interleaved",
+            qkv_layout="bshd_bs2hd",
             bias_type="no_bias",
             mask_type="padding",
         ):
@@ -830,7 +830,7 @@ class TestFusedAttn:
             kv_seqlen=s,
             dtype=dtype,
             dropout=0.0,
-            qkv_layout="qkv_interleaved",
+            qkv_layout="bs3hd",
             bias_type="no_bias",
             mask_type="causal" if is_causal_masking else "padding",
         ):

@@ -12,7 +12,6 @@
 #include "paddle/extension.h"
 #include "paddle/phi/backends/all_context.h"
 
-#include "common/util/logging.h"
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/fused_attn.h>
@@ -22,6 +21,7 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
@@ -176,6 +176,8 @@ TensorWrapper MakeNvteTensor(void *data_ptr, const std::vector<size_t> &shape, c
                              void *amax_ptr, void *scale_ptr, void *scale_inv_ptr);
 TensorWrapper MakeNvteTensor(paddle::Tensor &tensor);  // NOLINT
 TensorWrapper MakeNvteTensor(const paddle::Tensor &tensor);
+
+NVTE_QKV_Layout get_nvte_qkv_layout(const std::string &qkv_layout);
 
 }  // namespace paddle_ext
 }  // namespace transformer_engine

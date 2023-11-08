@@ -133,8 +133,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
-                || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))
