@@ -20,7 +20,7 @@ from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quanti
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
 from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax.layernorm import layernorm
-from transformer_engine.jax.mlp import layernrom_geglu_fp8_mlp, geglu
+from transformer_engine.jax.mlp import layernrom_geglu_fp8_mlp
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -58,7 +58,7 @@ class TestFP8Dot:
         y = quantize(x, q_dtype=jnp.float8_e4m3fn, scale=scale)
         z = dequantize(y, dq_dtype=jnp.float32, scale_inv=scale_inv)
 
-        assert_allclose(z, x, rtol=5e-2, atol=5e-2)
+        assert_allclose(z, x, dtype=jnp.float8_e4m3fn)
 
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_forward_bf16(self, m, n, k):
@@ -70,12 +70,11 @@ class TestFP8Dot:
         primitive_out = type_safe_dot_general(a, b)
         ref_out = jnp.dot(a, b)
 
-        assert_allclose(primitive_out, ref_out)
+        assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
-    @pytest.mark.parametrize('compute_type', FP8_COMPUTE_TYPE)
-    def test_forward_fp8_randint(self, m, n, k, compute_type):
+    def test_forward_fp8_randint(self, m, n, k):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
@@ -106,7 +105,7 @@ class TestFP8Dot:
         ref_out = ref_out.astype(jnp.float32)
         primitive_out = primitive_out.astype(jnp.float32)
 
-        assert_allclose(primitive_out, ref_out)
+        assert_allclose(primitive_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
 
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
     def test_grad_bf16(self, m, n, k):
@@ -129,9 +128,9 @@ class TestFP8Dot:
         primitive_out, (primitive_a_grad, primitive_b_grad) = value_n_grad_primitive_func(a, b)
         ref_out, (ref_a_grad, ref_b_grad) = value_n_grad_ref_func(a, b)
 
-        assert_allclose(primitive_out, ref_out)
-        assert_allclose(primitive_a_grad, ref_a_grad)
-        assert_allclose(primitive_b_grad, ref_b_grad, atol=1e-5)
+        assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
+        assert_allclose(primitive_a_grad, ref_a_grad, dtype=jnp.bfloat16)
+        assert_allclose(primitive_b_grad, ref_b_grad, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', GEMM_CASES)
@@ -167,9 +166,9 @@ class TestFP8Dot:
                             fp8_metas_scale, fp8_metas_scale_inv) = value_n_grad_primitive_func(
                                 a, b, fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv)
 
-        assert_allclose(primitive_out, ref_out, rtol=0.125, atol=0.0675)
-        assert_allclose(primitive_a_grad, ref_a_grad, rtol=0.25, atol=0.125)
-        assert_allclose(primitive_b_grad, ref_b_grad, rtol=0.25, atol=0.125)
+        assert_allclose(primitive_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
+        assert_allclose(primitive_a_grad, ref_a_grad, dtype=FP8Helper.BWD_DTYPE)
+        assert_allclose(primitive_b_grad, ref_b_grad, dtype=FP8Helper.BWD_DTYPE)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize('m,n,k', [(256, 256, 512), (16384, 1024, 2816), (16384, 2816, 1024),
@@ -213,12 +212,11 @@ class TestFP8Dot:
                                  kernel_2: jnp.ndarray, fp8_maxs: jnp.ndarray, amax: jnp.ndarray,
                                  scale: jnp.ndarray, scale_inv: jnp.ndarray) -> jnp.ndarray:
 
-            # x = jnp.asarray(x, jnp.float32)
-            # mean2 = jnp.mean(jax.lax.square(x), axis=-1, keepdims=True)
-            # y = jnp.asarray(x * jax.lax.rsqrt(mean2 + 1e-6), jnp.bfloat16)
-            # ln_out = y * ln_scale
-            # ln_out = jnp.asarray(ln_out, jnp.bfloat16)
-            ln_out = layernorm(x, ln_scale, None, "rmsnorm")
+            x = jnp.asarray(x, jnp.float32)
+            mean2 = jnp.mean(jax.lax.square(x), axis=-1, keepdims=True)
+            y = jnp.asarray(x * jax.lax.rsqrt(mean2 + 1e-6), jnp.bfloat16)
+            ln_out = y * ln_scale
+            ln_out = jnp.asarray(ln_out, jnp.bfloat16)
 
             fp8_gemm_1_pkg = FP8MetaPackage(1, fp8_maxs[:FP8Helper.NUM_META_PER_GEMM],
                                             amax[:FP8Helper.NUM_META_PER_GEMM],
@@ -226,14 +224,13 @@ class TestFP8Dot:
                                             scale_inv[:FP8Helper.NUM_META_PER_GEMM])
             linear_1_out = type_safe_dot_general(ln_out, kernel_1, fp8_gemm_1_pkg, ((1,), (0,)))
 
-            # x = jnp.split(linear_1_out, len(activations), axis=-2)
-            # acts = []
-            # for idx, act_fn in enumerate(activations):
-            #     x_i = _convert_to_activation_function(act_fn)(x[idx])
-            #     acts.append(x_i)
-            # x = functools.reduce(operator.mul, acts)
-            # x = jnp.asarray(jnp.squeeze(x, axis=-2), jnp.bfloat16)
-            x = geglu(linear_1_out)
+            x = jnp.split(linear_1_out, len(activations), axis=-2)
+            acts = []
+            for idx, act_fn in enumerate(activations):
+                x_i = _convert_to_activation_function(act_fn)(x[idx])
+                acts.append(x_i)
+            x = functools.reduce(operator.mul, acts)
+            x = jnp.asarray(jnp.squeeze(x, axis=-2), jnp.bfloat16)
 
             fp8_gemm_2_pkg = FP8MetaPackage(1, fp8_maxs[FP8Helper.NUM_META_PER_GEMM:],
                                             amax[FP8Helper.NUM_META_PER_GEMM:],
@@ -274,23 +271,19 @@ class TestFP8Dot:
                                 a, s, k1, k2, pri_fp8_max, pri_fp8_metas_amax, pri_fp8_metas_scale,
                                 pri_fp8_metas_scale_inv)
 
-        assert_allclose(primitive_out, ref_out, rtol=0.125, atol=0.0675)
+        assert_allclose(primitive_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
         assert_allclose(jnp.asarray(primitive_a_grad, np.float32),
                         jnp.asarray(ref_a_grad, np.float32),
-                        rtol=0.25,
-                        atol=0.125)
+                        dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(jnp.asarray(primitive_k1_grad, np.float32),
                         jnp.asarray(ref_k1_grad, np.float32),
-                        rtol=0.25,
-                        atol=0.125)
+                        dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(jnp.asarray(primitive_k2_grad, np.float32),
                         jnp.asarray(ref_k2_grad, np.float32),
-                        rtol=0.25,
-                        atol=0.125)
+                        dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(jnp.asarray(primitive_s_grad, np.float32),
                         jnp.asarray(ref_s_grad, np.float32),
-                        rtol=0.25,
-                        atol=0.2)
+                        dtype=FP8Helper.BWD_DTYPE)
 
 
 @pytest.fixture(name="random_inputs")
@@ -342,8 +335,8 @@ class TestGatedGeLu:
         prim_out, prim_grad = self.prim_func(x)
         ref_out, ref_grad = self.ref_func(x)
 
-        assert_allclose(prim_out, ref_out, rtol=1e-2)
-        assert_allclose(prim_grad, ref_grad, rtol=1e-1, atol=1e-3)
+        assert_allclose(prim_out, ref_out, dtype=x.dtype)
+        assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
 
 class TestGatedGeLuFP8(TestGatedGeLu):
@@ -389,10 +382,12 @@ class TestGatedGeLuFP8(TestGatedGeLu):
         prim_out, (prim_grad, prim_grad_trans, amax) = self.prim_func(x)
         ref_out, ref_grad = self.ref_func(x)
 
-        assert_allclose(prim_out, ref_out, rtol=1e-2)
+        assert_allclose(prim_out, ref_out, dtype=FP8Helper.FWD_DTYPE)
         assert_allclose(amax, jnp.amax(jnp.abs(ref_grad)), rtol=1e-2)
-        assert_allclose(prim_grad, ref_grad, rtol=1e-1, atol=1e-3)
-        assert_allclose(prim_grad_trans, jnp.transpose(ref_grad, (1, 2, 0)), rtol=1e-1, atol=1e-3)
+        assert_allclose(prim_grad, ref_grad, dtype=FP8Helper.BWD_DTYPE)
+        assert_allclose(prim_grad_trans,
+                        jnp.transpose(ref_grad, (1, 2, 0)),
+                        dtype=FP8Helper.BWD_DTYPE)
 
 
 class TestRMSNorm:
@@ -423,14 +418,9 @@ class TestRMSNorm:
         primitive_out, (primitive_dx, primitive_dgamma) = jitted_primitive(x, scale)
         reference_out, (reference_dx, reference_dgamma) = jitted_reference(x, scale)
 
-        if dtype == jnp.float32:
-            assert_allclose(primitive_out, reference_out, rtol=1e-7)
-            assert_allclose(primitive_dx, reference_dx, rtol=1e-7)
-            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-7)
-        else:
-            assert_allclose(primitive_out, reference_out, rtol=1e-3)
-            assert_allclose(primitive_dx, reference_dx, rtol=1e-4, atol=5e-8)
-            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-4, atol=5e-8)
+        assert_allclose(primitive_out, reference_out, dtype=dtype)
+        assert_allclose(primitive_dx, reference_dx, dtype=dtype)
+        assert_allclose(primitive_dgamma, reference_dgamma, dtype=dtype)
 
 
 class TestLayerNorm:
@@ -481,13 +471,7 @@ class TestLayerNorm:
         reference_out, (reference_dx, reference_dgamma,
                         reference_dbeta) = jitted_reference(x, scale, bias)
 
-        if dtype == jnp.float32:
-            assert_allclose(primitive_out, reference_out, rtol=1e-7)
-            assert_allclose(primitive_dx, reference_dx, rtol=1e-7)
-            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-7)
-            assert_allclose(primitive_dbeta, reference_dbeta, rtol=1e-7)
-        else:
-            assert_allclose(primitive_out, reference_out, rtol=1e-7)
-            assert_allclose(primitive_dx, reference_dx, rtol=1e-5, atol=1e-6)
-            assert_allclose(primitive_dgamma, reference_dgamma, rtol=1e-5, atol=3e-5)
-            assert_allclose(primitive_dbeta, reference_dbeta, rtol=1e-5, atol=3e-5)
+        assert_allclose(primitive_out, reference_out, dtype=dtype)
+        assert_allclose(primitive_dx, reference_dx, dtype=dtype)
+        assert_allclose(primitive_dgamma, reference_dgamma, dtype=dtype)
+        assert_allclose(primitive_dbeta, reference_dbeta, dtype=dtype)
