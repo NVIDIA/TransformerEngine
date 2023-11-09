@@ -1334,6 +1334,12 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_q = seqlens_q.max().item()
             max_seqlen_kv = seqlens_kv.max().item()
 
+        is_causal = attn_mask_type == "causal"
+        if is_causal and not self.training:
+            # turn off FA causal mask after first inference autoregressive iteration
+            # only on first autoregressive step q,k,v have same seqlen
+            is_causal = max_seqlen_q == max_seqlen_kv
+
         if context_parallel:
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
@@ -1342,7 +1348,7 @@ class FlashAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     cp_group, cp_global_ranks, cp_stream,
                     softmax_scale=1.0/self.norm_factor,
-                    causal=attn_mask_type=="causal",
+                    causal=is_causal,
                     deterministic=self.deterministic
                 )
         else:
@@ -1354,7 +1360,8 @@ class FlashAttention(torch.nn.Module):
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
-                    softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
+                    softmax_scale=1.0/self.norm_factor,
+                    causal=is_causal,
                     **fa_optional_forward_kwargs
                 )
 
