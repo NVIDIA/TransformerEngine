@@ -56,14 +56,17 @@ class ModelConfig:
     num_attention_heads: int
     kv_channels: Optional[int] = None
 
+    def is_fp8_supported(self):
+        if self.seq_len * self.batch_size % 16:
+            return False
+        if self.hidden_size % 16:
+            return False
+        return True
+
 model_configs = {
-    "small": ModelConfig(
-        num_layers=2,
-        seq_len=32,
-        batch_size=2,
-        hidden_size=64,
-        num_attention_heads=2,
-    ),
+    "126m": ModelConfig(12, 2048, 2, 768, 12),
+    "small": ModelConfig(2, 32, 2, 64, 2),
+    "weird": ModelConfig(2, 37, 3, 69, 3),
 }
 
 fp8_recipes = [
@@ -314,7 +317,7 @@ def _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad)
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -332,7 +335,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
@@ -340,13 +343,16 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 def test_sanity_layernorm_linear(dtype, fp8_recipe, model, skip_wgrad,
                                  zero_centered_gamma, skip_dgrad,
                                  normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -367,14 +373,17 @@ def test_sanity_layernorm_linear(dtype, fp8_recipe, model, skip_wgrad,
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     sigma = 0.023
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
@@ -391,7 +400,7 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
@@ -400,13 +409,16 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
 def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
                               zero_centered_gamma, skip_dgrad, activation,
                               normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -430,7 +442,7 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -439,13 +451,16 @@ def test_sanity_layernorm_mlp(dtype, fp8_recipe, model, skip_wgrad,
 def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
                     zero_centered_gamma, bias, activation,
                     normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -475,21 +490,46 @@ def test_sanity_gpt(dtype, fp8_recipe, model, skip_wgrad,
     _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
 
 
+def test_sanity_gpt_126m():
+    fp8_recipe = None
+    if fp8_available:
+        fp8_recipe = recipe.DelayedScaling(
+            0,
+            1,
+            recipe.Format.E4M3,
+            amax_history_len=16,
+            amax_compute_algo="most_recent",
+        )
+    test_sanity_gpt(
+        dtype=param_types[-1],
+        fp8_recipe=fp8_recipe,
+        model="126m",
+        skip_wgrad=False,
+        zero_centered_gamma=True,
+        bias=True,
+        activation="gelu",
+        normalization="LayerNorm",
+    )
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                      normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -518,21 +558,42 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
     _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad)
 
 
+def test_sanity_bert_126m():
+    fp8_recipe = recipe.DelayedScaling(
+        0,
+        1,
+        recipe.Format.E4M3,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+    )
+    test_sanity_bert(
+        dtype=param_types[-1],
+        fp8_recipe=fp8_recipe,
+        model="126m",
+        skip_wgrad=False,
+        zero_centered_gamma=False,
+        normalization="LayerNorm",
+    )
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                    normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -561,15 +622,36 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
     _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad)
 
 
+def test_sanity_T5_126m():
+    fp8_recipe = recipe.DelayedScaling(
+        0,
+        1,
+        recipe.Format.E4M3,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+    )
+    test_sanity_T5(
+        dtype=param_types[-1],
+        fp8_recipe=fp8_recipe,
+        model="126m",
+        skip_wgrad=False,
+        zero_centered_gamma=False,
+        normalization="LayerNorm",
+    )
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -595,13 +677,16 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -630,13 +715,16 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -665,14 +753,17 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
     config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -703,19 +794,22 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma,
                         normalization):
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+    config = model_configs[model]
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
 
     if normalization == "RMSNorm" and zero_centered_gamma:
         pytest.skip("RMSNorm does not support zero_centered_gamma yet!")
-
-    config = model_configs[model]
 
     sigma = 0.023
     init_method = init_method_normal(sigma)
