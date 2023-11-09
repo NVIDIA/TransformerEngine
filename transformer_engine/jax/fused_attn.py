@@ -10,6 +10,7 @@ import jax.numpy as jnp
 
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
 
 from .cpp_extensions import FusedAttnHelper
 from .cpp_extensions import cross_fused_attn_fwd, cross_fused_attn_bwd
@@ -37,13 +38,19 @@ class AttnMaskType(Enum):
     PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
 
 
-def is_fused_attn_kernel_available(q_type, kv_type, attn_bias_type, attn_mask_type,
+class QKVLayout(Enum):
+    """QKV layout"""
+    BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
+    BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
+
+
+def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
                                    dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
     """
     To check whether the fused attention kernel is available
     """
-    return FusedAttnHelper(q_type, kv_type, attn_bias_type.value, attn_mask_type.value,
-                           dropout_probability, max_seqlen_q, max_seqlen_kv,
+    return FusedAttnHelper(q_type, kv_type, qkv_layout.value, attn_bias_type.value,
+                           attn_mask_type.value, dropout_probability, max_seqlen_q, max_seqlen_kv,
                            head_dim).is_fused_attn_kernel_available()
 
 

@@ -18,7 +18,7 @@ from flax.linen import make_attention_mask
 from flax.linen import make_causal_mask
 from jax import value_and_grad, jit
 
-from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType
+from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 from transformer_engine_jax import get_device_compute_capability    # pylint: disable=wrong-import-order
@@ -183,8 +183,8 @@ class TestSelfFusedAttn():
 
         assert isinstance(backend, Backend)
 
-        if not is_fused_attn_kernel_available(dtype, dtype, attn_bias_type, attn_mask_type,
-                                              dropout_probability, s, s, head_dim):
+        if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
+                                              attn_mask_type, dropout_probability, s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
