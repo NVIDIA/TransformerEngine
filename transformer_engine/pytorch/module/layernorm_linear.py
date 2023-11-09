@@ -29,6 +29,7 @@ from ..utils import (
     get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
+    clear_tensor_data,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -40,12 +41,12 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-
 from ._common import _apply_normalization
-
 from ..float8_tensor import Float8Tensor
 
+
 __all__ = ["LayerNormLinear"]
+
 
 class _LayerNormLinear(torch.autograd.Function):
     """LayerNormLinear semi-top level module
@@ -355,7 +356,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj_dgrad = get_ub(ctx.ub_name+"_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
-                dgrad = torch.empty (dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
@@ -393,6 +394,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta_tensor = meta_tensor,
                     D_dtype = out_te_type,
                 )
+                clear_tensor_data(grad_output_c)
             else:
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
@@ -453,6 +455,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor
                         )
+                        clear_tensor_data(ln_out_total_t, grad_output_t)
                     else:
                         ln_out_total_c = tex.cast_from_fp8(
                             ln_out_total,
@@ -475,6 +478,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor
                         )
+                        clear_tensor_data(ln_out_total_c)
                 else:
                     # WGRAD
                     wgrad, grad_bias, _ = tex.gemm(
@@ -490,6 +494,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
+                    clear_tensor_data(ln_out_total)
                     if ctx.ub_bulk_wgrad:
                         dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
 
@@ -501,24 +506,23 @@ class _LayerNormLinear(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            d_ln_out = dgrad.view(inputmat.shape)
+            dgrad = dgrad.view(inputmat.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output:
-                d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
+                dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
-                dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                    d_ln_out, inputmat, mu, rsigma, ln_weight,
+                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                    dgrad, inputmat, mu, rsigma, ln_weight,
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
             elif ctx.normalization == "RMSNorm":
-                dxmat, dgamma = tex.rmsnorm_bwd(
-                    d_ln_out, inputmat, rsigma, ln_weight,
+                dgrad, dgamma = tex.rmsnorm_bwd(
+                    dgrad, inputmat, rsigma, ln_weight,
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
-
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -538,7 +542,7 @@ class _LayerNormLinear(torch.autograd.Function):
             wgrad = None
 
         return (
-            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             wgrad,
