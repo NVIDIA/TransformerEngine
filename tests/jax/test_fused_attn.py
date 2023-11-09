@@ -27,6 +27,15 @@ from transformer_engine_jax import get_device_compute_capability    # pylint: di
 Array = jnp.ndarray
 
 
+@pytest.fixture(autouse=True, scope='module')
+def clear_backends():
+    """
+    Clear all JAX backend resources to avoid OOM
+    """
+    yield
+    jax.clear_backends()
+
+
 class Backend(Enum):
     """
     Fused attn backend.
