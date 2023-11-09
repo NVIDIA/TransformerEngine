@@ -441,9 +441,10 @@ def test_sanity_layernorm_mlp(dtype, bs, fp8_recipe, model, skip_wgrad,
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad,
                     zero_centered_gamma, bias, activation,
-                    normalization):
+                    normalization, parallel_attention_mlp):
     if fp8_recipe is not None and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -473,6 +474,7 @@ def test_sanity_gpt(dtype, bs, fp8_recipe, model, skip_wgrad,
             bias=bias,
             activation=activation,
             normalization=normalization,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
