@@ -1616,6 +1616,7 @@ class FusedAttnHelper:
 
     q_type: jnp.dtype
     kv_type: jnp.dtype
+    qkv_layout: NVTE_QKV_Layout
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
@@ -1629,10 +1630,13 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(
-            jax_dtype_to_te_dtype(self.q_type), jax_dtype_to_te_dtype(self.kv_type),
-            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, self.attn_bias_type, self.attn_mask_type,
-            self.dropout_probability, self.max_seqlen_q, self.max_seqlen_kv, self.head_dim)
+        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
+                                                             jax_dtype_to_te_dtype(self.kv_type),
+                                                             self.qkv_layout, self.attn_bias_type,
+                                                             self.attn_mask_type,
+                                                             self.dropout_probability,
+                                                             self.max_seqlen_q, self.max_seqlen_kv,
+                                                             self.head_dim)
 
 
 @dataclass(frozen=True)
@@ -1704,8 +1708,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (*batch_shape, max_seqlen, num_head, head_dim)
         output_dtype = qkv_dtype
 
-        backend = FusedAttnHelper(qkv_dtype, qkv_dtype, attn_bias_type, attn_mask_type,
-                                  dropout_probability, max_seqlen, max_seqlen,
+        backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
+                                  attn_mask_type, dropout_probability, max_seqlen, max_seqlen,
                                   head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:

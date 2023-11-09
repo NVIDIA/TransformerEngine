@@ -32,6 +32,12 @@ class AttnMaskType(Enum):
     PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
 
 
+class QKVLayout(Enum):
+    """QKV layout"""
+    BS3HD = NVTE_QKV_Layout.NVTE_BS3HD
+    BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
+
+
 def generate_cu_seqlen(mask):
     """
     Generating cumsum seqlen for a batch
@@ -42,7 +48,7 @@ def generate_cu_seqlen(mask):
     return cu_seqlen
 
 
-def is_fused_attn_kernel_available(q_type, kv_type, attn_bias_type, attn_mask_type,
+def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
                                    dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
     """
     To check whether the fused attention kernel is available
