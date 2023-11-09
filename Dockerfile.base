@@ -1,0 +1,52 @@
+ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+ARG FRAMEWORK=pytorch
+
+FROM scratch as transformerengine
+COPY 3rdparty/ 3rdparty/
+COPY docs/ docs/
+COPY examples/ examples/
+COPY qa/ qa/
+COPY tests/ tests/
+COPY transformer_engine/ transformer_engine/
+COPY CONTRIBUTING.rst .
+COPY LICENSE .
+COPY README.rst .
+COPY setup.py .
+COPY VERSION .
+
+FROM ${FROM_IMAGE_NAME}
+ARG FRAMEWORK
+
+WORKDIR /opt/transformerengine/
+COPY --from=transformerengine . .
+
+# Install dependencies for building
+# Note: pybind11 is not a strict dependency since it may be installed
+# outside of Python, e.g. installed via apt.
+RUN pip install ninja pybind11
+
+# JAX build requires Praxis
+# Note: Praxis pins specific versions for its dependencies, so naively
+# installing will reinstall JAX.
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ jax|all ]] \
+  && pip install fiddle \
+  && SKIP_HEAD_INSTALLS=1 pip install git+https://github.com/google/praxis \
+  || [[ ! "${FRAMEWORK}" =~ jax|all ]]
+EOF
+
+# Install Transformer Engine
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ pytorch|all ]] \
+  && export NVTE_WITH_USERBUFFERS=1 \
+  && export MPI_HOME=/usr/local/mpi \
+  && export MAX_JOBS=1 \
+  || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
+
+  NVTE_FRAMEWORK=${FRAMEWORK} \
+  pip install .[test]
+
+  rm -rf transformer_engine.egg-info dist build
+EOF
+
+WORKDIR /workspace/
