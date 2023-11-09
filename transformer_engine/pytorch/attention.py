@@ -70,7 +70,53 @@ else:
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
 
 
-__all__ = ["DotProductAttention", "MultiheadAttention"]
+__all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+
+
+class InferenceParams: # pylint: disable=too-few-public-methods
+    """
+    Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference.
+
+    Parameters
+    ----------
+    max_batch_size : int
+                    maximum batch size during inference.
+    max_sequence_length : int
+                         maximum sequence length during inference.
+    """
+
+    def __init__(self, max_batch_size, max_sequence_length):
+        self.max_sequence_length = max_sequence_length
+        self.max_batch_size = max_batch_size
+        self.sequence_len_offset = 0
+        self.batch_size_offset = 0
+        self.key_value_memory_dict = {}
+
+    def swap_key_value_dict(self, batch_indices):
+        """
+        Reorders the KV cache using the specified batch indices.
+
+        Parameters
+        ----------
+        batch_indices : List[int]
+                       Sequence of indices to reorder along the batch dimensions of
+                       the KV cache. Must have a length equal to the batch size.
+        """
+        if len(self.key_value_memory_dict) == 0:
+            raise ValueError("should not swap when dict in empty")
+
+        for layer_number, inference_memory in self.key_value_memory_dict.items():
+            inference_key_memory, inference_value_memory = inference_memory
+            assert (
+                len(batch_indices) == inference_key_memory.shape[1]
+            )  # make sure batch size is the same
+            new_inference_key_memory = inference_key_memory[:, batch_indices]
+            new_inference_value_memory = inference_value_memory[:, batch_indices]
+            self.key_value_memory_dict[layer_number] = (
+                new_inference_key_memory,
+                new_inference_value_memory,
+            )
 
 
 def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -526,6 +572,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
 
         # [b, np, sq] -> [b, np, 2, sq//2]
         softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, softmax_lse.shape[-1]//2)
+        softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
         # [b*sq, np, hn] -> [b, 2, sq//2, np, hn]
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
@@ -613,7 +660,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
                     dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
                     _flash_attn_backward(
-                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse_[..., 1, :],
+                        dout_, q_, kv_[0], kv_[1], out_, softmax_lse_,
                         dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
                         ctx.max_seqlen_q//2, ctx.max_seqlen_k,
                         ctx.dropout_p, ctx.softmax_scale, False,
@@ -690,6 +737,64 @@ def flash_attn_forward_func_with_cp(q, k, v, cu_seqlens_q, cu_seqlens_k,
     )
     return out
 
+
+class RotaryPositionEmbedding(torch.nn.Module):
+    """
+    Implements Rotary Position Embedding from https://arxiv.org/abs/2104.09864.
+    """
+    def __init__(
+        self,
+        dim: int,
+        seq_len_interpolation_factor: Optional[int] = None,
+        pretrained_max_position_embeddings: Optional[int] = None,
+    ):
+        """
+        Parameters
+        ----------
+        dim: int
+            rotary embedding dimension
+        seq_len_interpolation_factor: int
+            if not None, discrete positions will be interpolated by this factor via the trick in
+            https://arxiv.org/abs/2306.15595
+        pretrained_max_position_embeddings: int
+            pre-trained max_position_embeddings before position interpolation
+        """
+        super().__init__()
+        self.seq_len_interpolation_factor = seq_len_interpolation_factor
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
+
+    def forward(self, max_seq_len: int, offset: int = 0):
+        """
+        Create rotary position embedding frequencies
+
+        Parameters
+        ----------
+        max_seq_len: int
+            sequence length of a sample
+        offset: int, default = 0
+            fixed offset for freqencies
+        """
+        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
+        seq = seq.type_as(self.inv_freq)
+
+        if (self.pretrained_max_position_embeddings is not None
+            and self.seq_len_interpolation_factor is not None):
+            if (max_seq_len >
+                self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor):
+                # dynamic linear scaling (length > position we have learned)
+                seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
+            else:
+                # fixed linear scaling
+                seq *= 1 / self.seq_len_interpolation_factor
+
+        freqs = torch.einsum('i , j -> i j', seq, self.inv_freq)
+        # first part even vector components, second part odd vector components,
+        #  2 * dim in dimension size
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # emb [seq_length, .., dim]
+        return emb.reshape(emb.size(0), 1, 1, emb.size(1))
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
@@ -1488,9 +1593,10 @@ class FusedAttention(torch.nn.Module):
     | qkv_layout    |                         |                                |
     |  - qkv        | qkv_interleaved         | qkv_interleaved                |
     |  - (q,kv)     | kv_interleaved          |                                |
-    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd                   |
+    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd, sbh3d, bsh3d     |
     |               | sbhd_sb2hd, bshd_bs2hd  | sbhd_sb2hd, bshd_bs2hd         |
-    |               | bshd_bshd_bshd          | sbhd_sbhd_sbhd, bshd_bshd_bshd |
+    |               | bshd_bshd_bshd          | sbhd_sbh2d, bshd_bsh2d         |
+    |               |                         | sbhd_sbhd_sbhd, bshd_bshd_bshd |
     | mask_type     | causal/no_mask          | causal                         |
     | bias_type     | no_bias/post_scale_bias | no_bias                        |
     | dropout       | yes                     | yes                            |
@@ -1514,7 +1620,7 @@ class FusedAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.use_FAv2_bwd = (os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
                         and _flash_attn_2_available
-                        and get_device_compute_capability() == 9.0)
+                        and get_device_compute_capability() == (9, 0))
 
     def forward(
         self,
@@ -1744,7 +1850,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_flash_attention = (
             int(os.getenv("NVTE_FLASH_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
         if _flash_attn_2_available and self.deterministic:
             self.use_flash_attention = False
@@ -1756,7 +1862,7 @@ class DotProductAttention(torch.nn.Module):
 
         self.use_fused_attention = (
             int(os.getenv("NVTE_FUSED_ATTN", "1"))
-            and self.device_compute_capability >= 8.0
+            and self.device_compute_capability >= (8, 0)
         )
 
         assert (
@@ -1808,6 +1914,29 @@ class DotProductAttention(torch.nn.Module):
         )
 
         return hidden_states
+
+    def set_context_parallel_group(
+        self,
+        cp_group: Union[dist_group_type, None],
+        cp_global_ranks: List[int],
+        cp_stream: torch.cuda.Stream,
+    ) -> None:
+        """
+        Set the context parallel attributes for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        cp_group : ProcessGroup
+                  context parallel process group.
+        cp_global_ranks : List[int]
+                         list of global ranks in the context group.
+        cp_stream : torch.cuda.Stream
+                   cuda stream for context parallel execution.
+        """
+        self.cp_group = cp_group
+        self.cp_global_ranks = cp_global_ranks
+        self.cp_stream = cp_stream
 
     def forward(
         self,
@@ -1975,9 +2104,12 @@ class DotProductAttention(torch.nn.Module):
 
         # Filter: Device and dimensions.
         if key_layer.shape[-1] > 64:
-            if self.device_compute_capability in (8.6, 8.7):
+            if self.device_compute_capability in ((8, 6), (8, 7)):
                 use_flash_attention = False
-            elif not _flash_attn_2_available and self.device_compute_capability == 8.9:
+            elif (
+                not _flash_attn_2_available
+                and self.device_compute_capability == (8, 9)
+            ):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
@@ -2033,19 +2165,6 @@ class DotProductAttention(torch.nn.Module):
                 )
 
         if use_flash_attention:
-            if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(self.flash_attention,
-                                                            query_layer,
-                                                            key_layer,
-                                                            value_layer,
-                                                            attention_mask=attention_mask,
-                                                            qkv_layout=qkv_layout,
-                                                            cu_seqlens_q=cu_seqlens_q,
-                                                            cu_seqlens_kv=cu_seqlens_kv,
-                                                            attn_mask_type=attn_mask_type,
-                                                            cp_group=self.cp_group,
-                                                            cp_global_ranks=self.cp_global_ranks,
-                                                            cp_stream=self.cp_stream)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
@@ -2441,19 +2560,42 @@ class MultiheadAttention(torch.nn.Module):
         )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
-        """Set TP group"""
+        """
+        Set the tensor parallel group for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        tp_group : ProcessGroup, default = `None`
+                  tensor parallel process group.
+        """
         self.tp_group = tp_group
 
-    def set_context_parallel_running(
+    def set_context_parallel_group(
         self,
         cp_group: Union[dist_group_type, None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
     ) -> None:
-        """Set CP group and CP dual-stream running"""
-        self.core_attention.cp_group = cp_group
-        self.core_attention.cp_global_ranks = cp_global_ranks
-        self.core_attention.cp_stream = cp_stream
+        """
+        Set the context parallel attributes for the given
+        module before executing the forward pass.
+
+        Parameters
+        ----------
+        cp_group : ProcessGroup
+                  context parallel process group.
+        cp_global_ranks : List[int]
+                         list of global ranks in the context group.
+        cp_stream : torch.cuda.Stream
+                   cuda stream for context parallel execution.
+        """
+        # Deep iterate but skip self to avoid infinite recursion.
+        for index, child in enumerate(self.modules()):
+            if index == 0:
+                continue
+            if hasattr(child, "set_context_parallel_group"):
+                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream)
 
     def forward(
         self,
@@ -2463,7 +2605,7 @@ class MultiheadAttention(torch.nn.Module):
         attn_mask_type: Optional[str] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
-        inference_params: Optional[Any] = None,
+        inference_params: Optional[InferenceParams] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -2736,6 +2878,7 @@ class MultiheadAttention(torch.nn.Module):
             q_pos_emb, k_pos_emb = rotary_pos_emb
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            value_layer = value_layer.contiguous()
 
         context_layer = self.core_attention(
             query_layer,

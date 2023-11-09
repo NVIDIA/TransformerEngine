@@ -14,6 +14,10 @@ from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
 
+
+__all__ = ["checkpoint", "CudaRNGStatesTracker"]
+
+
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "tensor_model_parallel": False,
     "partition_dim": -1,
@@ -79,14 +83,16 @@ def initialize_affine_weight_gpu(
     weight: torch.Tensor,
     init_method: Callable,
     get_rng_state_tracker: Callable,
-    partition_dim: int,
+    partition_dim: int = 0,
     stride: int = 1,
+    set_tp_attributes: bool = True,
 ) -> None:
     """Initialize affine weight for model parallel on GPU."""
 
-    set_tensor_model_parallel_attributes(
-        tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
-    )
+    if set_tp_attributes:
+        set_tensor_model_parallel_attributes(
+            tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
+        )
 
     if get_rng_state_tracker is None:
         init_method(weight)
@@ -299,17 +305,14 @@ def checkpoint(
     Parameters
     ----------
     function: Callable
-            whether or not to enable fp8
+            pytorch module used to run the forward and backward passes using
+            the specified :attr:`args` and :attr:`kwargs`.
     distribute_saved_activations: bool
             if set to `True`, the first tensor argument is distributed across the
             specified tensor parallel group (`tp_group`) before saving it for the
             backward pass.
     get_cuda_rng_tracker: `Callable`
-            python function with the functionality to retrieve a state via
-            :attr:`state = get_cuda_rng_tracker().get_states()` and to reset the state via
-            :attr:`get_cuda_rng_tracker().set_states(state)`. This is used to ensure any
-            extra cuda rng state or general global state can be reproduced across the 2
-            forward phases; original and recompute.
+            python callable which returns an instance of :func:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup, default = `None`
             tensor parallel process group.
     args : tuple
@@ -326,6 +329,100 @@ def checkpoint(
         kwargs,
         *args,
     )
+
+
+class CudaRNGStatesTracker:
+    """
+    For model parallelism, multiple RNG states need to simultaneously exist in order
+    to execute operations in or out of the model parallel region. This class keeps
+    track of the various RNG states and provides utility methods to maintain them and
+    execute parts of the model under a given RNG setting. Using the `add` method, a
+    cuda rng state is initialized based on the input `seed` and is assigned to `name`.
+    Later, by forking the rng state, we can perform operations and return to our starting
+    cuda state.
+    """
+
+    def __init__(self):
+        # Map from a string name to the cuda rng state.
+        self.states_ = {}
+        # Seeds are just for book keeping and ensure no seed is set twice.
+        self.seeds_ = set()
+
+    def reset(self):
+        """
+        Set to the initial state (no tracker).
+        """
+        self.states_ = {}
+        self.seeds_ = set()
+
+    def get_states(self) -> Dict[str, torch.Tensor]:
+        """
+        Get rng states. Copy the dictionary so we have direct pointers
+        to the states, not just a pointer to the dictionary.
+        """
+        states = {}
+        for name in self.states_:
+            states[name] = self.states_[name]
+        return states
+
+    def set_states(self, states: Dict[str, torch.Tensor]) -> None:
+        """
+        Set the rng states. For efficiency purposes, we do not
+        check the size of seed for compatibility.
+
+        states: Dict[str, torch.Tensor]
+               A mapping from string names to RNG states.
+        """
+        self.states_ = states
+
+    def add(self, name: str, seed: int) -> None:
+        """
+        Adds a new RNG state.
+
+        name: str
+             string identifier for the RNG state.
+        seed: int
+             PyTorch seed for the RNG state.
+        """
+        # Check seed is not already used.
+        if seed in self.seeds_:
+            raise Exception(f"seed {seed} already exists")
+        self.seeds_.add(seed)
+        # Check that state is not already defined.
+        if name in self.states_:
+            raise Exception(f"cuda rng state {name} already exists")
+        # Get the current rng state.
+        orig_rng_state = torch.cuda.get_rng_state()
+        # Set the new state and store it.
+        torch.cuda.manual_seed(seed)
+        self.states_[name] = torch.cuda.get_rng_state()
+        # Reset rng state to what it was.
+        _set_cuda_rng_state(orig_rng_state)
+
+    @contextmanager
+    def fork(self, name: str = "model-parallel-rng") -> None:
+        """
+        Fork the cuda rng state, perform operations, and exit with
+        the original state.
+
+        name: str
+             string identifier for the RNG state.
+        """
+        # Check if we have added the state
+        if name not in self.states_:
+            raise Exception(f"cuda rng state {name} is not added")
+        # Store current rng state.
+        orig_cuda_rng_state = torch.cuda.get_rng_state()
+        # Set rng state to the desired one
+        _set_cuda_rng_state(self.states_[name])
+        # Do the stuff we wanted to do.
+        try:
+            yield
+        finally:
+            # Update the current rng state for later use.
+            self.states_[name] = torch.cuda.get_rng_state()
+            # And set the state to the original state we started with.
+            _set_cuda_rng_state(orig_cuda_rng_state)
 
 
 def reduce_scatter_along_first_dim(

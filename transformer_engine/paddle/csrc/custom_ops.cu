@@ -5,26 +5,14 @@
  ************************************************************************/
 
 #include <cub/cub.cuh>
+#include <map>
 #include <vector>
-#include "../common.h"
+
 #include "common.h"
+#include "common/common.h"
 
 namespace transformer_engine {
 namespace paddle_ext {
-
-// MHA utils
-// convert QKV layout to enum
-NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout) {
-    if (qkv_layout == "not_interleaved") {
-        return NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED;
-    } else if (qkv_layout == "qkv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
-    } else if (qkv_layout == "kv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
-    } else {
-        NVTE_ERROR("Invalid QKV layout. \n");
-    }
-}
 
 // convert bias type to enum
 NVTE_Bias_Type get_nvte_bias_type(const std::string bias_type) {

@@ -43,30 +43,23 @@ inline CUresult call(const char *symbol, ArgTs... args) {
 
 }  // namespace transformer_engine
 
-namespace {
+#define NVTE_CHECK_CUDA_DRIVER(expr)                                    \
+  do {                                                                  \
+    const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);              \
+    if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                \
+      const char *desc_NVTE_CHECK_CUDA_DRIVER;                          \
+      ::transformer_engine::cuda_driver::call(                          \
+        "cuGetErrorString",                                             \
+        status_NVTE_CHECK_CUDA_DRIVER,                                  \
+        &desc_NVTE_CHECK_CUDA_DRIVER);                                  \
+      NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);          \
+    }                                                                   \
+  } while (false)
 
-/*! \brief Throw exception if CUDA driver call has failed */
-inline void check_cuda_driver_(CUresult status) {
-  if (status != CUDA_SUCCESS) {
-    const char *description;
-    transformer_engine::cuda_driver::call("cuGetErrorString", &description);
-    NVTE_ERROR(transformer_engine::concat_strings("CUDA Error: ", description));
-  }
-}
-
-/*! \brief Call CUDA driver function and throw exception if it fails */
-template <typename... ArgTs>
-inline void call_and_check_cuda_driver_(const char *symbol,
-                                        ArgTs &&... args) {
-  check_cuda_driver_(transformer_engine::cuda_driver::call(symbol,
-                                                           std::forward<ArgTs>(args)...));
-}
-
-}  // namespace
-
-#define NVTE_CHECK_CUDA_DRIVER(ans) { check_cuda_driver_(ans); }
-
-#define NVTE_CALL_CHECK_CUDA_DRIVER(func, ...) \
-  { call_and_check_cuda_driver_(#func, __VA_ARGS__); }
+#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                        \
+  do {                                                                  \
+    NVTE_CHECK_CUDA_DRIVER(                                             \
+      ::transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__));   \
+  } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_

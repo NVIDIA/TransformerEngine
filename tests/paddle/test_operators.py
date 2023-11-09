@@ -6,10 +6,9 @@
 import struct
 
 import numpy as np
-import pytest
 import paddle
 import paddle.nn.functional as F
-from utils import assert_allclose, create_fp8_meta
+import pytest
 
 import transformer_engine    # pylint: disable=unused-import
 import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
@@ -44,6 +43,13 @@ from transformer_engine.paddle.cpp_extensions import (
 from transformer_engine.paddle.fp8 import is_fp8_available
 from transformer_engine.paddle.constants import FP8FwdTensors
 from transformer_engine.common.recipe import DelayedScaling
+
+from utils import (
+    assert_allclose,
+    create_fp8_meta,
+    get_fused_attention_backend,
+    is_fused_attention_supported,
+)
 
 GEMM_CASES = [(256, 256, 512), (32, 32, 32), (16384, 1024, 2816), (16384, 2816, 1024),
               (16384, 1024, 1024)]
@@ -300,7 +306,7 @@ class TestGemm:
         actual_out, _, _ = gemm(b, a, paddle.bfloat16, workspace, False, None, False, False, "TN",
                                 None, None, False)
 
-        assert_allclose(actual_out, ref_out)
+        assert_allclose(actual_out, ref_out, rtol=1.6e-2, atol=1e-5)
 
     @staticmethod
     @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
@@ -332,8 +338,8 @@ class TestGemm:
         """
         Test "TN" FP8 GEMM
         """
-        min_val = -8
-        max_val = 8
+        min_val = -4
+        max_val = 4
         fp8_dtype = tex.DType.kFloat8E4M3
         out_dtype = paddle.float32
         fp8_meta = create_fp8_meta(num_gemms=1)
@@ -582,31 +588,38 @@ class TestFusedAttn:
         else:
             self.kv = _random(self.kv_shape)
 
-        self.q_actual_seqlen = np.random.randint(
-            low=20,
-            high=self.q_seqlen,
-            size=(self.batch_size,),
-            dtype=np.int32,
-        )
+        self.q_actual_seqlen = None
+        if self.is_causal_masking:
+            self.q_actual_seqlen = np.full(
+                self.batch_size,
+                self.q_seqlen,
+                dtype=np.int32,
+            )
+        else:
+            self.q_actual_seqlen = np.random.randint(
+                low=20,
+                high=self.q_seqlen,
+                size=(self.batch_size,),
+                dtype=np.int32,
+            )
         self.kv_actual_seqlen = self.q_actual_seqlen
 
         self.q_cu_seqlen = np.cumsum(self.q_actual_seqlen)
         self.q_cu_seqlen = np.insert(self.q_cu_seqlen, 0, 0)
         self.kv_cu_seqlen = np.cumsum(self.kv_actual_seqlen)
         self.kv_cu_seqlen = np.insert(self.kv_cu_seqlen, 0, 0)
-        self.attn_mask = np.zeros(
+        self.attn_mask = np.ones(
             shape=(self.batch_size, 1, self.q_seqlen, self.kv_seqlen),
             dtype=np.int32,
         )
-        for i in range(0, self.batch_size):
-            self.attn_mask[i, 0, 0:self.q_actual_seqlen[i], 0:self.kv_actual_seqlen[i],] = 1
-
-            if self.is_causal_masking:
-                assert attn_mode == "self_attn", "only support causal masking for self attention"
-                col_beg, col_end = 1, self.q_actual_seqlen[i]
-                for row in range(0, self.q_actual_seqlen[i]):
-                    self.attn_mask[i, 0, row, col_beg:col_end] = 0
-                    col_beg += 1
+        if self.is_causal_masking:
+            assert attn_mode == "self_attn", "only support causal masking for self attention"
+            for i in range(0, self.batch_size):
+                for j in range(self.q_actual_seqlen[i]):
+                    self.attn_mask[i, :, j, :j+1] = 0
+        else:
+            for i in range(0, self.batch_size):
+                self.attn_mask[i, :, :self.q_actual_seqlen[i], :self.kv_actual_seqlen[i]] = 0
 
         dout = _random((self.batch_size, self.q_seqlen, self.num_heads, self.head_size))
         self.dout = paddle.to_tensor(dout, dtype=self.dtype)
@@ -628,10 +641,12 @@ class TestFusedAttn:
             transpose_y=True,
         )
 
-        attn_mask = paddle.to_tensor(self.attn_mask, stop_gradient=True)
-        attn_mask = (paddle.cast(attn_mask, self.dtype) - 1.0) * 1e4
-        attn_mask_out = qk_out + attn_mask
+        attn_mask = paddle.to_tensor(self.attn_mask, stop_gradient=True).cast('bool')
+        attn_mask_vals = paddle.full(qk_out.shape, -1e4, qk_out.dtype)
+        attn_mask_out = paddle.where(attn_mask, attn_mask_vals, qk_out)
+        attn_mask_out = paddle.cast(attn_mask_out, 'float32')
         softmax_out = F.softmax(attn_mask_out)
+        softmax_out = paddle.cast(softmax_out, self.dtype)
 
         if self.dropout_prob:
             dropout_out = F.dropout(
@@ -667,9 +682,21 @@ class TestFusedAttn:
         q_cu_seqlen_tensor = paddle.to_tensor(self.q_cu_seqlen, dtype="int32", stop_gradient=True)
         kv_cu_seqlen_tensor = paddle.to_tensor(self.kv_cu_seqlen, dtype="int32", stop_gradient=True)
 
-        fused_attention_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen if (
-            self.q_seqlen <= 512
-            and self.kv_seqlen <= 512) else tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+        qkv_layout = (
+            "bs3hd"
+            if self.attn_mode == "self_attn"
+            else "bshd_bs2hd"
+        )
+        fused_attention_backend = get_fused_attention_backend(
+            head_size=self.head_size,
+            q_seqlen=self.q_seqlen,
+            kv_seqlen=self.kv_seqlen,
+            dtype=self.dtype,
+            dropout=self.dropout_prob,
+            qkv_layout=qkv_layout,
+            bias_type="no_bias",
+            mask_type="causal" if self.is_causal_masking else "padding",
+        )
 
         qkv_dtype = tex.DType.kBFloat16 if self.dtype == "bfloat16" else tex.DType.kFloat16
         out, softmax_aux_tensor, q_grad, k_grad, v_grad = None, None, None, None, None
@@ -739,8 +766,6 @@ class TestFusedAttn:
 
         return out, q_grad, k_grad, v_grad
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
-                        reason="cuDNN fMHA requires Ampere and Hopper GPU")
     @pytest.mark.parametrize('b, s, h, d', SELF_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True, False])
@@ -748,6 +773,17 @@ class TestFusedAttn:
         """
         test self attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s,
+            kv_seqlen=s,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
@@ -756,14 +792,23 @@ class TestFusedAttn:
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() not in ((8, 0), (9, 0)),
-                        reason="cuDNN fMHA requires Ampere and Hopper GPU")
     @pytest.mark.parametrize('b, s_q, s_kv, h, d', CROSS_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     def test_cross_attn_forward_backward(self, b, s_q, s_kv, h, d, dtype):
         """
         test cross attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s_q,
+            kv_seqlen=s_kv,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="bshd_bs2hd",
+            bias_type="no_bias",
+            mask_type="padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s_q, s_kv, h, d, dtype, "cross_attn")
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()
@@ -772,8 +817,6 @@ class TestFusedAttn:
         assert_allclose(k_grad_ref, k_grad, rtol=1e-3, atol=1e-2)
         assert_allclose(v_grad_ref, v_grad, rtol=1e-3, atol=1e-2)
 
-    @pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                        reason="cuDNN fMHA requires Ampere+ GPU")
     @pytest.mark.parametrize('b, s, h, d', FLASH_ATTN_CASES)
     @pytest.mark.parametrize('dtype', ['float16', 'bfloat16'])
     @pytest.mark.parametrize('is_causal_masking', [True])
@@ -781,6 +824,17 @@ class TestFusedAttn:
         """
         test flash attention forward + backward
         """
+        if not is_fused_attention_supported(
+            head_size=d,
+            q_seqlen=s,
+            kv_seqlen=s,
+            dtype=dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type="causal" if is_causal_masking else "padding",
+        ):
+            pytest.skip("cuDNN fused attention is not supported")
         self.set_input(b, s, s, h, d, dtype, "self_attn", is_causal_masking)
         reference_out, q_grad_ref, k_grad_ref, v_grad_ref = self._get_reference_out()
         fused_attention_out, q_grad, k_grad, v_grad = self._get_fused_attention_out()

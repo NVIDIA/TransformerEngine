@@ -5,14 +5,16 @@
 
 import math
 import os
-import pytest
 from utils import assert_allclose
 
 import paddle
+import pytest
 
+from transformer_engine.common.recipe import DelayedScaling
 import transformer_engine.paddle as te
 from transformer_engine.paddle.fp8 import is_fp8_available, fp8_autocast
-from transformer_engine.common.recipe import DelayedScaling
+
+from utils import is_fused_attention_supported
 
 is_fp8_supported, reason = is_fp8_available()
 LINEAR_CASES = [(16, 16, 32), (32, 32, 64)]
@@ -614,8 +616,6 @@ class TestLayerNormMLP:
             assert paddle.count_nonzero(layer_te.fp8_meta["scaling_fwd"].amax_history).item() > 0
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads', [[1024, 16], [768, 12]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
@@ -630,8 +630,21 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     paddle.set_default_dtype(math_dtype)
     rtol = 1e-4
     atol = 2e-2
-
     head_size = hidden_size // num_heads
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+        head_size=head_size,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bs3hd" if attn_type == "self" else "bshd_bs2hd",
+        bias_type="no_bias",
+        mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+
     self_attn_qkv_input = paddle.normal(mean=0.0,
                                         std=0.02,
                                         shape=(bs, q_seqlen, 3, num_heads,
@@ -727,8 +740,6 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
@@ -748,6 +759,19 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     rtol = 5e-2
     atol = 5e-2
     eps = 1e-3
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+        head_size=hidden_size // num_heads,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bs3hd",
+        bias_type="no_bias",
+        mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
 
     encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
 
@@ -892,8 +916,6 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             atol=0.5)
 
 
-@pytest.mark.skipif(paddle.device.cuda.get_device_capability() < (8, 0),
-                    reason="cuDNN fMHA requires Ampere+ GPU")
 @pytest.mark.parametrize('bs', [1, 2, 8])
 @pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
 @pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128], [512, 512]])
@@ -915,6 +937,30 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
     rtol = 5e-2
     atol = 6e-2
     eps = 1e-3
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+        head_size=hidden_size // num_heads,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bs3hd",
+        bias_type="no_bias",
+        mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+    if not is_fused_attention_supported(
+        head_size=hidden_size // num_heads,
+        q_seqlen=q_seqlen,
+        kv_seqlen=kv_seqlen,
+        dtype=math_dtype,
+        dropout=0.0,
+        qkv_layout="bshd_bs2hd",
+        bias_type="no_bias",
+        mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
 
     encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
     encoder_output = paddle.uniform(shape=(bs, kv_seqlen, hidden_size), dtype=math_dtype)

@@ -36,7 +36,6 @@ Additional Prerequisites
 
 1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support.
 2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
-3. [For TensorFlow support] `TensorFlow <https://www.tensorflow.org/>`__ with GPU support.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -47,7 +46,7 @@ Execute the following command to install the latest stable version of Transforme
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,tensorflow`).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +63,14 @@ Execute the following command to install the latest development build of Transfo
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,tensorflow`).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
+
+In order to install a specific PR, execute after changing NNN to the PR number:
+
+.. code-block:: bash
+
+  pip install git+https://github.com/NVIDIA/TransformerEngine.git@refs/pull/NNN/merge
+
 
 Installation (from source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

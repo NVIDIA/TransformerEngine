@@ -2,5 +2,8 @@
 #
 # See LICENSE for license information.
 
-import transformer_engine.tensorflow
-print("OK")
+set -xe
+
+: ${TE_PATH:=/opt/transformerengine}
+pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_custom_ops.py
+

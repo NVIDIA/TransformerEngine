@@ -11,7 +11,9 @@ from paddle.distributed import fleet
 from .constants import RecomputeFunctionNames
 from .fp8 import get_global_fp8_state
 
-__all__ = ['recompute', 'is_in_recompute_phase']
+
+__all__ = ['recompute']
+
 
 _DISABLE_RECOMPUTE = int(os.getenv("NVTE_DISABLE_RECOMPUTE", "0"))
 
@@ -35,6 +37,16 @@ def recompute(function, *args, **kwargs):
     """
     This is a wrapper of paddle.distributed.fleet.utils.recompute. It provides necessary
     state information for fp8 layers.
+
+    Parameters
+    ----------
+    function: Callable
+            paddle module used to run the forward and backward passes using
+            the specified :attr:`args` and :attr:`kwargs`.
+    args : tuple
+            tuple of torch tensors for inputs to :attr:`function`.
+    kwargs : dict
+            dictionary of string keys for keyword arguments to :attr:`function`.
     """
     assert not _DISABLE_RECOMPUTE, "Recompute is disabled. " \
         f"Got NVTE_DISABLE_RECOMPUTE={_DISABLE_RECOMPUTE}."

@@ -6,8 +6,6 @@
 C/C++ API
 =========
 
-.. Caution:: This feature is not officially supported yet and may change without notice.
-
 The C/C++ API allows you to access the custom kernels defined in `libtransformer_engine.so` library
 directly from C/C++, without Python.
 

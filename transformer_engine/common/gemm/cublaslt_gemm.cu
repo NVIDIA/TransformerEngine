@@ -4,13 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/logging.h>
 #include <transformer_engine/gemm.h>
-#include <cuda.h>
+
 #include <cublasLt.h>
 #include <cublas_v2.h>
+#include <cuda.h>
+
+#include <transformer_engine/transformer_engine.h>
 #include "../common.h"
+#include "../util/logging.h"
 
 namespace {
 
@@ -259,9 +261,12 @@ void cublas_gemm(const Tensor *inputA,
           preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
           &workspaceSize, sizeof(workspaceSize)));
 
-  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
-                                                   Ddesc, preference, 1, &heuristicResult,
-                                                   &returnedResults));
+  const auto status = cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc,
+                                                     Ddesc, preference, 1, &heuristicResult,
+                                                     &returnedResults);
+  NVTE_CHECK(status != CUBLAS_STATUS_NOT_SUPPORTED,
+             "Unable to find suitable cuBLAS GEMM algorithm");
+  NVTE_CHECK_CUBLAS(status);
 
   if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
 

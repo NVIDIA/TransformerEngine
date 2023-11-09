@@ -7,15 +7,16 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
 #define TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
 
-#include <pybind11/pybind11.h>
-
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/logging.h"
+
+#include <pybind11/pybind11.h>
+
+#include "common/util/logging.h"
+#include <transformer_engine/fused_attn.h>
 
 namespace transformer_engine {
 namespace jax {

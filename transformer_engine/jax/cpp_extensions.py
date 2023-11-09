@@ -65,6 +65,7 @@ def jax_dtype_to_te_dtype(jax_dtype):
     """
     convert jax dtype to TE dtype
     """
+    jax_dtype = dtypes.canonicalize_dtype(jax_dtype)
     if jax_dtype == jnp.float32:
         return TEDType.kFloat32
     if jax_dtype == jnp.float16:
@@ -82,6 +83,7 @@ class FusedAttnHelper:
 
     q_type: jnp.dtype
     kv_type: jnp.dtype
+    qkv_layout: NVTE_QKV_Layout
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
@@ -95,10 +97,13 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(
-            jax_dtype_to_te_dtype(self.q_type), jax_dtype_to_te_dtype(self.kv_type),
-            NVTE_QKV_Layout.NVTE_QKV_INTERLEAVED, self.attn_bias_type, self.attn_mask_type,
-            self.dropout_probability, self.max_seqlen_q, self.max_seqlen_kv, self.head_dim)
+        return transformer_engine_jax.get_fused_attn_backend(jax_dtype_to_te_dtype(self.q_type),
+                                                             jax_dtype_to_te_dtype(self.kv_type),
+                                                             self.qkv_layout, self.attn_bias_type,
+                                                             self.attn_mask_type,
+                                                             self.dropout_probability,
+                                                             self.max_seqlen_q, self.max_seqlen_kv,
+                                                             self.head_dim)
 
 
 def merge_named_shape(base, new):
@@ -209,14 +214,15 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
         # Need to disable one pylint error as the second function
         # parameter name recenctly in JAX. Otherwise we won't be
         # compatible with multiple JAX version.
-        out = custom_call(name,    # pylint: disable=too-many-function-args
-                          args.output_types,
-                          operands=args.operands,
-                          operand_layouts=args.operand_layouts,
-                          result_layouts=args.output_layouts,
-                          backend_config=opaque,
-                          has_side_effect=has_side_effect,
-                          **kwargs)
+        out = custom_call(    # pylint: disable=too-many-function-args
+            name,
+            args.output_types,
+            operands=args.operands,
+            operand_layouts=args.operand_layouts,
+            result_layouts=args.output_layouts,
+            backend_config=opaque,
+            has_side_effect=has_side_effect,
+            **kwargs)
     return out
 
 
@@ -1626,6 +1632,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1757,6 +1764,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -1908,6 +1916,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """Check Softmax kernel availability based on size"""
         attn_batches = batch * heads
 
+        dtype = dtypes.canonicalize_dtype(dtype)
         if (dtype in [jnp.float16, jnp.bfloat16]
                 and 16 < k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         # k_seqlen must be 16 ~ 4096
@@ -2099,8 +2108,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (batch, max_seqlen, num_head, head_dim)
         output_dtype = qkv_dtype
 
-        backend = FusedAttnHelper(qkv_dtype, qkv_dtype, attn_bias_type, attn_mask_type,
-                                  dropout_probability, max_seqlen, max_seqlen,
+        backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
+                                  attn_mask_type, dropout_probability, max_seqlen, max_seqlen,
                                   head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:

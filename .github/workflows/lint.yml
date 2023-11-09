@@ -18,10 +18,11 @@ jobs:
         run: |
           export CPP_ONLY=1
           export TE_PATH=.
-          bash ./qa/L0_lint/test.sh
+          bash ./qa/L0_pytorch_lint/test.sh
   pytorch_pylint:
     name: 'PyTorch Python'
     runs-on: ubuntu-latest
+    if: false  # NGC PyTorch container does not fit on GitHub runner
     container:
       image: nvcr.io/nvidia/pytorch:23.03-py3
       options: --user root
@@ -33,7 +34,7 @@ jobs:
           pip install flash-attn==1.0.2
           export PYTHON_ONLY=1
           export TE_PATH=.
-          bash ./qa/L0_lint/test.sh
+          bash ./qa/L0_pytorch_lint/test.sh
   jax_cpplint:
     name: 'JAX C++'
     runs-on: ubuntu-latest
@@ -49,41 +50,13 @@ jobs:
     name: 'JAX Python'
     runs-on: ubuntu-latest
     container:
-      #image: nvcr.io/nvidia/jax:XX.XX-py3  # Not yet available
-      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
+      image: ghcr.io/nvidia/jax:latest
       options: --user root
     steps:
       - name: 'Checkout'
         uses: actions/checkout@v3
       - name: 'Lint'
         run: |
-          pip install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-          pip install flax
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
-  tensorflow_cpplint:
-    name: 'TensorFlow C++'
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          export CPP_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_tensorflow_lint/test.sh
-  tensorflow_pylint:
-    name: 'TensorFlow Python'
-    runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/tensorflow:23.03-tf2-py3
-      options: --user root
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          export PYTHON_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_tensorflow_lint/test.sh

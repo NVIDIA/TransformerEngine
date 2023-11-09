@@ -203,7 +203,7 @@ def with_userbuffers() -> bool:
 def frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "tensorflow", "paddle"]
+    supported_frameworks = ["pytorch", "jax", "paddle"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -229,12 +229,6 @@ def frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import tensorflow
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("tensorflow")
         try:
             import paddle
         except ImportError:
@@ -297,11 +291,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
-    if "tensorflow" in frameworks():
-        if not found_pybind11():
-            add_unique(setup_reqs, "pybind11")
-        add_unique(install_reqs, "tensorflow")
-        add_unique(test_reqs, ["keras", "tensorflow_datasets"])
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
@@ -445,14 +434,12 @@ class CMakeBuildExtension(BuildExtension):
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library
 
-    Also builds JAX, TensorFlow, and userbuffers support if needed.
+    Also builds JAX or userbuffers support if needed.
 
     """
     cmake_flags = []
     if "jax" in frameworks():
         cmake_flags.append("-DENABLE_JAX=ON")
-    if "tensorflow" in frameworks():
-        cmake_flags.append("-DENABLE_TENSORFLOW=ON")
     if with_userbuffers():
         cmake_flags.append("-DNVTE_WITH_USERBUFFERS=ON")
     return CMakeExtension(
@@ -480,6 +467,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     include_dirs = [
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "pytorch" / "csrc",
+        root_path / "transformer_engine",
         root_path / "3rdparty" / "cudnn-frontend" / "include",
     ]
 
@@ -552,6 +540,7 @@ def setup_paddle_extension() -> setuptools.Extension:
     include_dirs = [
         root_path / "transformer_engine" / "common" / "include",
         root_path / "transformer_engine" / "paddle" / "csrc",
+        root_path / "transformer_engine",
     ]
 
     # Compiler flags

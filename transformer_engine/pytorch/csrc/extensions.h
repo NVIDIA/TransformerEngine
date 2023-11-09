@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include "common.h"
-#include "../common.h"
+#include "common/common.h"
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
                 const transformer_engine::DType q_dtype,
@@ -523,6 +523,8 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 );
 
 size_t get_cublasLt_version();
+
+size_t get_cudnn_version();
 
 bool userbuf_comm_available();
 
