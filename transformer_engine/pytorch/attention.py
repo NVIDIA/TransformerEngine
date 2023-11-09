@@ -745,6 +745,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def __init__(
         self,
         dim: int,
+        rotary_percent: float,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
     ):
@@ -753,6 +754,8 @@ class RotaryPositionEmbedding(torch.nn.Module):
         ----------
         dim: int
             rotary embedding dimension
+        rotary_percent: float
+            Percent of rotary dimension to use for rotary position embeddings.
         seq_len_interpolation_factor: int
             if not None, discrete positions will be interpolated by this factor via the trick in
             https://arxiv.org/abs/2306.15595
@@ -760,8 +763,10 @@ class RotaryPositionEmbedding(torch.nn.Module):
             pre-trained max_position_embeddings before position interpolation
         """
         super().__init__()
+        if rotary_percent < 1.0:
+            dim = int(dim * rotary_percent)
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device()) / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
 
@@ -776,8 +781,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             fixed offset for freqencies
         """
-        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
-        seq = seq.type_as(self.inv_freq)
+        seq = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype) + offset
 
         if (self.pretrained_max_position_embeddings is not None
             and self.seq_len_interpolation_factor is not None):
@@ -816,8 +820,34 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
+    t = (t * cos_) + (_rotate_half(t) * sin_)
     return torch.cat((t, t_pass), dim=-1)
+
+
+class FusedRoPEFunc(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, t: torch.Tensor, cos_: torch.Tensor, sin_: torch.Tensor) -> torch.Tensor:
+
+        output = tex.fused_rope_forward(t, cos_, sin_)
+        ctx.save_for_backward(cos_, sin_)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+
+        cos_, sin_ = ctx.saved_tensors
+        grad_q = tex.fused_rope_backward(grad_output, cos_, sin_)
+
+        return grad_q, None, None
+
+def fused_apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
+    return FusedRoPEFunc.apply(t, cos_, sin_)
 
 
 class _SplitAlongDim(torch.autograd.Function):
