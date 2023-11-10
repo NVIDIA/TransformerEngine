@@ -595,6 +595,9 @@ def main():
     packages = setuptools.find_packages(
         include=["transformer_engine", "transformer_engine.*"],
     )
+    packages += setuptools.find_namespace_packages(
+        include=['examples', 'examples.*', 'tests', 'tests.*']
+    )
 
     # Dependencies
     setup_requires, install_requires, test_requires = setup_requirements()
