@@ -19,6 +19,16 @@ from utils import EncoderLayer as RefEncoderLayer
 is_fp8_supported, reason = is_fp8_available()
 
 
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
+    """
+    Clear all live arrays to keep the resource clean
+    """
+    yield
+    for arr in jax.live_arrays():
+        arr.delete()
+
+
 def loss_fn(diff_xs, no_diff_xs, params, others, model, rngs):
     output = model.apply({"params": params, **others}, *diff_xs, *no_diff_xs, rngs=rngs)
     return jnp.mean(output)

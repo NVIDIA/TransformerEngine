@@ -27,13 +27,14 @@ from transformer_engine_jax import get_device_compute_capability    # pylint: di
 Array = jnp.ndarray
 
 
-@pytest.fixture(autouse=True, scope='module')
-def clear_backends():
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
     """
-    Clear all JAX backend resources to avoid OOM
+    Clear all live arrays to keep the resource clean
     """
     yield
-    jax.clear_backends()
+    for arr in jax.live_arrays():
+        arr.delete()
 
 
 class Backend(Enum):
