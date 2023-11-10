@@ -102,7 +102,7 @@ def _combine_biases(*masks: List[Array]):
     return mask
 
 
-class Softmax(nn.Module):
+class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies softmax over a mini-batch of inputs.
     The input's shape should be [batch, heads, q_seqlen, k_seqlen].
@@ -176,7 +176,7 @@ class Softmax(nn.Module):
         return outputs
 
 
-class LayerNorm(nn.Module):
+class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies layer normalization over a mini-batch of inputs.
     There are two types of normalization supported by this module,

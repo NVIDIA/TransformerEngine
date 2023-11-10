@@ -247,7 +247,7 @@ def core_attention(query: Array,
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Multi-head Attention (MHA), including Query,
     Key, Value and Output projection.
@@ -741,7 +741,7 @@ class MultiHeadAttention(nn.Module):
         return out, residual
 
 
-class RelativePositionBiases(nn.Module):
+class RelativePositionBiases(nn.Module):    # pylint: disable=too-few-public-methods
     """
     T5-style relative positional embeddings to the attention logits.
 
@@ -848,7 +848,7 @@ class TransformerLayerType(Enum):
     DECODER = "decoder"
 
 
-class TransformerLayer(nn.Module):
+class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     TransformerLayer is made up of a relative embedding,
     an attention block and a feedforward network (MLP).
