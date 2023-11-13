@@ -37,6 +37,16 @@ DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = is_fp8_available()
 
 
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
+    """
+    Clear all live arrays to keep the resource clean
+    """
+    yield
+    for arr in jax.live_arrays():
+        arr.delete()
+
+
 class TestFP8Dot:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
