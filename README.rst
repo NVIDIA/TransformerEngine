@@ -151,7 +151,7 @@ The quickest way to get started with Transformer Engine is by using Docker image
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.09-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.10-py3
 
 Where 23.10 is the container version. For example, 23.10 for the October 2023 release.
 
