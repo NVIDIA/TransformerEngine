@@ -38,16 +38,6 @@ class QKVLayout(Enum):
     BSHD_BS2HD = NVTE_QKV_Layout.NVTE_BSHD_BS2HD
 
 
-def generate_cu_seqlen(mask):
-    """
-    Generating cumsum seqlen for a batch
-    """
-    seqlen = jnp.sum(mask == 0, axis=(-1, -2), dtype=jnp.int32)
-    cu_seqlen = jnp.cumsum(seqlen)
-    cu_seqlen = jnp.hstack((0, cu_seqlen))
-    return cu_seqlen
-
-
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
                                    dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
     """
@@ -94,30 +84,29 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                               seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                               attn_mask_type: AttnMaskType, scaling_factor: float,
                               dropout_probability: float, is_training: bool):
-    cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
-
+    squeezed_mask = mask[:, :, :, 0]
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
-                                                         cu_seqlen,
+                                                         squeezed_mask,
                                                          seed,
                                                          attn_bias_type=attn_bias_type.value,
                                                          attn_mask_type=attn_mask_type.value,
                                                          scaling_factor=scaling_factor,
                                                          dropout_probability=dropout_probability,
                                                          is_training=is_training)
-    return output, (qkv, softmax_aux, rng_state, output, cu_seqlen)
+    return output, (qkv, softmax_aux, rng_state, output, squeezed_mask)
 
 
 def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                               is_training, ctx, dz):
-    qkv, softmax_aux, rng_state, output, cu_seqlen = ctx
+    qkv, softmax_aux, rng_state, output, squeezed_mask = ctx
 
     grad_qkv, grad_bias = self_fused_attn_bwd(qkv,
                                               softmax_aux,
                                               rng_state,
                                               output,
                                               dz,
-                                              cu_seqlen,
+                                              squeezed_mask,
                                               attn_bias_type=attn_bias_type.value,
                                               attn_mask_type=attn_mask_type.value,
                                               scaling_factor=scaling_factor,
@@ -166,32 +155,32 @@ def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: 
 def _cross_fused_attn_fwd_rule(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
                                dropout_probability, is_training):
 
-    q_cu_seqlen = generate_cu_seqlen(mask[:, :, :, 0])
-    kv_cu_seqlen = generate_cu_seqlen(mask[:, :, 0, :])
+    q_squeezed_mask = mask[:, :, :, 0]
+    kv_squeezed_mask = mask[:, :, 0, :]
 
     output, softmax_aux = cross_fused_attn_fwd(q,
                                                kv,
-                                               q_cu_seqlen,
-                                               kv_cu_seqlen,
+                                               q_squeezed_mask,
+                                               kv_squeezed_mask,
                                                seed,
                                                attn_bias_type=attn_bias_type.value,
                                                attn_mask_type=attn_mask_type.value,
                                                scaling_factor=scaling_factor,
                                                dropout_probability=dropout_probability,
                                                is_training=is_training)
-    return output, (softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen)
+    return output, (softmax_aux, q, kv, q_squeezed_mask, kv_squeezed_mask)
 
 
 def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                                is_training, ctx, dz):
-    softmax_aux, q, kv, q_cu_seqlen, kv_cu_seqlen = ctx
+    softmax_aux, q, kv, q_squeezed_mask, kv_squeezed_mask = ctx
 
     grad_q, grad_kv = cross_fused_attn_bwd(q,
                                            kv,
                                            softmax_aux,
                                            dz,
-                                           q_cu_seqlen,
-                                           kv_cu_seqlen,
+                                           q_squeezed_mask,
+                                           kv_squeezed_mask,
                                            attn_bias_type=attn_bias_type.value,
                                            attn_mask_type=attn_mask_type.value,
                                            scaling_factor=scaling_factor,
