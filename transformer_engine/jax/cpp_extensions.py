@@ -1974,7 +1974,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         dbias_spec = [None]
         if attn_bias_type is not NVTE_Bias_Type.NVTE_NO_BIAS:
-            dbias_spec = [*x_spec[:-5], None, x_spec[-4], *x_spec[-2:]]
+            dbias_spec = [*x_spec[:-5], None, x_spec[-2], None, None]
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_spec))
         return (dx_sharding, dbias_sharding)
 
@@ -1986,7 +1986,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec))
         dbias_spec = [None]
         if attn_bias_type is not NVTE_Bias_Type.NVTE_NO_BIAS:
-            dbias_spec = [*x_spec[:-5], None, x_spec[-4], *x_spec[-2:]]
+            dbias_spec = [*x_spec[:-5], None, x_spec[-2], None, None]
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_spec))
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (dx_sharding, dbias_sharding)
