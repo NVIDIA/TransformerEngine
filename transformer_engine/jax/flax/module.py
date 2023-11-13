@@ -102,7 +102,7 @@ def _combine_biases(*masks: List[Array]):
     return mask
 
 
-class Softmax(nn.Module):
+class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies softmax over a mini-batch of inputs.
     The input's shape should be [batch, heads, q_seqlen, k_seqlen].
@@ -176,7 +176,7 @@ class Softmax(nn.Module):
         return outputs
 
 
-class LayerNorm(nn.Module):
+class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies layer normalization over a mini-batch of inputs.
     There are two types of normalization supported by this module,
@@ -431,8 +431,9 @@ class DenseGeneral(TransformerEngineBase):
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
         else:
             bias = None
 
@@ -656,8 +657,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
 
         if bias is not None:
             bias_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
@@ -969,8 +971,9 @@ class LayerNormMLP(TransformerEngineBase):
                 bias = nn_partitioning.param_with_axes('wi_bias',
                                                        self.bias_init,
                                                        intermediate_dim,
-                                                       self.dtype,
+                                                       jnp.float32,
                                                        axes=self.bias_axes_1)
+                bias = bias.astype(self.dtype)
                 bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
                 x += jnp.reshape(bias, bias_shape)
 
@@ -1029,8 +1032,9 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 bias = nn_partitioning.param_with_axes('wo_bias',
                                                        self.bias_init, (hidden_size,),
-                                                       self.dtype,
+                                                       jnp.float32,
                                                        axes=self.bias_axes_2)
+                bias = bias.astype(self.dtype)
                 out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
 
         return out, ln_output    # Output, layner_norm_output

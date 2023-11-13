@@ -83,7 +83,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
         .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
         .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+        .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
 
     pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
         .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
