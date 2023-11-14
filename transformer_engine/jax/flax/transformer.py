@@ -446,7 +446,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.dropout_rate, q_seqlen,
-                                                               kv_seqlen, self.head_dim)
+                                                               kv_seqlen, self.head_dim,
+                                                               self.num_heads, self.num_heads)
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \

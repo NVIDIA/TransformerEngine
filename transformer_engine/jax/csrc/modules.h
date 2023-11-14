@@ -97,6 +97,7 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
 struct CustomCallFusedAttnDescriptor {
     size_t batch;
     size_t num_head;
+    size_t num_gqa_groups;
     size_t q_max_seqlen;
     size_t kv_max_seqlen;
     size_t head_dim;
@@ -109,15 +110,16 @@ struct CustomCallFusedAttnDescriptor {
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t batch, size_t num_head, size_t num_gqa_groups, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, DType dtype, bool is_training);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t head_dim);
+                                            size_t head_dim, size_t num_attn_heads,
+                                            size_t num_gqa_groups);
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 

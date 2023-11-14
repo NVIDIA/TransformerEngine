@@ -238,7 +238,8 @@ class DotProductAttention(paddle.nn.Layer):
                 TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
                 tex.get_nvte_qkv_layout(self.qkv_layout), AttnBiasType[core_attention_bias_type],
                 AttnMaskType[self.attn_mask_type], self.attention_dropout, max_s_q, max_s_kv,
-                query_layer.shape[-1])
+                query_layer.shape[-1], query_layer.shape[-2],
+                key_value_layer.shape[-2] if key_value_layer is not None else query_layer.shape[-2])
 
             is_backend_avail = (self.fused_attention_backend in [
                 FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]

@@ -689,6 +689,8 @@ class TestFusedAttn:
         )
         fused_attention_backend = get_fused_attention_backend(
             head_size=self.head_size,
+            num_heads=self.num_heads,
+            num_gqa_groups=self.num_heads,
             q_seqlen=self.q_seqlen,
             kv_seqlen=self.kv_seqlen,
             dtype=self.dtype,
@@ -775,6 +777,8 @@ class TestFusedAttn:
         """
         if not is_fused_attention_supported(
             head_size=d,
+            num_heads=h,
+            num_gqa_groups=h,
             q_seqlen=s,
             kv_seqlen=s,
             dtype=dtype,
@@ -800,6 +804,8 @@ class TestFusedAttn:
         """
         if not is_fused_attention_supported(
             head_size=d,
+            num_heads=h,
+            num_gqa_groups=h,
             q_seqlen=s_q,
             kv_seqlen=s_kv,
             dtype=dtype,
@@ -826,6 +832,8 @@ class TestFusedAttn:
         """
         if not is_fused_attention_supported(
             head_size=d,
+            num_heads=h,
+            num_gqa_groups=h,
             q_seqlen=s,
             kv_seqlen=s,
             dtype=dtype,

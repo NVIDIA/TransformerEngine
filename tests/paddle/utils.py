@@ -103,6 +103,8 @@ def set_random_seed(seed):
 
 def get_fused_attention_backend(
     head_size: int,
+    num_heads: int,
+    num_gqa_groups: int,
     q_seqlen: int,
     kv_seqlen: int,
     dtype: Union[paddle.dtype, str],
@@ -128,11 +130,15 @@ def get_fused_attention_backend(
         q_seqlen,
         kv_seqlen,
         head_size,
+        num_heads,
+        num_gqa_groups,
     )
 
 
 def is_fused_attention_supported(
     head_size: int,
+    num_heads: int,
+    num_gqa_groups: int,
     q_seqlen: int,
     kv_seqlen: int,
     dtype: Union[paddle.dtype, str],
@@ -144,6 +150,8 @@ def is_fused_attention_supported(
     """Check if cuDNN fused attention is supported for attention config"""
     backend = get_fused_attention_backend(
         head_size=head_size,
+        num_heads=num_heads,
+        num_gqa_groups=num_gqa_groups,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
         dtype=dtype,

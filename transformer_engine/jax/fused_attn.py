@@ -45,13 +45,14 @@ class QKVLayout(Enum):
 
 
 def is_fused_attn_kernel_available(q_type, kv_type, qkv_layout, attn_bias_type, attn_mask_type,
-                                   dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim):
+                                   dropout_probability, max_seqlen_q, max_seqlen_kv, head_dim,
+                                   num_heads, num_gqa_groups):
     """
     To check whether the fused attention kernel is available
     """
     return FusedAttnHelper(q_type, kv_type, qkv_layout.value, attn_bias_type.value,
                            attn_mask_type.value, dropout_probability, max_seqlen_q, max_seqlen_kv,
-                           head_dim).is_fused_attn_kernel_available()
+                           head_dim, num_heads, num_gqa_groups).is_fused_attn_kernel_available()
 
 
 def self_fused_attn(qkv: jnp.ndarray,

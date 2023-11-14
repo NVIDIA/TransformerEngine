@@ -90,6 +90,8 @@ class FusedAttnHelper:
     max_seqlen_q: int
     max_seqlen_kv: int
     head_dim: int
+    num_heads: int
+    num_gqa_groups: int
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -103,7 +105,8 @@ class FusedAttnHelper:
                                                              self.attn_mask_type,
                                                              self.dropout_probability,
                                                              self.max_seqlen_q, self.max_seqlen_kv,
-                                                             self.head_dim)
+                                                             self.head_dim, self.num_heads,
+                                                             self.num_gqa_groups)
 
 
 def merge_named_shape(base, new):
@@ -2110,7 +2113,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 
         backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
                                   attn_mask_type, dropout_probability, max_seqlen, max_seqlen,
-                                  head_dim).get_fused_attn_backend()
+                                  head_dim, num_head, num_head).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (batch, num_head, max_seqlen, max_seqlen)
@@ -2154,7 +2157,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
+            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
         out = custom_caller(SelfFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -2250,7 +2253,8 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
+            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim,
+            scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
         out = custom_caller(SelfFusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -2338,8 +2342,9 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         q_aval, kv_aval, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
-        batch, q_max_seqlen, num_head, head_dim = q_aval.shape
+        batch, q_max_seqlen, num_head_q, head_dim = q_aval.shape
         kv_max_seqlen = kv_aval.shape[1]
+        num_head_kv = kv_aval.shape[2]
 
         operands = [q, kv, q_cu_seqlen, kv_cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
@@ -2350,7 +2355,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+            batch, num_head_q, num_head_kv, q_max_seqlen, kv_max_seqlen, head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
 
@@ -2431,8 +2436,9 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         q_aval, kv_aval, _, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
-        batch, q_max_seqlen, num_head, head_dim = q_aval.shape
+        batch, q_max_seqlen, num_head_q, head_dim = q_aval.shape
         kv_max_seqlen = kv_aval.shape[1]
+        num_head_kv = kv_aval.shape[2]
 
         operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
         operand_shapes = map(lambda x: x.type.shape, operands)
@@ -2446,7 +2452,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         # the dropout elements are encoded in the forward auxiliary tensor
         # so seed is not needed in backward
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, q_max_seqlen, kv_max_seqlen, head_dim,
+            batch, num_head_q, num_head_kv, q_max_seqlen, kv_max_seqlen, head_dim,
             scaling_factor, dropout_probability, attn_bias_type, attn_mask_type,
             jax_dtype_to_te_dtype(q_aval.dtype), is_training)
 
