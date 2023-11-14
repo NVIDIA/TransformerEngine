@@ -119,8 +119,7 @@ def _fp8_dot_fwd_rule(
                        fwd_dtype, static_axis_boundary=-1,
                        transpose_axis_boundary=(max(rhs_contracting_dims) + 1))
 
-    rhs_t_contracting_dims = tuple(
-        i for i in range(kernel.ndim - len(rhs_contracting_dims), kernel.ndim))
+    rhs_t_contracting_dims = tuple(range(kernel.ndim - len(rhs_contracting_dims), kernel.ndim))
     output = fp8_dot_impl(casted_x, casted_kerenl_t, x_scale_inv, kernel_scale_inv, x.dtype,
                           (lhs_contracting_dims, rhs_t_contracting_dims))
 
@@ -146,15 +145,15 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
                        bwd_dtype, static_axis_boundary=-1,
                        transpose_axis_boundary=min(lhs_contracting_dims))
 
-    xt_constracting_dim = tuple(i for i in range(len(lhs_contracting_dims), len(x_shape)))
-    gt_constracting_dim = tuple(i for i in range(grad.ndim - len(xt_constracting_dim), grad.ndim))
+    xt_constracting_dim = tuple(range(len(lhs_contracting_dims), len(x_shape)))
+    gt_constracting_dim = tuple(range(grad.ndim - len(xt_constracting_dim), grad.ndim))
     x_scale_inv = scale_inv[gemm_x_idx]
     wgrad = fp8_dot_impl(casted_xt, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
                          (xt_constracting_dim, gt_constracting_dim))
 
     g_constracting_dim = tuple(
-        i for i in range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
-    k_constracting_dim = tuple(i for i in range(len(rhs_contracting_dims), len(kernel_shape)))
+        range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
+    k_constracting_dim = tuple(range(len(rhs_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_constracting_dim, k_constracting_dim))

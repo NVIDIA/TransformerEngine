@@ -116,7 +116,7 @@ def global_shard_guard(resource: MeshResource):
 
 def global_mesh_resource() -> MeshResource:
     """
-    A getter of  the global MeshResource
+    A getter of the global MeshResource
     """
     return _GLOBAL_MESH_RESOURCE
 

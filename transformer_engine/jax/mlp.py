@@ -128,7 +128,7 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     assert len(kernel_2.shape) == 2
 
     x_contracting_dims = (len(x.shape) - 1,)
-    xt_batch_dims = tuple(i for i in range(1, x.ndim))
+    xt_batch_dims = tuple(range(1, x.ndim))
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[0]
     assert kernel_1.shape[-1] == kernel_2.shape[0]

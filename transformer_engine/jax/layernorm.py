@@ -68,7 +68,7 @@ def _layernorm_fwd_rule(x,
         output, rsigma = rmsnorm_fwd(x, gamma, epsilon)
         mu = None
     else:
-        raise ValueError(f"{layernorm_type} is not supported.")
+        raise ValueError(f"{layernorm_type=} is not supported.")
     return output, (x, mu, rsigma, gamma)
 
 
@@ -88,7 +88,7 @@ def _layernorm_bwd_rule(layernorm_type, zero_centered_gamma, epsilon, ctx, dz):
         dx, dgamma = rmsnorm_bwd(dz, x, rsigma, gamma, epsilon=epsilon)
         dbeta = None
     else:
-        raise ValueError(f"{layernorm_type} is not supported.")
+        raise ValueError(f"{layernorm_type=} is not supported.")
 
     return dx, dgamma, dbeta
 
@@ -227,15 +227,15 @@ def _layernorm_fp8_dot_bwd_rule(
         cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
                        static_axis_boundary=-1, transpose_axis_boundary=min(x_contracting_dims))
 
-    xt_constracting_dim = tuple(i for i in range(len(x_contracting_dims), len(x_shape)))
-    gt_constracting_dim = tuple(i for i in range(grad.ndim - len(xt_constracting_dim), grad.ndim))
+    xt_constracting_dim = tuple(range(len(x_contracting_dims), len(x_shape)))
+    gt_constracting_dim = tuple(range(grad.ndim - len(xt_constracting_dim), grad.ndim))
     x_scale_inv = scale_inv[gemm_x_idx]
     wgrad = fp8_dot_impl(ln_out_t, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
                          (xt_constracting_dim, gt_constracting_dim))
 
     g_constracting_dim = tuple(
-        i for i in range(grad.ndim - len(kernel_shape) + len(k_contracting_dims), grad.ndim))
-    k_constracting_dim = tuple(i for i in range(len(k_contracting_dims), len(kernel_shape)))
+        range(grad.ndim - len(kernel_shape) + len(k_contracting_dims), grad.ndim))
+    k_constracting_dim = tuple(range(len(k_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_constracting_dim, k_constracting_dim))

@@ -43,26 +43,26 @@ for _name, _value in transformer_engine_jax.registrations().items():
     xla_client.register_custom_call_target(_name, _value, platform="CUDA")
 
 
-def te_dtype_to_jax_dtype(te_dtype):    # pylint: disable=too-many-return-statements
+def te_dtype_to_jax_dtype(te_dtype):
     """
     convert TE dtype to jax dtype
     """
     assert isinstance(te_dtype, TEDType)
-    if te_dtype == TEDType.kFloat32:
-        return jnp.float32
-    if te_dtype == TEDType.kFloat16:
-        return jnp.float16
-    if te_dtype == TEDType.kBFloat16:
-        return jnp.bfloat16
-    if te_dtype == TEDType.kInt32:
-        return jnp.int32
-    if te_dtype == TEDType.kInt64:
-        return jnp.int64
-    if te_dtype == TEDType.kFloat8E4M3:
-        return jnp.float8_e4m3fn
-    if te_dtype == TEDType.kFloat8E5M2:
-        return jnp.float8_e5m2
-    raise ValueError(f"Not support the {te_dtype=}")
+
+    converter = {
+        TEDType.kFloat32: jnp.float32,
+        TEDType.kFloat16: jnp.float16,
+        TEDType.kBFloat16: jnp.bfloat16,
+        TEDType.kInt32: jnp.int32,
+        TEDType.kInt64: jnp.int64,
+        TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
+        TEDType.kFloat8E5M2: jnp.float8_e5m2,
+    }
+
+    if te_dtype not in converter:
+        raise ValueError(f"Unsupported {te_dtype=}")
+
+    return converter.get(te_dtype)
 
 
 def te_dtype_to_ir_dtype(te_dtype):
@@ -84,17 +84,21 @@ def jax_dtype_to_te_dtype(jax_dtype):
     convert jax dtype to TE dtype
     """
     jax_dtype = dtypes.canonicalize_dtype(jax_dtype)
-    if jax_dtype == jnp.float32:
-        return TEDType.kFloat32
-    if jax_dtype == jnp.float16:
-        return TEDType.kFloat16
-    if jax_dtype == jnp.bfloat16:
-        return TEDType.kBFloat16
-    if jax_dtype == jnp.float8_e4m3fn:
-        return TEDType.kFloat8E4M3
-    if jax_dtype == jnp.float8_e5m2:
-        return TEDType.kFloat8E5M2
-    raise ValueError(f"Not support the {jax_dtype=}")
+
+    converter = {
+        jnp.float32.dtype: TEDType.kFloat32,
+        jnp.float16.dtype: TEDType.kFloat16,
+        jnp.bfloat16.dtype: TEDType.kBFloat16,
+        jnp.int32.dtype: TEDType.kInt32,
+        jnp.int64.dtype: TEDType.kInt64,
+        jnp.float8_e4m3fn.dtype: TEDType.kFloat8E4M3,
+        jnp.float8_e5m2.dtype: TEDType.kFloat8E5M2,
+    }
+
+    if jax_dtype not in converter:
+        raise ValueError(f"Unsupported {jax_dtype=}")
+
+    return converter.get(jax_dtype)
 
 
 def get_padded_spec(arg_info):
@@ -107,7 +111,7 @@ def get_padded_spec(arg_info):
     return te_get_padded_spec(spec, ndim)
 
 
-def assert_not_supported_batch_dim(bdims):
+def _check_valid_batch_dims(bdims):
     """
     Assert out non-supported bath dims
     """
@@ -363,7 +367,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert LayerNormFwdPrimitive.outer_primitive is not None
         x, gamma, beta = batched_args
         x_bdim, _, _ = batch_dims
@@ -392,7 +396,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
     @staticmethod
     def partition(zero_centered_gamma, epsilon, mesh, arg_infos, result_infos):
         del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
+        x_spec, g_spec, b_spec = map(get_padded_spec, arg_infos)
         if x_spec[-1] is not None:
             warnings.warn(
                 f"Does not support to shard hidden dim in {LayerNormFwdPrimitive.name}! " \
@@ -400,11 +404,11 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        b_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[2])))
+        g_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
+        b_sharding = NamedSharding(mesh, PartitionSpec(*b_spec))
         out_sharding = x_sharding
-        mu_sharding = rsigma_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        mu_sharding = rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
+
         arg_shardings = (x_sharding, g_sharding, b_sharding)
         out_shardings = (out_sharding, mu_sharding, rsigma_sharding)
         impl = partial(LayerNormFwdPrimitive.impl,
@@ -509,7 +513,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, zero_centered_gamma, epsilon):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert LayerNormBwdPrimitive.outer_primitive is not None
         dz, x, mu, rsigma, gamma = batched_args
         _, x_bdim, _, _, gamma_bdim = batch_dims
@@ -552,7 +556,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = dbeta_sharding = NamedSharding(mesh, PartitionSpec(*g_b_spec))
         out_shardings = dx_sharding, dgamma_sharding, dbeta_sharding
-        x_shardings = (dx_sharding,) * 2
+        x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         mu_shardings = (NamedSharding(mesh, PartitionSpec(*x_spec[:-1])),) * 2
         arg_shardings = (*x_shardings, *mu_shardings, NamedSharding(mesh, PartitionSpec(*g_b_spec)))
 
@@ -665,7 +669,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert RmsNormFwdPrimitive.outer_primitive is not None
         x, gamma = batched_args
         x_bdim, _ = batch_dims
@@ -690,7 +694,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
     @staticmethod
     def partition(epsilon, mesh, arg_infos, result_infos):
         del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
+        x_spec, g_spec = map(get_padded_spec, arg_infos)
         if x_spec[-1] is not None:
             warnings.warn(
                 f"Does not support to shard hidden dim in {RmsNormFwdPrimitive.name}! " \
@@ -698,9 +702,9 @@ class RmsNormFwdPrimitive(BasePrimitive):
                 f"and hurt performance."
             )
         x_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
-        g_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
+        g_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
         out_sharding = x_sharding
-        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]))
+        rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (x_sharding, g_sharding)
         out_shardings = (out_sharding, rsigma_sharding)
         impl = partial(RmsNormFwdPrimitive.impl, epsilon=epsilon)
@@ -760,7 +764,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
         x_shape = x_type.shape
         g_type = ir.RankedTensorType(gamma.type)
         g_shape = g_type.shape
-        go_shape = ir.RankedTensorType(dz.type).shape
+        dz_shape = ir.RankedTensorType(dz.type).shape
         rsigma_shape = ir.RankedTensorType(rsigma.type).shape
 
         hidden_size = reduce(operator.mul, g_shape)
@@ -771,7 +775,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
             ir.RankedTensorType.get(g_shape, g_type.element_type),
         ]
         operands = [dz, rsigma, x, gamma]
-        operand_shapes = [go_shape, rsigma_shape, x_shape, g_shape]
+        operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -795,7 +799,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, epsilon):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert RmsNormBwdPrimitive.outer_primitive is not None
         dz, x, rsigma, gamma = batched_args
         _, x_bdim, _, gamma_bdim = batch_dims
@@ -833,7 +837,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
         dx_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1], None))
         dgamma_sharding = NamedSharding(mesh, PartitionSpec(*g_spec))
         out_shardings = dx_sharding, dgamma_sharding
-        x_shardings = (dx_sharding,) * 2
+        x_shardings = (dx_sharding,) * 2    # dz and x should have the same sharding.
         rsigma_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-1]))
         arg_shardings = (*x_shardings, rsigma_sharding, NamedSharding(mesh, PartitionSpec(*g_spec)))
 
@@ -884,7 +888,7 @@ class SoftmaxPrimitive(BasePrimitive):
         return batches_per_block
 
     @staticmethod
-    def forward_abstract(logits_aval, scale_factor):    # pylint: disable=unused-argument
+    def forward_abstract(logits_aval, scale_factor):
         """
         softmax_forward abstract
         """
@@ -1121,7 +1125,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         return SoftmaxPrimitive.forward_batcher(ScaledSoftmaxFwdPrimitive.outer_primitive,
                                                 batched_args,
                                                 batch_dims,
@@ -1195,7 +1199,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         return SoftmaxPrimitive.backward_batcher(ScaledSoftmaxBwdPrimitive.outer_primitive,
                                                  batched_args,
                                                  batch_dims,
@@ -1327,7 +1331,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert ScaledMaskedSoftmaxFwdPrimitive.outer_primitive is not None
         logits, mask = batched_args
         logits_bdim, _ = batch_dims
@@ -1414,7 +1418,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         return SoftmaxPrimitive.backward_batcher(ScaledMaskedSoftmaxBwdPrimitive.outer_primitive,
                                                  batched_args,
                                                  batch_dims,
@@ -1500,7 +1504,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         return SoftmaxPrimitive.forward_batcher(
             ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive,
             batched_args,
@@ -1577,7 +1581,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, scale_factor):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         return SoftmaxPrimitive.backward_batcher(
             ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive,
             batched_args,
@@ -1708,11 +1712,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
         del mask_or_cu_seqlen_aval, scaling_factor, is_training
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
-        batch_shape = qkv_aval.shape[:-4]
-        max_seqlen = qkv_aval.shape[-4]
-        nqkv = qkv_aval.shape[-3]
-        num_head = qkv_aval.shape[-2]
-        head_dim = qkv_aval.shape[-1]
+        *batch_shape, max_seqlen, nqkv, num_head, head_dim = qkv_aval.shape
         assert nqkv == 3
         assert qkv_aval.dtype == bias_aval.dtype
 
@@ -1751,10 +1751,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         """
         qkv_aval, _, _, _ = ctx.avals_in
 
-        batch = reduce(operator.mul, qkv_aval.shape[:-4])
-        max_seqlen = qkv_aval.shape[-4]
-        num_head = qkv_aval.shape[-2]
-        head_dim = qkv_aval.shape[-1]
+        *batch_shape, max_seqlen, _, num_head, head_dim = qkv_aval.shape
+        batch = reduce(operator.mul, batch_shape)
 
         operands = [qkv, bias, cu_seqlen, seed]
         operand_shapes = map(lambda x: x.type.shape, operands)
@@ -1794,7 +1792,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert SelfFusedAttnFwdPrimitive.outer_primitive is not None
         qkv, bias, cu_seqlen, seed = batched_args
         qkv_bdim, _, _, seed_bdim = batch_dims
@@ -1891,13 +1889,11 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         """
         del softmax_aux_aval, rng_state_aval
         # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
-        del mask_or_cu_seqlen_aval, output_aval, attn_mask_type
+        del mask_or_cu_seqlen_aval, attn_mask_type
         del scaling_factor, dropout_probability, is_training
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
-        assert qkv_aval.dtype == doutput_aval.dtype
-        batch_shape = qkv_aval.shape[:-4]
-        max_seqlen = qkv_aval.shape[-4]
-        num_head = qkv_aval.shape[-2]
+        assert qkv_aval.dtype == output_aval.dtype == doutput_aval.dtype
+        *batch_shape, max_seqlen, num_head, _ = output_aval.shape
 
         if attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS:
             bias_shape = (0,)
@@ -1917,10 +1913,8 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         """
         qkv_aval, _, _, _, _, _ = ctx.avals_in
 
-        batch = reduce(operator.mul, qkv_aval.shape[:-4])
-        max_seqlen = qkv_aval.shape[-4]
-        num_head = qkv_aval.shape[-2]
-        head_dim = qkv_aval.shape[-1]
+        *batch_shape, max_seqlen, _, num_head, head_dim = qkv_aval.shape
+        batch = reduce(operator.mul, batch_shape)
 
         operands = [qkv, softmax_aux, rng_state, output, doutput, cu_seqlen]
         operand_shapes = map(lambda x: x.type.shape, operands)
@@ -1963,7 +1957,7 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert SelfFusedAttnBwdPrimitive.outer_primitive is not None
         qkv, softmax_aux, rng_state, output, doutput, cu_seqlen = batched_args
         qkv_bdim, *_ = batch_dims
@@ -2074,17 +2068,10 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         del scaling_factor, dropout_probability, is_training
 
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
-        q_batch_shape = q_aval.shape[:-3]
-        q_max_seqlen = q_aval.shape[-3]
-        q_num_head = q_aval.shape[-2]
-        q_head_dim = q_aval.shape[-1]
+        *q_batch_shape, q_max_seqlen, q_num_head, q_head_dim = q_aval.shape
 
         kv_dtype = dtypes.canonicalize_dtype(kv_aval.dtype)
-        kv_batch_shape = kv_aval.shape[:-4]
-        kv_max_seqlen = kv_aval.shape[-4]
-        nkv = kv_aval.shape[-3]
-        kv_num_head = kv_aval.shape[-2]
-        kv_head_dim = kv_aval.shape[-1]
+        *kv_batch_shape, kv_max_seqlen, nkv, kv_num_head, kv_head_dim = kv_aval.shape
 
         assert q_dtype == kv_dtype
         assert q_batch_shape == kv_batch_shape
@@ -2112,10 +2099,8 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         q_aval, kv_aval, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
-        batch = reduce(operator.mul, q_aval.shape[:-3])
-        q_max_seqlen = q_aval.shape[-3]
-        num_head = q_aval.shape[-2]
-        head_dim = q_aval.shape[-1]
+        *batch_shape, q_max_seqlen, num_head, head_dim = q_aval.shape
+        batch = reduce(operator.mul, batch_shape)
         kv_max_seqlen = kv_aval.shape[-4]
 
         operands = [q, kv, q_cu_seqlen, kv_cu_seqlen, seed]
@@ -2159,7 +2144,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert CrossFusedAttnFwdPrimitive.outer_primitive is not None
         q, kv, q_cu_seqlen, kv_cu_seqlen, seed = batched_args
         q_bdim, *_ = batch_dims
@@ -2277,10 +2262,8 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         q_aval, kv_aval, _, _, _, _ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
-        batch = reduce(operator.mul, q_aval.shape[:-3])
-        q_max_seqlen = q_aval.shape[-3]
-        num_head = q_aval.shape[-2]
-        head_dim = q_aval.shape[-1]
+        *batch_shape, q_max_seqlen, num_head, head_dim = q_aval.shape
+        batch = reduce(operator.mul, batch_shape)
         kv_max_seqlen = kv_aval.shape[-4]
 
         operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
@@ -2328,7 +2311,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, attn_bias_type, attn_mask_type, scaling_factor,
                 dropout_probability, is_training):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert CrossFusedAttnBwdPrimitive.outer_primitive is not None
         q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen = batched_args
         q_bdim, kv_bdim, *_ = batch_dims
@@ -2472,7 +2455,7 @@ class GatedGeluPrimitive(BasePrimitive):
         """
         gated_gelu batcher
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert GatedGeluPrimitive.outer_primitive is not None
         inputs, = batched_args
         inputs_bdim, = batch_dims
@@ -2595,7 +2578,7 @@ class DgatedGeluPrimitive(BasePrimitive):
         """
         dgated_gelu batcher
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert DgatedGeluPrimitive.outer_primitive is not None
         dz, x = batched_args
         _, x_bdim = batch_dims
@@ -2755,7 +2738,7 @@ class CastTransposePrimitive(BasePrimitive):
     @staticmethod
     def impl(x, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis_boundary):
         """
-        tcast_transpose implementation
+        te_cast_transpose implementation
         """
         assert CastTransposePrimitive.inner_primitive is not None
         casted_x, casted_transposed_x, updated_amax = \
@@ -2768,7 +2751,7 @@ class CastTransposePrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary,
                 transpose_axis_boundary):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert CastTransposePrimitive.outer_primitive is not None
         assert static_axis_boundary < 0
 
@@ -2916,7 +2899,7 @@ class TransposePrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, static_axis_boundary, transpose_axis_boundary):
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert TransposePrimitive.outer_primitive is not None
         assert static_axis_boundary < 0
 
@@ -3097,7 +3080,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert LayerNormFwdFp8Primitive.outer_primitive is not None
         x, gamma, beta, amax, scale, scale_inv = batched_args
         x_bdim, _, _, amax_bdim, _, _ = batch_dims
@@ -3298,7 +3281,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert RmsNormFwdFp8Primitive.outer_primitive is not None
         x, gamma, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims
@@ -3466,7 +3449,7 @@ class GatedGeluFp8Primitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert GatedGeluFp8Primitive.outer_primitive is not None
         x, amax, scale, scale_inv = batched_args
         x_bdim, amax_bdim, _, _ = batch_dims
@@ -3628,7 +3611,7 @@ class DgatedGeluCastTransposePrimitive(BasePrimitive):
         to describe batch rules for vmap
         """
         del static_axis_boundary
-        assert_not_supported_batch_dim(batch_dims)
+        _check_valid_batch_dims(batch_dims)
         assert DgatedGeluCastTransposePrimitive.outer_primitive is not None
         dz, x, amax, scale, scale_inv = batched_args
         x_bdim, _, amax_bdim, _, _ = batch_dims

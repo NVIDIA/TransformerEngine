@@ -817,7 +817,7 @@ class LayerNormMLP(TransformerEngineBase):
 
         # LayerNorm
         if self.enable_layernorm:
-            assert self.axis == -1    # Only support axis ==-1 at this moment
+            assert self.axis == -1    # Only support axis == -1 at this moment
 
             features = inputs.shape[-1]
 

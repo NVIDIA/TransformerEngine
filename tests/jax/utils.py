@@ -1011,7 +1011,6 @@ class DecoderLayer(nn.Module):
         return z
 
 
-@staticmethod
 def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
     shape = (batch, seqlen)
     idxs = jnp.broadcast_to(jnp.arange(shape[-1], dtype=jnp.int32), shape)
@@ -1022,7 +1021,6 @@ def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
     return mask.astype(dtype)
 
 
-@staticmethod
 def make_self_mask(batch, seqlen, dtype=jnp.uint8):
     shape = (batch, seqlen)
     mask = jnp.ones((*shape, shape[-1]))
