@@ -44,7 +44,6 @@ from ..jit import no_torch_dynamo
 from ._common import _apply_normalization
 from ..float8_tensor import Float8Tensor
 
-from ..float8_tensor import Float8Tensor
 
 __all__ = ["LayerNormLinear"]
 

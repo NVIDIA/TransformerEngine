@@ -2157,7 +2157,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
         opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim, scaling_factor, dropout_probability,
+            batch, num_head, num_head, max_seqlen, max_seqlen, head_dim,
+            scaling_factor, dropout_probability,
             attn_bias_type, attn_mask_type, jax_dtype_to_te_dtype(qkv_aval.dtype), is_training)
 
         out = custom_caller(SelfFusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
