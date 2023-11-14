@@ -126,8 +126,6 @@ Flax
 
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
-        # Update FP8 metas
-        other_variables = te.update_fp8_metas(other_grads)
 
 .. overview-end-marker-do-not-remove
 
@@ -135,37 +133,47 @@ Installation
 ----------
 .. installation
 
-In the NGC container
-^^^^^^^^^^^^^^^^^^^^
-
-The quickest way to get started with Transformer Engine is the NGC PyTorch container on
-`NVIDIA GPU Cloud Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_ (versions 22.09 and later).
-
-.. code-block:: bash
-
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.04-py3
-
-Where 23.04 is the container version. For example, 23.04 for the April 2023 release.
-
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
 * Linux x86_64
-* CUDA 11.8 or later
+* CUDA 11.8+ for Hopper and CUDA 12.1+ for Ada
 * NVIDIA Driver supporting CUDA 11.8 or later
 * cuDNN 8.1 or later
 * For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
 
+Docker
+^^^^^^^^^^^^^^^^^^^^
+
+The quickest way to get started with Transformer Engine is by using Docker images on
+`NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_. For example to use the NGC PyTorch container interactively,
+
+.. code-block:: bash
+
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.10-py3
+
+Where 23.10 is the container version. For example, 23.10 for the October 2023 release.
+
+pip
+^^^^^^^^^^^^^^^^^^^^
+To install the latest stable version of Transformer Engine,
+
+.. code-block:: bash
+
+    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
+
 From source
 ^^^^^^^^^^^
+`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_.
 
-`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html>`_.
-
-Compiling with Flash Attention 2
+Compiling with FlashAttention-2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance. 
 
-TransformerEngine release v0.11.0 adds support for Flash Attention 2.0 for improved performance. It is a known issue that Flash Attention 2.0 compilation is
-resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory
-errors during the installation of TransformerEngine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue. If the errors persist, install a supported version of Flash Attention 1 (v1.0.6 to v1.0.9).
+It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue. If the errors persist, install a supported version of FlashAttention-1 (v1.0.6 to v1.0.9).
+
+Note that NGC PyTorch 23.08+ containers include FlashAttention-2.
 
 Model Support
 ----------

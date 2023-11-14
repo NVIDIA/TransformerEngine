@@ -83,12 +83,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
         .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
         .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+        .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+        .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
 
     pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
-        .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
-        .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-        .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED);
+        .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)
+        .value("NVTE_BSHD_BS2HD", NVTE_QKV_Layout::NVTE_BSHD_BS2HD);
 
     pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
         .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)

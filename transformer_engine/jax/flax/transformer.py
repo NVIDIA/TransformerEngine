@@ -23,13 +23,12 @@ from jax import lax, vmap
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..fused_attn import AttnBiasType, AttnMaskType
+from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
-from ..sharding import infer_major_sharding_type, infer_sharding_type
-from ..sharding import global_shard_resource, with_sharding_constraint
-from ..sharding import ShardingType
+from ..sharding import global_mesh_resource, num_of_devices
+from ..sharding import with_sharding_constraint
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -102,7 +101,7 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         else:
             rules_map[key] = [val]
 
-    gsr = global_shard_resource()
+    gsr = global_mesh_resource()
 
     batch_dim_rule = []
     if gsr.dp_resource is not None:
@@ -186,7 +185,6 @@ def core_attention(query: Array,
                    scale_factor: float,
                    transpose_batch_sequence: bool,
                    softmax_type: SoftmaxType = SoftmaxType.SCALED,
-                   softmax_sharding_type: ShardingType = ShardingType.SINGLE,
                    mask: Optional[Array] = None,
                    bias: Optional[Array] = None,
                    dropout_rng: Optional[PRNGKey] = None,
@@ -226,9 +224,7 @@ def core_attention(query: Array,
         fused_scale_factor = scale_factor
 
     attn_weights = Softmax(softmax_type=softmax_type,
-                           scale_factor=fused_scale_factor,
-                           sharding_type=softmax_sharding_type)(attn_weights, mask,
-                                                                bias).astype(dtype)
+                           scale_factor=fused_scale_factor)(attn_weights, mask, bias).astype(dtype)
 
     if not deterministic and dropout_rate > 0.:
         keep_prob = 1.0 - dropout_rate
@@ -247,7 +243,7 @@ def core_attention(query: Array,
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Multi-head Attention (MHA), including Query,
     Key, Value and Output projection.
@@ -422,12 +418,14 @@ class MultiHeadAttention(nn.Module):
             Convert the string to AttnMaskType
             """
             if attn_mask_type == 'causal':
-                return AttnMaskType.CAUSAL_MASK
+                return AttnMaskType.PADDING_CAUSAL_MASK
             if attn_mask_type == 'padding':
                 return AttnMaskType.PADDING_MASK
             raise ValueError(f"Unsupported {attn_mask_type=}, "
                              "supported attn_mask_type = {'causal', 'padding'}")
 
+        is_self_attn = (inputs_q is inputs_kv)
+        qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
         canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
@@ -441,7 +439,7 @@ class MultiHeadAttention(nn.Module):
         def _check_head_dim(head_dim):
             return head_dim in [64, 128]
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype,
+        has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.dropout_rate, q_seqlen,
                                                                kv_seqlen, self.head_dim)
@@ -480,11 +478,9 @@ class MultiHeadAttention(nn.Module):
                 f"Fused attention is not enabled. Because " \
                 f"{reason}fall back to unfused attention.")
 
-        first_sharding_type, second_sharding_type = infer_sharding_type()
-
         residual = inputs_q
         if self.fuse_qkv:
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
@@ -492,7 +488,6 @@ class MultiHeadAttention(nn.Module):
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=(3, self.num_heads * self.head_dim),
-                    sharding_type=first_sharding_type,
                     transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.apply_residual_connection_post_layernorm,
                     scale_axes=(W_NO_SHARD_AXES,),
@@ -514,7 +509,6 @@ class MultiHeadAttention(nn.Module):
                     epsilon=self.layernorm_epsilon,
                     axis=-1,
                     features=self.num_heads * self.head_dim,
-                    sharding_type=first_sharding_type,
                     transpose_batch_sequence=self.transpose_batch_sequence,
                     return_layernorm_output=self.apply_residual_connection_post_layernorm,
                     scale_axes=(W_NO_SHARD_AXES,),
@@ -528,7 +522,6 @@ class MultiHeadAttention(nn.Module):
                     name='query')(inputs_q)
                 kv_proj = DenseGeneral(axis=-1,
                                        features=(2, self.num_heads * self.head_dim),
-                                       sharding_type=first_sharding_type,
                                        transpose_batch_sequence=self.transpose_batch_sequence,
                                        kernel_axes=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
                                        kernel_init=kv_init,
@@ -544,7 +537,6 @@ class MultiHeadAttention(nn.Module):
                 DenseGeneral,
                 axis=-1,
                 features=self.num_heads * self.head_dim,
-                sharding_type=first_sharding_type,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 kernel_axes=(W_FSDP_AXES, W_TP_AXES),
                 use_bias=self.use_bias,
@@ -558,7 +550,6 @@ class MultiHeadAttention(nn.Module):
                 epsilon=self.layernorm_epsilon,
                 axis=-1,
                 features=self.num_heads * self.head_dim,
-                sharding_type=first_sharding_type,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 return_layernorm_output=True,
                 scale_axes=(W_NO_SHARD_AXES,),
@@ -571,7 +562,7 @@ class MultiHeadAttention(nn.Module):
                 kernel_init=query_init,
                 name='query')(inputs_q)
 
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 assert ln_out is not None
                 inputs_kv = ln_out
 
@@ -646,11 +637,11 @@ class MultiHeadAttention(nn.Module):
 
             seed = None
             if dropout_rng is not None:
-                seed = jax.random.split(dropout_rng, len(jax.devices()))
+                seed = jax.random.split(dropout_rng, num_of_devices())
                 # ensure the old key never used
                 del dropout_rng
 
-            if inputs_q is inputs_kv:
+            if is_self_attn:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
                 qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                            HIDDEN_AXES)
@@ -663,8 +654,7 @@ class MultiHeadAttention(nn.Module):
                                     attn_mask_type=attn_mask_type,
                                     scaling_factor=scale_factor,
                                     dropout_probability=self.dropout_rate,
-                                    is_training=not deterministic,
-                                    sharding_type=first_sharding_type)
+                                    is_training=not deterministic)
             else:
                 assert bias is None
                 query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
@@ -683,8 +673,7 @@ class MultiHeadAttention(nn.Module):
                                      attn_mask_type=attn_mask_type,
                                      scaling_factor=scale_factor,
                                      dropout_probability=self.dropout_rate,
-                                     is_training=not deterministic,
-                                     sharding_type=first_sharding_type)
+                                     is_training=not deterministic)
         else:
 
             def convert_to_softmax_type(attn_mask_type, mask):
@@ -708,7 +697,6 @@ class MultiHeadAttention(nn.Module):
                                scale_factor=scale_factor,
                                transpose_batch_sequence=self.transpose_batch_sequence,
                                softmax_type=softmax_type,
-                               softmax_sharding_type=first_sharding_type,
                                mask=mask,
                                bias=bias,
                                dropout_rng=dropout_rng,
@@ -726,7 +714,6 @@ class MultiHeadAttention(nn.Module):
         x = _with_sharding_constraint(x, attn_context_sharding_constraint)
 
         out = DenseGeneral(features=inputs_q.shape[-1],
-                           sharding_type=second_sharding_type,
                            transpose_batch_sequence=self.transpose_batch_sequence,
                            axis=-1,
                            kernel_init=self.kernel_init,
@@ -739,7 +726,7 @@ class MultiHeadAttention(nn.Module):
         return out, residual
 
 
-class RelativePositionBiases(nn.Module):
+class RelativePositionBiases(nn.Module):    # pylint: disable=too-few-public-methods
     """
     T5-style relative positional embeddings to the attention logits.
 
@@ -846,7 +833,7 @@ class TransformerLayerType(Enum):
     DECODER = "decoder"
 
 
-class TransformerLayer(nn.Module):
+class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     TransformerLayer is made up of a relative embedding,
     an attention block and a feedforward network (MLP).
@@ -1173,7 +1160,6 @@ class TransformerLayer(nn.Module):
             layernorm_type=self.layernorm_type,
             zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.layernorm_epsilon,
-            major_sharding_type=infer_major_sharding_type(),
             transpose_batch_sequence=self.transpose_batch_sequence,
             return_layernorm_output=self.apply_residual_connection_post_layernorm,
             intermediate_dim=self.mlp_hidden_size,
@@ -1206,7 +1192,6 @@ class TransformerLayer(nn.Module):
         z = z + residual
 
         if self.output_layernorm:
-            ln_sharding_type, _ = infer_sharding_type()
             z = LayerNorm(layernorm_type=self.layernorm_type,
                           zero_centered_gamma=self.zero_centered_gamma,
                           epsilon=self.layernorm_epsilon,
@@ -1214,7 +1199,6 @@ class TransformerLayer(nn.Module):
                           bias_axes=(W_NO_SHARD_AXES,),
                           transpose_batch_sequence=self.transpose_batch_sequence,
                           dtype=self.dtype,
-                          sharding_type=ln_sharding_type,
                           name="output_layer_norm")(z)
 
         return z

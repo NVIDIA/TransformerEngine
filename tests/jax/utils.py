@@ -3,8 +3,9 @@
 # See LICENSE for license information.
 
 import functools
+import math
 import operator
-from typing import Any, Callable, Tuple, Sequence, Union, Iterable, Optional
+from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +15,8 @@ from flax.linen import partitioning as nn_partitioning
 from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
+
+from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -1008,15 +1011,116 @@ class DecoderLayer(nn.Module):
         return z
 
 
-def assert_allclose(actual,
-                    desired,
-                    rtol=1e-05,
-                    atol=1e-08,
-                    equal_nan=True,
-                    err_msg='',
-                    verbose=True):
+def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
+    shape = (batch, seqlen)
+    idxs = jnp.broadcast_to(jnp.arange(shape[-1], dtype=jnp.int32), shape)
+
+    mask = jnp.greater_equal(jnp.expand_dims(idxs, axis=-1), jnp.expand_dims(idxs, axis=-2))
+    mask = jnp.expand_dims(mask, axis=-3)
+    mask = 1 - mask
+    return mask.astype(dtype)
+
+
+def make_self_mask(batch, seqlen, dtype=jnp.uint8):
+    shape = (batch, seqlen)
+    mask = jnp.ones((*shape, shape[-1]))
+    mask = jnp.expand_dims(mask, axis=-3)
+    mask = 1 - mask
+    return mask.astype(dtype)
+
+
+def assert_allclose(
+    actual: Array,
+    desired: Array,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
+    dtype: Optional[Union[DType, TEDType, np.dtype, str]] = None,
+    **kwargs,
+) -> None:
+    """Check if two tensors are close.
+
+    Args:
+      actual: test tensor.
+      desired: reference tensor.
+      dtype: data type or data type name (default: inferred from
+        `actual`).
+      rtol: relative tolerance (default: based on `dtype`).
+      atol: absolute tolerance (default: based on `dtype`).
+      **kwargs: keyword arguments to pass to np.testing.assert_allclose.
+    """
+
+    # Infer data type if needed
+    if dtype is None:
+        if isinstance(actual, float):
+            dtype = "float32"
+        else:
+            dtype = actual.dtype
+
+    # Determine tolerances
+    tols = dict()
+    if rtol is None or atol is None:
+        tols = dtype_tols(dtype)
+    if rtol is not None:
+        tols["rtol"] = rtol
+    if atol is not None:
+        tols["atol"] = atol
+
+    # Cast tensors to fp32
     if not isinstance(actual, float):
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
-    np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
+
+    # Check if tensors are close
+    np.testing.assert_allclose(actual, desired, **tols, **kwargs)
+
+
+def dtype_tols(
+    dtype: Union[DType, TEDType, np.dtype],
+    reference_value: float = 1.0,
+) -> Dict[str, float]:
+    """Expected numerical tolerance for a data type.
+
+    Args:
+      dtype: data type.
+      reference_value: reference value (default: 1).
+
+    Returns:
+      Dictionary with "rtol" and "atol" as keys
+
+    """
+
+    # Convert to JAX dtype if needed
+    if isinstance(dtype, TEDType):
+        dtype = {
+            TEDType.kByte: jnp.uint8,
+            TEDType.kInt32: jnp.int32,
+            TEDType.kInt64: jnp.int64,
+            TEDType.kFloat32: jnp.float32,
+            TEDType.kFloat16: jnp.float16,
+            TEDType.kBFloat16: jnp.bfloat16,
+            TEDType.kFloat8E4M3: jnp.float8_e4m3fn,
+            TEDType.kFloat8E5M2: jnp.float8_e5m2,
+        }[dtype]
+    elif isinstance(dtype, np.dtype):
+        dtype = jnp.dtype(dtype)
+
+    # Expect bit-wise accuracy for integer dtypes
+    if not jnp.issubdtype(dtype, jnp.floating):
+        return dict(rtol=0, atol=0)
+
+    # Estimate floating-point error
+    finfo = jnp.finfo(dtype)
+    eps_relaxed = math.pow(finfo.eps, 2 / 3)
+    with jax.default_device(jax.devices("cpu")[0]):
+        if isinstance(reference_value, (float, int)):
+            reference_value = jnp.array(reference_value, dtype=dtype)
+        else:
+            reference_value = reference_value.astype(dtype)
+        spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
+        spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
+        ulp = max(spacing_high.item(), spacing_low.item())
+    return dict(
+        rtol=eps_relaxed,
+        atol=max(ulp, eps_relaxed),
+    )

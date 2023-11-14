@@ -87,6 +87,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const int sm_arch_ = cuda::sm_arch(device_id);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  auto cudnn_runtime_version = cudnnGetVersion();
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
           && (sm_arch_ >= 90)
           && (max_seqlen_q == max_seqlen_kv)
@@ -111,6 +112,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+                || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
@@ -131,10 +133,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (max_seqlen_q == max_seqlen_kv)
             && ((head_dim == 64) || (head_dim == 128))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
-            && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+            && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+                || ((cudnn_runtime_version >= 8906) &&
+                    (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
-                || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
+                || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))

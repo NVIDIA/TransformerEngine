@@ -75,15 +75,13 @@ def apply_model(state, images, labels, var_collect, rngs=None):
 
 
 @partial(jax.jit, static_argnums=2)
-def update_model(state, grads, use_fp8):
+def update_model(state, grads):
     """Update model params and FP8 meta."""
     state = state.apply_gradients(grads=grads[PARAMS_KEY])
-    if use_fp8:
-        grads = te.update_fp8_metas(grads)
     return state, grads
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
+def train_epoch(state, train_ds, batch_size, rngs, var_collect):
     """Train for a single epoch."""
     train_ds_size = len(train_ds['image'])
     steps_per_epoch = train_ds_size // batch_size
@@ -97,7 +95,7 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8):
         batch_images = train_ds['image'][perm, ...]
         batch_labels = train_ds['label'][perm, ...]
         grads, loss, accuracy = apply_model(state, batch_images, batch_labels, var_collect, rngs)
-        state, var_collect = update_model(state, grads, use_fp8)
+        state, var_collect = update_model(state, grads)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -150,7 +148,7 @@ def get_datasets():
 
 def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
-    assert "Float8" in str(
+    assert "f8_" in str(
         jax.make_jaxpr(apply_model)(state, jnp.empty(input_shape, dtype=jnp.bfloat16),
                                     jnp.empty(label_shape, dtype=jnp.bfloat16), var_collect))
 
@@ -195,7 +193,7 @@ def train_and_evaluate(args):
             rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
 
             state, train_loss, train_accuracy, var_collect = train_epoch(
-                state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8)
+                state, train_ds, args.batch_size, rngs, var_collect)
             test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size, var_collect)
 
             print(f"Epoch: {epoch:>2} "
@@ -280,7 +278,7 @@ class TestMNIST(unittest.TestCase):
         """Check If loss and accuracy match target"""
         desired_traing_loss = 0.055
         desired_traing_accuracy = 0.98
-        desired_test_loss = 0.035
+        desired_test_loss = 0.04
         desired_test_accuracy = 0.098
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_traing_accuracy

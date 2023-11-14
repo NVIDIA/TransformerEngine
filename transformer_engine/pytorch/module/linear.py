@@ -26,6 +26,7 @@ from ..utils import (
     get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
+    clear_tensor_data,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -82,6 +83,7 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
+        ub_name: str,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -180,7 +182,7 @@ class _Linear(torch.autograd.Function):
             proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                 None, None, None, activation_dtype)
             if ub_split_rs or ub_atomic_gemm_rs:
-                ub_obj_projout = get_ub("proj_fprop")
+                ub_obj_projout = get_ub(ub_name+"_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
@@ -285,6 +287,7 @@ class _Linear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.ub_split_ag = ub_split_ag
             ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+            ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
@@ -326,7 +329,7 @@ class _Linear(torch.autograd.Function):
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ctx.ub_obj_gradout = get_ub("proj_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name+"_dgrad")
             (
                 grad_output,
                 grad_output_c,
@@ -429,6 +432,7 @@ class _Linear(torch.autograd.Function):
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
+                        clear_tensor_data(inputmat_t_total)
                     else:
                         wgrad, _, _ = gemm(
                             inputmat_total,
@@ -440,6 +444,7 @@ class _Linear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                         )
+                        clear_tensor_data(inputmat_total)
                 else:
                     # WGRAD
                     wgrad, grad_bias, _ = gemm(
@@ -453,6 +458,7 @@ class _Linear(torch.autograd.Function):
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
+                    clear_tensor_data(inputmat_total)
 
             # Column Parallel Linear
             if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
@@ -465,6 +471,11 @@ class _Linear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
+                wgrad = torch.empty(weight.main_grad.shape,
+                                   dtype=weight.dtype,
+                                   device=torch.cuda.current_device(),
+                                   requires_grad=False
+                                   )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
@@ -476,6 +487,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -583,6 +595,7 @@ class Linear(TransformerEngineBaseModule):
         ub_split_ag: bool = False,
         ub_atomic_gemm_rs: bool = False,
         ub_atomic_gemm_ag: bool = False,
+        ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -599,6 +612,9 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
+            assert ub_name is not None, "Userbuffer name [string] is not set."
+        self.ub_name = ub_name
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -843,6 +859,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_split_ag,
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag,
+                self.ub_name,
             )
             out = linear_fn(*args)
 

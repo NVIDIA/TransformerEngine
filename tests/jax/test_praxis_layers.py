@@ -38,6 +38,16 @@ ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
 
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
+    """
+    Clear all live arrays to keep the resource clean
+    """
+    yield
+    for arr in jax.live_arrays():
+        arr.delete()
+
+
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, \
