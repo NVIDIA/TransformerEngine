@@ -969,7 +969,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
-  
+
     size_t workspace_size = 0;
 
     bool check_support = false;
@@ -1033,7 +1033,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
     void* devPtrDropoutSeed = rng_state->data.dptr;
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
-  
+
     size_t workspace_size = 0;
 
     bool check_support = false;
