@@ -11,6 +11,7 @@
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "fused_attn_fp8.h"
 #include "../util/cuda_runtime.h"
+#include "../util/system.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
@@ -18,7 +19,6 @@ NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
         case NVTE_QKV_Layout::NVTE_SB3HD:
         case NVTE_QKV_Layout::NVTE_BS3HD:
         case NVTE_QKV_Layout::NVTE_T3HD:
-        case NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED:
             return NVTE_QKV_Layout_Group::NVTE_3HD;
         case NVTE_QKV_Layout::NVTE_SBH3D:
         case NVTE_QKV_Layout::NVTE_BSH3D:
@@ -27,7 +27,6 @@ NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
         case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
         case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
         case NVTE_QKV_Layout::NVTE_THD_T2HD:
-        case NVTE_QKV_Layout::NVTE_KV_INTERLEAVED:
             return NVTE_QKV_Layout_Group::NVTE_HD_2HD;
         case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
         case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
@@ -36,7 +35,6 @@ NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
         case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
         case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
         case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-        case NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED:
             return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
         default:
             NVTE_ERROR("qkv_layout not supported!");
@@ -63,9 +61,6 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
         case NVTE_QKV_Layout::NVTE_THD_T2HD:
         case NVTE_QKV_Layout::NVTE_THD_TH2D:
         case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-        case NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED:
-        case NVTE_QKV_Layout::NVTE_KV_INTERLEAVED:
-        case NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED:
             return NVTE_QKV_Format::NVTE_THD;
         default:
             NVTE_ERROR("qkv_layout not supported!");
@@ -80,7 +75,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         NVTE_Bias_Type bias_type,
         NVTE_Mask_Type attn_mask_type,
         float dropout, size_t max_seqlen_q,
-        size_t max_seqlen_kv, size_t head_dim) {
+        size_t max_seqlen_kv, size_t head_dim,
+        size_t num_attn_heads, size_t num_gqa_groups) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   const int device_id = cuda::current_device();
@@ -91,56 +87,52 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)
           && (sm_arch_ >= 90)
           && (max_seqlen_q == max_seqlen_kv)
+          && (num_attn_heads == num_gqa_groups)
           && (max_seqlen_q <= 512)
           && (head_dim == 64)
           && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
           && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
-          && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-              || (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD))) {
-#if (CUDNN_VERSION >= 8900)
-    backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
-#else
-    backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-    std::cout << "Warning: FP8 fused attention is supported by cuDNN 8.9.0+."
-           " Please upgrade your cuDNN version if possible." << std::endl;
-#endif
+          && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD)) {
+    if (cudnn_runtime_version >= 8900) {
+      backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
+    } else {
+      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      std::cout << "Warning: FP8 fused attention is supported by cuDNN 8.9.0+."
+          " Please upgrade your cuDNN version if possible." << std::endl;
+    }
   } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
     bool flag_m512 = false;
     bool flag_arb = false;
     if ((sm_arch_ == 80 || sm_arch_ == 90)
             && (head_dim == 64)
+            && (num_attn_heads == num_gqa_groups)
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
-            && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD)
+            && ((qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {
       flag_m512 = true;
     }
-    if (
-#if (CUDNN_VERSION >= 8903)
-        (sm_arch_ >= 80)
-#else
-        (sm_arch_ == 80 || sm_arch_ == 90)
-#endif
-            && (max_seqlen_q == max_seqlen_kv)
-            && ((head_dim == 64) || (head_dim == 128))
+    if ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
+            && (cudnn_runtime_version < 8903 && sm_arch_ == 80 || sm_arch_ == 90)
+            && (max_seqlen_q % 64 == 0)
+            && (max_seqlen_kv % 64 == 0)
+            && (num_attn_heads == num_gqa_groups)
+            && ((head_dim <= 128) && (head_dim % 8 == 0))
             && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
             && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
                 || ((cudnn_runtime_version >= 8906) &&
                     (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)))
-            && ((qkv_layout == NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD)
-                || (qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD))) {
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)))
+            && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
+                || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512))
@@ -148,34 +140,32 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
     }
     if ((max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-      if (flag_m512 == true) {
-        backend = NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen;
-      } else if ((flag_m512 == false) && (flag_arb == true)) {
+      if (flag_arb == true) {
         backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
+      } else if ((flag_arb == false) && (flag_m512 == true)) {
+        backend = NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen;
+      }
+      int env_backend = static_cast<int>(backend);
+      env_backend = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_BACKEND", env_backend);
+      if (((env_backend == static_cast<int>(NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen))
+      && flag_m512)
+          || ((env_backend == static_cast<int>(NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen))
+      && flag_arb)) {
+          backend = static_cast<NVTE_Fused_Attn_Backend>(env_backend);
       }
     }
-    const char* env_backend = std::getenv("NVTE_FUSED_ATTN_BACKEND");
-    if ((max_seqlen_q <= 512) && (max_seqlen_kv <= 512)
-            && (flag_arb == true)
-            && (env_backend != nullptr)
-            && (std::string(env_backend) == std::to_string(
-                    NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen))) {
-      backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
-    }
-#if (CUDNN_VERSION < 8901)
-    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
+    if (cudnn_runtime_version < 8901
+        && backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: FP16/BF16 fused attention is supported by cuDNN 8.9.1+."
            " Please upgrade your cuDNN version if possible." << std::endl;
     }
-#endif
-#if (CUDNN_VERSION < 8900)
-    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+    if (cudnn_runtime_version < 8900
+        && backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
       backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       std::cout << "Warning: FP16/BF16 fused attention is supported by cuDNN 8.9.0+."
            " Please upgrade your cuDNN version if possible." << std::endl;
     }
-#endif
   } else {
     backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
@@ -208,10 +198,17 @@ void nvte_fused_attn_fwd_qkvpacked(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // QKV shape is [total_seqs, 3, h, d]
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
-  size_t h = input_QKV->data.shape[ndim - 2];
+  size_t h = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+      h = input_QKV->data.shape[ndim - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+      h = input_QKV->data.shape[ndim - 3];
+  } else {
+      NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
+  }
   size_t d = input_QKV->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
@@ -221,7 +218,7 @@ void nvte_fused_attn_fwd_qkvpacked(
               nvte_get_fused_attn_backend(
                           QKV_type, QKV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen, max_seqlen, d);
+                          dropout, max_seqlen, max_seqlen, d, h, h);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -297,10 +294,17 @@ void nvte_fused_attn_bwd_qkvpacked(
   Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // QKV shape is [total_seqs, 3, h, d]
   auto ndim = input_QKV->data.shape.size();
   size_t b = input_cu_seqlens->data.shape[0] - 1;
-  size_t h = input_QKV->data.shape[ndim - 2];
+  size_t h = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+      h = input_QKV->data.shape[ndim - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+      h = input_QKV->data.shape[ndim - 3];
+  } else {
+      NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
+  }
   size_t d = input_QKV->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
@@ -310,7 +314,7 @@ void nvte_fused_attn_bwd_qkvpacked(
               nvte_get_fused_attn_backend(
                           QKV_type, QKV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen, max_seqlen, d);
+                          dropout, max_seqlen, max_seqlen, d, h, h);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -395,12 +399,20 @@ void nvte_fused_attn_fwd_kvpacked(
   Tensor *output_O = reinterpret_cast<Tensor*>(O);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // Q shape is [total_seqs, h, d]
-  // KV shape is [total_seqs, h, d]
-  auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  auto ndim = input_Q->data.shape.size();
   size_t h = input_Q->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
+  auto ndim_kv = input_KV->data.shape.size();
+  size_t hg = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      hg = input_KV->data.shape[ndim_kv - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      hg = input_KV->data.shape[ndim_kv - 3];
+  } else {
+      NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -410,7 +422,7 @@ void nvte_fused_attn_fwd_kvpacked(
               nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen_q, max_seqlen_kv, d);
+                          dropout, max_seqlen_q, max_seqlen_kv, d, h, hg);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -426,10 +438,19 @@ void nvte_fused_attn_fwd_kvpacked(
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-    const char* err_msg =
-    "The FP16/BF16 fused attention (arbitrary seqlen) currently "
-    "only supports packed QKV input.\n";
-    NVTE_ERROR(err_msg);
+#if (CUDNN_VERSION >= 8903)
+      fused_attn_arbitrary_seqlen_fwd_kvpacked(
+          b, max_seqlen_q, max_seqlen_kv, h, hg, d,
+          is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_Q, input_KV, input_Bias, output_O,
+          Aux_CTX_Tensors,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
+          input_rng_state,
+          wkspace, stream, handle);
+#else
+    NVTE_ERROR(
+      "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");
+#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else {
@@ -471,12 +492,20 @@ void nvte_fused_attn_bwd_kvpacked(
   Tensor *output_dBias = reinterpret_cast<Tensor*>(dBias);
   Tensor *wkspace = reinterpret_cast<Tensor*>(workspace);
 
-  // Q shape is [total_seqs, h, d]
-  // KV shape is [total_seqs, h, d]
-  auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  auto ndim = input_Q->data.shape.size();
   size_t h = input_Q->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
+  auto ndim_kv = input_KV->data.shape.size();
+  size_t hg = 0;
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+      hg = input_KV->data.shape[ndim_kv - 2];
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+      hg = input_KV->data.shape[ndim_kv - 3];
+  } else {
+      NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -486,7 +515,7 @@ void nvte_fused_attn_bwd_kvpacked(
               nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen_q, max_seqlen_kv, d);
+                          dropout, max_seqlen_q, max_seqlen_kv, d, h, hg);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -503,10 +532,23 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-    const char* err_msg =
-    "The FP16/BF16 fused attention (arbitrary seqlen) currently "
-    "only supports packed QKV input.\n";
+#if (CUDNN_VERSION >= 8903)
+      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
+      fused_attn_arbitrary_seqlen_bwd_kvpacked(
+          b, max_seqlen_q, max_seqlen_kv, h, hg, d,
+          attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+          input_Q, input_KV, input_O, input_dO,
+          output_S,
+          output_dQ, output_dKV, output_dBias,
+          input_cu_seqlens_q, input_cu_seqlens_kv,
+          input_rng_state, wkspace, stream, handle);
+#else
+    const char *err_msg =
+    "cuDNN 8.9.3 is required for BF16/FP16 fused attention "
+    "with arbitrary sequence length. \n";
     NVTE_ERROR(err_msg);
+#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
     NVTE_ERROR("The FP8 fused attention API only supports packed QKV input. \n");
   } else {
@@ -547,6 +589,7 @@ void nvte_fused_attn_fwd(
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h = input_Q->data.shape[ndim - 2];
+  size_t hg = input_K->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
@@ -557,7 +600,7 @@ void nvte_fused_attn_fwd(
               nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen_q, max_seqlen_kv, d);
+                          dropout, max_seqlen_q, max_seqlen_kv, d, h, hg);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -575,7 +618,7 @@ void nvte_fused_attn_fwd(
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
       fused_attn_arbitrary_seqlen_fwd(
-          b, max_seqlen_q, max_seqlen_kv, h, d,
+          b, max_seqlen_q, max_seqlen_kv, h, hg, d,
           is_training, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_Bias, output_O,
           Aux_CTX_Tensors,
@@ -645,6 +688,7 @@ void nvte_fused_attn_bwd(
   auto ndim = input_Q->data.shape.size();
   size_t b = input_cu_seqlens_q->data.shape[0] - 1;
   size_t h = input_Q->data.shape[ndim - 2];
+  size_t hg = input_K->data.shape[ndim - 2];
   size_t d = input_Q->data.shape[ndim - 1];
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
@@ -655,7 +699,7 @@ void nvte_fused_attn_bwd(
               nvte_get_fused_attn_backend(
                           Q_type, KV_type,
                           qkv_layout, bias_type, attn_mask_type,
-                          dropout, max_seqlen_q, max_seqlen_kv, d);
+                          dropout, max_seqlen_q, max_seqlen_kv, d, h, hg);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -676,7 +720,7 @@ void nvte_fused_attn_bwd(
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       const Tensor *input_rng_state = reinterpret_cast<const Tensor*>(Aux_CTX_Tensors->tensors[1]);
       fused_attn_arbitrary_seqlen_bwd(
-          b, max_seqlen_q, max_seqlen_kv, h, d,
+          b, max_seqlen_q, max_seqlen_kv, h, hg, d,
           attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
           input_Q, input_K, input_V, input_O, input_dO,
           output_S,

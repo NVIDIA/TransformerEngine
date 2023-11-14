@@ -366,8 +366,7 @@ static cudnn_frontend::Tensor createDropoutForward(
           .setDataType(CUDNN_DATA_FLOAT)
           .setVirtual(true)
           .setByValue(false)
-          .setReorderType(cudnn_frontend::cudnnBackendTensorReordering_t::
-                          CUDNN_TENSOR_REORDERING_F16x16)
+          .setReorderType(cudnn_frontend::TensorReordering_t::F16x16)
           .build();
   // Scale after dropout
   auto scaleDropoutTensor = tensor_create(
@@ -448,8 +447,7 @@ static cudnn_frontend::Tensor createDropoutBackward(
           .setDataType(CUDNN_DATA_FLOAT)
           .setVirtual(true)
           .setByValue(false)
-          .setReorderType(cudnn_frontend::cudnnBackendTensorReordering_t::
-                          CUDNN_TENSOR_REORDERING_F16x16)
+          .setReorderType(cudnn_frontend::TensorReordering_t::F16x16)
           .build();
   // Scale after dropout (1 / (1 - p))
   auto scaleDropoutTensor = tensor_create(
