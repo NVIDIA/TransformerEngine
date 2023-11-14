@@ -1,6 +1,9 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import operator
+import re
+from functools import reduce
 
 import jax
 from jax.experimental.pjit import pjit, _UNSPECIFIED
@@ -39,6 +42,40 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
     target_splitted_hlo = target_hlo.splitlines()
     start_symb = "-start"
 
+    def count_bytes(hlo_text):
+        bytes_count = 0
+
+        def get_bytes_per_txt(t):
+            '''
+            The pattern of t would be like:
+                'f32[]',
+                '(f32[1024]{0}',
+                'f32[1024]{0})',
+                'f8E4M3FN[1024]{0}',
+                'i32[1024]{0}',
+                'bf16[1024,1024]{0}'
+            '''
+            match = re.search(r'(i|f)(\d+).*\[([0-9,]*)\]', t)
+            _, bits_of_type, shape = match.groups()
+            bytes_of_type = int(bits_of_type) // 8
+            if shape == '':
+                num_of_elements = 1
+            else:
+                num_of_elements = reduce(operator.mul, map(int, shape.split(',')))
+
+            return bytes_of_type * num_of_elements
+
+        # ['xxx-start', '=', '(bf16[xxx]', 'bf16[xxx])', 'xxx-start(', ...]
+        if '(' in hlo_text[2]:
+            for txt in hlo_text[2:]:
+                bytes_count += get_bytes_per_txt(txt)
+                if ')' in txt:
+                    break
+        else:    # ['xxx-start', '=', 'fp32[]', 'xxx-start(', ...]
+            bytes_count = get_bytes_per_txt(hlo_text[2])
+
+        return bytes_count
+
     def count_collectives(splitted_hlo):
         result = generate_collectives_count(0, 0, 0)
 
@@ -46,20 +83,16 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
             txt = line.split()
             if len(txt) > 0 and start_symb in txt[0]:
                 if COLL_AR_KEY in txt[0]:
-                    result[COLL_AR_KEY] += 1
+                    result[COLL_AR_KEY] += count_bytes(txt)
                 elif COLL_AG_KEY in txt[0]:
-                    result[COLL_AG_KEY] += 1
+                    result[COLL_AG_KEY] += count_bytes(txt)
                 else:
-                    result[COLL_OTHER_KEY] += 1
+                    result[COLL_OTHER_KEY] += count_bytes(txt)
         return result
 
     target_result = count_collectives(target_splitted_hlo)
-    for key in target_result:
-        assert key in coll_count_ref
-        # "< reference count" mean potential fusion by XLA.
-        assert target_result[key] <= coll_count_ref[key], \
-            f"The number of {key} ({target_result[key]}) " \
-            f"is more than expected ({coll_count_ref[key]})."
+    assert target_result == coll_count_ref, \
+        f"Expected collective count is {coll_count_ref}, but got {target_result}."
 
 
 def compare_ops(target_func,

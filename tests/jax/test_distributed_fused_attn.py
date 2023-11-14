@@ -24,12 +24,21 @@ DTYPES = [jnp.float16, jnp.bfloat16]
 
 class TestDistributedSelfAttn:
 
-    def generate_collectives_count_ref(self, mesh_resource, with_bias):
+    def generate_collectives_count_ref(self, mesh_shape, mesh_axes, mesh_resource, with_bias, shape,
+                                       dtype):
+        jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
+        _, seqlen, _, heads, _ = shape
         is_dp_enabled = mesh_resource.dp_resource is not None
+        tp_size = 1
+        if mesh_resource.tp_resource is not None:
+            idx = mesh_axes.index(mesh_resource.tp_resource)
+            tp_size = mesh_shape[idx]
+
+        all_reduce_loss_bytes = 4    # 1 * FP32
+        bias_bytes = int(with_bias) * (heads // tp_size) * seqlen * seqlen * jax_dtype.itemsize
+        allreduce_total_bytes = all_reduce_loss_bytes + (bias_bytes * is_dp_enabled)
         # for loss and dbias
-        return generate_collectives_count(allreduce=1 + int(with_bias) * is_dp_enabled,
-                                          allgather=0,
-                                          other=0)
+        return generate_collectives_count(allreduce=allreduce_total_bytes, allgather=0, other=0)
 
     def generate_inputs(self, shape, mesh_resource, with_bias, attn_mask_type, dtype):
         batch, seqlen, _, heads, _ = shape
@@ -108,7 +117,9 @@ class TestDistributedSelfAttn:
         (qkv, bias, mask), (qkv_pspec, bias_pspec, mask_pspec) = \
                 self.generate_inputs(data_shape, mesh_resource, with_bias,
                                      attn_mask_type, dtype)
-        collective_count_ref = self.generate_collectives_count_ref(mesh_resource, with_bias)
+        collective_count_ref = self.generate_collectives_count_ref(mesh_shape, mesh_axes,
+                                                                   mesh_resource, with_bias,
+                                                                   data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
@@ -135,7 +146,8 @@ class TestDistributedCrossAttn:
 
     def generate_collectives_count_ref(self):
         # for loss
-        return generate_collectives_count(allreduce=1, allgather=0, other=0)
+        all_reduce_loss_bytes = 4    # 1 * FP32
+        return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
     def generate_inputs(self, shape, mesh_resource, attn_mask_type, dtype):
         batch, seqlen, heads, hidden = shape

@@ -23,7 +23,8 @@ class TestDistributedSoftmax:
 
     def generate_collectives_count_ref(self):
         # for loss
-        return generate_collectives_count(allreduce=1, allgather=0, other=0)
+        all_reduce_loss_bytes = 4    # 1 * FP32
+        return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
     def generate_inputs(self, shape, mesh_resource, softmax_type, dtype):
         batch, _, sqelen, _ = shape

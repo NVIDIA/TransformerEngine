@@ -38,12 +38,15 @@ class TestDistributedLayernorm:
 
         return (x, gamma, beta), (x_pspec, g_pspec, b_pspec)
 
-    def generate_collectives_count_ref(self, mesh_resource, ln_type):
+    def generate_collectives_count_ref(self, mesh_resource, ln_type, shape, dtype):
+        jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
         is_dp_enabled = mesh_resource.dp_resource is not None
         assert ln_type in ['layernorm', 'rmsnorm']
+        all_reduce_loss_bytes = 4    # 1 * FP32
         # for loss, dgamma and dbeta
-        ar_base_count = 3 if ln_type == 'layernorm' else 2
-        return generate_collectives_count(allreduce=ar_base_count * int(is_dp_enabled),
+        weight_count = 2 if ln_type == 'layernorm' else 1
+        allreduce_total_bytes = all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
+        return generate_collectives_count(allreduce=allreduce_total_bytes * int(is_dp_enabled),
                                           allgather=0,
                                           other=0)
 
@@ -72,7 +75,8 @@ class TestDistributedLayernorm:
 
         (x, gamma, beta), (x_pspec, g_pspec, b_pspec) = \
                 self.generate_inputs(data_shape, mesh_resource, dtype)
-        collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type)
+        collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type,
+                                                                   data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
@@ -108,7 +112,8 @@ class TestDistributedLayernorm:
 
         (x, gamma, _), (x_pspec, g_pspec, _) = \
                 self.generate_inputs(data_shape, mesh_resource, dtype)
-        collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type)
+        collective_count_ref = self.generate_collectives_count_ref(mesh_resource, ln_type,
+                                                                   data_shape, dtype)
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(mesh_resource=mesh_resource):
