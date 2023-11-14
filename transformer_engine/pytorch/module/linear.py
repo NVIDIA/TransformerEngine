@@ -26,6 +26,7 @@ from ..utils import (
     get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
+    clear_tensor_data,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -431,6 +432,7 @@ class _Linear(torch.autograd.Function):
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
+                        clear_tensor_data(inputmat_t_total)
                     else:
                         wgrad, _, _ = gemm(
                             inputmat_total,
@@ -442,6 +444,7 @@ class _Linear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                         )
+                        clear_tensor_data(inputmat_total)
                 else:
                     # WGRAD
                     wgrad, grad_bias, _ = gemm(
@@ -455,6 +458,7 @@ class _Linear(torch.autograd.Function):
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
+                    clear_tensor_data(inputmat_total)
 
             # Column Parallel Linear
             if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:

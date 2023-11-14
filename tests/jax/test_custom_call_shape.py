@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import pytest
+import jax
 import jax.numpy as jnp
 from jax.core import ShapedArray
 
@@ -29,6 +30,16 @@ NAMED_SHAPES = [{}, {
 }]
 DTYPE = [DType.kFloat32, DType.kFloat16, DType.kBFloat16]
 TRANSPOSE = [True, False]
+
+
+@pytest.fixture(autouse=True, scope='function')
+def clear_live_arrays():
+    """
+    Clear all live arrays to keep the resource clean
+    """
+    yield
+    for arr in jax.live_arrays():
+        arr.delete()
 
 
 class TestGEMMShapeInfer:
