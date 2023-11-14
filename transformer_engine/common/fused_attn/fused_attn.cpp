@@ -120,7 +120,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       flag_m512 = true;
     }
     if ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
-            && (cudnn_runtime_version < 8903 && sm_arch_ == 80 || sm_arch_ == 90)
+            && (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90))
             && (max_seqlen_q % 64 == 0)
             && (max_seqlen_kv % 64 == 0)
             && (num_attn_heads == num_gqa_groups)
