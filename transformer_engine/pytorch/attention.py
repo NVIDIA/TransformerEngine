@@ -745,7 +745,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
     def __init__(
         self,
         dim: int,
-        rotary_percent: float,
+        rotary_percent: float = 1.0,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
     ):
