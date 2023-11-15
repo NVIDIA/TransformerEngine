@@ -26,6 +26,7 @@ PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Preci
                                                                        lax.Precision]]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
+
 def is_devices_enough(required):
     return len(jax.devices()) >= required
 
@@ -1010,6 +1011,24 @@ class DecoderLayer(nn.Module):
         return z
 
 
+def make_causal_mask(batch, seqlen, dtype=jnp.uint8):
+    shape = (batch, seqlen)
+    idxs = jnp.broadcast_to(jnp.arange(shape[-1], dtype=jnp.int32), shape)
+
+    mask = jnp.greater_equal(jnp.expand_dims(idxs, axis=-1), jnp.expand_dims(idxs, axis=-2))
+    mask = jnp.expand_dims(mask, axis=-3)
+    mask = 1 - mask
+    return mask.astype(dtype)
+
+
+def make_self_mask(batch, seqlen, dtype=jnp.uint8):
+    shape = (batch, seqlen)
+    mask = jnp.ones((*shape, shape[-1]))
+    mask = jnp.expand_dims(mask, axis=-3)
+    mask = 1 - mask
+    return mask.astype(dtype)
+
+
 def assert_allclose(
     actual: Array,
     desired: Array,
@@ -1092,7 +1111,7 @@ def dtype_tols(
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
-    eps_relaxed = math.pow(finfo.eps, 2/3)
+    eps_relaxed = math.pow(finfo.eps, 2 / 3)
     with jax.default_device(jax.devices("cpu")[0]):
         if isinstance(reference_value, (float, int)):
             reference_value = jnp.array(reference_value, dtype=dtype)
