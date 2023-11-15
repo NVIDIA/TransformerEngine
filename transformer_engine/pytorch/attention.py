@@ -800,6 +800,27 @@ class RotaryPositionEmbedding(torch.nn.Module):
         # emb [seq_length, .., dim]
         return emb.reshape(emb.size(0), 1, 1, emb.size(1))
 
+
+class FusedRoPEFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, t: torch.Tensor, cos_: torch.Tensor, sin_: torch.Tensor
+    ) -> torch.Tensor:
+        output = tex.fused_rope_forward(t, cos_, sin_)
+        ctx.save_for_backward(cos_, sin_)
+
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos_, sin_ = ctx.saved_tensors
+        grad_q = tex.fused_rope_backward(grad_output, cos_, sin_)
+
+        return grad_q, None, None
+
+
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
     change sign so the last dimension becomes [-odd, +even]
@@ -809,45 +830,31 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb(
+    t: torch.Tensor,
+    freqs: torch.Tensor,
+    fused: bool = False,
+) -> torch.Tensor:
     """
     input tensor t is of shape [seq_length, ..., dim]
     rotary positional embeding tensor `freqs` is of shape [seq_length, ..., dim]
     """
-    rot_dim = freqs.shape[-1]
-    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
-
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
-    t = (t * cos_) + (_rotate_half(t) * sin_)
-    return torch.cat((t, t_pass), dim=-1)
 
+    if fused:
+        return FusedRoPEFunc.apply(t, cos_, sin_)
+    else:
+        rot_dim = freqs.shape[-1]
+        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-class FusedRoPEFunc(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, t: torch.Tensor, cos_: torch.Tensor, sin_: torch.Tensor) -> torch.Tensor:
-
-        output = tex.fused_rope_forward(t, cos_, sin_)
-        ctx.save_for_backward(cos_, sin_)
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-
-        cos_, sin_ = ctx.saved_tensors
-        grad_q = tex.fused_rope_backward(grad_output, cos_, sin_)
-
-        return grad_q, None, None
-
-def fused_apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
-    return FusedRoPEFunc.apply(t, cos_, sin_)
+        # first part is cosine component
+        # second part is sine component, need to change signs with _rotate_half method
+        cos_ = torch.cos(freqs).to(t.dtype)
+        sin_ = torch.sin(freqs).to(t.dtype)
+        t = (t * cos_) + (_rotate_half(t) * sin_)
+        return torch.cat((t, t_pass), dim=-1)
 
 
 class _SplitAlongDim(torch.autograd.Function):
