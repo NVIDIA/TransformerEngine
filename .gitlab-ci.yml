@@ -5,14 +5,23 @@
 variables:
     EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
     DATADIR: /mnt/nvdl/datasets
+
+    # framework containers
     PYTORCH_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
     JAX_IMAGE: ghcr.io/nvidia/jax:latest
     PADDLE_IMAGE: gitlab-master.nvidia.com:5005/dl/dgx/paddle:main-py3-devel
+
+    # container tags are in the form <TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>
+    TAG_ROOT: ""
 
     # variables that may be overridden by the pipeline vars
     BUILD_PYTORCH: 1
     BUILD_JAX: 1
     BUILD_PADDLE: 1
+    RUN_L0_TESTS: 1
+    RUN_L1_TESTS: 0
+    RUN_L2_TESTS: 0
+    RUN_L3_TESTS: 0
     API_LOGGING: 0
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -31,6 +40,7 @@ stages:
     - create branch
     - build base
     - build devel
+    - build stage
     - trigger
     - test
     - finalize
@@ -43,7 +53,8 @@ before_script:
     - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
-    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${RELEASE_BRANCH_NAME_SLUG}${IMAGE_NAME_ROOT_ADDON}-${FRAMEWORK}-py${PYVER%.*}"       && echo "${IMAGE_NAME_ROOT}"
+    - test ${TAG_ROOT} || export TAG_ROOT=RELEASE_BRANCH_NAME_SLUG                                 && echo "${TAG_ROOT}"
+    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${TAG_ROOT}-${FRAMEWORK}-py${PYVER%.*}"         && echo "${IMAGE_NAME_ROOT}"
     - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
     - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
     - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
@@ -144,10 +155,18 @@ before_script:
             --form "variables[GH_BRANCH]=${GH_BRANCH}" \
             --form "variables[GIT_SHA]=${GIT_SHA}" \
             --form "variables[GH_PR]=${GH_PR}" \
+            --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[PYTORCH_IMAGE]=${PYTORCH_IMAGE}" \
+            --form "variables[JAX_IMAGE]=${JAX_IMAGE}" \
+            --form "variables[PADDLE_IMAGE]=${PADDLE_IMAGE}" \
+            --form "variables[TAG_ROOT]=${TAG_ROOT}" \
             --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
             --form "variables[BUILD_JAX]=${BUILD_JAX}" \
             --form "variables[BUILD_PADDLE]=${BUILD_PADDLE}" \
-            --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
+            --form "variables[RUN_L1_TESTS]=${RUN_L1_TESTS}" \
+            --form "variables[RUN_L2_TESTS]=${RUN_L2_TESTS}" \
+            --form "variables[RUN_L3_TESTS]=${RUN_L3_TESTS}" \
             --form "variables[GH_NIGHTLY]=${GH_NIGHTLY}" \
             --form "variables[GH_WEEKLY]=${GH_WEEKLY}" \
             --form "variables[RELEASE]=${RELEASE}" \
@@ -169,21 +188,19 @@ before_script:
 
 create_branch:
     <<: *CREATE_BRANCH
-    only:
-    - web
-    - schedules
-    - triggers
-    except:
-    - tags
     tags:
-        - vm-builder
-
+    - vm-builder
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE =~ /^(web|schedule|trigger)$/
 
 .base_template:
     variables:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
     - echo ${JOB_START_STRING}
@@ -193,13 +210,23 @@ create_branch:
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
     - echo ${JOB_END_STRING}
-    except:
-    - tags
     tags:
     - builder
-    only:
-    - pipelines
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
 
 pytorch-py3-base:
     stage: build base
@@ -208,9 +235,6 @@ pytorch-py3-base:
       FRAMEWORK: pytorch
     extends:
     - .base_template
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 jax-py3-base:
     stage: build base
@@ -219,9 +243,6 @@ jax-py3-base:
       FRAMEWORK: jax
     extends:
     - .base_template
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 paddle-py3-base:
     stage: build base
@@ -230,15 +251,13 @@ paddle-py3-base:
       FRAMEWORK: paddle
     extends:
     - .base_template
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 .devel_template:
     variables:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
     - bash docker-build.sh --pyver=${PYVER}
@@ -246,10 +265,20 @@ paddle-py3-base:
                            $(test "$VIRTUAL" -eq 1 && echo "--virtual")
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
-    except:
-    - tags
-    only:
-    - pipelines
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
 
 pytorch-py3-devel:
     stage: build devel
@@ -258,9 +287,6 @@ pytorch-py3-devel:
     needs: [ pytorch-py3-base ]
     extends:
     - .devel_template
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 jax-py3-devel:
     stage: build devel
@@ -269,9 +295,6 @@ jax-py3-devel:
     needs: [ jax-py3-base ]
     extends:
     - .devel_template
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 paddle-py3-devel:
     stage: build devel
@@ -280,9 +303,6 @@ paddle-py3-devel:
     needs: [ paddle-py3-base ]
     extends:
     - .devel_template
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 .stage_template : &STAGE
     environment: staging
@@ -293,23 +313,55 @@ paddle-py3-devel:
       SQRL_REGISTRY_URL: "sqrl.nvidia.com:443"
       TARGET_TOKEN_SQRL: "nvadmin"
       TARGET_REGISTRY_USER_SQRL: "nvadmin"
+      FRAMEWORK: pytorch
     dependencies: []
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
     - echo "${TARGET_TOKEN_SQRL}" | (set -x && docker login -u "${TARGET_REGISTRY_USER_SQRL}" --password-stdin "${SQRL_REGISTRY_URL}")
-    - bash docker-build.sh --mode=s --push --pyver=${PYVER} $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}") $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
-    only:
-    - /^.*-devel$/
-    - /sqrl/
-    - /sqrl_registry/
-    except:
-    - api
-    - external
-    - schedules
-    - tags
-    - triggers
-    - web
-    when: manual
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=s --push
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
+    - if: $CI_COMMIT_BRANCH =~ /sqrl/
+    - if: $CI_COMMIT_BRANCH =~ /sqrl_registry/
+
+pytorch-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-base, pytorch-py3-devel ]
+    extends:
+    - .stage_template
+
+jax-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-base, jax-py3-devel ]
+    extends:
+    - .stage_template
+
+paddle-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: paddle
+    needs: [ paddle-py3-base, paddle-py3-devel ]
+    extends:
+    - .stage_template
 
 .test_template: &TEST_TEMPLATE
     environment: "${CI_JOB_NAME}"
@@ -356,12 +408,7 @@ paddle-py3-devel:
       when: always
     tags:
     - must_specify_runner
-    except:
-    - tags
-    allow_failure: false
     needs: [ pytorch-py3-devel ]
-    only:
-    - pipelines
 
 .docs_template: &DOCS_BUILD
     stage: test
@@ -369,6 +416,7 @@ paddle-py3-devel:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: pytorch
     script:
     - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
     - export TEST_TIMEOUT=$((20*60))
@@ -404,12 +452,20 @@ paddle-py3-devel:
       expire_in: 1 month
     tags:
     - 1GPU
-    except:
-    - tags
-    allow_failure: false
     needs: [ pytorch-py3-devel ]
-    only:
-    - pipelines
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
 
 gather:
     stage: finalize
@@ -422,12 +478,13 @@ gather:
       - wheelhouse/*
       expire_in: 1 month
       when: always
-    when: manual
-    except:
-      refs:
-        - tags
-      variables:
-        - $API_LOGGING == "0"
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $API_LOGGING == "0"
+      when: never
+    - when: manual
+      allow_failure: true
 
 upload_logs:
   stage: finalize
@@ -464,33 +521,97 @@ upload_logs:
     - export SCOPE1=${CI_JOB_NAME%% tests}; export SCOPE=${SCOPE1##Run all }
     - docker pull ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler
     - docker run --init --rm ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler ${CI_PIPELINE_ID} ${CI_PROJECT_PATH} ${SCOPE}
-    except:
-    - tags
-    when: manual
-    only:
-    - pipelines
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+      allow_failure: true
 
 .L0_test: &L0_TEST
     stage: test
-    <<: *TEST_TEMPLATE
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L0_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
 
 .L1_test: &L1_TEST
     stage: test
-    <<: *TEST_TEMPLATE
-    when: manual
-    allow_failure: true
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L1_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
 
 .L2_test: &L2_TEST
     stage: test
-    <<: *TEST_TEMPLATE
-    when: manual
-    allow_failure: true
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L2_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
 
 .L3_test: &L3_TEST
     stage: test
-    <<: *TEST_TEMPLATE
-    when: manual
-    allow_failure: true
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
+      when: never
+    - if: $RUN_L3_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
 
 "Run all L1 tests":
     <<: *MANUAL_TEST_TRIGGER
@@ -529,27 +650,18 @@ upload_logs:
     tags:
     - TU104
     - 1GPU
-    only:
-    - /^.*-devel$/
-    - /^main$/
 
 .TitanXP_R384_2GPU: &TitanXP_R384_2GPU
     tags:
     - TitanXP
     - R384
     - 2GPU
-    only:
-    - /^.*-devel$/
-    - /^main$/
 
 .P40_R384_1GPU: &P40_R384_1GPU
     tags:
     - P40
     - R384
     - 1GPU
-    only:
-    - /^.*-devel$/
-    - /^main$/
 
 .A100_1GPU: &A100_1GPU
     tags:
@@ -576,18 +688,12 @@ upload_logs:
     - M40
     - R384
     - 1GPU
-    only:
-    - /^.*-devel$/
-    - /^main$/
 
 .DGX2_R410_16GPU: &DGX2_R410_16GPU
     tags:
     - V100
     - R410
     - 16GPU
-    only:
-    - /^.*-devel$/
-    - /^main$/
 
 .H100_1GPU:
     tags:
@@ -637,6 +743,7 @@ upload_logs:
 ##
 ##   L0_mytest:
 ##      variables:
+##        FRAMEWORK: pytorch
 ##        TEST_WORK_DIR: "/some/other/path"
 ##        TEST_SCRIPT: "./test.sh"
 ##      extends:
@@ -645,6 +752,8 @@ upload_logs:
 ######################################################
 
 # L0_license:
+#     variables:
+#       FRAMEWORK: pytorch
 #     extends:
 #     - .L0_test
 #     tags:
@@ -658,9 +767,6 @@ L0_pytorch_lint:
     - .L0_test
     tags:
     - 1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_jax_lint:
     variables:
@@ -670,9 +776,6 @@ L0_jax_lint:
     - .L0_test
     tags:
     - 1GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_paddle_lint:
     variables:
@@ -682,9 +785,6 @@ L0_paddle_lint:
     - .L0_test
     tags:
     - 1GPU
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 L0_pytorch_unittest--V100_1GPU:
     variables:
@@ -693,9 +793,6 @@ L0_pytorch_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_pytorch_unittest--A100_1GPU:
     variables:
@@ -704,9 +801,6 @@ L0_pytorch_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_pytorch_unittest--TU102_R445_1GPU:
     variables:
@@ -715,9 +809,6 @@ L0_pytorch_unittest--TU102_R445_1GPU:
     extends:
     - .L0_test
     - .TU102_R445_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_pytorch_unittest--H100_1GPU:
     variables:
@@ -726,9 +817,6 @@ L0_pytorch_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_pytorch_unittest--L40_1GPU:
     variables:
@@ -737,9 +825,6 @@ L0_pytorch_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
@@ -748,9 +833,6 @@ L1_pytorch_distributed_unittest--H100_4GPU:
     extends:
     - .L1_test
     - .H100_4GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_jax_unittest--V100_1GPU:
     variables:
@@ -759,9 +841,6 @@ L0_jax_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_jax_unittest--A100_1GPU:
     variables:
@@ -770,9 +849,6 @@ L0_jax_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_jax_unittest--H100_1GPU:
     variables:
@@ -781,9 +857,6 @@ L0_jax_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_jax_unittest--L40_1GPU:
     variables:
@@ -792,9 +865,6 @@ L0_jax_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_jax_distributed_unittest--H100_4GPU:
     variables:
@@ -803,9 +873,6 @@ L0_jax_distributed_unittest--H100_4GPU:
     extends:
     - .L0_test
     - .H100_4GPU
-    except:
-      variables:
-        - $BUILD_JAX == "0"
 
 L0_paddle_unittest--V100_1GPU:
     variables:
@@ -814,9 +881,6 @@ L0_paddle_unittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 L0_paddle_unittest--A100_1GPU:
     variables:
@@ -825,9 +889,6 @@ L0_paddle_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 L0_paddle_unittest--H100_1GPU:
     variables:
@@ -836,9 +897,6 @@ L0_paddle_unittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 L0_paddle_unittest--L40_1GPU:
     variables:
@@ -847,9 +905,6 @@ L0_paddle_unittest--L40_1GPU:
     extends:
     - .L0_test
     - .L40_1GPU
-    except:
-      variables:
-        - $BUILD_PADDLE == "0"
 
 L0_cppunittest--V100_1GPU:
     variables:
@@ -858,9 +913,6 @@ L0_cppunittest--V100_1GPU:
     extends:
     - .L0_test
     - .V100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_cppunittest--A100_1GPU:
     variables:
@@ -869,9 +921,6 @@ L0_cppunittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 L0_cppunittest--H100_1GPU:
     variables:
@@ -880,9 +929,6 @@ L0_cppunittest--H100_1GPU:
     extends:
     - .L0_test
     - .H100_1GPU
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
 
 docs:
     variables:
@@ -890,6 +936,3 @@ docs:
     needs: [ pytorch-py3-devel ]
     extends:
     - .docs_template
-    except:
-      variables:
-        - $BUILD_PYTORCH == "0"
