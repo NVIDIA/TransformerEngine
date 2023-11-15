@@ -1,3 +1,6 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
 import pytest
 import torch
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding, apply_rotary_pos_emb, fused_apply_rotary_pos_emb

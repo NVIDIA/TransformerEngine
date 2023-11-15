@@ -79,7 +79,7 @@ __global__ void fused_rope_backward_kernel(int sq, int b, int np, int hn,
       int offset_head = offset_block + head_id * hn;
 #pragma unroll
       for (int hn_id = hn2 + threadIdx.x; hn_id < hn; hn_id += blockDim.x) {
-        dst[offset_head + hn_id] = 1.0;
+        dst[offset_head + hn_id] = src[offset_head + hn_id];
       }
     }
   }
