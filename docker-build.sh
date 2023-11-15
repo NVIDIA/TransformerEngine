@@ -251,9 +251,6 @@ FROM_IMAGE_ARG=$(docker pull "${FROM_IMAGE}" >& /dev/null && echo "--build-arg F
 BRANCH_NAME_SLUG=$(echo "${TAG_ROOT}" | sed 's/[^A-Za-z0-9._\-]/../g')
 TAG_ATTRIB="${FRAMEWORK}-py${PYVER%.*}"
 IMAGE_NAME_ROOT="${DOCKER_IMG}:${BRANCH_NAME_SLUG}-${TAG_ATTRIB}"
-PIPELINE_IMAGE_NAME_ROOT="${DOCKER_IMG}:${PIPELINE}"
-[[ ${FROM_IMAGE_ARG} =~ cudnn7  ]] \
-    && IMAGE_NAME_ROOT="${DOCKER_IMG}:${BRANCH_NAME_SLUG}-cudnn7-${TAG_ATTRIB}"
 VER_IMAGE_NAME_ROOT="${IMAGE_NAME_ROOT}.${PIPELINE}"
 
 [[ "$BUILD_BASE" -eq 0 ]] && echo "BUILDING BASE IMAGE"
@@ -282,7 +279,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
   ########
   PULL_FLAG=""
-  CACHE_FROM="--cache-from type=local,dest=/tmp/docker-cache"
+  CACHE_FROM="--cache-from type=local,src=/tmp/docker-cache"
   CACHE_TO="--cache-to type=local,dest=/tmp/docker-cache,mode=max"
   if [[ $PULL -eq 1 ]]; then
     PULL_FLAG="--pull"
@@ -290,8 +287,8 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
     docker pull "${MASTER_BASE_IMAGE_NAME}"
     docker pull "${IMAGE_NAME_ROOT}-base"
     docker pull "${FROM_SCRIPTS_IMAGE}"
-    CACHE_FROM="--cache-from type=registry,ref=${CI_REGISTRY_IMAGE}"
-    CACHE_TO="--cache-to type=registry,ref=${CI_REGISTRY_IMAGE},mode=max"
+    CACHE_FROM="--cache-from type=registry,ref=${DOCKER_IMG}"
+    CACHE_TO="--cache-to type=registry,ref=${DOCKER_IMG},mode=max"
   fi
 
   [[ "${VIRTUAL}" -ne 1 && "${ONE_OFF_BUILD}" -eq "0" ]] \
@@ -306,7 +303,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   docker buildx build $PULL_FLAG $FROM_FLAG \
       ${CACHE_FROM} \
       ${CACHE_TO} \
-      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-base" -t "${PIPELINE_IMAGE_NAME_ROOT}-base" \
+      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-base" \
       $FROM_IMAGE_ARG \
       $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
@@ -363,7 +360,7 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   fi
 
   docker build --progress=plain --network=host \
-      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-devel" -t "${PIPELINE_IMAGE_NAME_ROOT}-devel" \
+      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-devel" \
       $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
@@ -384,11 +381,6 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
     docker push "${VER_IMAGE_NAME_ROOT}-devel"
     if [[ $? -ne 0 ]]; then
       echo "Failed to push ${VER_IMAGE_NAME_ROOT}-devel"
-      exit 1
-    fi
-    docker push "${PIPELINE_IMAGE_NAME_ROOT}-devel"
-    if [[ $? -ne 0 ]]; then
-      echo "Failed to push ${PIPELINE_IMAGE_NAME_ROOT}-devel"
       exit 1
     fi
   fi
@@ -412,7 +404,9 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   # Create xx.yy-qa image
   docker build --progress=plain -t "${QA_IMAGE_NAME}" -f Dockerfile.qa \
       --build-arg "FROM_IMAGE_DEVEL=${DEVEL_IMAGE_NAME}" \
-      --build-arg "FROM_IMAGE=${BASE_IMAGE}" --network=host .
+      --build-arg "FROM_IMAGE=${BASE_IMAGE}" \
+      --build-arg "FRAMEWORK=${FRAMEWORK}" \
+      --network=host .
   if [[ $? -ne 0 ]]; then
     echo ABORT Failed to create qa image
     exit 1
