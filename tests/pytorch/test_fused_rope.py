@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 import pytest
 import torch
-from transformer_engine.pytorch.attention import RotaryPositionEmbedding, apply_rotary_pos_emb, fused_apply_rotary_pos_emb
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding, apply_rotary_pos_emb
 
 def get_atol(dtype: torch.dtype) -> float:
     if dtype == torch.bfloat16:
@@ -24,13 +24,13 @@ def test_fused_rope(dtype: torch.dtype, seq_length: int, hidden_size: int, rotar
     emb = rotary_pos_emb(seq_length)
 
     # unfused
-    output_unfused = apply_rotary_pos_emb(t, emb)
+    output_unfused = apply_rotary_pos_emb(t, emb, fused=False)
     output_unfused.sum().backward()
     grad_unfused = t.grad.detach().clone()
     t.grad = None
 
     # fused
-    output_fused = fused_apply_rotary_pos_emb(t, emb)
+    output_fused = apply_rotary_pos_emb(t, emb, fused=True)
     output_fused.sum().backward()
     grad_fused = t.grad.detach().clone()
 
