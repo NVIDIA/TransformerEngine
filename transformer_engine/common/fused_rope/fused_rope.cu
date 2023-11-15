@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,6 +8,7 @@
 #include <transformer_engine/fused_rope.h>
 
 #include "../common.h"
+#include "../utils.cuh"
 #include "../util/logging.h"
 
 namespace transformer_engine {
