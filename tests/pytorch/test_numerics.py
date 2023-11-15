@@ -504,6 +504,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
     return (
         TransformerLayer(
             config.hidden_size,
@@ -589,10 +590,12 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 def test_gpt_checkpointing(dtype, bs, model):
+    os.environ["NVTE_FUSED_ATTN"] = "0"
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
     assert_all_equal(outputs, outputs_checkpoint)
+    os.environ["NVTE_FUSED_ATTN"] = "1"
 
 
 def _test_e2e_gpt_accuracy(block, bs, dtype, config):
