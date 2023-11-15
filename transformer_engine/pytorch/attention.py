@@ -2897,7 +2897,6 @@ class MultiheadAttention(torch.nn.Module):
             q_pos_emb, k_pos_emb = rotary_pos_emb
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
-            value_layer = value_layer.contiguous()
 
         context_layer = self.core_attention(
             query_layer,
