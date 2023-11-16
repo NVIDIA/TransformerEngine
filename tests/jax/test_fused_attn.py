@@ -180,12 +180,14 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim):
+                      head_dim, num_heads, num_gqa_groups):
 
         assert isinstance(backend, Backend)
 
-        if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
-                                              attn_mask_type, dropout_probability, s, s, head_dim):
+        if ((s > 512 and backend == Backend.Max512)
+            or (not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
+                                              attn_mask_type, dropout_probability, s, s, head_dim,
+                                              num_heads, num_gqa_groups))):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
@@ -197,7 +199,9 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d)
+                                     head_dim=d,
+                                     num_heads=h,
+                                     num_gqa_groups=h)
 
         if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
             pad_ratio = 0.0
