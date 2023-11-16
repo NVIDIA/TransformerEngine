@@ -495,6 +495,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            # Primary weights are in FP8.
             if ctx.fp8 and fc1_weight_t_fp8 is None:
                 fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=ctx.is_first_microbatch)
             if ctx.fp8 and fc2_weight_t_fp8 is None:

@@ -312,6 +312,7 @@ class _Linear(torch.autograd.Function):
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
 
+            # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
                 weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
 
