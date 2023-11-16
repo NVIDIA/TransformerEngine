@@ -126,8 +126,6 @@ Flax
 
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
-        # Update FP8 metas
-        other_variables = te.update_fp8_metas(other_grads)
 
 .. overview-end-marker-do-not-remove
 

@@ -61,13 +61,11 @@ class Net(nn.Module):
         x = te_flax.DenseGeneral(features=256,
                                  kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
                                  bias_axes=(NAMED_TP_AXIS,),
-                                 sharding_type=te.ShardingType.DP_TP_COL,
                                  dtype=jnp.bfloat16)(x)
 
         x = te_flax.DenseGeneral(features=256,
                                  kernel_axes=(NAMED_TP_AXIS, NAMED_BROADCAST_AXIS),
                                  bias_axes=(NAMED_BROADCAST_AXIS,),
-                                 sharding_type=te.ShardingType.DP_TP_ROW,
                                  dtype=jnp.bfloat16)(x)
 
         x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
@@ -106,7 +104,7 @@ def shard_array_wrapper(dataset, batch_size, mesh, pspec, enable_partition=False
     return global_input_shape, named_sharding, inputs
 
 
-def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
+def train_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes gradients, loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
@@ -122,14 +120,12 @@ def train_step(state, inputs, masks, labels, var_collect, rngs, use_fp8):
 
     var_collect, grads = flax.core.pop(grads, PARAMS_KEY)
     state = state.apply_gradients(grads=grads)
-    if use_fp8:
-        var_collect = te.update_fp8_metas(var_collect)
 
     return state, loss, accuracy, var_collect
 
 
-def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_fn, mesh,
-                inputs_pspec, masks_pspec, labels_pspec):
+def train_epoch(state, train_ds, batch_size, rngs, var_collect, train_fn, mesh, inputs_pspec,
+                masks_pspec, labels_pspec):
     """Train for a single epoch."""
 
     total_batch_size = len(train_ds['sentence'])
@@ -164,7 +160,7 @@ def train_epoch(state, train_ds, batch_size, rngs, var_collect, use_fp8, train_f
                                                                label_named_sharding, [batch_label])
 
         state, loss, accuracy, var_collect = train_fn(state, shard_input, shard_mask, shard_label,
-                                                      var_collect, rngs, use_fp8)
+                                                      var_collect, rngs)
         epoch_loss.append(loss)
         epoch_accuracy.append(accuracy)
 
@@ -280,9 +276,8 @@ def get_datasets(max_seq_len):
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
     rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
-    assert "Float8" in str(
-        jax.make_jaxpr(train_step, static_argnums=6)(state, inputs, masks, labels, var_collect,
-                                                     rngs, True))
+    assert "fp8_" in str(
+        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
 
 
 def get_params_pspec(sharding_rules, abs_var_collect):
@@ -350,7 +345,8 @@ def train_and_evaluate(args):
         label_shape = [args.batch_size]
 
         with te.fp8_autocast(args.use_fp8,
-                             sharding_resource=te.ShardingResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS)):
+                             mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None,
+                                                           None)):
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
@@ -378,7 +374,7 @@ def train_and_evaluate(args):
 
             in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None, None)
             out_shardings = (state_pspec, None, None, None)
-            pjit_train_step = pjit(train_step, in_shardings, out_shardings, static_argnums=(6,))
+            pjit_train_step = pjit(train_step, in_shardings, out_shardings)
 
             in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None)
             out_shardings = (None, None)
@@ -391,7 +387,7 @@ def train_and_evaluate(args):
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 rngs = {DROPOUT_KEY: dropout_rng}
-                pjit_train_step(state, inputs, masks, labels, var_collect, rngs, args.use_fp8)
+                pjit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
             else:
                 for epoch in range(1, args.epochs + 1):
@@ -400,8 +396,8 @@ def train_and_evaluate(args):
                     rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
 
                     state, train_loss, train_accuracy, var_collect = train_epoch(
-                        state, train_ds, args.batch_size, rngs, var_collect, args.use_fp8,
-                        pjit_train_step, shard_mesh, inputs_pspec, masks_pspec, labels_pspec)
+                        state, train_ds, args.batch_size, rngs, var_collect, pjit_train_step,
+                        shard_mesh, inputs_pspec, masks_pspec, labels_pspec)
 
                     test_loss, test_accuracy = eval_model(state, test_ds, args.test_batch_size,
                                                           var_collect, pjit_eval_step, shard_mesh,
