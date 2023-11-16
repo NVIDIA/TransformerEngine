@@ -2136,7 +2136,7 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         if (_flash_attn_2_1_plus
-            and attn_mask_type == "causal"
+            and causal_mask
             and max_seqlen_q != max_seqlen_kv):
             warnings.warn(
                 "Disabling the use of FlashAttention since version 2.1+ has changed its behavior"
