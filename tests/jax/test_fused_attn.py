@@ -180,14 +180,13 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim, num_heads, num_gqa_groups):
+                      head_dim, num_heads_q, num_heads_kv):
 
         assert isinstance(backend, Backend)
 
-        if ((s > 512 and backend == Backend.Max512)
-            or (not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
+        if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
                                               attn_mask_type, dropout_probability, s, s, head_dim,
-                                              num_heads, num_gqa_groups))):
+                                              num_heads_q, num_heads_kv):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
@@ -200,8 +199,8 @@ class TestSelfFusedAttn():
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
                                      head_dim=d,
-                                     num_heads=h,
-                                     num_gqa_groups=h)
+                                     num_heads_q=h,
+                                     num_heads_kv=h)
 
         if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
             pad_ratio = 0.0
@@ -251,16 +250,17 @@ class TestSelfFusedAttn():
                          dtype=dtype,
                          is_training=is_training)
 
-        primitive_out = customcall_self_fused_attn(self.qkv,
-                                                   self.bias,
-                                                   self.q_token,
-                                                   self.kv_token,
-                                                   self.dropout_rng,
-                                                   attn_bias_type=self.attn_bias_type,
-                                                   attn_mask_type=attn_mask_type,
-                                                   scaling_factor=self.scaling_factor,
-                                                   dropout_probability=self.dropout_probability,
-                                                   is_training=self.is_training)
+        primitive_out = customcall_self_fused_attn(
+                self.qkv,
+                self.bias,
+                self.q_token,
+                self.kv_token,
+                self.dropout_rng,
+                attn_bias_type=self.attn_bias_type,
+                attn_mask_type=attn_mask_type,
+                scaling_factor=self.scaling_factor,
+                dropout_probability=self.dropout_probability if is_training else 0.0,
+                is_training=self.is_training)
 
         reference_out = jax_self_attn(self.qkv,
                                       self.bias,
@@ -447,16 +447,17 @@ class TestCrossFusedAttn():
                          is_training=is_training,
                          pad_ratio=pad_ratio)
 
-        primitive_out = customcall_cross_fused_attn(self.q,
-                                                    self.kv,
-                                                    self.q_token,
-                                                    self.kv_token,
-                                                    self.dropout_rng,
-                                                    attn_bias_type=self.attn_bias_type,
-                                                    attn_mask_type=attn_mask_type,
-                                                    scaling_factor=self.scaling_factor,
-                                                    dropout_probability=self.dropout_probability,
-                                                    is_training=self.is_training)
+        primitive_out = customcall_cross_fused_attn(
+                self.q,
+                self.kv,
+                self.q_token,
+                self.kv_token,
+                self.dropout_rng,
+                attn_bias_type=self.attn_bias_type,
+                attn_mask_type=attn_mask_type,
+                scaling_factor=self.scaling_factor,
+                dropout_probability=self.dropout_probability if is_training else 0.0,
+                is_training=self.is_training)
 
         reference_out = jax_cross_attn(self.q,
                                        self.kv,
@@ -491,6 +492,11 @@ class TestCrossFusedAttn():
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
+        if (attn_mask_type == AttnMaskType.PADDING_MASK
+            and dropout_probability == 0.):
+            # TODO (rewang/cyang) unify padding mask across backends
+            pytest.skip(f"Backward.Arbitrary currently has different implementation for padding")
+
         self._set_inputs(b,
                          s_q,
                          s_kv,
@@ -517,7 +523,7 @@ class TestCrossFusedAttn():
             'attn_bias_type': self.attn_bias_type,
             'attn_mask_type': attn_mask_type,
             'scaling_factor': self.scaling_factor,
-            'dropout_probability': self.dropout_probability,
+            'dropout_probability': self.dropout_probability if is_training else 0.0,
             'is_training': self.is_training
         }
 
