@@ -431,7 +431,7 @@ def fused_attn_fwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -518,7 +518,7 @@ def fused_attn_bwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -587,7 +587,7 @@ def fused_attn_fwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -685,7 +685,7 @@ def fused_attn_bwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:

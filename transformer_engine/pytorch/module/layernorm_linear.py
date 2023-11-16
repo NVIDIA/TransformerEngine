@@ -29,6 +29,7 @@ from ..utils import (
     get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
+    clear_tensor_data,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -40,12 +41,12 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-
 from ._common import _apply_normalization
-
 from ..float8_tensor import Float8Tensor
 
+
 __all__ = ["LayerNormLinear"]
+
 
 class _LayerNormLinear(torch.autograd.Function):
     """LayerNormLinear semi-top level module
@@ -86,6 +87,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_bulk_dgrad: bool,
         ub_split_ag: bool,
         ub_atomic_gemm_ag: bool,
+        ub_name: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
@@ -111,7 +113,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_split_ag or ub_atomic_gemm_ag:
             dim_size = list(inputmat.size())
             dim_size[0] = dim_size[0] * tp_world_size
-            ub_obj_lnout = get_ub("qkv_fprop")
+            ub_obj_lnout = get_ub(ub_name+"_fprop")
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
@@ -265,6 +267,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
+            ctx.ub_name = ub_name
             ctx.requires_dgrad = inp.requires_grad
             ctx.normalization = normalization
 
@@ -310,7 +313,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ub_obj_lnout = get_ub("qkv_dgrad")
+                ub_obj_lnout = get_ub(ctx.ub_name+"_dgrad")
                 ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
             (
                 grad_output,
@@ -350,10 +353,10 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_size = list(grad_output.size())
             dgrad_size[1] = weight.size(1)
             if ctx.ub_bulk_wgrad: # allocate dgrad output
-                ub_obj_dgrad = get_ub("qkv_wgrad")
+                ub_obj_dgrad = get_ub(ctx.ub_name+"_wgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1) # AllGather output
             else:
-                dgrad = torch.empty (dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(
@@ -391,6 +394,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta_tensor = meta_tensor,
                     D_dtype = out_te_type,
                 )
+                clear_tensor_data(grad_output_c)
             else:
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
@@ -451,6 +455,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor
                         )
+                        clear_tensor_data(ln_out_total_t, grad_output_t)
                     else:
                         ln_out_total_c = tex.cast_from_fp8(
                             ln_out_total,
@@ -473,6 +478,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor
                         )
+                        clear_tensor_data(ln_out_total_c)
                 else:
                     # WGRAD
                     wgrad, grad_bias, _ = tex.gemm(
@@ -488,6 +494,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None
                     )
+                    clear_tensor_data(ln_out_total)
                     if ctx.ub_bulk_wgrad:
                         dgrad = ub_obj_dgrad.get_ubuf_output(0) # Reduce-scatter output
 
@@ -499,24 +506,23 @@ class _LayerNormLinear(torch.autograd.Function):
                 handle.wait()
 
             # LayerNorm gradient
-            d_ln_out = dgrad.view(inputmat.shape)
+            dgrad = dgrad.view(inputmat.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output:
-                d_ln_out = d_ln_out + grad_outputs[1].view_as(d_ln_out)
+                dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if ctx.normalization == "LayerNorm":
-                dxmat, dgamma, dbeta = tex.layernorm_bwd(
-                    d_ln_out, inputmat, mu, rsigma, ln_weight,
+                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                    dgrad, inputmat, mu, rsigma, ln_weight,
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
             elif ctx.normalization == "RMSNorm":
-                dxmat, dgamma = tex.rmsnorm_bwd(
-                    d_ln_out, inputmat, rsigma, ln_weight,
+                dgrad, dgamma = tex.rmsnorm_bwd(
+                    dgrad, inputmat, rsigma, ln_weight,
                     ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
                 )
                 dbeta = None
-
 
             if not ctx.use_bias:
                 grad_bias = None
@@ -525,19 +531,25 @@ class _LayerNormLinear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
+                wgrad = torch.empty(weight.main_grad.shape,
+                                   dtype=weight.dtype,
+                                   device=torch.cuda.current_device(),
+                                   requires_grad=False
+                                   )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
             wgrad = None
 
         return (
-            dxmat.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             wgrad,
             None,
             None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -669,6 +681,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_split_ag: bool = False,
         ub_atomic_gemm_ag: bool = False,
+        ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -689,6 +702,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = ub_bulk_dgrad
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        if any([ub_bulk_wgrad, ub_bulk_dgrad, ub_split_ag]):
+            assert ub_name is not None, "Userbuffer name [string] is not set."
+        self.ub_name = ub_name
+
 
         if ub_bulk_wgrad or ub_bulk_dgrad or ub_split_ag or ub_atomic_gemm_ag:
             assert (
@@ -973,6 +990,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_dgrad,
                 self.ub_split_ag,
                 self.ub_atomic_gemm_ag,
+                self.ub_name,
             )
             out = fwd_fn(*args)
 

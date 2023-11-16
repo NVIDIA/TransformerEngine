@@ -49,7 +49,7 @@ class TransformerEngineBaseLayer(BaseLayer):
         fp8_collection_map = {
             FP8Helper.FP8_COLLECTION_NAME: [
                 WeightHParamsCollection.SKIP_LP_REGULARIZATION,
-                WeightHParamsCollection.NON_TRAINABLE,
+                WeightHParamsCollection.OVERWRITE_WITH_GRADIENT,
                 WeightHParamsCollection.DISALLOW_BFLOAT16_CONVERSION
             ]
         }
@@ -92,8 +92,7 @@ class LayerNorm(TransformerEngineBaseLayer):
                              "ln_bias", self.bias_init),
                          bias_axes=self.bias_axes,
                          dtype=self.dtype,
-                         transpose_batch_sequence=self.transpose_batch_sequence,
-                         sharding_type=self.sharding_type)
+                         transpose_batch_sequence=self.transpose_batch_sequence)
 
         self.create_layer("layer_norm", ln_cls)
 
@@ -115,8 +114,7 @@ class FusedSoftmax(TransformerEngineBaseLayer):
 
         fused_softmax_cls = partial(Softmax,
                                     scale_factor=self.scale_factor,
-                                    softmax_type=self.softmax_type,
-                                    sharding_type=self.sharding_type)
+                                    softmax_type=self.softmax_type)
 
         self.create_layer("fused_softmax", fused_softmax_cls)
 
@@ -151,8 +149,7 @@ class Linear(TransformerEngineBaseLayer):
             bias_axes=self.bias_axes,
             axis=self.axis,
             dtype=self.dtype,
-            transpose_batch_sequence=self.transpose_batch_sequence,
-            sharding_type=self.sharding_type)
+            transpose_batch_sequence=self.transpose_batch_sequence)
 
         self.create_layer("linear", dense_general_cls)
 
@@ -208,8 +205,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             axis=self.axis,
             dtype=self.dtype,
             transpose_batch_sequence=self.transpose_batch_sequence,
-            depth_scaling=self.depth_scaling,
-            sharding_type=self.sharding_type)
+            depth_scaling=self.depth_scaling)
 
         self.create_layer("ln_linear", ln_dense_general_cls)
 
@@ -273,8 +269,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             intermediate_hidden_dropout_dims=self.intermediate_hidden_dropout_dims,
             axis=self.axis,
             dtype=self.dtype,
-            transpose_batch_sequence=self.transpose_batch_sequence,
-            major_sharding_type=self.major_sharding_type)
+            transpose_batch_sequence=self.transpose_batch_sequence)
 
         self.create_layer("ln_mlp", ln_mlp_cls)
 
