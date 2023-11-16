@@ -11,5 +11,6 @@ pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py
 PYTORCH_JIT=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 pytest -v -s $TE_PATH/tests/pytorch/test_numerics.py
 pytest -v -s $TE_PATH/tests/pytorch/test_jit.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fused_attn.py
+pytest -v -s $TE_PATH/tests/pytorch/test_fused_rope.py
 NVTE_TORCH_COMPILE=0 pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py
 pytest -v -s $TE_PATH/tests/pytorch/test_float8tensor.py
