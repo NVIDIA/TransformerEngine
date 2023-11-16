@@ -2135,11 +2135,14 @@ class DotProductAttention(torch.nn.Module):
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
             use_flash_attention = False
 
-        # Disable FAv2.1+ for causal mask in cross attention due to
-        # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
         if (_flash_attn_2_1_plus
             and attn_mask_type == "causal"
             and max_seqlen_q != max_seqlen_kv):
+            warnings.warn(
+                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior"
+                "for causal mask in cross attention. See "
+                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+            )
             use_flash_attention = False
 
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
