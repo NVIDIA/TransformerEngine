@@ -2139,7 +2139,7 @@ class DotProductAttention(torch.nn.Module):
             and causal_mask
             and max_seqlen_q != max_seqlen_kv):
             warnings.warn(
-                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior"
+                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior "
                 "for causal mask in cross attention. See "
                 "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
             )
