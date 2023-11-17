@@ -1936,7 +1936,7 @@ class DotProductAttention(torch.nn.Module):
 
         attention_type = attention_type.replace(",","_")
         if attention_type == "causal_padding":
-            attention_type == "padding_causal":
+            attention_type == "padding_causal"
         assert (
             attention_type in AttnTypes
         ), f"attention_type {attention_type} not supported"
@@ -2121,7 +2121,7 @@ class DotProductAttention(torch.nn.Module):
         else:
             attention_type = attention_type.replace(",","_")
             if attention_type == "causal_padding":
-                attention_type == "padding_causal":
+                attention_type == "padding_causal"
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
 
