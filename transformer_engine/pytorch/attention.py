@@ -1820,18 +1820,19 @@ class DotProductAttention(torch.nn.Module):
                       dropout probability for the dropout op during multi-head attention.
     attn_mask_type: str, default = `causal`
                    type of attention mask passed into softmax operation, options are "`no_mask`",
-                   "`padding`", "`causal`", "`padding_causal`", and ""`arbitrary`". Overridden by
-                   :attr:`attn_mask_type` in the `forward` method. The init arg is useful for cases
-                   involving compilation/tracing, e.g. ONNX export, and the forward arg is useful
-                   for dynamically changing mask types, e.g. a different mask for training and
-                   inference. For the "`causal`" mask, TransformerEngine calculates and applies
-                   an upper triangular mask without user input. For "`padding`", users need to
-                   provide the locations of padded tokens via either :attr:`cu_seqlens_q` and
+                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`", and
+                   "`arbitrary`", where "`padding,causal`" and "`causal,padding`" are equivalent.
+                   This arg can be overridden by :attr:`attn_mask_type` in the `forward` method.
+                   It is useful for cases involving compilation/tracing, e.g. ONNX export, and the
+                   forward arg is useful for dynamically changing mask types, e.g. a different mask
+                   for training and inference. For "`no_mask`", no attention mask is applied. For
+                   "`causal`" or the causal mask in "`padding,causal`", TransformerEngine calculates
+                   and applies an upper triangular mask to the softmax input. No user input is
+                   needed. For "`padding`" or the padding mask in "`padding,causal`", users need to
+                   provide the locations of padded tokens either via :attr:`cu_seqlens_q` and
                    :attr:`cu_seqlens_kv` in the shape of [batch_size + 1] or :attr:`attention_mask`
-                   in the shape [batch_size, 1, 1, max_seq_len]. For "`arbitrary`", users need to
-                   provide a mask that is broadcastable to the shape of softmax input. "`no_mask`"
-                   is when no mask is applied. When padding and causal masks are both applied,
-                   please specify the type as "`padding_causal`".
+                   in the shape [batch_size, 1, 1, max_seq_len]. For the "`arbitrary`" mask, users
+                   need to provide a mask that is broadcastable to the shape of softmax input.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
     layer_number: int, default = `None`
@@ -1933,6 +1934,9 @@ class DotProductAttention(torch.nn.Module):
             and self.device_compute_capability >= (8, 0)
         )
 
+        attention_type = attention_type.replace(",","_")
+        if attention_type == "causal_padding":
+            attention_type == "padding_causal":
         assert (
             attention_type in AttnTypes
         ), f"attention_type {attention_type} not supported"
@@ -2088,8 +2092,9 @@ class DotProductAttention(torch.nn.Module):
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths in a batch for `key_layer` and `value_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
-        attn_mask_type: {`no_mask`, `padding`, `causal`, `padding_causal`, `arbitrary`},
-                       default = `None`. Type of attention mask passed into softmax operation.
+        attn_mask_type: {`no_mask`, `padding`, `causal`, `padding,causal`, `causal,padding`,
+                       `arbitrary`}, default = `None`. Type of attention mask passed into
+                       softmax operation. 'padding,causal' and 'causal,padding' are equivalent.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -2113,6 +2118,10 @@ class DotProductAttention(torch.nn.Module):
 
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
+        else:
+            attention_type = attention_type.replace(",","_")
+            if attention_type == "causal_padding":
+                attention_type == "padding_causal":
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
 
