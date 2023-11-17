@@ -1889,6 +1889,9 @@ class DotProductAttention(torch.nn.Module):
         super().__init__()
 
         self.qkv_format = qkv_format
+        attn_mask_type = attn_mask_type.replace(",","_")
+        if attn_mask_type == "causal_padding":
+            attn_mask_type == "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
@@ -1934,9 +1937,6 @@ class DotProductAttention(torch.nn.Module):
             and self.device_compute_capability >= (8, 0)
         )
 
-        attention_type = attention_type.replace(",","_")
-        if attention_type == "causal_padding":
-            attention_type == "padding_causal"
         assert (
             attention_type in AttnTypes
         ), f"attention_type {attention_type} not supported"
@@ -2119,9 +2119,10 @@ class DotProductAttention(torch.nn.Module):
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         else:
-            attention_type = attention_type.replace(",","_")
-            if attention_type == "causal_padding":
-                attention_type == "padding_causal"
+            attn_mask_type = attn_mask_type.replace(",","_")
+            if attn_mask_type == "causal_padding":
+                attn_mask_type == "padding_causal"
+
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
 
