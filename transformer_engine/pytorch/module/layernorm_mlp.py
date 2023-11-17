@@ -207,10 +207,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_fp8 = fc2_weight
                 fc1_weight_t_fp8 = None
                 fc2_weight_t_fp8 = None
-                if is_grad_enabled:
-                    fc1_weight_t_fp8 = fc1_weight_fp8.transpose(update_cache=is_first_microbatch)
-                    fc2_weight_t_fp8 = fc2_weight_fp8.transpose(update_cache=is_first_microbatch)
-
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 fc1_weight_fp8 = Float8Tensor(
@@ -498,6 +494,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Primary weights are in FP8.
+            if ctx.fp8 and fc1_weight_t_fp8 is None:
+                fc1_weight_t_fp8 = fc1_weight.transpose(update_cache=ctx.is_first_microbatch)
+            if ctx.fp8 and fc2_weight_t_fp8 is None:
+                fc2_weight_t_fp8 = fc2_weight.transpose(update_cache=ctx.is_first_microbatch)
 
             activation_func = _act_func(ctx.activation)[1]
 
