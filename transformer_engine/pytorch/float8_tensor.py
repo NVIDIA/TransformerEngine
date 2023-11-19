@@ -435,30 +435,12 @@ class Float8Tensor(torch.Tensor):
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
-    def _transpose_no_cache(self) -> torch.Tensor:
-        """
-        Swap tensor dimensions
-
-        For basic 2D matrix transposes, an optimized transpose kernel
-        is applied and a Float8Tensor is returned.
-        """
-
-        # Use optimized kernel for basic 2D transpose
-        # TODO Support differentiation # pylint: disable=fixme
-        return Float8Tensor.make_like(
-            self,
-            data=tex.fp8_transpose(
-                self._data.contiguous().detach(),
-                self._fp8_dtype,
-            ),
-        )
-
     def transpose(
         self,
         dim0: int = 0,
         dim1: int = 1,
         *,
-        update_cache: Optional[bool] = None,
+        update_cache: bool = False,
     ) -> torch.Tensor:
         """
         Swap tensor dimensions
@@ -472,12 +454,14 @@ class Float8Tensor(torch.Tensor):
               The first dimension to be transposed
         dim1: int, default = 1
               The second dimension to be transposed
-        update_cache: Optional[bool], default = None
-                      If set to `True`, the result is computed and stored in a cache.
-                      If set to `False`, the result is computed only if the cache is
-                      empty, otherwise the cache is returned. If set to `None`, the
-                      result is not cached. Caching is only supported for basic 2D
-                      transposes and the cache is reset after any in-place operations.
+        update_cache: bool, default = False
+                      If `True`, the transpose is computed and stored
+                      in a cache. If `False`, a cached version is
+                      returned if available and otherwise the
+                      transpose is computed. Caching is only supported
+                      for basic 2D transposes and the cache is reset
+                      after any in-place operations.
+
         """
 
         # Handle non-2D transposes
@@ -493,15 +477,25 @@ class Float8Tensor(torch.Tensor):
                 )
             return super().transpose(dim0, dim1)
 
-        # No caching.
-        if update_cache is None:
-            return self._transpose_no_cache()
+        # Clear cache if needed
+        if update_cache:
+            self._transpose = None
 
-        # Update cache.
-        if update_cache or self._transpose is None:
-            self._transpose = self._transpose_no_cache()
+        # Compute transpose if needed
+        out = self._transpose
+        if out is None:
+            out = Float8Tensor.make_like(
+                self,
+                data=tex.fp8_transpose(
+                    self._data.contiguous(),
+                    self._fp8_dtype,
+                ),
+            )
 
-        return self._transpose
+        # Update cache if needed
+        if update_cache:
+            self._transpose = out
+        return out
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:

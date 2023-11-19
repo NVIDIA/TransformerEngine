@@ -263,7 +263,7 @@ class TestFloat8Tensor:
         dims: DimsType,
         transpose_dims: Tuple[int, int],
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        scale: float = 1,
+        scale: float = 0.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         """Test transpose"""
