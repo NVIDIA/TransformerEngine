@@ -470,7 +470,7 @@ class Float8Tensor(torch.Tensor):
         if -self.dim() <= dim1 < 0:
             dim1 += self.dim()
         if self.dim() != 2 or dim0 == dim1:
-            if update_cache is not None:
+            if update_cache:
                 raise ValueError(
                     "Transpose caching is only supported for basic 2D transposes "
                     f"(ndims={self.dim()}, dim0={dim0}, dim1={dim1})"
