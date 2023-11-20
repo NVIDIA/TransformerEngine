@@ -244,17 +244,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             }
 
             mha_graph->create_execution_plans({fe::HeurMode_t::A});
-            //auto plans = mha_graph->get_execution_plan_list({fe::HeurMode_t::A});
 
             if (*check_support) {
-                //*check_support = plans.check_support(handle).is_good();
                 *check_support = mha_graph->check_support(handle).is_good();
                 return return_empty_tuple;
             }
 
-            //plans.check_support(handle);
             mha_graph->check_support(handle);
-            //mha_graph->set_execution_plans(plans);
             mha_graph->build_plans(handle);
 
             auto return_tuple = std::tuple_cat(
@@ -539,17 +535,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             }
 
             mha_graph->create_execution_plans({fe::HeurMode_t::A});
-            //auto plans = mha_graph->get_execution_plan_list({fe::HeurMode_t::A});
 
             if (*check_support) {
-                //*check_support = plans.check_support(handle).is_good();
                 *check_support = mha_graph->check_support(handle).is_good();
                 return return_empty_tuple;
             }
 
-            //plans.check_support(handle);
             mha_graph->check_support(handle);
-            //mha_graph->set_execution_plans(plans);
             mha_graph->build_plans(handle);
 
             auto return_tuple = std::tuple_cat(

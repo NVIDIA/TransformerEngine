@@ -1891,7 +1891,7 @@ class DotProductAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",","_")
         if attn_mask_type == "causal_padding":
-            attn_mask_type == "padding_causal"
+            attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
@@ -2121,7 +2121,7 @@ class DotProductAttention(torch.nn.Module):
         else:
             attn_mask_type = attn_mask_type.replace(",","_")
             if attn_mask_type == "causal_padding":
-                attn_mask_type == "padding_causal"
+                attn_mask_type = "padding_causal"
 
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
@@ -2210,7 +2210,7 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         if (_flash_attn_2_1_plus
-            and causal_mask
+            and "causal" in attn_mask_type
             and max_seqlen_q != max_seqlen_kv):
             warnings.warn(
                 "Disabling the use of FlashAttention since version 2.1+ has changed its behavior "
