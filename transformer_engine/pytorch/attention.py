@@ -766,7 +766,13 @@ class RotaryPositionEmbedding(torch.nn.Module):
         if rotary_percent < 1.0:
             dim = int(dim * rotary_percent)
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device()) / dim))
+        inv_freq = 1.0 / (
+            10000
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
+                / dim
+            )
+        )
         self.register_buffer('inv_freq', inv_freq)
         self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
 
@@ -781,7 +787,10 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             fixed offset for freqencies
         """
-        seq = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype) + offset
+        seq = (
+            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+            + offset
+        )
 
         if (self.pretrained_max_position_embeddings is not None
             and self.seq_len_interpolation_factor is not None):
@@ -802,6 +811,8 @@ class RotaryPositionEmbedding(torch.nn.Module):
 
 
 class FusedRoPEFunc(torch.autograd.Function):
+    """Function for FusedRoPE"""
+
     @staticmethod
     def forward(
         ctx, t: torch.Tensor, cos_: torch.Tensor, sin_: torch.Tensor
@@ -844,15 +855,15 @@ def apply_rotary_pos_emb(
 
     if fused:
         return FusedRoPEFunc.apply(t, cos_, sin_)
-    else:
-        rot_dim = freqs.shape[-1]
-        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-        # first part is cosine component
-        # second part is sine component, need to change signs with _rotate_half method
-        t = (t * cos_) + (_rotate_half(t) * sin_)
-        return torch.cat((t, t_pass), dim=-1)
+    rot_dim = freqs.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * cos_) + (_rotate_half(t) * sin_)
+    return torch.cat((t, t_pass), dim=-1)
 
 
 class _SplitAlongDim(torch.autograd.Function):
