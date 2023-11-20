@@ -2261,25 +2261,24 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
     """
     name = "te_cross_fused_attn_backward"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10)
+    impl_static_args = (8, 9, 10, 11, 12)
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(q_aval, kv_aval, softmax_aux_aval, doutput_aval, q_cu_seqlen_aval,
-                 kv_cu_seqlen_aval, *, attn_bias_type, attn_mask_type, scaling_factor,
-                 dropout_probability, is_training):
+    def abstract(q_aval, kv_aval, softmax_aux_aval, rng_state_aval, output_aval, doutput_aval,
+                 q_cu_seqlen_aval, kv_cu_seqlen_aval, *, attn_bias_type, attn_mask_type,
+                 scaling_factor, dropout_probability, is_training):
         """
         Cross fused attention bwd abstract
         """
-        del attn_bias_type, attn_mask_type
-        del scaling_factor, dropout_probability, is_training
+        del softmax_aux_aval, rng_state_aval, output_aval
+        del attn_bias_type, attn_mask_type, scaling_factor, dropout_probability, is_training
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
         kv_dtype = dtypes.canonicalize_dtype(kv_aval.dtype)
-        softmax_aux_dtype = dtypes.canonicalize_dtype(softmax_aux_aval.dtype)
+
         doutput_dtype = dtypes.canonicalize_dtype(doutput_aval.dtype)
-        assert q_dtype == kv_dtype == softmax_aux_dtype == doutput_dtype
-        # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
+        assert q_dtype == kv_dtype == doutput_dtype
         assert q_cu_seqlen_aval.dtype == kv_cu_seqlen_aval.dtype
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -2287,19 +2286,19 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         return dq_aval, dkv_aval
 
     @staticmethod
-    def lowering(ctx, q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen, *, attn_bias_type,
-                 attn_mask_type, scaling_factor, dropout_probability, is_training):
+    def lowering(ctx, q, kv, softmax_aux, rng_state, output, doutput, q_cu_seqlen, kv_cu_seqlen, *,
+                 attn_bias_type, attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Cross fused attention bwd lowering rules
         """
-        q_aval, kv_aval, _, _, _, _ = ctx.avals_in
+        q_aval, kv_aval, *_ = ctx.avals_in
         assert q_aval.dtype == kv_aval.dtype
 
         *batch_shape, q_max_seqlen, num_head, head_dim = q_aval.shape
         batch = reduce(operator.mul, batch_shape)
         kv_max_seqlen = kv_aval.shape[-4]
 
-        operands = [q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen]
+        operands = [q, kv, softmax_aux, rng_state, output, doutput, q_cu_seqlen, kv_cu_seqlen]
         operand_shapes = map(lambda x: x.type.shape, operands)
         out_types = [
             ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
@@ -2320,8 +2319,8 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(q, kv, softmax_aux, doutput, q_squeezed_mask, kv_squeezed_mask, attn_bias_type,
-             attn_mask_type, scaling_factor, dropout_probability, is_training):
+    def impl(q, kv, softmax_aux, rng_state, output, doutput, q_squeezed_mask, kv_squeezed_mask,
+             attn_bias_type, attn_mask_type, scaling_factor, dropout_probability, is_training):
         assert CrossFusedAttnBwdPrimitive.inner_primitive is not None
 
         q_cu_seqlen = generate_cu_seqlen(q_squeezed_mask)
@@ -2331,6 +2330,8 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
             q,
             kv,
             softmax_aux,
+            rng_state,
+            output,
             doutput,
             q_cu_seqlen,
             kv_cu_seqlen,
@@ -2346,7 +2347,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
                 dropout_probability, is_training):
         _check_valid_batch_dims(batch_dims)
         assert CrossFusedAttnBwdPrimitive.outer_primitive is not None
-        q, kv, softmax_aux, doutput, q_cu_seqlen, kv_cu_seqlen = batched_args
+        q, kv, softmax_aux, rng_state, output, doutput, q_cu_seqlen, kv_cu_seqlen = batched_args
         q_bdim, kv_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, kv_bdim
@@ -2354,6 +2355,8 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
             q,
             kv,
             softmax_aux,
+            rng_state,
+            output,
             doutput,
             q_cu_seqlen,
             kv_cu_seqlen,
@@ -2400,10 +2403,10 @@ register_primitive(CrossFusedAttnBwdPrimitive)
 
 
 def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarray,
-                         doutput: jnp.ndarray, q_squeezed_mask: jnp.ndarray,
-                         kv_squeezed_mask: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
-                         attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
-                         dropout_probability: float, is_training: bool):
+                         rng_state: jnp.ndarray, output: jnp.ndarray, doutput: jnp.ndarray,
+                         q_squeezed_mask: jnp.ndarray, kv_squeezed_mask: jnp.ndarray,
+                         attn_bias_type: NVTE_Bias_Type, attn_mask_type: NVTE_Mask_Type,
+                         scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Wrapper for TE cross fused attention bwd
     Return the gradients of cross fused attention with packed kv input
@@ -2411,6 +2414,8 @@ def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, softmax_aux: jnp.ndarr
     return CrossFusedAttnBwdPrimitive.outer_primitive.bind(q,
                                                            kv,
                                                            softmax_aux,
+                                                           rng_state,
+                                                           output,
                                                            doutput,
                                                            q_squeezed_mask,
                                                            kv_squeezed_mask,

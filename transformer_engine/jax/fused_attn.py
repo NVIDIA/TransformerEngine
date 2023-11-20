@@ -172,11 +172,12 @@ def _cross_fused_attn_fwd_rule(q, kv, mask, seed, attn_bias_type, attn_mask_type
 def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                                is_training, ctx, dz):
     q, kv, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask = ctx
-    del rng_state, output
 
     grad_q, grad_kv = cross_fused_attn_bwd(q,
                                            kv,
                                            softmax_aux,
+                                           rng_state,
+                                           output,
                                            dz,
                                            q_squeezed_mask,
                                            kv_squeezed_mask,

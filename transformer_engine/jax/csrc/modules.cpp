@@ -1014,20 +1014,25 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     void *q = buffers[0];
     void *kv = buffers[1];
     void *softmax_aux = buffers[2];
-    void *doutput = buffers[3];
-    void *q_cu_seqlens = buffers[4];
-    void *kv_cu_seqlens = buffers[5];
+    void *rng_state = buffers[3];
+    void *output = buffers[4];
+    void *doutput = buffers[5];
+    void *q_cu_seqlens = buffers[6];
+    void *kv_cu_seqlens = buffers[7];
 
     // output
-    void *dq = buffers[6];
-    void *dkv = buffers[7];
-    void *dp = softmax_aux;
+    void *dq = buffers[8];
+    void *dkv = buffers[9];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BS2HD;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
@@ -1037,11 +1042,9 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, dtype);
     auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
-    // It's a little trick that the flash attn needs fwd output
-    // But when seqlen <= 512, it is not needed
-    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
-    // FP16/BF16 doesn't use this tensor
+    // F16 doesn't use this tensor
     auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
 
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
@@ -1053,17 +1056,18 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // Currently, no rng_state required for bwd
-    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     // TODO(rewang): need to think about how to pass aux_output_tensors
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 1;
+    aux_output_tensors.size = 2;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
-    output_s->data.shape = std::vector<size_t>{batch * num_head, q_max_seqlen, kv_max_seqlen};
     output_s->data.dptr = softmax_aux;
+    auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
+    rng_state_tensor->data.shape = std::vector<size_t>{2};
+    rng_state_tensor->data.dtype = DType::kInt64;
+    rng_state_tensor->data.dptr = rng_state;
 
     TensorWrapper query_workspace_tensor;
 
@@ -1073,11 +1077,10 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD,
-        descriptor.bias_type, descriptor.mask_type, query_workspace_tensor.data(), stream);
+        descriptor.scaling_factor, dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD, bias_type,
+        mask_type, query_workspace_tensor.data(), stream);
 
-    size_t workspace_size =
-        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    size_t workspace_size = query_workspace_tensor.shape().data[0];
     auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
     auto workspace_tensor =
@@ -1089,8 +1092,8 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD,
-        descriptor.bias_type, descriptor.mask_type, workspace_tensor.data(), stream);
+        descriptor.scaling_factor, dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD, bias_type,
+        mask_type, workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }
