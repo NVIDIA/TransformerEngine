@@ -65,7 +65,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-    bool is_dropout = (dropout_probability != 0.0f);
+    bool is_dropout = (is_training && dropout_probability != 0.0f);
 
     // provide a mechanism for support checking for upcoming FE APIs
     bool tmp_check = *check_support;
@@ -243,15 +243,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 }
             }
 
-            auto plans = mha_graph->get_execution_plan_list({fe::HeurMode_t::A});
+            mha_graph->create_execution_plans({fe::HeurMode_t::A});
 
             if (*check_support) {
-                *check_support = plans.check_support(handle).is_good();
+                *check_support = mha_graph->check_support(handle).is_good();
                 return return_empty_tuple;
             }
 
-            plans.check_support(handle);
-            mha_graph->set_execution_plans(plans);
+            mha_graph->check_support(handle);
+            mha_graph->build_plans(handle);
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,
@@ -534,15 +534,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 }
             }
 
-            auto plans = mha_graph->get_execution_plan_list({fe::HeurMode_t::A});
+            mha_graph->create_execution_plans({fe::HeurMode_t::A});
 
             if (*check_support) {
-                *check_support = plans.check_support(handle).is_good();
+                *check_support = mha_graph->check_support(handle).is_good();
                 return return_empty_tuple;
             }
 
-            plans.check_support(handle);
-            mha_graph->set_execution_plans(plans);
+            mha_graph->check_support(handle);
+            mha_graph->build_plans(handle);
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,

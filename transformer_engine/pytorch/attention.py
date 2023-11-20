@@ -56,6 +56,7 @@ from transformer_engine.pytorch.jit import jit_fuser
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+_flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
@@ -1665,14 +1666,13 @@ class FusedAttention(torch.nn.Module):
         # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
         # - unset:       enables workspace optimization when required space is <= 256MB
         # - n:           enables workspace optimization when required space is <=n byte
-        # - 99999999999: enables workspace optimization always
+        # - -1:          enables workspace optimization always
         # - 0:           disables workspace optimization always
         if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = str(
-                        torch.cuda.get_device_properties(0).total_memory)
+                os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
     def forward(
         self,
@@ -1891,7 +1891,7 @@ class DotProductAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",","_")
         if attn_mask_type == "causal_padding":
-            attn_mask_type == "padding_causal"
+            attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
@@ -2121,7 +2121,7 @@ class DotProductAttention(torch.nn.Module):
         else:
             attn_mask_type = attn_mask_type.replace(",","_")
             if attn_mask_type == "causal_padding":
-                attn_mask_type == "padding_causal"
+                attn_mask_type = "padding_causal"
 
         assert (attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
@@ -2207,6 +2207,16 @@ class DotProductAttention(torch.nn.Module):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
+            use_flash_attention = False
+
+        if (_flash_attn_2_1_plus
+            and "causal" in attn_mask_type
+            and max_seqlen_q != max_seqlen_kv):
+            warnings.warn(
+                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior "
+                "for causal mask in cross attention. See "
+                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+            )
             use_flash_attention = False
 
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
