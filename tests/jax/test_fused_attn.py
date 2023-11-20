@@ -250,17 +250,16 @@ class TestSelfFusedAttn():
                          dtype=dtype,
                          is_training=is_training)
 
-        primitive_out = customcall_self_fused_attn(
-                self.qkv,
-                self.bias,
-                self.q_token,
-                self.kv_token,
-                self.dropout_rng,
-                attn_bias_type=self.attn_bias_type,
-                attn_mask_type=attn_mask_type,
-                scaling_factor=self.scaling_factor,
-                dropout_probability=self.dropout_probability if is_training else 0.0,
-                is_training=self.is_training)
+        primitive_out = customcall_self_fused_attn(self.qkv,
+                                                   self.bias,
+                                                   self.q_token,
+                                                   self.kv_token,
+                                                   self.dropout_rng,
+                                                   attn_bias_type=self.attn_bias_type,
+                                                   attn_mask_type=attn_mask_type,
+                                                   scaling_factor=self.scaling_factor,
+                                                   dropout_probability=self.dropout_probability,
+                                                   is_training=self.is_training)
 
         reference_out = jax_self_attn(self.qkv,
                                       self.bias,
@@ -447,17 +446,16 @@ class TestCrossFusedAttn():
                          is_training=is_training,
                          pad_ratio=pad_ratio)
 
-        primitive_out = customcall_cross_fused_attn(
-                self.q,
-                self.kv,
-                self.q_token,
-                self.kv_token,
-                self.dropout_rng,
-                attn_bias_type=self.attn_bias_type,
-                attn_mask_type=attn_mask_type,
-                scaling_factor=self.scaling_factor,
-                dropout_probability=self.dropout_probability if is_training else 0.0,
-                is_training=self.is_training)
+        primitive_out = customcall_cross_fused_attn(self.q,
+                                                    self.kv,
+                                                    self.q_token,
+                                                    self.kv_token,
+                                                    self.dropout_rng,
+                                                    attn_bias_type=self.attn_bias_type,
+                                                    attn_mask_type=attn_mask_type,
+                                                    scaling_factor=self.scaling_factor,
+                                                    dropout_probability=self.dropout_probability,
+                                                    is_training=self.is_training)
 
         reference_out = jax_cross_attn(self.q,
                                        self.kv,
@@ -523,7 +521,7 @@ class TestCrossFusedAttn():
             'attn_bias_type': self.attn_bias_type,
             'attn_mask_type': attn_mask_type,
             'scaling_factor': self.scaling_factor,
-            'dropout_probability': self.dropout_probability if is_training else 0.0,
+            'dropout_probability': self.dropout_probability,
             'is_training': self.is_training
         }
 
