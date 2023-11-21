@@ -12,14 +12,13 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
-from utils import make_causal_mask, make_self_mask, is_devices_enough
+from utils import make_causal_mask, make_self_mask
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.softmax import SoftmaxType, softmax
 
 DTYPES = [jnp.float16, jnp.bfloat16]
 
 
-@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
 class TestDistributedSoftmax:
 
     def generate_collectives_count_ref(self):

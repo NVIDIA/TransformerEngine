@@ -5,18 +5,16 @@
 import pytest
 import multiprocessing as mp
 import transformer_engine.jax as te
-import transformer_engine.jax.examples.encoder.multi_gpu as multi_gpu_encoder
-import transformer_engine.jax.examples.encoder.model_parallel as model_parallel_encoder
-import transformer_engine.jax.examples.encoder.multiprocessing as multiprocessing_encoder
-from utils import is_devices_enough
+import transformer_engine.jax.examples.encoder.data_parallel as data_parallel
+import transformer_engine.jax.examples.encoder.model_parallel as model_parallel
+import transformer_engine.jax.examples.encoder.data_model_parallel as data_model_parallel
 
 
-@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
-class TestDistributedEncoder:
+class TestMultiGPUEncoder:
 
     gpu_has_fp8, reason = te.fp8.is_fp8_available()
-    parsers  = [ multi_gpu_encoder.encoder_parser,     model_parallel_encoder.encoder_parser ]
-    trainers = [ multi_gpu_encoder.train_and_evaluate, model_parallel_encoder.train_and_evaluate ]
+    parsers  = [ data_parallel.encoder_parser,     model_parallel.encoder_parser ]
+    trainers = [ data_parallel.train_and_evaluate, model_parallel.train_and_evaluate ]
     args = ["--epochs", "3"]
 
     @pytest.mark.parametrize('encoder_parser,train_and_evaluate', zip(parsers, trainers))
@@ -33,10 +31,9 @@ class TestDistributedEncoder:
         assert actual[0] < 0.45 and actual[1] > 0.79
 
 
-@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
-class TestMultiprocessingEncoder:
+class TestMultiGPUEncoderDPTP:
 
-    num_gpu, gpu_has_fp8, reason = multiprocessing_encoder.unittest_query_gpu()
+    num_gpu, gpu_has_fp8, reason = data_model_parallel.unittest_query_gpu()
 
     def exec(self, use_fp8):
         """Run 3 epochs for testing"""
@@ -47,7 +44,7 @@ class TestMultiprocessingEncoder:
 
         arg_list = []
         for i in range(num_gpu):
-            args = multiprocessing_encoder.encoder_parser([])
+            args = data_model_parallel.encoder_parser([])
             args.num_process = num_gpu
             args.use_fp8 = use_fp8
             args.batch_size = batch_size
@@ -56,7 +53,7 @@ class TestMultiprocessingEncoder:
             arg_list.append(args)
 
         with mp.Pool(self.num_gpu) as p:
-            results = p.map(multiprocessing_encoder.train_and_evaluate, arg_list)
+            results = p.map(data_model_parallel.train_and_evaluate, arg_list)
 
         return results
 

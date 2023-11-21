@@ -10,7 +10,6 @@ import numpy as np
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from utils import is_devices_enough
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
 from transformer_engine.jax import fp8_autocast
@@ -19,7 +18,6 @@ from transformer_engine.jax.layernorm import layernorm
 DTYPES = [jnp.bfloat16, jnp.float32]
 
 
-@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
 class TestDistributedLayernorm:
 
     def generate_inputs(self, shape, mesh_resource, dtype):

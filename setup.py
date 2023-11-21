@@ -603,22 +603,27 @@ def setup_paddle_extension() -> setuptools.Extension:
 def main():
 
     # Submodules to install
-    packages = [ 'transformer_engine', 'transformer_engine.common' ]
-    package_dir = {
-        'transformer_engine' : 'transformer_engine',
-        'transformer_engine.common' : 'transformer_engine/common'
-    }
-    package_data = {}
+    packages = setuptools.find_packages(include=['transformer_engine', 'transformer_engine.*'])
     
     # Add examples (importable) and tests (not importable)
+    package_dir = {}
+    package_data = {}
     for framework in frameworks():
-        packages += [ f'transformer_engine.{framework}' ]
+        packages += [
+            f'transformer_engine.{framework}.examples',
+            f'transformer_engine.{framework}.tests'
+        ]
         package_dir.update(
             {
-                f'transformer_engine.{framework}' : f'transformer_engine/{framework}',
-                f'transformer_engine.{framework}.examples': f'examples/{framework}',
+                f'transformer_engine.{framework}.examples' : f'examples/{framework}',
+                f'transformer_engine.{framework}.tests' : f'tests/{framework}'
             }
         )
+        examples_paths = []
+        for path, _, _ in os.walk(f'examples/{framework}'):
+            examples_paths += [ f'{path}/*' ]
+        package_data.update( { f'transformer_engine.{framework}.examples' : examples_paths } )
+        
         test_paths = []
         for path, _, _ in os.walk(f'tests/{framework}'):
             test_paths += [ f'{path}/*.py' ]
@@ -641,7 +646,6 @@ def main():
         version=te_version(),
         packages=packages,
         package_dir=package_dir,
-        package_data=package_data,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
