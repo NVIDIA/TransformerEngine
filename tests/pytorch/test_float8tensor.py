@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from collections.abc import Iterable
+import io
 from typing import Any, Dict, List, Tuple, Union
 
 import pytest
@@ -318,6 +319,7 @@ class TestFloat8Tensor:
             )
 
     def test_serialization(
+        self,
         dims: DimsType = [2,3,5],
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         scale: float = 0.5,
@@ -335,12 +337,25 @@ class TestFloat8Tensor:
         x_ref = x_fp8.from_float8()
 
         # Serialize tensor
-        buf = io.BytesIO()
-        torch.save(x_fp8, buf)
-        del x_fp8
+        byte_stream = io.BytesIO()
+        torch.save(x_fp8, byte_stream)
+        x_bytes = byte_stream.getvalue()
+
+        # Mess up and delete old tensor
+        x_fp8._data.zero_()
+        x_fp8._scale_inv.zero_()
+        del x_fp8, byte_stream
 
         # Deserialize tensor
-        x_fp8 = torch.load(buf)
+        x_fp8 = torch.load(io.BytesIO(x_bytes))
+        del x_bytes
 
         # Check results
-        torch.testing.assert_close(x_fp8, x_ref, rtol=0, atol=0)
+        tols = dict(rtol=0, atol=0)
+        torch.testing.assert_close(x_fp8, x_ref, **tols)
+
+        # Make sure we are not trivially passing tests
+        x_fp8._data.zero_()
+        x_fp8._scale_inv.zero_()
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(x_fp8, x_ref, **tols)
