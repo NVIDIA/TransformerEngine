@@ -923,14 +923,15 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     // input
     void *q = buffers[0];
     void *kv = buffers[1];
-    void *q_cu_seqlens = buffers[2];
-    void *kv_cu_seqlens = buffers[3];
-    void *seed = buffers[4];
+    void *bias = buffers[2];
+    void *q_cu_seqlens = buffers[3];
+    void *kv_cu_seqlens = buffers[4];
+    void *seed = buffers[5];
 
     // output
-    void *output = buffers[5];
-    void *softmax_aux = buffers[6];
-    void *rng_state = buffers[7];
+    void *output = buffers[6];
+    void *softmax_aux = buffers[7];
+    void *rng_state = buffers[8];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -951,8 +952,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
 
-    // TODO(rewang): add bias for cross attn?
-    auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
 
     auto q_cu_seqlens_tensor =
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
@@ -1023,6 +1023,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     // output
     void *dq = buffers[8];
     void *dkv = buffers[9];
+    void *dbias = buffers[10];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -1049,8 +1050,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
     auto dkv_tensor = TensorWrapper(dkv, kv_shape, dtype);
-    // TODO(rewang): generalize cross attn
-    auto dbias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+    auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
 
     auto q_cu_seqlens_tensor =
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);

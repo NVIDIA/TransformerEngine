@@ -119,8 +119,8 @@ def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dr
 _self_fused_attn.defvjp(_self_fused_attn_fwd_rule, _self_fused_attn_bwd_rule)
 
 
-def cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
-                     attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+def cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
+                     seed: jnp.ndarray, attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                      scaling_factor: float, dropout_probability: float, is_training: bool):
     """
     Cross multi-head attention wrapper
@@ -128,6 +128,7 @@ def cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: j
 
     output = _cross_fused_attn(q,
                                kv,
+                               bias,
                                mask,
                                seed,
                                attn_bias_type=attn_bias_type,
@@ -139,24 +140,25 @@ def cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: j
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
-def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, mask: jnp.ndarray, seed: jnp.ndarray,
-                      attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
+def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray,
+                      seed: jnp.ndarray, attn_bias_type: AttnBiasType, attn_mask_type: AttnMaskType,
                       scaling_factor: float, dropout_probability: float, is_training: bool):
 
-    output, _ = _cross_fused_attn_fwd_rule(q, kv, mask, seed, attn_bias_type, attn_mask_type,
+    output, _ = _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                            scaling_factor, dropout_probability, is_training)
     return output
 
 
-def _cross_fused_attn_fwd_rule(q, kv, mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
-                               dropout_probability, is_training):
+def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
+                               scaling_factor, dropout_probability, is_training):
 
     q_squeezed_mask = mask[..., 0]
     kv_squeezed_mask = mask[..., 0, :]
 
     output, softmax_aux, rng_state = cross_fused_attn_fwd(q,
                                                           kv,
+                                                          bias,
                                                           q_squeezed_mask,
                                                           kv_squeezed_mask,
                                                           seed,
@@ -173,21 +175,24 @@ def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, d
                                is_training, ctx, dz):
     q, kv, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask = ctx
 
-    grad_q, grad_kv = cross_fused_attn_bwd(q,
-                                           kv,
-                                           softmax_aux,
-                                           rng_state,
-                                           output,
-                                           dz,
-                                           q_squeezed_mask,
-                                           kv_squeezed_mask,
-                                           attn_bias_type=attn_bias_type.value,
-                                           attn_mask_type=attn_mask_type.value,
-                                           scaling_factor=scaling_factor,
-                                           dropout_probability=dropout_probability,
-                                           is_training=is_training)
+    grad_q, grad_kv, grad_bias = cross_fused_attn_bwd(q,
+                                                      kv,
+                                                      softmax_aux,
+                                                      rng_state,
+                                                      output,
+                                                      dz,
+                                                      q_squeezed_mask,
+                                                      kv_squeezed_mask,
+                                                      attn_bias_type=attn_bias_type.value,
+                                                      attn_mask_type=attn_mask_type.value,
+                                                      scaling_factor=scaling_factor,
+                                                      dropout_probability=dropout_probability,
+                                                      is_training=is_training)
 
-    return grad_q, grad_kv, None, None
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+
+    return grad_q, grad_kv, grad_bias, None, None
 
 
 _cross_fused_attn.defvjp(_cross_fused_attn_fwd_rule, _cross_fused_attn_bwd_rule)
