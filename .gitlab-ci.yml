@@ -53,7 +53,7 @@ before_script:
     - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
-    - test ${TAG_ROOT} || export TAG_ROOT=RELEASE_BRANCH_NAME_SLUG                                 && echo "${TAG_ROOT}"
+    - test ${TAG_ROOT} || export TAG_ROOT=${RELEASE_BRANCH_NAME_SLUG}                              && echo "${TAG_ROOT}"
     - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${TAG_ROOT}-${FRAMEWORK}-py${PYVER%.*}"         && echo "${IMAGE_NAME_ROOT}"
     - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
     - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
