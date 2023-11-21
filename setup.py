@@ -276,6 +276,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             if val not in l:
                 l.append(val)
 
+    def get_example_reqs(framework: str) -> List[str]:
+        example_reqs = []
+        for path, _, files in os.walk(f'examples/{framework}'):
+            if 'requirements.txt' in files:
+                with open(f'{path}/requirements.txt') as reqs_file:
+                    add_unique(example_reqs, reqs_file.read().splitlines())
+        return example_reqs
+
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
@@ -286,14 +294,17 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if "pytorch" in frameworks():
         add_unique(install_reqs, ["torch", "flash-attn>=1.0.6,<=2.3.3,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+        add_unique(test_reqs, get_example_reqs("pytorch"))
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
+        add_unique(test_reqs, get_example_reqs("jax"))
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
+        add_unique(test_reqs, get_example_reqs("paddle"))
 
     return setup_reqs, install_reqs, test_reqs
 
@@ -592,12 +603,23 @@ def setup_paddle_extension() -> setuptools.Extension:
 def main():
 
     # Submodules to install
-    packages = setuptools.find_packages(
-        include=["transformer_engine", "transformer_engine.*"],
-    )
-    packages += setuptools.find_namespace_packages(
-        include=['examples', 'examples.*', 'tests', 'tests.*']
-    )
+    packages = ['transformer_engine']
+    package_dir = {'transformer_engine' : 'transformer_engine'}
+    package_data = {}
+    
+    # Add examples (importable) and tests (not importable)
+    for framework in frameworks():
+        packages += [ f'transformer_engine.{framework}' ]
+        package_dir.update(
+            {
+                f'transformer_engine.{framework}' : f'transformer_engine/{framework}',
+                f'transformer_engine.{framework}.examples': f'examples/{framework}',
+            }
+        )
+        test_paths = []
+        for path, dirs, files in os.walk(f'tests/{framework}'):
+            test_paths += [ f'{path}/*.py' ]
+        package_data.update( { f'transformer_engine.{framework}.tests': test_paths } )
 
     # Dependencies
     setup_requires, install_requires, test_requires = setup_requirements()
@@ -611,10 +633,12 @@ def main():
         ext_modules.append(setup_paddle_extension())
 
     # Configure package
-    setuptools.setup(
+    s = setuptools.setup(
         name="transformer_engine",
         version=te_version(),
         packages=packages,
+        package_dir=package_dir,
+        package_data=package_data,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
@@ -623,7 +647,6 @@ def main():
         extras_require={"test": test_requires},
         license_files=("LICENSE",),
     )
-
 
 if __name__ == "__main__":
     main()

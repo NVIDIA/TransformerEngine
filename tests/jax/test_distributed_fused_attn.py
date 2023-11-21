@@ -13,7 +13,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
-from utils import make_causal_mask, make_self_mask
+from utils import make_causal_mask, make_self_mask, is_devices_enough
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
 from transformer_engine.jax.fused_attn import self_fused_attn, cross_fused_attn
@@ -22,6 +22,7 @@ from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLay
 DTYPES = [jnp.float16, jnp.bfloat16]
 
 
+@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
 class TestDistributedSelfAttn:
 
     def generate_collectives_count_ref(self, mesh_shape, mesh_axes, mesh_resource, with_bias, shape,
@@ -142,6 +143,7 @@ class TestDistributedSelfAttn:
                         out_shardings=(None, out_grad_shardings))
 
 
+@pytest.mark.skipif(not is_devices_enough(2), reason='Need at least 2 GPUs for distributed tests.')
 class TestDistributedCrossAttn:
 
     def generate_collectives_count_ref(self):

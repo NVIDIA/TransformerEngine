@@ -105,9 +105,7 @@ def test(model, device, test_loader, use_fp8):
         f"({100. * correct / len(test_loader.dataset):.0f}%)\n"
     )
 
-
-def main():
-    # Training settings
+def mnist_parser(args):
     parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
     parser.add_argument(
         "--batch-size",
@@ -175,7 +173,9 @@ def main():
     parser.add_argument(
         "--use-te", action="store_true", default=False, help="Use Transformer Engine"
     )
-    args = parser.parse_args()
+    return parser.parse_args(args)
+
+def train_and_evaluate(args):
     use_cuda = torch.cuda.is_available()
 
     if args.use_fp8 or args.use_fp8_infer:
@@ -220,6 +220,5 @@ def main():
         model.load_state_dict(weights)
         test(model, device, test_loader, args.use_fp8_infer)
 
-
 if __name__ == "__main__":
-    main()
+    train_and_evaluate(mnist_parser(None))

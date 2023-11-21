@@ -5,14 +5,12 @@
 set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
-pytest -Wignore -v $TE_PATH/tests/jax -k 'not distributed'
-
 pip install -r $TE_PATH/examples/jax/mnist/requirements.txt
-pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
-
-pytest -Wignore -v $TE_PATH/examples/jax/mnist
+pytest -Wignore -v $TE_PATH/tests/jax \
+    --ignore="$TE_PATH/tests/jax/test_encoder.py" \
+    --ignore-glob="$TE_PATH/tests/jax/test_distributed_*.py"
 
 # Make encoder tests to have run-to-run deterministic to have the stable CI results
+pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
-pytest -Wignore -v $TE_PATH/examples/jax/encoder --ignore=$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
-pytest -Wignore -v $TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
+pytest -Wignore -v $TE_PATH/tests/jax/test_encoder.py
