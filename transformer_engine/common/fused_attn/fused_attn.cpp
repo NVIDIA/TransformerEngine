@@ -111,8 +111,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
                 || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS))
             && ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-                || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
+                || (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                 || (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
             && ((qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD)
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
@@ -127,11 +127,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             && (max_seqlen_kv % 64 == 0)
             && (num_attn_heads == num_gqa_groups)
             && ((head_dim <= 128) && (head_dim % 8 == 0))
-            && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
+            //&& (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
+            && ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
+                || ((cudnn_runtime_version >= 8906) &&
+                    (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
+                     bias_type == NVTE_Bias_Type::NVTE_ALIBI ||
+                     bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)))
             && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
                 || ((cudnn_runtime_version >= 8906) &&
                     (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)))
             && ((qkv_format == NVTE_QKV_Format::NVTE_SBHD)
                 || (qkv_format == NVTE_QKV_Format::NVTE_BSHD))) {

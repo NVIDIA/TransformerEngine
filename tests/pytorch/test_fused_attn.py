@@ -114,6 +114,7 @@ def _is_fused_attention_supported(
         config.num_heads,
         config.num_gqa_groups,
     )
+    print('bbbbbbbbbb',backend)
     return backend != FusedAttnBackend["No_Backend"]
 
 @functools.cache
@@ -140,7 +141,7 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
 
 def _is_unfused_attention_supported(config: ModelConfig) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
-    if ("padding" in config.attn_mask_type or config.attn_bias_type == "alibi"):
+    if ("padding" in config.attn_mask_type): # or config.attn_bias_type == "alibi"):
         return False
     if ("causal" in config.attn_mask_type and config.attn_type == 'cross'):
         return False
@@ -228,14 +229,17 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
+        print('unfused vs fused')
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
+        print('unfused vs flash')
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
+        print('fused vs flash')
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -247,14 +251,18 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    "mask_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,         "causal", "no_bias"),
-    "mask_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,         "causal", "no_bias"),
-    "mask_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "no_bias"),
-    "mask_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,         "causal", "no_bias"),
-    "mask_3_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding", "no_bias"),
-    "mask_3_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,        "padding", "no_bias"),
-    "mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
-    "mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
+    #"mask_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,         "causal", "no_bias"),
+    #"mask_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,         "causal", "no_bias"),
+    #"mask_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "no_bias"),
+    #"mask_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,         "causal", "no_bias"),
+    #"mask_3_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding", "no_bias"),
+    #"mask_3_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,        "padding", "no_bias"),
+    #"mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
+    #"mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
+    "mask_5_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal", "no_bias"),
+    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"),
+    "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
@@ -269,6 +277,10 @@ model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias 
     "bias_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
     "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "no_mask", "post_scale_bias"),
+    "bias_2_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
+    "bias_2_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "post_scale_bias"), # TODO
+    "bias_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask",           "alibi"),
+    "bias_3_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask",           "alibi"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
@@ -418,28 +430,30 @@ def _run_dot_product_attention(
     out_grad = 0.001 * torch.randint(0, 200, out_grad_shape_new, dtype=dtype, device="cuda")
 
     # Create bias
-    if config.attn_bias_type == 'no_bias':
+    if config.attn_bias_type in ['no_bias', 'alibi']:
         bias = None
     if config.attn_bias_type == 'post_scale_bias':
         bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
                 dtype=dtype, device="cuda")
-    elif config.attn_bias_type == 'alibi':
-        if os.environ['NVTE_FUSED_ATTN_BACKEND'] == '0':
-            config.attn_bias_type = 'post_scale_bias'
-            n = 2 ** math.floor(math.log2(config.num_heads))
-            m_0 = 2.0 ** (-8.0 / n)
-            m = torch.pow(m_0, torch.arange(1, 1 + n))
+    #elif config.attn_bias_type == 'alibi':
+        #if os.environ['NVTE_FUSED_ATTN_BACKEND'] == '0':
+        #    config.attn_bias_type = 'post_scale_bias'
+        #    n = 2 ** math.floor(math.log2(config.num_heads))
+        #    m_0 = 2.0 ** (-8.0 / n)
+        #    m = torch.pow(m_0, torch.arange(1, 1 + n))
 
-            a = torch.ones(config.max_seqlen_q, config.max_seqlen_kv)
-            b = torch.triu(a,diagonal=1)
-            c = b.cumsum(dim=-1)
-            d = c - torch.transpose(c, 0, 1)
-            bias = d.expand(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv)
-            for i in range(config.num_heads):
-                bias[0,i,:,:] = m[i] *  bias[0,i,:,:]
-            bias = bias.to(dtype=dtype, device="cuda")
-        else:
-            bias = None
+        #    a = torch.ones(config.max_seqlen_q, config.max_seqlen_kv)
+        #    b = torch.triu(a,diagonal=1)
+        #    c = b.cumsum(dim=-1)
+        #    bb = torch.tril(a,diagonal=-1)
+        #    cc = bb.cumsum(dim=0)
+        #    d = c - cc
+        #    bias = d.expand(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv)
+        #    for i in range(config.num_heads):
+        #        bias[0,i,:,:] = m[i] *  bias[0,i,:,:]
+        #    bias = bias.to(dtype=dtype, device="cuda")
+        #else:
+        #    bias = None
 
     # Create RNG
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()

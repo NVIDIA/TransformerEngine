@@ -119,6 +119,36 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
 
+def get_alibi(dtype: torch.dtype,
+    num_heads: int,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+) -> torch.Tensor:
+    """
+    Generate ALiBi bias in the shape of [1, num_heads, max_seqlen_q, max_seqlen_kv].
+    """
+    n = 2 ** math.floor(math.log2(num_heads))
+    m_0 = 2.0 ** (-8.0 / n)
+    m = torch.pow(m_0, torch.arange(1, 1 + n))
+
+    if n < num_heads:
+        m_hat_0 = 2.0 ** (-4.0 / n)
+        m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
+        m = torch.cat([m, m_hat])
+
+    a = torch.ones(max_seqlen_q, max_seqlen_kv)
+    b = torch.triu(a,diagonal=1)
+    c = b.cumsum(dim=-1)
+    bb = torch.tril(a,diagonal=-1)
+    cc = bb.cumsum(dim=0)
+    d = c - cc
+    bias = d.expand(1, num_heads, max_seqlen_q, max_seqlen_kv)
+
+    for i in range(num_heads):
+        bias[0,i,:,:] = m[i] * bias[0,i,:,:]
+
+    bias = bias.to(dtype=dtype, device="cuda")
+    return bias
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
@@ -1006,10 +1036,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 + core_attention_bias).view(-1, output_size[2], output_size[3])
             matmul_result /= scale
 
-        elif core_attention_bias_type == "post_scale_bias":
-            assert core_attention_bias is not None, "core_attention_bias should not be None!"
-            assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
-                    ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+        elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
+            if core_attention_bias_type == "post_scale_bias":
+                assert core_attention_bias is not None, "core_attention_bias should not be None!"
+                assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
+                        ), "core_attention_bias must be in [1, h, sq, skv] shape!"
+            if core_attention_bias_type == "alibi":
+                core_attention_bias = get_alibi(query_layer.dtype,
+                        output_size[1], output_size[2], output_size[3])
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
