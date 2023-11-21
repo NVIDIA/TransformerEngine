@@ -482,8 +482,7 @@ class Float8Tensor(torch.Tensor):
         # Compute transpose if needed
         out = self._transpose
         if out is None:
-            out = Float8Tensor.make_like(
-                self,
+            out = self.make_like(
                 data=tex.fp8_transpose(
                     self._data.contiguous(),
                     self._fp8_dtype,
