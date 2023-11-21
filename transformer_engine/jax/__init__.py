@@ -32,13 +32,3 @@ __all__ = [
     'flax',
     'praxis',
 ]
-
-try:
-    # `pip install .` will move JAX examples to the installed TE/framework folder
-    from . import examples
-except ImportError as e:
-    try:
-        # if the examples are not here, then TE must be installed in editable/develop mode
-        from ...examples import jax as examples
-    except ImportError as e:
-        pass
