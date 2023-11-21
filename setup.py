@@ -603,8 +603,11 @@ def setup_paddle_extension() -> setuptools.Extension:
 def main():
 
     # Submodules to install
-    packages = ['transformer_engine']
-    package_dir = {'transformer_engine' : 'transformer_engine'}
+    packages = [ 'transformer_engine', 'transformer_engine.common' ]
+    package_dir = {
+        'transformer_engine' : 'transformer_engine',
+        'transformer_engine.common' : 'transformer_engine/common'
+    }
     package_data = {}
     
     # Add examples (importable) and tests (not importable)
