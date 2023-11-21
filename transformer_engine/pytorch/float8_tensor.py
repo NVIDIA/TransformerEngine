@@ -340,10 +340,8 @@ class Float8Tensor(torch.Tensor):
 
         return self
 
-    @classmethod
     def make_like(
-        cls,
-        tensor: Float8Tensor,
+        self,
         *,
         data: torch.Tensor,
         fp8_attrs: Optional[Dict[str, Any]] = None,
@@ -355,12 +353,12 @@ class Float8Tensor(torch.Tensor):
 
         """
         default_kwargs = dict(
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
-            fp8_dtype=tensor._fp8_dtype,
-            fp8_scale_inv=tensor._scale_inv,
-            dtype=tensor.dtype,
+            fp8_meta=self._fp8_meta,
+            fp8_meta_forward=self._fp8_meta_forward,
+            fp8_meta_index=self._fp8_meta_index,
+            fp8_dtype=self._fp8_dtype,
+            fp8_scale_inv=self._scale_inv,
+            dtype=self.dtype,
         )
         for key, val in default_kwargs.items():
             if key not in kwargs:
@@ -526,8 +524,7 @@ class Float8Tensor(torch.Tensor):
         The new tensor has the same underlying FP8 data.
 
         """
-        return Float8Tensor.make_like(
-            self,
+        return self.make_like(
             data=self._data,
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
@@ -602,13 +599,12 @@ class Float8Tensor(torch.Tensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=data_slice)
+            return tensor.make_like(data=data_slice)
 
         # Detach op
         if func == aten.detach.default:
             # Simply return a new Float8Tensor with the same attrs
-            return Float8Tensor.make_like(
-                args[0],
+            return args[0].make_like(
                 data=args[0]._data,
                 fp8_attrs=args[0]._fp8_attrs,
             )
@@ -657,6 +653,32 @@ class Float8Tensor(torch.Tensor):
             kwargs = tree_map(maybe_unwrap, kwargs)
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
+
+    def _make_in_reduce(
+        data: torch.Tensor,
+        fp8_dtype: tex.DType,
+        fp8_scale_inv: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> Float8Tensor:
+        """Build Float8Tensor, for use in __reduce__
+
+        __reduce__ function assumes object constructor has positional
+        arguments.
+
+        """
+        return Float8Tensor(
+            data=data,
+            fp8_dtype=fp8_dtype,
+            fp8_scale_inv=fp8_scale_inv,
+            dtype=dtype,
+        )
+
+    def __reduce__(self) -> tuple:
+        """Custom pickling to remove references to FP8 metadata objects"""
+        return (
+            Float8Tensor._make_in_reduce,
+            (self.data, self.fp8_dtype, self.fp8_scale_inv, self.dtype),
+        )
 
     def _get_data(self) -> Float8Tensor:
         """Get tensor data property"""
