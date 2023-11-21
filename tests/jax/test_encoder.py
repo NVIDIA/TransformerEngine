@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import pytest
 import transformer_engine.jax as te
 from transformer_engine.jax.examples.encoder.single_gpu import encoder_parser, train_and_evaluate

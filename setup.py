@@ -617,7 +617,7 @@ def main():
             }
         )
         test_paths = []
-        for path, dirs, files in os.walk(f'tests/{framework}'):
+        for path, _, _ in os.walk(f'tests/{framework}'):
             test_paths += [ f'{path}/*.py' ]
         package_data.update( { f'transformer_engine.{framework}.tests': test_paths } )
 
