@@ -4,7 +4,13 @@
 
 import pytest
 import transformer_engine.jax as te
-from transformer_engine.jax.examples.mnist.single_gpu import mnist_parser, train_and_evaluate
+try:
+    from te.examples.mnist.single_gpu import mnist_parser, train_and_evaluate
+except ModuleNotFoundError as e:
+    example_path = te.examples.mnist.__file__.strip('/__init__.py')
+    err_msg = f'{str(e)}. Please install TransformerEngine with `pip install .[test]` ' + \
+        'or run `pip install -r {example_path}/requirements.txt`.'
+    raise ModuleNotFoundError(err_msg)
 
 def verify(actual):
         """Check If loss and accuracy match target"""
@@ -22,7 +28,7 @@ def config():
     yield mnist_parser(["--epochs", "5"])
 
 
-class TestMNIST:
+class TestExampleMNIST:
 
     gpu_has_fp8, reason = te.fp8.is_fp8_available()
 

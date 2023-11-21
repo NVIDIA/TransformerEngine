@@ -600,34 +600,46 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext.name = "transformer_engine_paddle_pd_"
     return ext
 
+def find_auxiliary_packages(pkg_name, frameworks=frameworks()):
+    """
+    Find module names, paths and files for auxiliary packages that live outside
+    the TransformerEngine source and therefore cannot be found by `setuptools.find_packages()`.
+    """
+    pkgs = []
+    dirs = {}
+    data = {}
+    for framework in frameworks:
+        for path, _, files in os.walk(f'{pkg_name}/{framework}'):
+            # Construct module name for the auxiliary package
+            parts = path.split('/')
+            module = f'transformer_engine.{framework}.{pkg_name}'
+            for p in parts[2:]:
+                module += f'.{p}'
+            pkgs += [ module ]
+            # Redirect module to auxiliary directory outside TE source path
+            dirs.update( { module : path } )
+            # Include non-Python files (setuptools automatically skips over *.py files)
+            includes = [ f'*.*' ]
+            if '__init__.py' not in files:
+                # Python files need to be added manually for subpackages that are not PyModules
+                includes += [ f'*.py']
+            data.update( { module : includes } )
+    return pkgs, dirs, data
+
 def main():
 
     # Submodules to install
     packages = setuptools.find_packages(include=['transformer_engine', 'transformer_engine.*'])
     
-    # Add examples (importable) and tests (not importable)
-    package_dir = {}
-    package_data = {}
-    for framework in frameworks():
-        packages += [
-            f'transformer_engine.{framework}.examples',
-            f'transformer_engine.{framework}.tests'
-        ]
-        package_dir.update(
-            {
-                f'transformer_engine.{framework}.examples' : f'examples/{framework}',
-                f'transformer_engine.{framework}.tests' : f'tests/{framework}'
-            }
-        )
-        examples_paths = []
-        for path, _, _ in os.walk(f'examples/{framework}'):
-            examples_paths += [ f'{path}/*' ]
-        package_data.update( { f'transformer_engine.{framework}.examples' : examples_paths } )
-        
-        test_paths = []
-        for path, _, _ in os.walk(f'tests/{framework}'):
-            test_paths += [ f'{path}/*.py' ]
-        package_data.update( { f'transformer_engine.{framework}.tests': test_paths } )
+    # Add examples (importable)
+    examples_pkgs, package_dir, package_data = find_auxiliary_packages('examples')
+    packages += examples_pkgs
+    
+    # Add tests (not importable)
+    tests_pkgs, tests_dir, tests_data = find_auxiliary_packages('tests')
+    packages += tests_pkgs
+    package_dir.update(tests_dir)
+    package_data.update(tests_data)
 
     # Dependencies
     setup_requires, install_requires, test_requires = setup_requirements()
@@ -646,6 +658,7 @@ def main():
         version=te_version(),
         packages=packages,
         package_dir=package_dir,
+        package_data=package_data,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},

@@ -5,12 +5,18 @@
 import pytest
 import multiprocessing as mp
 import transformer_engine.jax as te
-import transformer_engine.jax.examples.encoder.data_parallel as data_parallel
-import transformer_engine.jax.examples.encoder.model_parallel as model_parallel
-import transformer_engine.jax.examples.encoder.data_model_parallel as data_model_parallel
+try:
+    import te.examples.encoder.data_parallel as data_parallel
+    import te.examples.encoder.model_parallel as model_parallel
+    import te.examples.encoder.data_model_parallel as data_model_parallel
+except ModuleNotFoundError as e:
+    example_path = te.examples.encoder.__file__.strip('/__init__.py')
+    err_msg = f'{str(e)}. Please install TransformerEngine with `pip install .[test]` ' + \
+        'or run `pip install -r {example_path}/requirements.txt`.'
+    raise ModuleNotFoundError(err_msg)
 
 
-class TestMultiGPUEncoder:
+class TestDistributedExampleEncoder:
 
     gpu_has_fp8, reason = te.fp8.is_fp8_available()
     parsers  = [ data_parallel.encoder_parser,     model_parallel.encoder_parser ]
@@ -31,7 +37,7 @@ class TestMultiGPUEncoder:
         assert actual[0] < 0.45 and actual[1] > 0.79
 
 
-class TestMultiGPUEncoderDPTP:
+class TestDistributedExampleEncoderDPTP:
 
     num_gpu, gpu_has_fp8, reason = data_model_parallel.unittest_query_gpu()
 

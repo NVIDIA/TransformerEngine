@@ -5,9 +5,7 @@
 set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
-pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_fused_attn.py
-pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_layernorm.py
-pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_softmax.py
+pytest -Wignore -v $TE_PATH/tests/jax -k 'distributed and not encoder'
 
 # Make encoder tests to have run-to-run deterministic to have the stable CI results
 pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
