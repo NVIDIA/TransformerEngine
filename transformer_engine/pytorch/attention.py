@@ -1695,8 +1695,8 @@ class FusedAttention(torch.nn.Module):
                         and get_device_compute_capability() == (9, 0))
         self.layer_number = 1 if layer_number is None else layer_number
         if deterministic:
-            # workspace optimization path is non-deterministic
-            os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
+            # workspace optimization path is deterministic
+            os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
         # - unset:       enables workspace optimization when required space is <= 256MB
