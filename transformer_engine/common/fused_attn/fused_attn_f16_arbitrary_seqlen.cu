@@ -320,7 +320,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                 void* devPtrQ, void* devPtrKTranspose, void* devPtrVTranspose,
-                void* devPtrO, void* devPtrSoftmaxStats,
+                void* devPtrO, void* devPtrSoftmaxStats, void* devPtrBias,
                 void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO, void* devPtrdBias,
                 void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
@@ -365,6 +365,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
               std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
               std::shared_ptr<fe::graph::Tensor_attributes>,  // dV
               std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+              std::shared_ptr<fe::graph::Tensor_attributes>,  // dBias
               std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
               std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
               std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
@@ -390,7 +391,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                     .set_compute_data_type(fe::DataType_t::FLOAT);
 
             std::shared_ptr<fe::graph::Tensor_attributes> q, k, v, o, dO, stats, attn_scale;
-            std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
+            std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
             std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
             std::vector<int64_t> q_stride(4);
@@ -453,7 +454,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_name("bias")
                                 .set_dim({1, h, s_q, s_kv})
                                 .set_stride({h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+                dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                .set_name("dBias")
+                                .set_dim({1, h, s_q, s_kv})
+                                .set_stride({h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
                 scaled_dot_product_flash_attention_backward_options.set_bias(bias);
+                scaled_dot_product_flash_attention_backward_options.set_dbias(dBias);
             }
 
             if (is_padding) {
@@ -511,7 +517,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                     std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
                     std::shared_ptr<fe::graph::Tensor_attributes> >  // dV
             key_tensors_tuple = std::make_tuple(q, k, v, o, dO, stats, attn_scale, dQ, dK, dV);
-            auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
+            auto bias_tuple = is_bias ?
+                std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
             auto padding_tuple = is_padding ?
                 std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
             auto dropout_tuple = is_dropout ?
@@ -553,7 +560,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         };
 
         auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV,
-            bias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
+            bias, dBias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
                 sdpa_flash_f16_bprop_cache, descriptor);
 
         auto plan_workspace_size = mha_graph->get_workspace_size();
@@ -579,7 +586,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         };
 
         if (is_bias) {
-            variant_pack[bias] = devPtrdBias;
+            variant_pack[bias] = devPtrBias;
+            variant_pack[dBias] = devPtrdBias;
         }
 
         if (is_padding) {
@@ -692,7 +700,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
                                   float p_dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_QKV, const Tensor *input_O,
-                                  const Tensor *input_dO, Tensor *output_S,
+                                  const Tensor *input_dO, const Tensor *input_Bias,
+                                  Tensor *output_S,
                                   Tensor *output_dQKV, Tensor *output_dBias,
                                   const Tensor *cu_seqlens, const Tensor *rng_state,
                                   Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
@@ -713,6 +722,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
 
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
+    void *devPtrBias = input_Bias->data.dptr;
     void *devPtrdBias = output_dBias->data.dptr;
 
     void *devPtrdQKV = output_dQKV->data.dptr;
@@ -737,7 +747,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
                                 max_seqlen, max_seqlen, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
                                 bias_type, mask_type,
-                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
+                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
@@ -847,7 +857,8 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                   float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_Q, const Tensor *input_KV,
-                                  const Tensor *input_O, const Tensor *input_dO, Tensor *output_S,
+                                  const Tensor *input_O, const Tensor *input_dO,
+                                  const Tensor *input_Bias, Tensor *output_S,
                                   Tensor *output_dQ, Tensor *output_dKV,
                                   Tensor *output_dBias, const Tensor *cu_seqlens_q,
                                   const Tensor *cu_seqlens_kv,
@@ -871,6 +882,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
+    void *devPtrBias = input_Bias->data.dptr;
 
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdKV = output_dKV->data.dptr;
@@ -895,7 +907,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, attn_scale, p_dropout, qkv_layout,
                                 bias_type, mask_type,
-                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
+                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
@@ -932,27 +944,50 @@ void fused_attn_arbitrary_seqlen_fwd(
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrK = input_K->data.dptr;
     void *devPtrV = input_V->data.dptr;
-    void *devPtrBias = input_Bias->data.dptr;
     void *devPtrO = output_O->data.dptr;
     void *devPtrS = nullptr;
+    void *devPtrBias = input_Bias->data.dptr;
 
     void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
-        Aux_CTX_Tensors->size = 2;
-        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-        output_S->data.dptr = nullptr;
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-        output_S->data.dtype = DType::kFloat32;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = nullptr;
-        output_rng_state->data.shape = {2};
-        output_rng_state->data.dtype = DType::kInt64;
+        if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+            Aux_CTX_Tensors->size = 3;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_bias->data.dptr = nullptr;
+            output_bias->data.shape = {1, num_attn_heads, max_seqlen_q, max_seqlen_kv};
+            output_bias->data.dtype = QKV_type;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+        } else {
+            Aux_CTX_Tensors->size = 2;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+        }
     } else if (Aux_CTX_Tensors->size == 2) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
         Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+    } else if (Aux_CTX_Tensors->size == 3) {
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_bias->data.dptr = devPtrBias;
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
         output_rng_state->data.dptr = rng_state->data.dptr;
     } else {
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -997,7 +1032,8 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_Q, const Tensor *input_K,
                                   const Tensor *input_V, const Tensor *input_O,
-                                  const Tensor *input_dO, Tensor *output_S,
+                                  const Tensor *input_dO, const Tensor *input_Bias,
+                                  Tensor *output_S,
                                   Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV,
                                   Tensor *output_dBias, const Tensor *cu_seqlens_q,
                                   const Tensor *cu_seqlens_kv,
@@ -1011,6 +1047,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
     void *devPtrV = input_V->data.dptr;
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
+    void *devPtrBias = input_Bias->data.dptr;
 
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdK = output_dK->data.dptr;
@@ -1033,7 +1070,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, attn_scale, p_dropout, qkv_layout,
                                 bias_type, mask_type,
-                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats,
+                                devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias,
                                 devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,

@@ -1795,6 +1795,7 @@ class FusedAttention(torch.nn.Module):
         qkv_dtype = TE_DType[query_layer.dtype]
 
         use_FAv2_bwd = (self.use_FAv2_bwd
+                and (core_attention_bias_type == "no_bias")
                 and (fused_attention_backend
                     == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen))
         with self.attention_dropout_ctx():
