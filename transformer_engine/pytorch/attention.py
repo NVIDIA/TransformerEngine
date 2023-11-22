@@ -119,6 +119,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
 
+@torch.no_grad()
 def get_alibi(dtype: torch.dtype,
     num_heads: int,
     max_seqlen_q: int,

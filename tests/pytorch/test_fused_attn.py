@@ -43,6 +43,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
 )
 import transformer_engine_extensions as tex
+from transformer_engine_extensions import NVTE_Fused_Attn_Backend
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
@@ -99,7 +100,7 @@ def _is_fused_attention_supported(
     config: ModelConfig,
     dtype: torch.dtype,
     qkv_layout: str = "sbh3d",
-) -> bool:
+) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
     """Check if FusedAttention supports a model configuration"""
     backend = tex.get_fused_attn_backend(
         TE_DType[dtype],
@@ -114,8 +115,8 @@ def _is_fused_attention_supported(
         config.num_heads,
         config.num_gqa_groups,
     )
-    print('bbbbbbbbbb',backend)
-    return backend != FusedAttnBackend["No_Backend"]
+    print('backend:',backend)
+    return backend != FusedAttnBackend["No_Backend"], backend
 
 @functools.cache
 def _is_flash_attention_2_available() -> bool:
@@ -137,26 +138,27 @@ def _is_flash_attention_supported(config: ModelConfig) -> bool:
         return False
     if config.num_heads != config.num_gqa_groups and not _is_flash_attention_2_available():
         return False
+    if "causal" in config.attn_mask_type and config.attn_type == "cross":
+        if _is_flash_attention_2_1():
+            # FAv2.1 implements causal mask for cross attention differently
+            # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
+            return False
     return True
 
 def _is_unfused_attention_supported(config: ModelConfig) -> bool:
     """Check if UnfusedDotProductAttention supports a model configuration"""
-    if ("padding" in config.attn_mask_type): # or config.attn_bias_type == "alibi"):
+    if ("padding" in config.attn_mask_type):
         return False
     if ("causal" in config.attn_mask_type and config.attn_type == 'cross'):
         return False
     return True
 
 model_configs_base = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , d  , backend
-    "base_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "no_mask", "no_bias"), # self , 64 , 0
-    "base_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 64 , 0
-    "base_2_0": ModelConfig(2, 24, 24,  64, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 64 , 1
-    "base_2_1": ModelConfig(1, 24, 24,  64, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 64 , 1
-    "base_3_0": ModelConfig(8, 16, 16, 128,  128,  128, 0.0, "no_mask", "no_bias"), # self , 128, 0
-    "base_3_1": ModelConfig(4, 16, 16, 128,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 128, 0
-    "base_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 128, 1
-    "base_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 128, 1
+    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
+    "base_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "no_mask", "no_bias"), # self , 0
+    "base_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "no_mask", "no_bias"), # cross, 0
+    "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"), # self , 1
+    "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"), # cross, 1
 }
 
 param_types = [torch.float16]
@@ -193,19 +195,12 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     unfused_attn_supported = _is_unfused_attention_supported(config)
     if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    fused_attn_supported = _is_fused_attention_supported(
+    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config, dtype, qkv_layout=qkv_layout,
     )
     flash_attn_supported = _is_flash_attention_supported(config)
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        if _is_flash_attention_2_1():
-            # FAv2.1 implements causal mask for cross attention differently
-            # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
-            flash_attn_supported = False
-    if not (fused_attn_supported or flash_attn_supported):
-        pytest.skip(
-            "Neither FusedAttention nor FlashAttention support this model config"
-        )
+    if (fused_attn_supported + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
@@ -251,16 +246,16 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    #"mask_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,         "causal", "no_bias"),
-    #"mask_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,         "causal", "no_bias"),
-    #"mask_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "no_bias"),
-    #"mask_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,         "causal", "no_bias"),
-    #"mask_3_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding", "no_bias"),
-    #"mask_3_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,        "padding", "no_bias"),
-    #"mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
-    #"mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
+    "mask_1_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,         "causal", "no_bias"),
+    "mask_1_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,         "causal", "no_bias"),
+    "mask_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "no_bias"),
+    "mask_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,         "causal", "no_bias"),
+    "mask_3_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0,        "padding", "no_bias"),
+    "mask_3_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0,        "padding", "no_bias"),
+    "mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
+    "mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
     "mask_5_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal", "no_bias"),
-    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"),
+    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"), # TODO
     "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
@@ -274,13 +269,31 @@ def test_dpa_mask(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, True, None)
 
 model_configs_bias = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias 
-    "bias_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "no_mask", "post_scale_bias"),
-    "bias_2_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
-    "bias_2_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "post_scale_bias"), # TODO
-    "bias_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "no_mask",           "alibi"),
-    "bias_3_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask",           "alibi"),
+    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias 
+    "bias_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "no_mask", "post_scale_bias"),
+    "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "no_mask", "post_scale_bias"),
+    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask", "post_scale_bias"), # TODO
+    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask", "post_scale_bias"), # TODO
+    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",           "alibi"), # TODO
+    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",           "alibi"), # TODO
+    "bias_2_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "padding", "post_scale_bias"),
+    "bias_2_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "padding", "post_scale_bias"),
+    #"bias_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "padding", "post_scale_bias"),
+    #"bias_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "padding", "post_scale_bias"),
+    #"bias_2_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "padding",           "alibi"),
+    #"bias_2_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "padding",           "alibi"),
+    "bias_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,         "causal", "post_scale_bias"),
+    #"bias_3_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,         "causal", "post_scale_bias"),
+    "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"), # TODO
+    #"bias_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal", "post_scale_bias"),
+    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal",           "alibi"), # TODO
+    #"bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal",           "alibi"),
+    "bias_4_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "padding_causal", "post_scale_bias"),
+    "bias_4_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"),
+    "bias_4_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "post_scale_bias"),
+    "bias_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"), # TODO
+    "bias_4_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal",           "alibi"),
+    "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",           "alibi"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
@@ -299,13 +312,15 @@ qkv_layouts = [
     ]
 
 model_configs_layout = {
-    #       test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias 
-    "layout_0_0": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "no_mask",         "no_bias"),
-    "layout_0_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,  "causal",         "no_bias"),
-    "layout_0_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding",         "no_bias"),
-    "layout_1_0": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask",         "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,  "causal",         "no_bias"),
-    "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding",         "no_bias"),
+    #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias 
+    "layout_0_0": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "no_mask",         "no_bias"),
+    "layout_0_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,         "causal",         "no_bias"),
+    "layout_0_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"),
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_0": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",         "no_bias"),
+    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal",         "no_bias"),
+    "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding",         "no_bias"),
+    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",         "no_bias"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
