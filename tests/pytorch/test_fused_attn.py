@@ -102,6 +102,8 @@ def _is_fused_attention_supported(
     qkv_layout: str = "sbh3d",
 ) -> Tuple[bool, NVTE_Fused_Attn_Backend]:
     """Check if FusedAttention supports a model configuration"""
+    backends = []
+    os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
     backend = tex.get_fused_attn_backend(
         TE_DType[dtype],
         TE_DType[dtype],
@@ -115,8 +117,36 @@ def _is_fused_attention_supported(
         config.num_heads,
         config.num_gqa_groups,
     )
-    print('backend:',backend)
-    return backend != FusedAttnBackend["No_Backend"], backend
+    if backend == FusedAttnBackend["FP8"]:
+        backends.append(backend)
+        print('backends:',backends)
+        return True, backends
+    if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        backends.append(backend)
+        print('backends:',backends)
+        return True, backends
+    if backend == FusedAttnBackend["F16_max512_seqlen"]:
+        backends.append(backend)
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+        backend = tex.get_fused_attn_backend(
+            TE_DType[dtype],
+            TE_DType[dtype],
+            QKVLayout[qkv_layout],
+            AttnBiasType[config.attn_bias_type],
+            AttnMaskType[config.attn_mask_type],
+            config.dropout_p,
+            config.max_seqlen_q,
+            config.max_seqlen_kv,
+            config.head_dim,
+            config.num_heads,
+            config.num_gqa_groups,
+        )
+        if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            backends.append(backend)
+        print('backends:',backends)
+        return True, backends
+    print('backends:',backends)
+    return False, backends
 
 @functools.cache
 def _is_flash_attention_2_available() -> bool:
@@ -199,7 +229,7 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         config, dtype, qkv_layout=qkv_layout,
     )
     flash_attn_supported = _is_flash_attention_supported(config)
-    if (fused_attn_supported + flash_attn_supported + unfused_attn_supported) < 2:
+    if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
@@ -210,9 +240,19 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 
     # FusedAttention backend
     if fused_attn_supported:
-        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
-        )
+        if len(fused_attn_backend) == 1:
+            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+            )
+        if len(fused_attn_backend) == 2:
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
+            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+            )
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
+            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+                dtype, config, "FusedAttention", ckpt_attn, qkv_layout, workspace_opt,
+            )
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -235,11 +275,17 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
         print('fused vs flash')
+    if fused_attn_supported and len(fused_attn_backend) == 2:
+        torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
+        for i,_ in enumerate(fused_attn_bwd):
+            print(fused_attn_bwd[i].isnan().sum(),fused_attn_bwd_1[i].isnan().sum())
+            torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
+        print('fused backend 0 vs fused backend 1')
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
-@pytest.mark.parametrize("model", ["base_1_1", "base_4_1"])
+@pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     test_dot_product_attention(dtype, model_configs, model, True, True, None)
@@ -255,7 +301,7 @@ model_configs_mask = {
     "mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
     "mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
     "mask_5_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal", "no_bias"),
-    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"), # TODO
+    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"),
     "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
@@ -272,10 +318,10 @@ model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias 
     "bias_1_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "no_mask", "post_scale_bias"),
     "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "no_mask", "post_scale_bias"),
-    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask", "post_scale_bias"), # TODO
-    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask", "post_scale_bias"), # TODO
-    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",           "alibi"), # TODO
-    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",           "alibi"), # TODO
+    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask", "post_scale_bias"),
+    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask", "post_scale_bias"),
+    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",           "alibi"),
+    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",           "alibi"),
     "bias_2_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "padding", "post_scale_bias"),
     "bias_2_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "padding", "post_scale_bias"),
     #"bias_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "padding", "post_scale_bias"),
@@ -283,15 +329,15 @@ model_configs_bias = {
     #"bias_2_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "padding",           "alibi"),
     #"bias_2_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "padding",           "alibi"),
     "bias_3_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,         "causal", "post_scale_bias"),
-    #"bias_3_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,         "causal", "post_scale_bias"),
-    "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"), # TODO
-    #"bias_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal", "post_scale_bias"),
-    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal",           "alibi"), # TODO
-    #"bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal",           "alibi"),
+    "bias_3_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,         "causal", "post_scale_bias"),
+    "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
+    "bias_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal", "post_scale_bias"),
+    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal",           "alibi"),
+    "bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal",           "alibi"),
     "bias_4_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "padding_causal", "post_scale_bias"),
     "bias_4_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"),
     "bias_4_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "post_scale_bias"),
-    "bias_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"), # TODO
+    "bias_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
     "bias_4_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal",           "alibi"),
     "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",           "alibi"),
 }
@@ -313,14 +359,14 @@ qkv_layouts = [
 
 model_configs_layout = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias 
-    "layout_0_0": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "no_mask",         "no_bias"),
-    "layout_0_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,         "causal",         "no_bias"),
+    "layout_0_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,        "no_mask",         "no_bias"),
+    "layout_0_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,         "causal", "post_scale_bias"),
     "layout_0_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding_causal",         "no_bias"),
-    "layout_1_0": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",         "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal",         "no_bias"),
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"),
+    "layout_1_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",         "no_bias"),
+    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
     "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding",         "no_bias"),
-    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal",         "no_bias"),
+    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
@@ -539,22 +585,15 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
     # Skip if only unfused backend is supported
     if config.max_seqlen_q <= 512 and config.max_seqlen_kv <= 512:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-    fused_attn_supported = _is_fused_attention_supported(
+    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
         config,
         dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
     )
     flash_attn_supported = _is_flash_attention_supported(config)
-    if "causal" in config.attn_mask_type and config.attn_type == "cross":
-        if _is_flash_attention_2_1():
-            # FAv2.1 implements causal mask for cross attention differently
-            # https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag
-            flash_attn_supported = False
     unfused_attn_supported = _is_unfused_attention_supported(config)
-    if not (fused_attn_supported or flash_attn_supported):
-        pytest.skip(
-            "Neither FusedAttention nor FlashAttention support this model config"
-        )
+    if (len(fused_attn_backend) + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
@@ -800,7 +839,9 @@ def test_dpa_fp8(dtype, model):
     config = model_configs_fp8[model]
 
     # Skip if not supported
-    if not _is_fused_attention_supported(config, dtype):
+    fused_attn_supported, fused_attn_backend = _is_fused_attention_supported(
+        config, dtype)
+    if not fused_attn_supported:
         pytest.skip("FusedAttention does not support this model config")
 
     # Run dot-product attention with different backends
