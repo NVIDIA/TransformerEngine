@@ -1,14 +1,12 @@
 /*************************************************************************
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights
+ *reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #ifndef TRANSFORMER_ENGINE_FUSED_ROPE_H_
 #define TRANSFORMER_ENGINE_FUSED_ROPE_H_
-
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
 
 #include "transformer_engine.h"
 
@@ -22,11 +20,29 @@ extern "C" {
  *  \param[in]     cos             The cos tensor.
  *  \param[in]     sin             The sin tensor.
  *  \param[out]    output          Output tensor.
+ *  \param[in]     s               Length of the s dimension of input.
+ *  \param[in]     b               Length of the b dimension of input.
+ *  \param[in]     h               Length of the h dimension of input.
+ *  \param[in]     d               Length of the d dimension of input.
+ *  \param[in]     d2              Length of the d dimension of cos/sin.
+ *  \param[in]     stride_s        Stride of the s dimension of input.
+ *  \param[in]     stride_b        Stride of the b dimension of input.
+ *  \param[in]     stride_h        Stride of the h dimension of input.
+ *  \param[in]     stride_d        Stride of the d dimension of input.
+ *  \param[in]     o_stride_s      Stride of the s dimension of output.
+ *  \param[in]     o_stride_b      Stride of the b dimension of output.
+ *  \param[in]     o_stride_h      Stride of the h dimension of output.
+ *  \param[in]     o_stride_d      Stride of the d dimension of output.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor cos,
                              const NVTETensor sin, NVTETensor output,
-                             cudaStream_t stream);
+                             const int s, const int b, const int h, const int d,
+                             const int d2, const int stride_s,
+                             const int stride_b, const int stride_h,
+                             const int stride_d, const int o_stride_s,
+                             const int o_stride_b, const int o_stride_h,
+                             const int o_stride_d, cudaStream_t stream);
 
 /*! \brief Compute the backward of the fused rope.
  *
@@ -34,11 +50,27 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor cos,
  *  \param[in]     cos             The cos tensor.
  *  \param[in]     sin             The sin tensor.
  *  \param[out]    output_grads    Output gradient tensor.
+ *  \param[in]     s               Length of the s dimension of input.
+ *  \param[in]     b               Length of the b dimension of input.
+ *  \param[in]     h               Length of the h dimension of input.
+ *  \param[in]     d               Length of the d dimension of input.
+ *  \param[in]     d2              Length of the d dimension of cos/sin.
+ *  \param[in]     stride_s        Stride of the s dimension of input.
+ *  \param[in]     stride_b        Stride of the b dimension of input.
+ *  \param[in]     stride_h        Stride of the h dimension of input.
+ *  \param[in]     stride_d        Stride of the d dimension of input.
+ *  \param[in]     o_stride_s      Stride of the s dimension of output.
+ *  \param[in]     o_stride_b      Stride of the b dimension of output.
+ *  \param[in]     o_stride_h      Stride of the h dimension of output.
+ *  \param[in]     o_stride_d      Stride of the d dimension of output.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_rope_backward(const NVTETensor incoming_grads,
-                              const NVTETensor cos, const NVTETensor sin,
-                              NVTETensor output_grads, cudaStream_t stream);
+void nvte_fused_rope_backward(
+    const NVTETensor incoming_grads, const NVTETensor cos, const NVTETensor sin,
+    NVTETensor output_grads, const int s, const int b, const int h, const int d,
+    const int d2, const int stride_s, const int stride_b, const int stride_h,
+    const int stride_d, const int o_stride_s, const int o_stride_b,
+    const int o_stride_h, const int o_stride_d, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

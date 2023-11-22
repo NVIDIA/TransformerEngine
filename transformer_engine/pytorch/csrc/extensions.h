@@ -529,14 +529,16 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
  * Rotary positional embedding
  **************************************************************************************************/
 
-at::Tensor fused_rope_forward(const at::Tensor &input_,
-                              const at::Tensor &cos_,
-                              const at::Tensor &sin_
+at::Tensor fused_rope_forward(const at::Tensor &input,
+                              const at::Tensor &cos,
+                              const at::Tensor &sin,
+                              const bool transpose_output_memory
 );
 
-at::Tensor fused_rope_backward(const at::Tensor &incoming_grads_,
-                               const at::Tensor &cos_,
-                               const at::Tensor &sin_
+at::Tensor fused_rope_backward(const at::Tensor &output_grads,
+                               const at::Tensor &cos,
+                               const at::Tensor &sin,
+                               const bool transpose_output_memory
 );
 
 /***************************************************************************************************
