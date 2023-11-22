@@ -5,5 +5,5 @@
 set -xe
 
 : ${TE_PATH:=/opt/transformerengine}
-pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_custom_ops.py
+pytest -Wignore -v $TE_PATH/tests/jax/test_distributed_*
 
