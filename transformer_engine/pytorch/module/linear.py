@@ -35,7 +35,6 @@ from ..distributed import (
     initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    gather_along_last_dim,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -110,7 +109,7 @@ class _Linear(torch.autograd.Function):
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
             if not fp8_meta["recipe"].override_linear_precision.wgrad:
-                if is_grad_enabled:
+                if is_grad_enabled and not sequence_parallel:
                     inputmat, inputmat_t = fp8_cast_transpose_fused(
                         inputmat,
                         fp8_meta["scaling_fwd"],
@@ -261,9 +260,11 @@ class _Linear(torch.autograd.Function):
 
         if is_grad_enabled:
             fp8_wgrad = fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
+            wgrad_save_transposed_input = fp8_wgrad and not sequence_parallel
+            inputmat_for_backward = inputmat if fp8_wgrad else inputmat_no_fp8
             ctx.save_for_backward(
-                inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad else None,
-                inputmat_t if weight.requires_grad and fp8_wgrad else None,
+                inputmat_for_backward if weight.requires_grad and not wgrad_save_transposed_input else None,
+                inputmat_t if weight.requires_grad and wgrad_save_transposed_input else None,
                 weight,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -337,14 +338,9 @@ class _Linear(torch.autograd.Function):
             # Column Parallel Linear
             # Overlap input AG with dgrad
             if weight.requires_grad and ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                    inputmat_t_total, handle = gather_along_last_dim(
-                        inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
-                    )
-                else:
-                    inputmat_total, handle = gather_along_first_dim(
-                        inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
-                    )
+                inputmat_total, handle = gather_along_first_dim(
+                    inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
+                )
             else:
                 inputmat_t_total = inputmat_t
                 inputmat_total = inputmat
@@ -412,6 +408,8 @@ class _Linear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                        if ctx.sequence_parallel:
+                            inputmat_t_total = tex.fp8_transpose(inputmat_total, fp8_dtype_backward)
                         wgrad, _ = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
@@ -428,6 +426,8 @@ class _Linear(torch.autograd.Function):
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
                         clear_tensor_data(inputmat_t_total)
+                        if ctx.sequence_parallel:
+                            clear_tensor_data(inputmat_total)
                     else:
                         wgrad, _, _ = gemm(
                             inputmat_total,
