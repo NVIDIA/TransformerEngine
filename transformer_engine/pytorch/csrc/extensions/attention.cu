@@ -897,15 +897,15 @@ std::vector<at::Tensor> fused_attn_fwd(
         if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
             if (i < nvte_aux_tensor_pack.size - 2) {
                 output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
-	    } else if (i == nvte_aux_tensor_pack.size - 2) {
+            } else if (i == nvte_aux_tensor_pack.size - 2) {
                 output_tensor = Bias.value();
-	    } else if (i == nvte_aux_tensor_pack.size - 1) {
+            } else if (i == nvte_aux_tensor_pack.size - 1) {
                 output_tensor = rng_state;
-	    }
-	} else {
+            }
+        } else {
             output_tensor = (i < nvte_aux_tensor_pack.size-1)
                 ? allocateSpace(tensor->data.shape, tensor->data.dtype, false) : rng_state;
-	}
+        }
     } else {
         output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
     }

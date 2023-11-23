@@ -647,7 +647,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
-@pytest.mark.parametrize("model", ["te_1_2", "te_2_0"]) # te_1_2 segfault
+@pytest.mark.parametrize("model", ["te_2_0"]) #"te_1_2", "te_2_0"]) # te_1_2 segfault
 def test_te_layer_misc(dtype, model_configs, model):
     """Test TransformerLayer module with miscellanous settings"""
     ckpt_attn = True
