@@ -54,9 +54,6 @@ def self_fused_attn(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.ndarray, seed
     """
     Self fused attention wrapper
     """
-    assert attn_mask_type is not AttnMaskType.NO_MASK, \
-        "Currently not support AttnMaskType.NO_MASK."
-
     output = _self_fused_attn(qkv,
                               bias,
                               mask,
