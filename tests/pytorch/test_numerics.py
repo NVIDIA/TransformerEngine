@@ -323,8 +323,6 @@ class TorchGPT(nn.Module):
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.resid_attn_dropout = nn.Dropout(0.1)
-        self.resid_mlp_dropout = nn.Dropout(0.1)
         self.parallel_attention_mlp = parallel_attention_ml
 
     def forward(
@@ -336,12 +334,13 @@ class TorchGPT(nn.Module):
         b = self.causal_attn(a, attn_mask)
         if self.parallel_attention_mlp:
             n = self.ln_mlp(x)
-            x = x + self.resid_attn_dropout(b) + self.resid_mlp_dropout(n)
+            x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
         else:
-            x = x + self.resid_attn_dropout(b)
+            x = x + nn.functional.dropout(b, p=0.1, training=self.training)
             n = self.ln_mlp(x)
-            x = x + self.resid_mlp_dropout(n)
+            x = x + nn.functional.dropout(n, p=0.1, training=self.training)
         return x
+
 
 
 def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
