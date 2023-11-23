@@ -17,10 +17,10 @@ namespace transformer_engine {
 template <typename scalar_t>
 __global__ void fused_rope_forward_kernel(
     const scalar_t *src, const scalar_t *cos, const scalar_t *sin,
-    scalar_t *dst, const int s, const int b, const int h, const int d,
-    const int d2, const int stride_s, const int stride_b, const int stride_h,
-    const int stride_d, const int o_stride_s, const int o_stride_b,
-    const int o_stride_h, const int o_stride_d) {
+    scalar_t *dst, const int h, const int d, const int d2, const int stride_s,
+    const int stride_b, const int stride_h, const int stride_d,
+    const int o_stride_s, const int o_stride_b, const int o_stride_h,
+    const int o_stride_d) {
   int s_id = blockIdx.x, b_id = blockIdx.y;
   int offset_block = s_id * stride_s + b_id * stride_b;
   int offset_block_dst = s_id * o_stride_s + b_id * o_stride_b;
@@ -58,10 +58,10 @@ __global__ void fused_rope_forward_kernel(
 template <typename scalar_t>
 __global__ void fused_rope_backward_kernel(
     const scalar_t *src, const scalar_t *cos, const scalar_t *sin,
-    scalar_t *dst, const int s, const int b, const int h, const int d,
-    const int d2, const int stride_s, const int stride_b, const int stride_h,
-    const int stride_d, const int o_stride_s, const int o_stride_b,
-    const int o_stride_h, const int o_stride_d) {
+    scalar_t *dst, const int h, const int d, const int d2, const int stride_s,
+    const int stride_b, const int stride_h, const int stride_d,
+    const int o_stride_s, const int o_stride_b, const int o_stride_h,
+    const int o_stride_d) {
   int s_id = blockIdx.x, b_id = blockIdx.y;
   int offset_block = s_id * stride_s + b_id * stride_b;
   int offset_block_dst = s_id * o_stride_s + b_id * o_stride_b;
@@ -112,8 +112,8 @@ void fused_rope_forward_launcher(const scalar_t *input, const scalar_t *cos,
   dim3 threads(THREADS_PER_WARP, warps_per_block);
 
   fused_rope_forward_kernel<<<blocks, threads, 0, stream>>>(
-      input, cos, sin, output, s, b, h, d, d2, stride_s, stride_b, stride_h,
-      stride_d, o_stride_s, o_stride_b, o_stride_h, o_stride_d);
+      input, cos, sin, output, h, d, d2, stride_s, stride_b, stride_h, stride_d,
+      o_stride_s, o_stride_b, o_stride_h, o_stride_d);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -129,9 +129,8 @@ void fused_rope_backward_launcher(
   dim3 threads(THREADS_PER_WARP, warps_per_block);
 
   fused_rope_backward_kernel<<<blocks, threads, 0, stream>>>(
-      incoming_grads, cos, sin, output_grads, s, b, h, d, d2, stride_s,
-      stride_b, stride_h, stride_d, o_stride_s, o_stride_b, o_stride_h,
-      o_stride_d);
+      incoming_grads, cos, sin, output_grads, h, d, d2, stride_s, stride_b,
+      stride_h, stride_d, o_stride_s, o_stride_b, o_stride_h, o_stride_d);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
