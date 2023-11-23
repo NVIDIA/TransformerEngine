@@ -121,10 +121,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD))) {
       flag_m512 = true;
     }
-    //int allow_non_determinism =
-    //    transformer_engine::getenv<int>("NVTE_ALLOW_NONDETERMINISTIC_ALGO", 1);
-    //if (allow_non_determinism == 1 // TODO sdpa flash non deterministic with/without workopt
-    //        && ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
     if (((cudnn_runtime_version >= 8903 && sm_arch_ >= 80)
                 || (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90)))
             && (max_seqlen_q % 64 == 0)
