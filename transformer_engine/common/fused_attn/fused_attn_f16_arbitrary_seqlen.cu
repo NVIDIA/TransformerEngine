@@ -722,7 +722,10 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
 
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
-    void *devPtrBias = input_Bias->data.dptr;
+    void *devPtrBias = nullptr;
+    if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
+        devPtrBias = input_Bias->data.dptr;
+    }
     void *devPtrdBias = output_dBias->data.dptr;
 
     void *devPtrdQKV = output_dQKV->data.dptr;
@@ -882,7 +885,10 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
-    void *devPtrBias = input_Bias->data.dptr;
+    void *devPtrBias = nullptr;
+    if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
+        devPtrBias = input_Bias->data.dptr;
+    }
 
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdKV = output_dKV->data.dptr;
@@ -1047,7 +1053,10 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
     void *devPtrV = input_V->data.dptr;
     void* devPtrO = input_O->data.dptr;
     void *devPtrdO = input_dO->data.dptr;
-    void *devPtrBias = input_Bias->data.dptr;
+    void *devPtrBias = nullptr;
+    if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
+        devPtrBias = input_Bias->data.dptr;
+    }
 
     void *devPtrdQ = output_dQ->data.dptr;
     void *devPtrdK = output_dK->data.dptr;

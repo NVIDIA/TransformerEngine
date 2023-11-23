@@ -320,8 +320,8 @@ model_configs_bias = {
     "bias_1_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "no_mask", "post_scale_bias"),
     "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask", "post_scale_bias"),
     "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask", "post_scale_bias"),
-    #"bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",           "alibi"), # segfault
-    #"bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",           "alibi"), # segfault
+    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",           "alibi"), # mismatch
+    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,        "no_mask",           "alibi"), # mismatch
     #"bias_2_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,        "padding", "post_scale_bias"), # segfault
     #"bias_2_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,        "padding", "post_scale_bias"), # segfault
     "bias_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,        "padding", "post_scale_bias"), # skipped
@@ -332,7 +332,7 @@ model_configs_bias = {
     "bias_3_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0,         "causal", "post_scale_bias"),
     "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
     "bias_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal", "post_scale_bias"), # skipped
-    #"bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal",           "alibi"), # segfault
+    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0,         "causal",           "alibi"), # mismatch
     "bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0,         "causal",           "alibi"), # skipped
     #"bias_4_0": ModelConfig(4, 16, 16,  64,  128,  128, 0.0, "padding_causal", "post_scale_bias"), # segfault
     #"bias_4_1": ModelConfig(2, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"), # segfault
