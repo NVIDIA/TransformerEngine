@@ -1304,14 +1304,14 @@ class FlashAttention(torch.nn.Module):
                     assert (
                         max_seqlen_q == max_seqlen_kv
                     ), "Maximum sequence length for Q and KV should be the same."
-                    if self.layer_number == 1:
+                    if _cu_seqlens_q is None:
                         _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask)
                     _cu_seqlens_kv = _cu_seqlens_q
                     query_layer_packed, key_layer_packed, value_layer_packed = PackTensors.apply(
                         _indices_q, query_layer, key_layer, value_layer
                     )
                 else:
-                    if self.layer_number == 1:
+                    if _cu_seqlens_q is None or _cu_seqlens_kv is None:
                         _cu_seqlens_q, _indices_q = get_cu_seqlens_and_indices(attention_mask[0])
                         _cu_seqlens_kv, _indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
                     query_layer_packed = PackTensors.apply(_indices_q, query_layer)
@@ -1322,20 +1322,21 @@ class FlashAttention(torch.nn.Module):
                     query_layer_packed, key_layer_packed, value_layer_packed)
                 cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
             else:
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = torch.arange(
+                if _cu_seqlens_q is None:
+                    _cu_seqlens_q = torch.arange(
                             0,
                             (batch_size + 1) * max_seqlen_q,
                             step=max_seqlen_q,
                             dtype=torch.int32,
                             device=query_layer.device)
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = torch.arange(
+                if _cu_seqlens_kv is None:
+                    _cu_seqlens_kv = torch.arange(
                             0,
                             (batch_size + 1) * max_seqlen_kv,
                             step=max_seqlen_kv,
                             dtype=torch.int32,
                             device=key_layer.device)
+                cu_seqlens_q, cu_seqlens_kv = _cu_seqlens_q, _cu_seqlens_kv
         elif qkv_format == 'thd':
             assert not context_parallel, "thd format is not supported for context parallelism!"
             assert (_flash_attn_2_available
