@@ -566,8 +566,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         auto plan_workspace_size = mha_graph->get_workspace_size();
 
         // Exit to request upper level API to allocate memory if needed
+        size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
         if (workspace == nullptr) {
-            *workspace_size = plan_workspace_size;
+            *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
             return;
         }
 
