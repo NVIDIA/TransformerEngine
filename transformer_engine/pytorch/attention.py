@@ -143,7 +143,7 @@ def get_alibi(dtype: torch.dtype,
     bb = torch.tril(a,diagonal=-1)
     cc = bb.cumsum(dim=0)
     d = c - cc
-    bias = d.expand(1, num_heads, max_seqlen_q, max_seqlen_kv)
+    bias = d.repeat(1, num_heads, 1, 1)
 
     for i in range(num_heads):
         bias[0,i,:,:] = m[i] * bias[0,i,:,:]

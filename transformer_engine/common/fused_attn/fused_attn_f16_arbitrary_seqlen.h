@@ -21,33 +21,6 @@
 
 namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
-namespace fused_attn {
-void fused_attn_arbitrary_seqlen_fwd_impl(
-                int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
-                bool is_training, float scaling_factor, float dropout_probability,
-                NVTE_QKV_Layout layout,
-                NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-                void *devPtrQ, void *devPtrK, void *devPtrV,
-                void *devPtrSoftmaxStats, void *devPtrO,
-                void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-                void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
-                cudnn_frontend::DataType_t tensorType,
-                void *workspace, size_t *workspace_size,
-                cudaStream_t stream, cudnnHandle_t handle, bool* check_support);
-
-void fused_attn_arbitrary_seqlen_bwd_impl(
-                int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d,
-                float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
-                NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-                void* devPtrQ, void* devPtrKTranspose, void* devPtrVTranspose,
-                void* devPtrO, void* devPtrSoftmaxStats, void* devPtrBias,
-                void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrdO, void* devPtrdBias,
-                void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-                void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
-                cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
-                cudaStream_t stream, cudnnHandle_t handle, bool* check_support);
-}  // namespace fused_attn
-
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
                 size_t batch, size_t max_seqlen, size_t num_head,
                 size_t head_size, bool is_training, float attn_scale,

@@ -56,7 +56,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
                 cudnn_frontend::DataType_t tensorType,
                 void *workspace, size_t *workspace_size,
-                cudaStream_t stream, cudnnHandle_t handle, bool* check_support) {
+                cudaStream_t stream, cudnnHandle_t handle) {
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -66,13 +66,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_dropout = (is_training && dropout_probability != 0.0f);
-
-    // provide a mechanism for support checking for upcoming FE APIs
-    bool tmp_check = *check_support;
-    if (*check_support && !tmp_check) {
-        *check_support = tmp_check;
-        return;
-    }
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
@@ -229,27 +222,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
 
-            if (!mha_graph->validate().is_good()) {
-                if (*check_support) {
-                    *check_support = false;
-                    return return_empty_tuple;
-                }
-            }
-
-            if (!mha_graph->build_operation_graph(handle).is_good()) {
-                if (*check_support) {
-                    *check_support = false;
-                    return return_empty_tuple;
-                }
-            }
-
+            mha_graph->validate();
+            mha_graph->build_operation_graph(handle);
             mha_graph->create_execution_plans({fe::HeurMode_t::A});
-
-            if (*check_support) {
-                *check_support = mha_graph->check_support(handle).is_good();
-                return return_empty_tuple;
-            }
-
             mha_graph->check_support(handle);
             mha_graph->build_plans(handle);
 
@@ -325,7 +300,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                 void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
                 cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
-                cudaStream_t stream, cudnnHandle_t handle, bool* check_support) {
+                cudaStream_t stream, cudnnHandle_t handle) {
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
     bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -335,13 +310,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)
         || (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
     bool is_dropout = (dropout_probability != 0.0f);
-
-    // provide a mechanism for support checking for upcoming FE APIs
-    bool tmp_check = *check_support;
-    if (*check_support && !tmp_check) {
-        *check_support = tmp_check;
-        return;
-    }
 
     try {
         FADescriptor_v1 descriptor{b,                   h,
@@ -527,27 +495,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 bias_tuple, padding_tuple, dropout_tuple);
 
-            if (!mha_graph->validate().is_good()) {
-                if (*check_support) {
-                    *check_support = false;
-                    return return_empty_tuple;
-                }
-            }
-
-            if (!mha_graph->build_operation_graph(handle).is_good()) {
-                if (*check_support) {
-                    *check_support = false;
-                    return return_empty_tuple;
-                }
-            }
-
+            mha_graph->validate();
+            mha_graph->build_operation_graph(handle);
             mha_graph->create_execution_plans({fe::HeurMode_t::A});
-
-            if (*check_support) {
-                *check_support = mha_graph->check_support(handle).is_good();
-                return return_empty_tuple;
-            }
-
             mha_graph->check_support(handle);
             mha_graph->build_plans(handle);
 
@@ -669,7 +619,6 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     const DType QKV_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_attn_heads, num_attn_heads,
                                 max_seqlen, max_seqlen, head_dim,
                                 is_training, attn_scale, p_dropout, qkv_layout,
@@ -679,7 +628,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
                                 devPtrCuSeqlens, devPtrCuSeqlens,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
-                                stream, handle, &check_support);
+                                stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -746,7 +695,6 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
     const auto qkv_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_attn_heads, num_attn_heads,
                                 max_seqlen, max_seqlen, head_dim,
                                 attn_scale, p_dropout, qkv_layout,
@@ -756,7 +704,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlens, devPtrCuSeqlens,
                                 get_cudnn_fe_dtype(qkv_type), workspace->data.dptr,
-                                &workspace_size, stream, handle, &check_support);
+                                &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -828,7 +776,6 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_attn_heads, num_gqa_groups,
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, is_training, attn_scale, p_dropout, qkv_layout,
@@ -838,7 +785,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
-                                stream, handle, &check_support);
+                                stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -909,7 +856,6 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_attn_heads, num_gqa_groups,
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, attn_scale, p_dropout, qkv_layout,
@@ -919,7 +865,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
-                                &workspace_size, stream, handle, &check_support);
+                                &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1006,7 +952,6 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_attn_heads, num_gqa_groups,
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, is_training, attn_scale, p_dropout, qkv_layout,
@@ -1016,7 +961,7 @@ void fused_attn_arbitrary_seqlen_fwd(
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 get_cudnn_fe_dtype(QKV_type),
                                 workspace->data.dptr, &workspace_size,
-                                stream, handle, &check_support);
+                                stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
@@ -1075,7 +1020,6 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
 
     size_t workspace_size = 0;
 
-    bool check_support = false;
     fused_attn_arbitrary_seqlen_bwd_impl(batch, num_attn_heads, num_gqa_groups,
                                 max_seqlen_q, max_seqlen_kv,
                                 head_dim, attn_scale, p_dropout, qkv_layout,
@@ -1085,7 +1029,7 @@ void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t m
                                 devPtrDropoutSeed, devPtrDropoutOffset,
                                 devPtrCuSeqlensQ, devPtrCuSeqlensKV,
                                 get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
-                                &workspace_size, stream, handle, &check_support);
+                                &workspace_size, stream, handle);
 
     if (workspace_size > 0) {
         if (workspace->data.dptr == nullptr) {
