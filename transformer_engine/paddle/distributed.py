@@ -3,8 +3,10 @@
 # See LICENSE for license information.
 """Methods needed for distributed training."""
 
+import os
+import warnings
 from contextlib import contextmanager
-from typing import Optional, Union, Tuple
+from typing import Any, Optional, Union, Tuple
 
 import paddle
 
@@ -35,6 +37,19 @@ def get_tp_group_and_world_size(tp_group: Union[dist_group_type, None],
                             if tp_group is None else tp_group)
     world_size = (tp._HYBRID_PARALLEL_GROUP.get_model_parallel_world_size()
                   if tp_group is None else tp_group.nranks)
+    """
+    When using TP, the NCCL communication needs to be scheduled
+    before the GEMM for a guaranteed overlap. From the host side
+    in TE, the comm calls are always launched first, but to ensure
+    that the GEMM isn't scheduled first, the environment variable
+    `CUDA_DEVICE_MAX_CONNECTIONS` needs to be set to 1 to force a
+    single channel.
+    """
+    num_cuda_work_queues = int(os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", "0"))
+    if num_cuda_work_queues != 1:
+        warnings.warn("To guarantee overlapping TP and SP collectives with the backward"
+                      "GEMMs, set environment variable CUDA_DEVICE_MAX_CONNECTIONS = 1")
+
     return model_parallel_group, world_size
 
 
@@ -69,7 +84,8 @@ def set_weight_tensor_dist_attr(tensor: paddle.Tensor, is_parallel: bool,
 def allreduce(
     input_: paddle.Tensor,
     tp_group: Optional[dist_group_type] = None,
-) -> paddle.Tensor:
+    sync_op: bool = True,
+) -> Tuple[paddle.Tensor, Any]:
     """All-reduce the input tensor across model parallel group."""
 
     # Bypass the function if we are using only 1 GPU.
@@ -77,14 +93,25 @@ def allreduce(
         return input_
 
     # All-reduce.
-    output = mp_ops._mp_allreduce(
+    if sync_op:
+        output = mp_ops._mp_allreduce(
+            input_,
+            group=tp_group,
+            use_calc_stream=True,
+            use_model_parallel=True,
+        )
+        return output, None
+
+    wait_handle = paddle.distributed.all_reduce(
         input_,
+        op=paddle.distributed.ReduceOp.SUM,
         group=tp_group,
-        use_calc_stream=True,
-        use_model_parallel=True,
+        sync_op=False,
     )
 
-    return output
+    output = input_
+
+    return output, wait_handle
 
 
 def identity(

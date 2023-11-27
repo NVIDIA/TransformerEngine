@@ -532,7 +532,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             ln_out = identity(ln_out, self.tp_group)
         out = F.linear(ln_out, self.weight, self.bias if self.gemm_bias_fused_add else None)
         if self.parallel_mode == 'row' and self.tensor_parallel:
-            out = allreduce(out, self.tp_group)
+            out, _ = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out
         if self.return_layernorm_output:
             return out, ln_out
