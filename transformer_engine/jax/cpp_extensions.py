@@ -2390,7 +2390,7 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(attn_bias_type, attn_mask_type, scaling_factor,
                                      dropout_probability, is_training, mesh, arg_infos,
                                      result_infos):
-        del attn_bias_type, attn_mask_type, scaling_factor
+        del attn_mask_type, scaling_factor
         del dropout_probability, is_training, result_infos
         q_spec = get_padded_spec(arg_infos[0])
         kv_spec = get_padded_spec(arg_infos[1])
