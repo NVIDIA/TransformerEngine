@@ -110,18 +110,17 @@ struct FADescriptor_v1 {
   NVTE_Bias_Type bias_type;
   NVTE_Mask_Type mask_type;
   cudnn_frontend::DataType_t tensor_type;
-  bool use_workspace_opt;
 
   bool operator<(const FADescriptor_v1 &rhs) const {
     return std::tie(b, h, hg, s_q, s_kv, d,
                     attnScale, isTraining, dropoutProbability,
-                    layout, mask_type, bias_type, tensor_type, use_workspace_opt)
+                    layout, mask_type, bias_type, tensor_type)
                     < std::tie(
                       rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d,
                       rhs.attnScale, rhs.isTraining,
                       rhs.dropoutProbability, rhs.layout,
                       rhs.mask_type, rhs.bias_type,
-                      rhs.tensor_type, rhs.use_workspace_opt);
+                      rhs.tensor_type);
   }
 };
 

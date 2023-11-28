@@ -74,7 +74,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                    scaling_factor,      is_training,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType,          false};
+                                   tensorType};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
@@ -318,7 +318,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                    scaling_factor,      true,
                                    dropout_probability, layout,
                                    bias_type,           mask_type,
-                                   tensorType,          false};
+                                   tensorType};
 
         namespace fe = cudnn_frontend;
         using graph_and_tensors = std::tuple<std::shared_ptr<fe::graph::Graph>,
