@@ -263,7 +263,9 @@ class _Linear(torch.autograd.Function):
             wgrad_save_transposed_input = fp8_wgrad and not sequence_parallel
             inputmat_for_backward = inputmat if fp8_wgrad else inputmat_no_fp8
             ctx.save_for_backward(
-                inputmat_for_backward if weight.requires_grad and not wgrad_save_transposed_input else None,
+                inputmat_for_backward
+                if weight.requires_grad and not wgrad_save_transposed_input
+                else None,
                 inputmat_t if weight.requires_grad and wgrad_save_transposed_input else None,
                 weight,
                 weight_t_fp8 if fp8 else None,
