@@ -56,6 +56,7 @@ from transformer_engine.pytorch.jit import jit_fuser
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
+_flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
@@ -849,7 +850,7 @@ class _SplitAlongDim(torch.autograd.Function):
 
         noop_ok = True
         strides = grad_outputs[0].stride()
-        data_ptr = grad_outputs[0].storage().data_ptr()
+        data_ptr = grad_outputs[0].untyped_storage().data_ptr()
         shape = list(grad_outputs[0].shape)
         for i, tensor in enumerate(grad_outputs):
             shape_i = shape
@@ -857,7 +858,7 @@ class _SplitAlongDim(torch.autograd.Function):
             offset_size = sum(split_sizes[:i]) * np.prod(shape[split_dim+1:])
             if (tensor.stride() != strides or
                 list(tensor.shape) != shape_i or
-                tensor.storage().data_ptr() != data_ptr or
+                tensor.untyped_storage().data_ptr() != data_ptr or
                 tensor.storage_offset() != offset_size):
                 noop_ok = False
                 break
@@ -2132,6 +2133,16 @@ class DotProductAttention(torch.nn.Module):
                 use_flash_attention = False
 
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
+            use_flash_attention = False
+
+        if (_flash_attn_2_1_plus
+            and causal_mask
+            and max_seqlen_q != max_seqlen_kv):
+            warnings.warn(
+                "Disabling the use of FlashAttention since version 2.1+ has changed its behavior "
+                "for causal mask in cross attention. See "
+                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+            )
             use_flash_attention = False
 
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
