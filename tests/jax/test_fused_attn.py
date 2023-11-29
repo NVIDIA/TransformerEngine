@@ -294,6 +294,11 @@ class TestSelfFusedAttn():
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
+        # TODO (rewang): wait for PR 525
+        if ((s > 512 or backend == Backend.Arbitrary)
+            and attn_bias_type == AttnBiasType.POST_SCALE_BIAS):
+            pytest.skip(f"Backend.Arbitrary doesn't support {attn_bias_type=}")
+
         self._set_inputs(b,
                          s,
                          h,
