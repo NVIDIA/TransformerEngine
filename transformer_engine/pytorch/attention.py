@@ -2284,10 +2284,11 @@ class DotProductAttention(torch.nn.Module):
                 AttnBiasType[core_attention_bias_type],
                 AttnMaskType[attn_mask_type],
                 self.attention_dropout,
-                max_seqlen_q, max_seqlen_kv,
-                query_layer.shape[-1], # head_dim
                 query_layer.shape[-2], # num_attn_heads
                 key_layer.shape[-2], # num_gqa_groups
+                max_seqlen_q,
+                max_seqlen_kv,
+                query_layer.shape[-1], # head_dim
             )
             # DPA does not support FP8; for FP8, use cpp_extensions modules directly
             is_backend_avail = (fused_attention_backend in

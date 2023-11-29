@@ -730,13 +730,13 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
+                                            size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t head_dim,
-                                            size_t q_num_heads, size_t kv_num_heads) {
+                                            size_t head_dim) {
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim,
-        q_num_heads, kv_num_heads);
+        mask_type, dropout_probability, q_num_heads, kv_num_heads,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     return backend;
 }
 
@@ -791,8 +791,8 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim,
-        num_head, num_head);
+        mask_type, dropout_probability, num_head, num_head,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
@@ -986,8 +986,8 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim,
-        num_head, num_head);
+        mask_type, dropout_probability, num_head, num_head,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     nvte_fused_attn_fwd_kvpacked(

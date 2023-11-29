@@ -569,7 +569,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
 using namespace transformer_engine::fused_attn;
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
-    size_t batch, size_t max_seqlen, size_t num_attn_heads, size_t head_dim, bool is_training,
+    size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_QKV, const Tensor *input_Bias, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens, const Tensor *rng_state,
@@ -645,8 +645,8 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     }
 }
 
-void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
-                                  size_t num_attn_heads, size_t head_dim, float attn_scale,
+void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t num_attn_heads,
+                                  size_t max_seqlen, size_t head_dim, float attn_scale,
                                   float p_dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_QKV, const Tensor *input_O,
@@ -721,8 +721,8 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(size_t batch, size_t max_seqlen,
     }
 }
 void fused_attn_arbitrary_seqlen_fwd_kvpacked(
-    size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
-    size_t num_attn_heads, size_t num_gqa_groups, size_t head_dim, bool is_training,
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_KV,
     const Tensor *input_Bias, Tensor *output_O,
@@ -803,8 +803,8 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 }
 
 void fused_attn_arbitrary_seqlen_bwd_kvpacked(
-                                  size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
-                                  size_t num_attn_heads, size_t num_gqa_groups, size_t head_dim,
+                                  size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                  size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
                                   float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_Q, const Tensor *input_KV,
@@ -883,8 +883,8 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 }
 
 void fused_attn_arbitrary_seqlen_fwd(
-    size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
-    size_t num_attn_heads, size_t num_gqa_groups, size_t head_dim, bool is_training,
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,
@@ -978,8 +978,8 @@ void fused_attn_arbitrary_seqlen_fwd(
     }
 }
 
-void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t max_seqlen_q, size_t max_seqlen_kv,
-                                  size_t num_attn_heads, size_t num_gqa_groups, size_t head_dim,
+void fused_attn_arbitrary_seqlen_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                  size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
                                   float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                   const Tensor *input_Q, const Tensor *input_K,

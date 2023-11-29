@@ -137,11 +137,11 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     bias_type        The attention bias type.
  *  \param[in]     attn_mask_type   The attention mask type.
  *  \param[in]     dropout          The dropout probability.
+ *  \param[in]     num_attn_heads   The number of heads in Q.
+ *  \param[in]     num_gqa_groups   The number of heads in K, V.
  *  \param[in]     max_seqlen_q     The sequence length of Q.
  *  \param[in]     max_seqlen_kv    The sequence length of K, V.
  *  \param[in]     head_dim         The head dimension of Q, K, V.
- *  \param[in]     num_attn_heads   The number of heads in Q.
- *  \param[in]     num_gqa_groups   The number of heads in K, V.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 NVTEDType q_dtype,
@@ -149,9 +149,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 NVTE_QKV_Layout qkv_layout,
                 NVTE_Bias_Type bias_type,
                 NVTE_Mask_Type attn_mask_type,
-                float dropout, size_t max_seqlen_q,
-                size_t max_seqlen_kv, size_t head_dim,
-                size_t num_attn_heads, size_t num_gqa_groups);
+                float dropout,
+                size_t max_seqlen_q, size_t max_seqlen_kv,
+                size_t num_attn_heads, size_t num_gqa_groups,
+                size_t head_dim);
 
 /*! \brief Compute dot product attention with packed QKV input.
  *

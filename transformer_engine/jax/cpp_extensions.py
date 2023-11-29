@@ -1624,11 +1624,11 @@ class FusedAttnHelper:
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
+    num_heads_q: int
+    num_heads_kv: int
     max_seqlen_q: int
     max_seqlen_kv: int
     head_dim: int
-    num_heads_q: int
-    num_heads_kv: int
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -1641,10 +1641,9 @@ class FusedAttnHelper:
                                                              self.qkv_layout, self.attn_bias_type,
                                                              self.attn_mask_type,
                                                              self.dropout_probability,
+                                                             self.num_heads_q, self.num_heads_kv,
                                                              self.max_seqlen_q, self.max_seqlen_kv,
-                                                             self.head_dim,
-                                                             self.num_heads_q,
-                                                             self.num_heads_kv)
+                                                             self.head_dim)
 
 
 @dataclass(frozen=True)
@@ -1724,8 +1723,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_dtype = qkv_dtype
 
         backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
-                                  attn_mask_type, dropout_probability, max_seqlen, max_seqlen,
-                                  head_dim, num_head, num_head).get_fused_attn_backend()
+                                  attn_mask_type, dropout_probability, num_head, num_head,
+                                  max_seqlen, max_seqlen, head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*batch_shape, num_head, max_seqlen, max_seqlen)

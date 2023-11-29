@@ -111,11 +111,11 @@ def _is_fused_attention_supported(
         AttnBiasType[config.attn_bias_type],
         AttnMaskType[config.attn_mask_type],
         config.dropout_p,
+        config.num_heads,
+        config.num_gqa_groups,
         config.max_seqlen_q,
         config.max_seqlen_kv,
         config.head_dim,
-        config.num_heads,
-        config.num_gqa_groups,
     )
     if backend == FusedAttnBackend["FP8"]:
         backends.append(backend)
@@ -135,11 +135,11 @@ def _is_fused_attention_supported(
             AttnBiasType[config.attn_bias_type],
             AttnMaskType[config.attn_mask_type],
             config.dropout_p,
+            config.num_heads,
+            config.num_gqa_groups,
             config.max_seqlen_q,
             config.max_seqlen_kv,
             config.head_dim,
-            config.num_heads,
-            config.num_gqa_groups,
         )
         if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             backends.append(backend)
