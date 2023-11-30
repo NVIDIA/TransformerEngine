@@ -1435,6 +1435,9 @@ class FlashAttention(torch.nn.Module):
         elif qkv_format == 'bshd':
             # (bs)hd -> bs(hd)
             output = output.view(batch_size, max_seqlen_q, -1).contiguous()
+        elif qkv_format == 'thd':
+            # thd -> t(hd)
+            output = output.view(output.shape[0], -1).contiguous()
 
         return output
 
@@ -2299,6 +2302,7 @@ class DotProductAttention(torch.nn.Module):
                                   and is_backend_avail)
 
         if use_flash_attention:
+            print("[DotProductAttention]: using flash-attn",_flash_attn_version)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
@@ -2316,6 +2320,8 @@ class DotProductAttention(torch.nn.Module):
         ), "Context parallelism is only implemented with Flash Attention!"
 
         if use_fused_attention:
+            print("[DotProductAttention]: using cuDNN fused attention (backend "
+                + str(int(fused_attention_backend)) + ")")
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                               query_layer,
@@ -2341,6 +2347,7 @@ class DotProductAttention(torch.nn.Module):
                               core_attention_bias = core_attention_bias,
                               fast_zero_fill = fast_zero_fill)
 
+        print("[DotProductAttention]: using unfused DPA")
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
                 self.unfused_attention,
