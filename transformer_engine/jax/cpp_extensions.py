@@ -1482,8 +1482,8 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_upper_triang_masked_softmax_forward abstract
         """
-        q_seqlen = logits_aval.shape[2]
-        k_seqlen = logits_aval.shape[3]
+        q_seqlen = logits_aval.shape[-2]
+        k_seqlen = logits_aval.shape[-1]
         assert q_seqlen == k_seqlen
         return SoftmaxPrimitive.forward_abstract(logits_aval, scale_factor)
 
