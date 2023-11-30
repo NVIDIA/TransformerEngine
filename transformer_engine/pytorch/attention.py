@@ -148,7 +148,8 @@ def get_alibi(dtype: torch.dtype,
     for i in range(num_heads):
         bias[0,i,:,:] = m[i] * bias[0,i,:,:]
 
-    bias = bias.to(dtype=dtype, device="cuda")
+    #bias = bias.to(dtype=dtype, device="cuda")
+    bias = bias.to(dtype=torch.float32, device="cuda")
     return bias
 
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
@@ -1054,7 +1055,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
             matmul_result = (matmul_result.view(
                 output_size[0], output_size[1], output_size[2], output_size[3])
-                + core_attention_bias).view(-1, output_size[2], output_size[3])
+                + core_attention_bias).view(-1, output_size[2], output_size[3]).to(
+                dtype=query_layer.dtype)
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
