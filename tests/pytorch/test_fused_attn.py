@@ -495,25 +495,6 @@ def _run_dot_product_attention(
     if config.attn_bias_type == 'post_scale_bias':
         bias = torch.randn(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv,
                 dtype=dtype, device="cuda")
-    #elif config.attn_bias_type == 'alibi':
-        #if os.environ['NVTE_FUSED_ATTN_BACKEND'] == '0':
-        #    config.attn_bias_type = 'post_scale_bias'
-        #    n = 2 ** math.floor(math.log2(config.num_heads))
-        #    m_0 = 2.0 ** (-8.0 / n)
-        #    m = torch.pow(m_0, torch.arange(1, 1 + n))
-
-        #    a = torch.ones(config.max_seqlen_q, config.max_seqlen_kv)
-        #    b = torch.triu(a,diagonal=1)
-        #    c = b.cumsum(dim=-1)
-        #    bb = torch.tril(a,diagonal=-1)
-        #    cc = bb.cumsum(dim=0)
-        #    d = c - cc
-        #    bias = d.expand(1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv)
-        #    for i in range(config.num_heads):
-        #        bias[0,i,:,:] = m[i] *  bias[0,i,:,:]
-        #    bias = bias.to(dtype=dtype, device="cuda")
-        #else:
-        #    bias = None
 
     # Create RNG
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -559,7 +540,7 @@ model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
     "te_1_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "no_mask", "post_scale_bias"),
     "te_1_1": ModelConfig(4, 16, 16,  64,  128,  128, 0.0,  "causal", "post_scale_bias"),
-    #"te_1_2": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "padding", "post_scale_bias"), # segfault
+    "te_1_2": ModelConfig(2, 16, 16,  64,  128,  128, 0.0, "padding", "post_scale_bias"),
     "te_2_0": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0,  "causal",         "no_bias"),
     "te_2_1": ModelConfig(2, 16, 16,  64, 2048, 2048, 0.0, "no_mask",         "no_bias"),
     "te_2_2": ModelConfig(1, 16, 16,  64, 2048, 2048, 0.0, "padding",         "no_bias"),
@@ -649,7 +630,7 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
-@pytest.mark.parametrize("model", ["te_2_0"]) #"te_1_2", "te_2_0"]) # te_1_2 segfault
+@pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
 def test_te_layer_misc(dtype, model_configs, model):
     """Test TransformerLayer module with miscellanous settings"""
     ckpt_attn = True
