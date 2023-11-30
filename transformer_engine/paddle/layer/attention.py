@@ -15,8 +15,8 @@ import transformer_engine_paddle as tex
 from .layernorm_linear import LayerNormLinear
 from .linear import Linear
 from .softmax import FusedScaleMaskSoftmax
-from ..constants import (AttnTypes, TE_DType, QKVLayout, AttnBiasType, AttnMaskType,
-                         FusedAttnBackend, dist_group_type)
+from ..constants import (AttnTypes, TE_DType, AttnBiasType, AttnMaskType, FusedAttnBackend,
+                         dist_group_type)
 from ..cpp_extensions import (
     fused_attn_fwd_qkvpacked,
     fused_attn_bwd_qkvpacked,
@@ -27,7 +27,6 @@ from ..cpp_extensions import (
 from ..distributed import get_tp_group_and_world_size, track_rng_state
 from ..utils import attention_mask_func, divide
 from ..recompute import recompute
-
 
 __all__ = ["DotProductAttention", "MultiHeadAttention"]
 
@@ -168,7 +167,7 @@ class DotProductAttention(paddle.nn.Layer):
         self.attn_mask_type = attn_mask_type
         self.attention_dropout = attention_dropout
         self.attention_type = attention_type
-        self.qkv_layout = "qkv_interleaved" if attention_type == "self" else "kv_interleaved"
+        self.qkv_layout = "bs3hd" if attention_type == "self" else "bshd_bs2hd"
 
         self.backend = backend
 
@@ -237,7 +236,7 @@ class DotProductAttention(paddle.nn.Layer):
             max_s_kv = max_s_q if self.attention_type == "self" else key_value_layer.shape[1]
             self.fused_attention_backend = tex.get_fused_attn_backend(
                 TE_DType[query_layer.dtype], TE_DType[query_layer.dtype],
-                QKVLayout[self.qkv_layout], AttnBiasType[core_attention_bias_type],
+                tex.get_nvte_qkv_layout(self.qkv_layout), AttnBiasType[core_attention_bias_type],
                 AttnMaskType[self.attn_mask_type], self.attention_dropout, max_s_q, max_s_kv,
                 query_layer.shape[-1])
 

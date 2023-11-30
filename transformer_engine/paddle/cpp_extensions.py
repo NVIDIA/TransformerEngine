@@ -431,7 +431,7 @@ def fused_attn_fwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -472,7 +472,12 @@ def fused_attn_fwd_qkvpacked(
         out = paddle.empty(shape=[b, max_seqlen, h, d], dtype=qkv.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
@@ -518,7 +523,7 @@ def fused_attn_bwd_qkvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -587,7 +592,7 @@ def fused_attn_fwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor]:
@@ -631,7 +636,12 @@ def fused_attn_fwd_kvpacked(
         out = paddle.empty(shape=[b, max_seqlen_q, h, d], dtype=q.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
@@ -685,7 +695,7 @@ def fused_attn_bwd_kvpacked(
     attn_scale: float = None,
     dropout: float = 0.0,
     set_zero: bool = True,
-    qkv_layout: str = "kv_interleaved",
+    qkv_layout: str = "bshd_bs2hd",
     bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
 ) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
