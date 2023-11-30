@@ -318,12 +318,12 @@ class TorchLayerNormMLP(nn.Module):
 
 
 class TorchGPT(nn.Module):
-    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_ml: bool):
+    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.parallel_attention_mlp = parallel_attention_ml
+        self.parallel_attention_mlp = parallel_attention_mlp
 
     def forward(
         self,
@@ -623,8 +623,8 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("parallel_attention_ml", all_boolean)
-def test_gpt_accuracy(dtype, bs, model, parallel_attention_ml):
+@pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
+def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
 
     te_gpt = (
@@ -637,7 +637,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_ml):
             hidden_dropout=0.1,
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
-            parallel_attention_mlp=parallel_attention_ml,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -649,7 +649,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_ml):
             config.hidden_size,
             config.eps,
             config.num_attention_heads,
-            parallel_attention_ml=parallel_attention_ml,
+            parallel_attention_ml=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
