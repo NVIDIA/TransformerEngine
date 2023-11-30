@@ -837,15 +837,16 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     // input
     void *qkv = buffers[0];
-    void *softmax_aux = buffers[1];
-    void *rng_state = buffers[2];
-    void *output = buffers[3];
-    void *doutput = buffers[4];
-    void *cu_seqlens = buffers[5];
+    void *bias = buffers[1];
+    void *softmax_aux = buffers[2];
+    void *rng_state = buffers[3];
+    void *output = buffers[4];
+    void *doutput = buffers[5];
+    void *cu_seqlens = buffers[6];
 
     // output
-    void *dqkv = buffers[6];
-    void *dbias = buffers[7];
+    void *dqkv = buffers[7];
+    void *dbias = buffers[8];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -881,13 +882,15 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 2;
+    aux_output_tensors.size = 3;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
     auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
     rng_state_tensor->data.shape = std::vector<size_t>{2};
     rng_state_tensor->data.dtype = DType::kInt64;
     rng_state_tensor->data.dptr = rng_state;
+    auto *bias_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[2]);
+    bias_tensor->data = SimpleTensor(bias, bias_shape, dtype);
 
     TensorWrapper query_workspace_tensor;
 
@@ -1013,17 +1016,18 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     // input
     void *q = buffers[0];
     void *kv = buffers[1];
-    void *softmax_aux = buffers[2];
-    void *rng_state = buffers[3];
-    void *output = buffers[4];
-    void *doutput = buffers[5];
-    void *q_cu_seqlens = buffers[6];
-    void *kv_cu_seqlens = buffers[7];
+    void *bias = buffers[2];
+    void *softmax_aux = buffers[3];
+    void *rng_state = buffers[4];
+    void *output = buffers[5];
+    void *doutput = buffers[6];
+    void *q_cu_seqlens = buffers[7];
+    void *kv_cu_seqlens = buffers[8];
 
     // output
-    void *dq = buffers[8];
-    void *dkv = buffers[9];
-    void *dbias = buffers[10];
+    void *dq = buffers[9];
+    void *dkv = buffers[10];
+    void *dbias = buffers[11];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -1061,13 +1065,15 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 2;
+    aux_output_tensors.size = 3;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
     auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
     rng_state_tensor->data.shape = std::vector<size_t>{2};
     rng_state_tensor->data.dtype = DType::kInt64;
     rng_state_tensor->data.dptr = rng_state;
+    auto *bias_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[2]);
+    bias_tensor->data = SimpleTensor(bias, bias_shape, dtype);
 
     TensorWrapper query_workspace_tensor;
 

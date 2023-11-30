@@ -91,14 +91,15 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                                                          scaling_factor=scaling_factor,
                                                          dropout_probability=dropout_probability,
                                                          is_training=is_training)
-    return output, (qkv, softmax_aux, rng_state, output, squeezed_mask)
+    return output, (qkv, bias, softmax_aux, rng_state, output, squeezed_mask)
 
 
 def _self_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                               is_training, ctx, dz):
-    qkv, softmax_aux, rng_state, output, squeezed_mask = ctx
+    qkv, bias, softmax_aux, rng_state, output, squeezed_mask = ctx
 
     grad_qkv, grad_bias = self_fused_attn_bwd(qkv,
+                                              bias,
                                               softmax_aux,
                                               rng_state,
                                               output,
@@ -168,15 +169,16 @@ def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mas
                                                           dropout_probability=dropout_probability,
                                                           is_training=is_training)
 
-    return output, (q, kv, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask)
+    return output, (q, kv, bias, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask)
 
 
 def _cross_fused_attn_bwd_rule(attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                                is_training, ctx, dz):
-    q, kv, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask = ctx
+    q, kv, bias, softmax_aux, rng_state, output, q_squeezed_mask, kv_squeezed_mask = ctx
 
     grad_q, grad_kv, grad_bias = cross_fused_attn_bwd(q,
                                                       kv,
+                                                      bias,
                                                       softmax_aux,
                                                       rng_state,
                                                       output,
