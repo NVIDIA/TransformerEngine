@@ -347,8 +347,8 @@ void nvte_fused_attn_bwd_qkvpacked(
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       Tensor *input_Bias, *input_rng_state;
       if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       } else {
           input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       }
@@ -554,8 +554,8 @@ void nvte_fused_attn_bwd_kvpacked(
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       Tensor *input_Bias, *input_rng_state;
       if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       } else {
           input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       }
@@ -744,8 +744,8 @@ void nvte_fused_attn_bwd(
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       Tensor *input_Bias, *input_rng_state;
       if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+          input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
+          input_Bias = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
       } else {
           input_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
       }

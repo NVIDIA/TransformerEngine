@@ -576,6 +576,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
     using namespace transformer_engine;
 
+    const DType QKV_type = input_QKV->data.dtype;
     void *devPtrQKV = input_QKV->data.dptr;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
     auto stride = 0;
@@ -594,20 +595,43 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     void *devPtrCuSeqlens = cu_seqlens->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
-        Aux_CTX_Tensors->size = 2;
-        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-        output_S->data.dptr = nullptr;
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
-        output_S->data.dtype = DType::kFloat32;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = nullptr;
-        output_rng_state->data.shape = {2};
-        output_rng_state->data.dtype = DType::kInt64;
+        if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+            Aux_CTX_Tensors->size = 3;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+            Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+            output_bias->data.dptr = nullptr;
+            output_bias->data.shape = {1, num_attn_heads, max_seqlen, max_seqlen};
+            output_bias->data.dtype = QKV_type;
+        } else {
+            Aux_CTX_Tensors->size = 2;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+        }
     } else if (Aux_CTX_Tensors->size == 2) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
         Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
         output_rng_state->data.dptr = rng_state->data.dptr;
+    } else if (Aux_CTX_Tensors->size == 3) {
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+        Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+        output_bias->data.dptr = devPtrBias;
     } else {
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
@@ -616,7 +640,6 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     void* devPtrDropoutOffset = reinterpret_cast<void *>(
                     reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
 
-    const DType QKV_type = input_QKV->data.dtype;
     size_t workspace_size = 0;
 
     fused_attn_arbitrary_seqlen_fwd_impl(batch, num_attn_heads, num_attn_heads,
@@ -731,7 +754,6 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     using namespace transformer_engine;
 
     const DType QKV_type = input_Q->data.dtype;
-
     void *devPtrQ = input_Q->data.dptr;
     void *devPtrKV = input_KV->data.dptr;
     NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -752,20 +774,43 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
 
     if (Aux_CTX_Tensors->size == 0) {
-        Aux_CTX_Tensors->size = 2;
-        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
-        output_S->data.dptr = nullptr;
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-        output_S->data.dtype = DType::kFloat32;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_rng_state->data.dptr = nullptr;
-        output_rng_state->data.shape = {2};
-        output_rng_state->data.dtype = DType::kInt64;
+        if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+            Aux_CTX_Tensors->size = 3;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+            Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+            output_bias->data.dptr = nullptr;
+            output_bias->data.shape = {1, num_attn_heads, max_seqlen_q, max_seqlen_kv};
+            output_bias->data.dtype = QKV_type;
+        } else {
+            Aux_CTX_Tensors->size = 2;
+            Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+            output_S->data.dptr = nullptr;
+            output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+            output_S->data.dtype = DType::kFloat32;
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+            output_rng_state->data.dptr = nullptr;
+            output_rng_state->data.shape = {2};
+            output_rng_state->data.dtype = DType::kInt64;
+        }
     } else if (Aux_CTX_Tensors->size == 2) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
         Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
         output_rng_state->data.dptr = rng_state->data.dptr;
+    } else if (Aux_CTX_Tensors->size == 3) {
+        Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+        devPtrS = output_S->data.dptr;
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+        output_rng_state->data.dptr = rng_state->data.dptr;
+        Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+        output_bias->data.dptr = devPtrBias;
     } else {
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
@@ -911,14 +956,14 @@ void fused_attn_arbitrary_seqlen_fwd(
             output_S->data.dptr = nullptr;
             output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
             output_S->data.dtype = DType::kFloat32;
-            Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-            output_bias->data.dptr = nullptr;
-            output_bias->data.shape = {1, num_attn_heads, max_seqlen_q, max_seqlen_kv};
-            output_bias->data.dtype = QKV_type;
-            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+            Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
             output_rng_state->data.dptr = nullptr;
             output_rng_state->data.shape = {2};
             output_rng_state->data.dtype = DType::kInt64;
+            Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+            output_bias->data.dptr = nullptr;
+            output_bias->data.shape = {1, num_attn_heads, max_seqlen_q, max_seqlen_kv};
+            output_bias->data.dtype = QKV_type;
         } else {
             Aux_CTX_Tensors->size = 2;
             Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
@@ -938,10 +983,10 @@ void fused_attn_arbitrary_seqlen_fwd(
     } else if (Aux_CTX_Tensors->size == 3) {
         Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
         devPtrS = output_S->data.dptr;
-        Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
-        output_bias->data.dptr = devPtrBias;
-        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+        Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
         output_rng_state->data.dptr = rng_state->data.dptr;
+        Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+        output_bias->data.dptr = devPtrBias;
     } else {
         NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
     }
