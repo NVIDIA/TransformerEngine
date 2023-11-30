@@ -466,11 +466,18 @@ class _Linear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
-                wgrad = torch.empty(weight.main_grad.shape,
-                                   dtype=weight.dtype,
-                                   device=torch.cuda.current_device(),
-                                   requires_grad=False
-                                   )
+                if getattr(weight, 'zero_out_wgrad', False):
+                    wgrad = torch.zeros(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
+                else:
+                    wgrad = torch.empty(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
