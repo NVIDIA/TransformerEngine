@@ -194,7 +194,7 @@ model_configs_base = {
 param_types = [torch.float16]
 if torch.cuda.is_bf16_supported():
     param_types.append(torch.bfloat16)
-param_types_lean = [torch.float16]
+param_types_lean = [torch.bfloat16]
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -278,7 +278,6 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
     if fused_attn_supported and len(fused_attn_backend) == 2:
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
-            print(fused_attn_bwd[i].isnan().sum(),fused_attn_bwd_1[i].isnan().sum())
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
         print('fused backend 0 vs fused backend 1')
 
@@ -301,7 +300,7 @@ model_configs_mask = {
     "mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "padding", "no_bias"),
     "mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding", "no_bias"),
     "mask_5_0": ModelConfig(8, 16, 16,  64,  128,  128, 0.0, "padding_causal", "no_bias"),
-    #"mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"),
+    "mask_5_1": ModelConfig(4, 16, 16,  64,  128,  256, 0.0, "padding_causal", "no_bias"),
     "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
@@ -362,11 +361,11 @@ model_configs_layout = {
     "layout_0_0": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,        "no_mask",         "no_bias"),
     "layout_0_1": ModelConfig(2, 16, 16,  64,  128,  128, 0.0,         "causal", "post_scale_bias"),
     "layout_0_2": ModelConfig(1, 16, 16,  64,  128,  256, 0.0,        "padding",         "no_bias"),
-    #"layout_0_3": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"), # segfault
+    "layout_0_3": ModelConfig(1, 16, 16,  64,  128,  256, 0.0, "padding_causal", "post_scale_bias"),
     "layout_1_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,        "no_mask",         "no_bias"),
     "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0,         "causal", "post_scale_bias"),
     "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0,        "padding",         "no_bias"),
-    #"layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"), # segfault
+    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
 }
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,5), reason="cuDNN 8.9.5+ is required.")
@@ -637,12 +636,15 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
     if unfused_attn_supported and fused_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+        print("unfused vs fused")
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
+        print("unfused vs flash")
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
+        print("fused vs flash")
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
