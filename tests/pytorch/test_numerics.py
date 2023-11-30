@@ -649,7 +649,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
             config.hidden_size,
             config.eps,
             config.num_attention_heads,
-            parallel_attention_ml=parallel_attention_mlp,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
