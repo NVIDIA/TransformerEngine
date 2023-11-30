@@ -16,9 +16,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "common/util/logging.h"
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -75,10 +75,11 @@ struct CustomCallNormDescriptor {
     DType w_dtype;
     bool zero_centered_gamma;
     float eps;
+    int sm_margin;
 };
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             bool zero_centered_gamma, float eps);
+                                             bool zero_centered_gamma, float eps, int sm_margin);
 
 struct SoftmaxDescriptor {
     size_t batch;
