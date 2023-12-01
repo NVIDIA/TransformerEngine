@@ -340,8 +340,10 @@ class Float8Tensor(torch.Tensor):
 
         return self
 
+    @classmethod
     def make_like(
-        self,
+        cls,
+        tensor: Float8Tensor,
         *,
         data: torch.Tensor,
         fp8_attrs: Optional[Dict[str, Any]] = None,
@@ -353,12 +355,12 @@ class Float8Tensor(torch.Tensor):
 
         """
         default_kwargs = dict(
-            fp8_meta=self._fp8_meta,
-            fp8_meta_forward=self._fp8_meta_forward,
-            fp8_meta_index=self._fp8_meta_index,
-            fp8_dtype=self._fp8_dtype,
-            fp8_scale_inv=self._scale_inv,
-            dtype=self.dtype,
+            fp8_meta=tensor._fp8_meta,
+            fp8_meta_forward=tensor._fp8_meta_forward,
+            fp8_meta_index=tensor._fp8_meta_index,
+            fp8_dtype=tensor._fp8_dtype,
+            fp8_scale_inv=tensor._scale_inv,
+            dtype=tensor.dtype,
         )
         for key, val in default_kwargs.items():
             if key not in kwargs:
@@ -482,7 +484,8 @@ class Float8Tensor(torch.Tensor):
         # Compute transpose if needed
         out = self._transpose
         if out is None:
-            out = self.make_like(
+            out = Float8Tensor.make_like(
+                self,
                 data=tex.fp8_transpose(
                     self._data.contiguous(),
                     self._fp8_dtype,
@@ -517,7 +520,8 @@ class Float8Tensor(torch.Tensor):
         The new tensor has the same underlying FP8 data.
 
         """
-        return self.make_like(
+        return Float8Tensor.make_like(
+            self,
             data=self._data,
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
@@ -547,9 +551,14 @@ class Float8Tensor(torch.Tensor):
             if not dst._data.is_contiguous():
                 raise RuntimeError("Transformer Engine cast kernels require contiguous data")
 
-            # Make sure input is in expected format
+            # Directly copy data from Float8Tensor
             if isinstance(src, Float8Tensor):
-                src = src.from_float8()
+                dst._data.copy_(src._data)
+                dst._scale_inv = src._scale_inv.clone()
+                dst._reset_caches()
+                return None
+
+            # Make sure input is in expected format
             src = src.expand(dst.size())
             src = src.to(
                 device=dst.device,
@@ -592,12 +601,13 @@ class Float8Tensor(torch.Tensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return tensor.make_like(data=data_slice)
+            return Float8Tensor.make_like(tensor, data=data_slice)
 
         # Detach op
         if func == aten.detach.default:
             # Simply return a new Float8Tensor with the same attrs
-            return args[0].make_like(
+            return Float8Tensor.make_like(
+                args[0],
                 data=args[0]._data,
                 fp8_attrs=args[0]._fp8_attrs,
             )
