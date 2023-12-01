@@ -148,7 +148,6 @@ def get_alibi(dtype: torch.dtype,
     for i in range(num_heads):
         bias[0,i,:,:] = m[i] * bias[0,i,:,:]
 
-    #bias = bias.to(dtype=dtype, device="cuda")
     bias = bias.to(dtype=torch.float32, device="cuda")
     return bias
 
