@@ -226,11 +226,13 @@ class _Linear(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of input
+                amin, amax = inputmat_total.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(inputmat_total).float()
+                    torch.max(-amin, amax).float()
                 # amax of weight
+                amin, amax = weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(weight).float()
+                    torch.max(-amin, amax).float()
 
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
