@@ -1707,7 +1707,7 @@ class FusedAttention(torch.nn.Module):
         # - unset:       enables workspace optimization when required space is <= 256MB
         # - n:           enables workspace optimization when required space is <=n byte
         # - -1:          enables workspace optimization always
-        # - 0:           disables workspace optimization always
+        # - 0:           disables workspace optimization always, unless dBias is required
         if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
