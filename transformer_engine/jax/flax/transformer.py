@@ -668,6 +668,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
                 x = cross_fused_attn(query,
                                      kv_proj,
+                                     bias,
                                      mask,
                                      seed,
                                      attn_bias_type=attn_bias_type,
