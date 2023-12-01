@@ -122,7 +122,7 @@ struct TypeInfo{
         using namespace transformer_engine; \
         case DType::kByte: \
             { \
-                using type = float; \
+                using type = unsigned char; \
                 {__VA_ARGS__} \
             } \
         break; \

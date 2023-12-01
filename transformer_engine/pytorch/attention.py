@@ -850,7 +850,7 @@ class _SplitAlongDim(torch.autograd.Function):
 
         noop_ok = True
         strides = grad_outputs[0].stride()
-        data_ptr = grad_outputs[0].storage().data_ptr()
+        data_ptr = grad_outputs[0].untyped_storage().data_ptr()
         shape = list(grad_outputs[0].shape)
         for i, tensor in enumerate(grad_outputs):
             shape_i = shape
@@ -858,7 +858,7 @@ class _SplitAlongDim(torch.autograd.Function):
             offset_size = sum(split_sizes[:i]) * np.prod(shape[split_dim+1:])
             if (tensor.stride() != strides or
                 list(tensor.shape) != shape_i or
-                tensor.storage().data_ptr() != data_ptr or
+                tensor.untyped_storage().data_ptr() != data_ptr or
                 tensor.storage_offset() != offset_size):
                 noop_ok = False
                 break
