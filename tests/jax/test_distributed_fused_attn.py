@@ -192,6 +192,7 @@ class TestDistributedCrossAttn:
             return jnp.mean(
                 cross_fused_attn(q,
                                  kv,
+                                 None,
                                  mask,
                                  None,
                                  attn_bias_type=attn_bias_type,
