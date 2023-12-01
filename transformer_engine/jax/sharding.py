@@ -17,8 +17,9 @@ from jax.sharding import PartitionSpec
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
 
-def _get_mesh_info(resource: str):
+def _get_mesh_info(resource: str, new_mesh=None):
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    assert mesh in (new_mesh, None)
     assert resource in mesh.axis_names, \
         f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
@@ -53,7 +54,7 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     return jax.lax.with_sharding_constraint(x, pspec)
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, mesh):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
@@ -121,12 +122,12 @@ def global_mesh_resource() -> MeshResource:
     return _GLOBAL_MESH_RESOURCE
 
 
-def all_reduce_sum_along_dp_fsdp(x: jnp.array):
+def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh=None):
     """
     All-Reduce (Sum) along DP and FSDP mesh axes.
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
 def all_reduce_max_along_all_axes_except_PP(x: jnp.array):
