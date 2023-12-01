@@ -120,7 +120,7 @@ class InferenceParams: # pylint: disable=too-few-public-methods
             )
 
 @torch.no_grad()
-def get_alibi(dtype: torch.dtype,
+def get_alibi(
     num_heads: int,
     max_seqlen_q: int,
     max_seqlen_kv: int,
@@ -1043,8 +1043,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 assert (core_attention_bias.shape == torch.Size([1, *output_size[1:]])
                         ), "core_attention_bias must be in [1, h, sq, skv] shape!"
             if core_attention_bias_type == "alibi":
-                core_attention_bias = get_alibi(query_layer.dtype,
-                        output_size[1], output_size[2], output_size[3])
+                core_attention_bias = get_alibi(output_size[1], output_size[2], output_size[3])
             matmul_result = torch.baddbmm(
                 matmul_result,
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
