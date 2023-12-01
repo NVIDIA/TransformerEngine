@@ -345,11 +345,13 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of fc1 input
+                amin, amax = ln_out_total.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(ln_out_total).float()
+                    torch.max(-amin, amax).float()
                 # amax of fc1 weight
+                amin, amax = fc1_weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(fc1_weight).float()
+                    torch.max(-amin, amax).float()
 
             fc1_outputs = tex.gemm(
                 fc1_weight,
@@ -383,11 +385,13 @@ class _LayerNormMLP(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of fc2 input
+                amin, amax = gelu_out.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_INPUT] = \
-                    torch.amax(gelu_out).float()
+                    torch.max(-amin, amax).float()
                 # amax of fc2 weight
+                amin, amax = fc2_weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM2_WEIGHT] = \
-                    torch.amax(fc2_weight).float()
+                    torch.max(-amin, amax).float()
 
             if ub_split_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
