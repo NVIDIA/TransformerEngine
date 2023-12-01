@@ -40,10 +40,11 @@ def quantize(x, q_dtype, scale):
     """
     Quantize with scale.
     """
+    updated_amax = jnp.max(jnp.abs(x)).astype(scale.dtype)
     dtype_max = (jnp.finfo(q_dtype).max).astype(x.dtype)
     scale = scale.astype(x.dtype)
     clipped_scaled_x = jnp.clip((x * scale), -dtype_max, dtype_max)
-    return clipped_scaled_x.astype(q_dtype)
+    return clipped_scaled_x.astype(q_dtype), updated_amax
 
 
 def dequantize(x, dq_dtype, scale_inv):
@@ -102,28 +103,22 @@ def _fp8_dot_fwd_rule(
 
     gemm_x_idx, gemm_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(0)
 
-    x_amax = amax[gemm_x_idx, 0:1]
     x_scale = scale[gemm_x_idx]
     x_scale_inv = scale_inv[gemm_x_idx]
+    # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
+    # unnecessary copy to break FP8 GEMM pattern matching.
+    casted_x, updated_x_amax = quantize(x, fwd_dtype, x_scale)
 
-    casted_x, casted_xt, updated_x_amax = \
-        cast_transpose(x, x_amax, x_scale, x_scale_inv, fwd_dtype, static_axis_boundary=-1,
-                       transpose_axis_boundary=min(lhs_contracting_dims))
-
-    kernel_amax = amax[gemm_kernel_idx, 0:1]
     kernel_scale = scale[gemm_kernel_idx]
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
+    # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
+    # unnecessary copy to break FP8 GEMM pattern matching.
+    casted_kerenl, updated_kernel_amax = quantize(kernel, fwd_dtype, kernel_scale)
 
-    casted_kerenl, casted_kerenl_t, updated_kernel_amax = \
-        cast_transpose(kernel, kernel_amax, kernel_scale, kernel_scale_inv,
-                       fwd_dtype, static_axis_boundary=-1,
-                       transpose_axis_boundary=(max(rhs_contracting_dims) + 1))
+    output = fp8_dot_impl(casted_x, casted_kerenl, x_scale_inv, kernel_scale_inv, x.dtype,
+                          (lhs_contracting_dims, rhs_contracting_dims))
 
-    rhs_t_contracting_dims = tuple(range(kernel.ndim - len(rhs_contracting_dims), kernel.ndim))
-    output = fp8_dot_impl(casted_x, casted_kerenl_t, x_scale_inv, kernel_scale_inv, x.dtype,
-                          (lhs_contracting_dims, rhs_t_contracting_dims))
-
-    ctx = (casted_xt, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
+    ctx = (casted_x, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape)
     return output, ctx
 
@@ -131,7 +126,7 @@ def _fp8_dot_fwd_rule(
 def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # pylint: disable=unused-argument
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
-    casted_xt, casted_kerenl, fp8_max, amax, scale, scale_inv, \
+    casted_x, casted_kerenl, fp8_max, amax, scale, scale_inv, \
         updated_x_amax, updated_kernel_amax, x_shape, kernel_shape = ctx
 
     gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
@@ -145,11 +140,11 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
                        bwd_dtype, static_axis_boundary=-1,
                        transpose_axis_boundary=min(lhs_contracting_dims))
 
-    xt_constracting_dim = tuple(range(len(lhs_contracting_dims), len(x_shape)))
-    gt_constracting_dim = tuple(range(grad.ndim - len(xt_constracting_dim), grad.ndim))
+    x_constracting_dim = tuple(range(0, len(x_shape) - len(lhs_contracting_dims)))
+    gt_constracting_dim = tuple(range(grad.ndim - len(x_constracting_dim), grad.ndim))
     x_scale_inv = scale_inv[gemm_x_idx]
-    wgrad = fp8_dot_impl(casted_xt, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
-                         (xt_constracting_dim, gt_constracting_dim))
+    wgrad = fp8_dot_impl(casted_x, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
+                         (x_constracting_dim, gt_constracting_dim))
 
     g_constracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
@@ -158,8 +153,8 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_constracting_dim, k_constracting_dim))
 
-    amax = amax.at[gemm_x_idx, 0].set(updated_x_amax[0])
-    amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax[0])
+    amax = amax.at[gemm_x_idx, 0].set(updated_x_amax)
+    amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax)
     amax = amax.at[gemm_grad_idx, 0].set(updated_grad_amax[0])
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
