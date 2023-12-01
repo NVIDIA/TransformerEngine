@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Tuple
 from functools import partial, reduce
 import operator
+import os
 import warnings
 
 import numpy as np
@@ -339,6 +340,8 @@ class LayerNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, b_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -346,6 +349,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             zero_centered_gamma,
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(LayerNormFwdPrimitive.name, args, opaque, False)
@@ -491,6 +495,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -498,6 +504,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             zero_centered_gamma,
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(LayerNormBwdPrimitive.name, args, opaque, False)
@@ -642,6 +649,8 @@ class RmsNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -649,6 +658,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(RmsNormFwdPrimitive.name, args, opaque, False)
@@ -778,6 +788,8 @@ class RmsNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -785,6 +797,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(RmsNormBwdPrimitive.name, args, opaque, False)
@@ -1482,8 +1495,8 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_upper_triang_masked_softmax_forward abstract
         """
-        q_seqlen = logits_aval.shape[2]
-        k_seqlen = logits_aval.shape[3]
+        q_seqlen = logits_aval.shape[-2]
+        k_seqlen = logits_aval.shape[-1]
         assert q_seqlen == k_seqlen
         return SoftmaxPrimitive.forward_abstract(logits_aval, scale_factor)
 
@@ -3040,6 +3053,8 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         ]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -3047,6 +3062,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             zero_centered_gamma,
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(LayerNormFwdFp8Primitive.name,
@@ -3244,6 +3260,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
+        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
             hidden_size,
@@ -3251,6 +3269,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),
             False,    # RMSNorm doesn't support zero_centered_gamma
             epsilon,
+            sm_margin,
         )
 
         out = custom_caller(RmsNormFwdFp8Primitive.name,
