@@ -2090,8 +2090,9 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         output_dtype = q_dtype
 
         backend = FusedAttnHelper(q_dtype, kv_dtype, NVTE_QKV_Layout.NVTE_BSHD_BS2HD,
-                                  attn_bias_type, attn_mask_type, dropout_probability, q_max_seqlen,
-                                  kv_max_seqlen, q_head_dim).get_fused_attn_backend()
+                                  attn_bias_type, attn_mask_type, dropout_probability,
+                                  q_num_head, kv_num_head,
+                                  q_max_seqlen, kv_max_seqlen, q_head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*q_batch_shape, q_num_head, q_max_seqlen, kv_max_seqlen)

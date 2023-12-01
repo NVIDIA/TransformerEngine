@@ -180,13 +180,14 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim, num_heads_q, num_heads_kv):
+                      num_heads_q, num_heads_kv, head_dim):
 
         assert isinstance(backend, Backend)
 
         if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
-                                              attn_mask_type, dropout_probability, s, s, head_dim,
-                                              num_heads_q, num_heads_kv):
+                                              attn_mask_type, dropout_probability,
+                                              num_heads_q, num_heads_kv,
+                                              s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
@@ -198,9 +199,9 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
-                                     head_dim=d,
                                      num_heads_q=h,
-                                     num_heads_kv=h)
+                                     num_heads_kv=h,
+                                     head_dim=d)
 
         if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
             pad_ratio = 0.0
@@ -294,10 +295,8 @@ class TestSelfFusedAttn():
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
-        # TODO (rewang): wait for PR 525
-        if ((s > 512 or backend == Backend.Arbitrary)
-            and attn_bias_type == AttnBiasType.POST_SCALE_BIAS):
-            pytest.skip(f"Backend.Arbitrary doesn't support {attn_bias_type=}")
+        # TODO (cyang): remove this when cudnn fe v1 has included it for dbias cases
+        os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         self._set_inputs(b,
                          s,
@@ -494,11 +493,6 @@ class TestCrossFusedAttn():
         """
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
-
-        if (attn_mask_type == AttnMaskType.PADDING_MASK
-            and dropout_probability == 0.):
-            # TODO (rewang/cyang) unify padding mask across backends
-            pytest.skip(f"Backward.Arbitrary currently has different implementation for padding")
 
         self._set_inputs(b,
                          s_q,

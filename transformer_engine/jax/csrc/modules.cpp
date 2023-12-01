@@ -978,7 +978,8 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, num_head, num_head,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
