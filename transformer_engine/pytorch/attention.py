@@ -2300,6 +2300,13 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = (use_fused_attention
                                   and is_backend_avail)
 
+        # Select FusedAttention on sm90 and FlashAttention on others for performance
+        if (use_flash_attention
+            and use_fused_attention
+            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]):
+            if self.device_compute_capability == (9, 0):
+                use_flash_attention = False
+
         if use_flash_attention:
             print("[DotProductAttention]: using flash-attn",_flash_attn_version)
             return self.flash_attention(query_layer,
