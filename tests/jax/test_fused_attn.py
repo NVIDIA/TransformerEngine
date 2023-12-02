@@ -163,7 +163,7 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     # mask invert
     mask = (mask == 0)
 
-    return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
+    return cross_fused_attn(q, kv, None, mask, dropout_rng, **kwargs)
 
 
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
