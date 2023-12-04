@@ -5,6 +5,7 @@
 
 from enum import Enum
 from functools import partial
+from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
 
@@ -92,6 +93,9 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                                                          scaling_factor=scaling_factor,
                                                          dropout_probability=dropout_probability,
                                                          is_training=is_training)
+    output = checkpoint_name(output, 'context')
+    softmax_aux = checkpoint_name(softmax_aux, 'context')
+    rng_state = checkpoint_name(rng_state, 'context')
     return output, (qkv, bias, softmax_aux, rng_state, output, squeezed_mask)
 
 
