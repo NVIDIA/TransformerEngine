@@ -2884,7 +2884,7 @@ def cast_transpose(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_
         transpose_axis_boundary=transpose_axis_boundary)
 
 
-class CastPrimitive(BasePrimitive):
+class CastFP8Primitive(BasePrimitive):
     """
     Cast Primitive
     """
@@ -2941,7 +2941,11 @@ class CastPrimitive(BasePrimitive):
                                                                jax_dtype_to_te_dtype(x_aval.dtype),
                                                                jax_dtype_to_te_dtype(out_dtype))
 
-        out = custom_caller(CastPrimitive.name, args, opaque, False, operand_output_aliases={1: 1})
+        out = custom_caller(CastFP8Primitive.name,
+                            args,
+                            opaque,
+                            False,
+                            operand_output_aliases={1: 1})
 
         return out
 
@@ -2950,23 +2954,23 @@ class CastPrimitive(BasePrimitive):
         """
         te_cast implementation
         """
-        assert CastPrimitive.inner_primitive is not None
+        assert CastFP8Primitive.inner_primitive is not None
         casted_x, updated_amax = \
-            CastPrimitive.inner_primitive.bind(
+            CastFP8Primitive.inner_primitive.bind(
                 x, amax, scale, scale_inv, out_dtype=out_dtype)
         return casted_x, updated_amax
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, out_dtype):
         _check_valid_batch_dims(batch_dims)
-        assert CastPrimitive.outer_primitive is not None
+        assert CastFP8Primitive.outer_primitive is not None
 
         x, amax, scale, scale_inv = batched_args
         x_bdim, amax_bdim, *_ = batch_dims
 
         out_bdims = x_bdim, x_bdim, amax_bdim
-        return CastPrimitive.outer_primitive.bind(x, amax, scale, scale_inv,
-                                                  out_dtype=out_dtype), out_bdims
+        return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv,
+                                                     out_dtype=out_dtype), out_bdims
 
     @staticmethod
     def infer_sharding_from_operands(out_dtype, mesh, arg_infos, result_infos):
@@ -2987,7 +2991,7 @@ class CastPrimitive(BasePrimitive):
 
         def sharded_impl(x, amax, scale, scale_inv):
             local_cx, local_updated_amax = \
-                CastPrimitive.impl(x, amax, scale, scale_inv, out_dtype=out_dtype)
+                CastFP8Primitive.impl(x, amax, scale, scale_inv, out_dtype=out_dtype)
             global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax)
 
             return local_cx, global_updated_amax
@@ -2995,16 +2999,16 @@ class CastPrimitive(BasePrimitive):
         return mesh, sharded_impl, out_shardings, arg_shardings
 
 
-register_primitive(CastPrimitive)
+register_primitive(CastFP8Primitive)
 
 
-def cast(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
-         out_dtype: TEDType) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cast_fp8(x: jnp.ndarray, amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
+             out_dtype: TEDType) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Cast wrapper
     Return FP8 tensor
     """
-    return CastPrimitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
+    return CastFP8Primitive.outer_primitive.bind(x, amax, scale, scale_inv, out_dtype=out_dtype)
 
 
 class TransposePrimitive(BasePrimitive):

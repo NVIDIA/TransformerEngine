@@ -7,7 +7,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import cast, cast_transpose, transpose
+from .cpp_extensions import cast_fp8, cast_transpose, transpose
 from .cpp_extensions import rmsnorm_fwd, rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd, layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl
@@ -188,14 +188,14 @@ def _layernorm_fp8_dot_fwd_rule(
     # Kernel in (hidden_in, hidden_out...)
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
-    casted_kerenl, updated_kernel_amax = \
-        cast(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype)
+    casted_kernel, updated_kernel_amax = \
+        cast_fp8(kernel, kernel_amax, kernel_scale, kernel_scale_inv, fwd_dtype)
 
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
-    output = fp8_dot_impl(ln_out, casted_kerenl, x_scale_inv, kernel_scale_inv, x.dtype,
+    output = fp8_dot_impl(ln_out, casted_kernel, x_scale_inv, kernel_scale_inv, x.dtype,
                           (x_contracting_dims, k_contracting_dims))
 
-    ctx = (ln_out, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
+    ctx = (ln_out, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape, mu, rsigma, x, gamma, x_contracting_dims,
            k_contracting_dims)
 
@@ -210,7 +210,7 @@ def _layernorm_fp8_dot_bwd_rule(
         epsilon,
         ctx,
         grad):
-    ln_out_, casted_kerenl, fp8_max, amax, scale, scale_inv, \
+    ln_out_, casted_kernel, fp8_max, amax, scale, scale_inv, \
     updated_x_amax, updated_kernel_amax, \
     x_shape, kernel_shape, mu, rsigma, x, gamma, \
     x_contracting_dims, k_contracting_dims = ctx
@@ -237,7 +237,7 @@ def _layernorm_fp8_dot_bwd_rule(
         range(grad.ndim - len(kernel_shape) + len(k_contracting_dims), grad.ndim))
     k_constracting_dim = tuple(range(len(k_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
-    dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
+    dgrad = fp8_dot_impl(casted_grad, casted_kernel, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_for_dgrad_constracting_dim, k_constracting_dim))
 
     if layernorm_type == 'layernorm':

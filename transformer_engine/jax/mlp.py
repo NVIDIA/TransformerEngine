@@ -9,7 +9,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import cast, transpose, cast_transpose
+from .cpp_extensions import cast_fp8, transpose, cast_transpose
 from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
@@ -172,11 +172,11 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
 
     # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
-    casted_kerenl_1, updated_kernel_1_amax = \
-        cast(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
+    casted_kernel_1, updated_kernel_1_amax = \
+        cast_fp8(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
 
     # (batch..., hidden_in) x (hidden_in, 2, hidden_out)
-    dot_1_output = fp8_dot_impl(ln_out, casted_kerenl_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
+    dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
                                 (x_contracting_dims, (0,)))
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
@@ -194,14 +194,14 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
     # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
-    casted_kerenl_2, updated_kernel_2_amax = quantize(kernel_2, fwd_dtype, kernel_2_scale)
+    casted_kernel_2, updated_kernel_2_amax = quantize(kernel_2, fwd_dtype, kernel_2_scale)
 
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kerenl_2, geglu_out_scale_inv,
+    dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kernel_2, geglu_out_scale_inv,
                                 kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)))
 
-    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kerenl_1,
-           casted_kerenl_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
+    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kernel_1,
+           casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
            updated_kernel_1_amax, updated_kernel_2_amax, x_contracting_dims, xt_batch_dims)
 
     return dot_2_output, ctx
@@ -216,7 +216,7 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, \
-    casted_kerenl_1, casted_kerenl_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
+    casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
     updated_geglu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims = ctx
 
@@ -241,7 +241,7 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
-    dgrad_2 = fp8_dot_impl(casted_grad, casted_kerenl_2, grad_scale_inv, kernel_2_scale_inv,
+    dgrad_2 = fp8_dot_impl(casted_grad, casted_kernel_2, grad_scale_inv, kernel_2_scale_inv,
                            grad.dtype, (x_contracting_dims, (1,)))
 
     gemm1_x_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
@@ -271,7 +271,7 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     x_contracting_dims_plus_act_dim = (min(x_contracting_dims),) + tuple(
         i + 1 for i in x_contracting_dims)
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
-    dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kerenl_1, dgeglu_scale_inv, kernel_1_scale_inv,
+    dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kernel_1, dgeglu_scale_inv, kernel_1_scale_inv,
                            grad.dtype, (x_contracting_dims_plus_act_dim, (
                                1,
                                2,

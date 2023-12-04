@@ -113,12 +113,12 @@ def _fp8_dot_fwd_rule(
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
     # unnecessary copy to break FP8 GEMM pattern matching.
-    casted_kerenl, updated_kernel_amax = quantize(kernel, fwd_dtype, kernel_scale)
+    casted_kernel, updated_kernel_amax = quantize(kernel, fwd_dtype, kernel_scale)
 
-    output = fp8_dot_impl(casted_x, casted_kerenl, x_scale_inv, kernel_scale_inv, x.dtype,
+    output = fp8_dot_impl(casted_x, casted_kernel, x_scale_inv, kernel_scale_inv, x.dtype,
                           (lhs_contracting_dims, rhs_contracting_dims))
 
-    ctx = (casted_x, casted_kerenl, fp8_max, amax, scale, scale_inv, updated_x_amax,
+    ctx = (casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape)
     return output, ctx
 
@@ -126,7 +126,7 @@ def _fp8_dot_fwd_rule(
 def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # pylint: disable=unused-argument
     lhs_contracting_dims, rhs_contracting_dims = contracting_dims
 
-    casted_x, casted_kerenl, fp8_max, amax, scale, scale_inv, \
+    casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, \
         updated_x_amax, updated_kernel_amax, x_shape, kernel_shape = ctx
 
     gemm_x_idx, gemm_kernel_idx, gemm_grad_idx = FP8Helper.get_fp8_meta_indices(0)
@@ -150,7 +150,7 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
         range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
     k_constracting_dim = tuple(range(len(rhs_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
-    dgrad = fp8_dot_impl(casted_grad, casted_kerenl, grad_scale_inv, kernel_scale_inv, grad.dtype,
+    dgrad = fp8_dot_impl(casted_grad, casted_kernel, grad_scale_inv, kernel_scale_inv, grad.dtype,
                          (g_constracting_dim, k_constracting_dim))
 
     amax = amax.at[gemm_x_idx, 0].set(updated_x_amax)
