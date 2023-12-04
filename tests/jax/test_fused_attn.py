@@ -295,9 +295,6 @@ class TestSelfFusedAttn():
         if not is_training:
             pytest.skip(f"Backward doesn't support {is_training=}")
 
-        # TODO (cyang): remove this when cudnn fe v1 has included it for dbias cases
-        os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
-
         self._set_inputs(b,
                          s,
                          h,

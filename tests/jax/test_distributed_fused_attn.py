@@ -73,9 +73,6 @@ class TestDistributedSelfAttn:
     @pytest.mark.parametrize('dtype', DTYPES)
     def test_self_attn(self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape,
                        attn_bias_type, attn_mask_type, dtype):
-        # TODO (cyang): remove this when cudnn fe v1 has included it for dbias cases
-        os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
-
         dropout_prob = 0.0
         is_training = True
         scaling_factor = 1.0
