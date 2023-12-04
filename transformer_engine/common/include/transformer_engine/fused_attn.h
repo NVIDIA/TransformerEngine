@@ -150,8 +150,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 NVTE_Bias_Type bias_type,
                 NVTE_Mask_Type attn_mask_type,
                 float dropout,
-                size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t num_attn_heads, size_t num_gqa_groups,
+                size_t max_seqlen_q, size_t max_seqlen_kv,
                 size_t head_dim);
 
 /*! \brief Compute dot product attention with packed QKV input.
