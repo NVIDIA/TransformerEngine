@@ -1671,7 +1671,7 @@ class FusedAttention(torch.nn.Module):
     |               | bshd_bshd_bshd          | sbhd_sbh2d, bshd_bsh2d         |
     |               |                         | sbhd_sbhd_sbhd, bshd_bshd_bshd |
     | mask_type     | causal/padding/no_mask  | causal/padding/no_mask         |
-    | bias_type     | post_scale_bias/no_bias | no_bias                        |
+    | bias_type     | post_scale_bias/no_bias | post_scale_bias/alibi/no_bias  |
     | dropout       | yes                     | yes                            |
     | max_seqlen    | <=512, multiple of 64   | any, multiple of 64            |
     | head_dim      | 64                      | <=128, multiple of 8           |
