@@ -318,13 +318,12 @@ class TorchLayerNormMLP(nn.Module):
 
 
 class TorchGPT(nn.Module):
-    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int):
+    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.resid_attn_dropout = nn.Dropout(0.1)
-        self.resid_mlp_dropout = nn.Dropout(0.1)
+        self.parallel_attention_mlp = parallel_attention_mlp
 
     def forward(
         self,
@@ -333,10 +332,15 @@ class TorchGPT(nn.Module):
     ) -> torch.Tensor:
         a = self.ln(x)
         b = self.causal_attn(a, attn_mask)
-        x = x + self.resid_attn_dropout(b)
-        n = self.ln_mlp(x)
-        x = x + self.resid_mlp_dropout(n)
+        if self.parallel_attention_mlp:
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
+        else:
+            x = x + nn.functional.dropout(b, p=0.1, training=self.training)
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(n, p=0.1, training=self.training)
         return x
+
 
 
 def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
@@ -624,7 +628,8 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
+def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
 
     te_gpt = (
@@ -637,6 +642,7 @@ def test_gpt_accuracy(dtype, bs, model):
             hidden_dropout=0.1,
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -648,6 +654,7 @@ def test_gpt_accuracy(dtype, bs, model):
             config.hidden_size,
             config.eps,
             config.num_attention_heads,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
