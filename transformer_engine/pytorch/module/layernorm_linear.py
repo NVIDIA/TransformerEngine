@@ -220,11 +220,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of input
+                amin, amax = ln_out_total.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(ln_out_total).float()
+                    torch.max(-amin, amax).float()
                 # amax of weight
+                amin, amax = weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(weight).float()
+                    torch.max(-amin, amax).float()
 
             out, _, _ = tex.gemm(
                 weight,
@@ -532,11 +534,18 @@ class _LayerNormLinear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
-                wgrad = torch.empty(weight.main_grad.shape,
-                                   dtype=weight.dtype,
-                                   device=torch.cuda.current_device(),
-                                   requires_grad=False
-                                   )
+                if getattr(weight, 'zero_out_wgrad', False):
+                    wgrad = torch.zeros(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
+                else:
+                    wgrad = torch.empty(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:

@@ -94,7 +94,7 @@ def _linear_fwd_fp8(
 
     # Row Parallel Linear
     if parallel_mode == "row" and tensor_parallel:
-        out = allreduce(out, tp_group)
+        out, _ = allreduce(out, tp_group)
 
     return out, weight_t_fp8
 
@@ -146,7 +146,7 @@ def _linear_fwd_non_fp8(
     out, _, _ = outputs
     # Row Parallel Linear
     if parallel_mode == "row" and tensor_parallel:
-        out = allreduce(out, tp_group)
+        out, _ = allreduce(out, tp_group)
     return out
 
 
@@ -221,7 +221,7 @@ def _linear_bwd_fp8(
     tensor_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
-    dgrad, wgrad = None, None
+    dgrad, wgrad, handle = None, None, None
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
     fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
     if requires_dgrad:
@@ -239,7 +239,7 @@ def _linear_bwd_fp8(
             use_split_accumulator=_2X_ACC_DGRAD,
         )
         if parallel_mode == "column" and tensor_parallel:
-            dgrad = allreduce(dgrad, tp_group)
+            dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
 
     if requires_wgrad:
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
@@ -265,6 +265,10 @@ def _linear_bwd_fp8(
                 layout="NT",
                 grad=True,
             )
+
+    if parallel_mode == "column" and tensor_parallel and handle is not None:
+        handle.wait()
+
     return dgrad, wgrad
 
 
@@ -285,7 +289,7 @@ def _linear_bwd_non_fp8(
     """
     Performs Linear Backward. Optionally, fuses GELU backward and dbias.
     """
-    dgrad, wgrad, bgrad = None, None, None
+    dgrad, wgrad, bgrad, handle = None, None, None, None
     if requires_dgrad:
         dgrad, _, _ = gemm(
             weight,
@@ -298,7 +302,7 @@ def _linear_bwd_non_fp8(
             grad=True,
         )
         if parallel_mode == "column" and tensor_parallel:
-            dgrad = allreduce(dgrad, tp_group)
+            dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
 
     if requires_wgrad:
         wgrad, bgrad, _ = gemm(
@@ -312,6 +316,9 @@ def _linear_bwd_non_fp8(
         )
     elif requires_bgrad:
         bgrad = grad_output.sum(axis=0)
+
+    if parallel_mode == "column" and tensor_parallel and handle is not None:
+        handle.wait()
 
     return dgrad, wgrad, bgrad
 
@@ -676,7 +683,7 @@ class Linear(TransformerEngineBaseLayer):
             inp = identity(inp, self.tp_group)
         out = F.linear(inp, self.weight, self.bias if self.gemm_bias_fused_add else None)
         if self.parallel_mode == 'row' and self.tensor_parallel:
-            out = allreduce(out, self.tp_group)
+            out, _ = allreduce(out, self.tp_group)
             out = out + self.bias if self.bias is not None else out
         return out
 
