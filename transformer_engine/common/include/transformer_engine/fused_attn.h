@@ -18,56 +18,56 @@ extern "C" {
 #endif
 
 /*! \enum NVTE_QKV_Layout
- *  \brief Memory layouts of QKV tensors 
- *  `S`, `B`, `H`, `D`, and `T` stand for sequence length, batch size, the number of heads,
-    head size, and the total number of sequences in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
-    `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
-    or padded to the same length, and `THD`-based layouts are used when sequences have
-    different lengths in a batch.
+ *  \brief Memory layouts of QKV tensors.
+ *   `S`, `B`, `H`, `D`, and `T` stand for sequence length, batch size, number of heads,
+ *   head size, and the total number of sequences in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
+ *   `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
+ *   or padded to the same length, and `THD`-based layouts are used when sequences have
+ *   different lengths in a batch.
  */
 enum NVTE_QKV_Layout {
-    NVTE_SB3HD = 0,
-    NVTE_SBH3D = 1,
-    NVTE_SBHD_SB2HD = 2,
-    NVTE_SBHD_SBH2D = 3,
-    NVTE_SBHD_SBHD_SBHD = 4,
-    NVTE_BS3HD = 5,
-    NVTE_BSH3D = 6,
-    NVTE_BSHD_BS2HD = 7,
-    NVTE_BSHD_BSH2D = 8,
-    NVTE_BSHD_BSHD_BSHD = 9,
-    NVTE_T3HD = 10,
-    NVTE_TH3D = 11,
-    NVTE_THD_T2HD = 12,
-    NVTE_THD_TH2D = 13,
-    NVTE_THD_THD_THD = 14,
+    NVTE_SB3HD          = 0,  /*!< SB3HD layout */
+    NVTE_SBH3D          = 1,  /*!< SBH3D layout */
+    NVTE_SBHD_SB2HD     = 2,  /*!< SBHD_SB2HD layout */
+    NVTE_SBHD_SBH2D     = 3,  /*!< SBHD_SBH2D layout */
+    NVTE_SBHD_SBHD_SBHD = 4,  /*!< SBHD_SBHD_SBHD layout */
+    NVTE_BS3HD          = 5,  /*!< BS3HD layout */
+    NVTE_BSH3D          = 6,  /*!< BSH3D layout */
+    NVTE_BSHD_BS2HD     = 7,  /*!< BSHD_BS2HD layout */
+    NVTE_BSHD_BSH2D     = 8,  /*!< BSHD_BSH2D layout */
+    NVTE_BSHD_BSHD_BSHD = 9,  /*!< BSHD_BSHD_BSHD layout */
+    NVTE_T3HD           = 10,  /*!< T3HD layout */
+    NVTE_TH3D           = 11,  /*!< TH3D layout */
+    NVTE_THD_T2HD       = 12,  /*!< THD_T2HD layout */
+    NVTE_THD_TH2D       = 13,  /*!< THD_TH2D layout */
+    NVTE_THD_THD_THD    = 14,  /*!< THD_THD_THD layout */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
- *  \brief Grouping of QKV layouts 
+ *  \brief QKV layout groups 
  */
 enum NVTE_QKV_Layout_Group {
-    /*! 3HD QKV layouts, e.g. BS3HD */
+    /*! 3HD QKV layouts, i.e. BS3HD, SB3HD, T3HD */
     NVTE_3HD = 0,
-    /*! H3D QKV layouts, e.g. BSH3D */
+    /*! H3D QKV layouts, i.e. BSH3D, SBH3D, TH3D */
     NVTE_H3D = 1,
-    /*! HD_2HD QKV layouts, e.g. BSHD_BS2HD */
+    /*! HD_2HD QKV layouts, i.e. BSHD_BS2HD, SBHD_SB2HD, THD_T2HD */
     NVTE_HD_2HD = 2,
-    /*! HD_H2D QKV layouts, e.g. BSHD_BSH2D */
+    /*! HD_H2D QKV layouts, i.e. BSHD_BSH2D, SBHD_SBH2D, THD_TH2D */
     NVTE_HD_H2D = 3,
-    /*! HD_HD_HD QKV layouts, e.g. BSHD_BSHD_BSHD */
+    /*! HD_HD_HD QKV layouts, i.e. BSHD_BSHD_BSHD, SBHD_SBHD_SBHD, THD_THD_THD */
     NVTE_HD_HD_HD = 4,
 };
 
 /*! \enum NVTE_QKV_Format
- *  \brief Dimension formats for QKV tensors
+ *  \brief QKV formats
  */
 enum NVTE_QKV_Format {
-    /*! SBHD QKV format */
+    /*! SBHD QKV format, i.e. SB3HD, SBH3D, SBHD_SB2HD, SBHD_SBH2D, SBHD_SBHD_SBHD */
     NVTE_SBHD = 0,
-    /*! BSHD QKV format */
+    /*! BSHD QKV format, i.e. BS3HD, BSH3D, BSHD_BS2HD, BSHD_BSH2D, BSHD_BSHD_BSHD */
     NVTE_BSHD = 1,
-    /*! THD QKV format */
+    /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD */
     NVTE_THD = 2,
 };
 
@@ -113,7 +113,7 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_FP8 = 2,
 };
 
-/*!  \brief Get layout group for a given QKV layout
+/*!  \brief Get QKV layout group for a given QKV layout.
  *
  *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
  *
@@ -121,7 +121,7 @@ enum NVTE_Fused_Attn_Backend {
  */
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout);
 
-/*!  \brief Get QKV format for a given QKV layout
+/*!  \brief Get QKV format for a given QKV layout.
  *
  *  \param[in]     qkv_layout       QKV layout, e.g. sbh3d.
  *
@@ -164,10 +164,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision | qkv layout |       bias         |                  mask                 | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | 3HD or H3D | NO/POST_SCALE_BIAS | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | 3HD or H3D |      NO_BIAS       |          NO/PADDING/CAUSAL_MASK       |   Yes   |      > 512      |   <= 128 |
-   | 2       | FP8       |    T3HD    |      NO_BIAS       |                PADDING_MASK           |   Yes   |     <= 512      |    64    |
+   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |       BS3HD,SB3HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |   2     |   FP8     |          T3HD           |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
    \endverbatim
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
@@ -208,10 +208,10 @@ void nvte_fused_attn_fwd_qkvpacked(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision | qkv layout |       bias         |                  mask                 | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | 3HD or H3D | NO/POST_SCALE_BIAS | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | 3HD or H3D |      NO_BIAS       |          NO/PADDING/CAUSAL_MASK       |   Yes   |      > 512      |   <= 128 |
-   | 2       | FP8       |    T3HD    |      NO_BIAS       |                PADDING_MASK           |   Yes   |     <= 512      |    64    |
+   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |       BS3HD,SB3HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |   2     |   FP8     |          T3HD           |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
    \endverbatim
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
@@ -261,8 +261,9 @@ void nvte_fused_attn_bwd_qkvpacked(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision |    qkv layout    |       bias         |                mask                   | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | HD_2HD or HD_H2D | NO/POST_SCALE_BIAS | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |     <= 512      |    64    |
+   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |            BSHD_BS2HD,SBHD_SB2HD            |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor, in HD layouts.
@@ -309,8 +310,9 @@ void nvte_fused_attn_fwd_kvpacked(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision |    qkv layout    |       bias         |                mask                   | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | HD_2HD or HD_H2D | NO/POST_SCALE_BIAS | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |     <= 512      |    64    |
+   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |            BSHD_BS2HD,SBHD_SB2HD            |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor, in HD layouts.
@@ -368,10 +370,12 @@ void nvte_fused_attn_bwd_kvpacked(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision | qkv format |       bias         |                 mask                  | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | NO_MASK/PADDING/CAUSAL/PADDING_CAUSAL |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS |     PADDING/CAUSAL/PADDING_CAUSAL     |   Yes   |      > 512      |  64, 128 |
-   | 2       | FP8       | THD        | NO_BIAS            |            PADDING_MASK               |   Yes   |     <= 512      |    64    |
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor.
@@ -420,10 +424,12 @@ void nvte_fused_attn_fwd(
  *
  * Support Matrix:
    \verbatim
-   | backend | precision | qkv format |       bias         |                 mask                  | dropout | sequence length | head_dim |
-   | 0       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS | NO_MASK/PADDING/CAUSAL/PADDING_CAUSAL |   Yes   |     <= 512      |    64    |
-   | 1       | FP16/BF16 | SBHD, BSHD | NO/POST_SCALE_BIAS |     PADDING/CAUSAL/PADDING_CAUSAL     |   Yes   |      > 512      |  64, 128 |
-   | 2       | FP8       | THD        | NO_BIAS            |            PADDING_MASK               |   Yes   |     <= 512      |    64    |
+   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
+   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
+   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
+   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
+   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
+   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
    \endverbatim
  *
  *  \param[in]     Q                        The Q tensor.
