@@ -8,6 +8,8 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cudnn_frontend.h>
+#include <cudnn_frontend_utils.h>
 #include <map>
 #include <vector>
 
@@ -182,12 +184,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 .set_name("Seed")
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
-                                .set_data_type(fe::DataType_t::INT32));
+                                .set_data_type(fe::DataType_t::INT64));
                 dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Offset")
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
-                                .set_data_type(fe::DataType_t::INT32));
+                                .set_data_type(fe::DataType_t::INT64));
                 scaled_dot_product_flash_attention_options.set_dropout(
                                 dropout_probability, dropout_seed, dropout_offset);
             }
@@ -451,12 +453,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_name("Seed")
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
-                                .set_data_type(fe::DataType_t::INT32));
+                                .set_data_type(fe::DataType_t::INT64));
                 dropout_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Offset")
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
-                                .set_data_type(fe::DataType_t::INT32));
+                                .set_data_type(fe::DataType_t::INT64));
                 scaled_dot_product_flash_attention_backward_options.set_dropout(
                                 dropout_probability, dropout_seed, dropout_offset);
             }

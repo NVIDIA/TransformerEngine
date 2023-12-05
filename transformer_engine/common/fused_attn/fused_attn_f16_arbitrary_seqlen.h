@@ -12,11 +12,7 @@
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 
 #include "transformer_engine/fused_attn.h"
-
 #include <cudnn.h>
-#include <cudnn_frontend.h>
-#include <cudnn_frontend_utils.h>
-
 #include "common/common.h"
 
 namespace transformer_engine {
