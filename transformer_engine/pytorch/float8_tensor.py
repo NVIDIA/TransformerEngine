@@ -544,49 +544,71 @@ class Float8Tensor(torch.Tensor):
             # Check tensors
             dst = args[0]
             src = args[1]
-            if not isinstance(dst, Float8Tensor):
-                raise RuntimeError("Expected to copy into Float8Tensor")
-            if not isinstance(src, torch.Tensor):
-                raise RuntimeError("Expected to copy from tensor")
-            if not dst._data.is_contiguous():
-                raise RuntimeError("Transformer Engine cast kernels require contiguous data")
-
-            # Directly copy data from Float8Tensor
-            if isinstance(src, Float8Tensor):
-                dst._data.copy_(src._data)
-                dst._scale_inv = src._scale_inv.clone()
-                dst._reset_caches()
-                return None
-
-            # Make sure input is in expected format
-            src = src.expand(dst.size())
-            src = src.to(
-                device=dst.device,
-                memory_format=torch.contiguous_format,
-            )
-
-            # Update scaling factor if FP8 meta tensors are available
-            if dst._fp8_meta is None:
-                scale = dst._scale_inv.reciprocal()
-            else:
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=dst._fp8_meta_forward,
+            if not isinstance(dst, torch.Tensor):
+                raise RuntimeError(
+                    "Attempted to copy into something that isn't a PyTorch tensor"
                 )
-                scale = dst._fp8_meta[fp8_meta_key].scale[dst._fp8_meta_index]
-                dst._scale_inv = scale.detach().view(1).reciprocal()
+            if not isinstance(src, torch.Tensor):
+                raise RuntimeError(
+                    "Attempted to copy from something that isn't a PyTorch tensor"
+                )
 
-            # Cast to FP8
-            tex.cast_to_fp8_noalloc(
-                src.view(1,-1),
-                scale,
-                dst._data.view(1,-1),
-                torch.empty_like(dst._scale_inv),  # amax
-                dst._scale_inv,
-                dst._fp8_dtype,
-            )
+            # Special handling based on which tensors are FP8
+            dst_is_fp8 = isinstance(dst, Float8Tensor)
+            src_is_fp8 = isinstance(src, Float8Tensor)
+            if dst_is_fp8 and src_is_fp8:
+
+                # Directly copy FP8 data if possible
+                if dst._fp8_dtype == src._fp8_dtype:
+                    dst._data.copy_(src._data)
+                    dst._scale_inv = src._scale_inv.clone()
+                else:
+                    dst.copy_(src.from_float8())
+
+            elif not dst_is_fp8 and src_is_fp8:
+
+                # Cast source tensor to higher precision
+                dst.copy_(src.from_float8())
+
+            elif dst_is_fp8 and not src_is_fp8:
+
+                # Make sure input is in expected format
+                src = src.expand(dst.size())
+                src = src.to(
+                    device=dst.device,
+                    memory_format=torch.contiguous_format,
+                )
+
+                # Update scaling factor if FP8 meta tensors are available
+                if dst._fp8_meta is None:
+                    scale = dst._scale_inv.reciprocal()
+                else:
+                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                        forward=dst._fp8_meta_forward,
+                    )
+                    scale = dst._fp8_meta[fp8_meta_key].scale[dst._fp8_meta_index]
+                    dst._scale_inv = scale.detach().view(1).reciprocal()
+
+                # Cast to FP8
+                if not dst._data.is_contiguous():
+                    raise RuntimeError("Transformer Engine cast kernels require contiguous data")
+                tex.cast_to_fp8_noalloc(
+                    src.view(1,-1),
+                    scale,
+                    dst._data.view(1,-1),
+                    torch.empty_like(dst._scale_inv),  # amax
+                    dst._scale_inv,
+                    dst._fp8_dtype,
+                )
+
+            else:
+
+                # Invalid case
+                raise RuntimeError("Using Float8Tensor copy logic, but no Float8Tensor found")
 
             # Nothing to return for in-place ops
-            dst._reset_caches()
+            if dst_is_fp8:
+                dst._reset_caches()
             return None
 
         # Slice op
@@ -657,7 +679,9 @@ class Float8Tensor(torch.Tensor):
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
 
-    def _make_in_reduce(
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
         data: torch.Tensor,
         fp8_dtype: tex.DType,
         fp8_scale_inv: torch.Tensor,
@@ -665,7 +689,7 @@ class Float8Tensor(torch.Tensor):
     ) -> Float8Tensor:
         """Build Float8Tensor, for use in __reduce__
 
-        __reduce__ function assumes object constructor has positional
+        __reduce_ex__ assumes object constructor has positional
         arguments.
 
         """
@@ -676,11 +700,11 @@ class Float8Tensor(torch.Tensor):
             dtype=dtype,
         )
 
-    def __reduce__(self) -> tuple:
+    def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling to remove references to FP8 metadata objects"""
         return (
-            Float8Tensor._make_in_reduce,
-            (self.data, self.fp8_dtype, self.fp8_scale_inv, self.dtype),
+            Float8Tensor._make_in_reduce_ex,
+            (self._data, self._fp8_dtype, self._scale_inv, self.dtype),
         )
 
     def _get_data(self) -> Float8Tensor:
