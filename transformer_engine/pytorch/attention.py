@@ -824,12 +824,11 @@ class FusedRoPEFunc(torch.autograd.Function):
     def forward(
         ctx,
         t: torch.Tensor,
-        cos_: torch.Tensor,
-        sin_: torch.Tensor,
+        freqs: torch.Tensor,
         transpose_output_memory: bool = False,
     ) -> torch.Tensor:
-        output = tex.fused_rope_forward(t, cos_, sin_, transpose_output_memory)
-        ctx.save_for_backward(cos_, sin_)
+        output = tex.fused_rope_forward(t, freqs, transpose_output_memory)
+        ctx.save_for_backward(freqs)
         ctx.transpose_output_memory = transpose_output_memory
 
         return output
@@ -838,12 +837,12 @@ class FusedRoPEFunc(torch.autograd.Function):
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        cos_, sin_ = ctx.saved_tensors
+        (freqs,) = ctx.saved_tensors
         grad_input = tex.fused_rope_backward(
-            grad_output, cos_, sin_, ctx.transpose_output_memory
+            grad_output, freqs, ctx.transpose_output_memory
         )
 
-        return grad_input, None, None, None
+        return grad_input, None, None
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -877,11 +876,11 @@ def apply_rotary_pos_emb(
         This is very helpful when you want to get a contiguous tensor after calling
         `output.transpose(0, 1)`. Only valid when `fused` = True.
     """
+    if fused:
+        return FusedRoPEFunc.apply(t, freqs, transpose_output_memory)
+
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
-
-    if fused:
-        return FusedRoPEFunc.apply(t, cos_, sin_, transpose_output_memory)
 
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t

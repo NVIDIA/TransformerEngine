@@ -7,27 +7,20 @@
 
 #include "extensions.h"
 
-at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &cos,
-                              const at::Tensor &sin,
+at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(cos.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(sin.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(input.size(0) == cos.size(0),
-              "expected input and cos tensor have the same sequence length");
-  TORCH_CHECK(input.size(0) == sin.size(0),
-              "expected input and sin tensor have the same sequence length");
-  TORCH_CHECK(cos.size(1) == 1 && cos.size(2) == 1,
-              "expected the second and third dims of the cos tensor equal 1");
-  TORCH_CHECK(sin.size(1) == 1 && sin.size(2) == 1,
-              "expected the second and third dims of the sin tensor equal 1");
-  TORCH_CHECK(input.size(3) >= cos.size(3),
-              "expected the last dim of the input tensor is greater than the "
-              "cos tensor");
-  TORCH_CHECK(input.size(3) >= sin.size(3),
-              "expected the last dim of the input tensor is greater than the "
-              "sin tensor");
+  TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
+  TORCH_CHECK(input.size(0) == freqs.size(0),
+              "expected input and freqs tensor have the same sequence length");
+  TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
+              "expected the second and third dims of the freqs tensor equal 1");
+  TORCH_CHECK(input.size(3) >= freqs.size(3),
+              "expected the last dim of the input tensor equals or is "
+              "greater than the freqs tensor");
+  TORCH_CHECK(freqs.scalar_type() == at::ScalarType::Float,
+              "Dtype of the freqs tensor must be float");
 
   // input sizes: (s, b, h, d)
   // s: sequence length
@@ -43,9 +36,9 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &cos,
   const int stride_b = input.stride(1);
   const int stride_h = input.stride(2);
   const int stride_d = input.stride(3);
-  // cos/sin's shape is always (s, 1, 1, d2), so the strides are same under
+  // freqs' shape is always (s, 1, 1, d2), so the strides are same under
   // different memory formats
-  const int d2 = cos.size(3);
+  const int d2 = freqs.size(3);
 
   // output
   auto act_options = input.options().requires_grad(false);
@@ -62,43 +55,33 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &cos,
   const int o_stride_d = output.stride(3);
 
   auto input_cu = makeTransformerEngineTensor(input);
-  auto cos_cu = makeTransformerEngineTensor(cos);
-  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  nvte_fused_rope_forward(
-      input_cu.data(), cos_cu.data(), sin_cu.data(), output_cu.data(), s, b, h,
-      d, d2, stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
-      o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
+  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), s,
+                          b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
+                          o_stride_s, o_stride_b, o_stride_h, o_stride_d,
+                          at::cuda::getCurrentCUDAStream());
 
   return output;
 }
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads,
-                               const at::Tensor &cos, const at::Tensor &sin,
+                               const at::Tensor &freqs,
                                const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(cos.dim() == 4, "expected 4D tensor");
-  TORCH_CHECK(sin.dim() == 4, "expected 4D tensor");
+  TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(
-      output_grads.size(0) == cos.size(0),
-      "expected output_grads and cos tensor have the same sequence length");
-  TORCH_CHECK(
-      output_grads.size(0) == sin.size(0),
-      "expected output_grads and sin tensor have the same sequence length");
-  TORCH_CHECK(cos.size(1) == 1 && cos.size(2) == 1,
-              "expected the second and third dims of the cos tensor equal 1");
-  TORCH_CHECK(sin.size(1) == 1 && sin.size(2) == 1,
-              "expected the second and third dims of the sin tensor equal 1");
-  TORCH_CHECK(
-      output_grads.size(3) >= cos.size(3),
-      "expected the last dim of the output_grads tensor is greater than the "
-      "cos tensor");
-  TORCH_CHECK(
-      output_grads.size(3) >= sin.size(3),
-      "expected the last dim of the output_grads tensor is greater than the "
-      "sin tensor");
+      output_grads.size(0) == freqs.size(0),
+      "expected output_grads and freqs tensor have the same sequence length");
+  TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
+              "expected the second and third dims of the freqs tensor equal 1");
+  TORCH_CHECK(output_grads.size(3) >= freqs.size(3),
+              "expected the last dim of the output_grads tensor equals or is "
+              "greater than the freqs tensor");
+  TORCH_CHECK(freqs.scalar_type() == at::ScalarType::Float,
+              "Dtype of the freqs tensor must be float");
 
   // output_grads sizes: (s, b, h, d)
   // s: sequence length
@@ -114,9 +97,9 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads,
   const int stride_b = output_grads.stride(1);
   const int stride_h = output_grads.stride(2);
   const int stride_d = output_grads.stride(3);
-  // cos/sin's shape is always (s, 1, 1, d2), so the strides are same under
+  // freqs' shape is always (s, 1, 1, d2), so the strides are same under
   // different memory formats
-  const int d2 = cos.size(3);
+  const int d2 = freqs.size(3);
 
   auto act_options = output_grads.options().requires_grad(false);
   at::Tensor input_grads;
@@ -131,15 +114,13 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads,
   const int o_stride_d = input_grads.stride(3);
 
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
-  auto cos_cu = makeTransformerEngineTensor(cos);
-  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  nvte_fused_rope_backward(output_grads_cu.data(), cos_cu.data(), sin_cu.data(),
-                           input_grads_cu.data(), s, b, h, d, d2, stride_s,
-                           stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
-                           o_stride_h, o_stride_d,
-                           at::cuda::getCurrentCUDAStream());
+  nvte_fused_rope_backward(
+      output_grads_cu.data(), freqs_cu.data(), input_grads_cu.data(), s, b, h, d,
+      d2, stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
+      o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }

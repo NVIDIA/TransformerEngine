@@ -51,8 +51,7 @@ def test_fused_rope(
         device=device,
     )
     if transpose:
-        t = t.transpose(*transpose)
-        t = t.reshape((seq_length, batch_size, head_num, hidden_size))
+        t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
