@@ -119,11 +119,9 @@ def _is_fused_attention_supported(
     )
     if backend == FusedAttnBackend["FP8"]:
         backends.append(backend)
-        print('backends:',backends)
         return True, backends
     if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         backends.append(backend)
-        print('backends:',backends)
         return True, backends
     if backend == FusedAttnBackend["F16_max512_seqlen"]:
         backends.append(backend)
@@ -143,9 +141,7 @@ def _is_fused_attention_supported(
         )
         if backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
             backends.append(backend)
-        print('backends:',backends)
         return True, backends
-    print('backends:',backends)
     return False, backends
 
 @functools.cache
@@ -264,22 +260,18 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
-        print('unfused vs fused')
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
-        print('unfused vs flash')
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
-        print('fused vs flash')
     if fused_attn_supported and len(fused_attn_backend) == 2:
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
-        print('fused backend 0 vs fused backend 1')
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -617,15 +609,12 @@ def test_transformer_layer(dtype, model_configs, model, ckpt_attn, qkv_format, f
     if unfused_attn_supported and fused_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
-        print("unfused vs fused")
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
-        print("unfused vs flash")
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
-        print("fused vs flash")
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
