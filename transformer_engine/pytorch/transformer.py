@@ -576,13 +576,17 @@ class TransformerLayer(torch.nn.Module):
                          to efficienly calculate and store the context during inference.
         """
 
-        if self_attn_mask_type is not None and "causal" in self_attn_mask_type:
-            if window_size is None:
-                window_size = (-1, 0)
+        if self_attn_mask_type is not None:
+            if "causal" in self_attn_mask_type:
+                if window_size is None:
+                    window_size = (-1, 0)
+                else:
+                    assert (
+                        window_size[1] == 0
+                    ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
             else:
-                assert (
-                    window_size[1] == 0
-                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+                if window_size is None:
+                    window_size = (-1, -1)
 
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type

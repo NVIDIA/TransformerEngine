@@ -1253,7 +1253,6 @@ class FlashAttention(torch.nn.Module):
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
-        window_size: Optional[Tuple[int, int]] = (-1, -1),
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -1267,7 +1266,6 @@ class FlashAttention(torch.nn.Module):
         else:
             if window_size is None:
                 window_size = (-1, -1)
-        print("SWA: ",window_size)
 
         assert (
             query_layer.dtype in [torch.float16, torch.bfloat16]
@@ -2089,13 +2087,17 @@ class DotProductAttention(torch.nn.Module):
         assert (key_layer.shape == value_layer.shape
             ), "Keys and values must have the same shape!"
 
-        if attn_mask_type is not None and "causal" in attn_mask_type:
-            if window_size is None:
-                window_size = (-1, 0)
+        if attn_mask_type is not None:
+            if "causal" in attn_mask_type:
+                if window_size is None:
+                    window_size = (-1, 0)
+                else:
+                    assert (
+                        window_size[1] == 0
+                    ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
             else:
-                assert (
-                    window_size[1] == 0
-                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+                if window_size is None:
+                    window_size = (-1, -1)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
@@ -2780,13 +2782,17 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if attn_mask_type is not None and "causal" in attn_mask_type:
-            if window_size is None:
-                window_size = (-1, 0)
+        if attn_mask_type is not None:
+            if "causal" in attn_mask_type:
+                if window_size is None:
+                    window_size = (-1, 0)
+                else:
+                    assert (
+                        window_size[1] == 0
+                    ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
             else:
-                assert (
-                    window_size[1] == 0
-                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+                if window_size is None:
+                    window_size = (-1, -1)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
