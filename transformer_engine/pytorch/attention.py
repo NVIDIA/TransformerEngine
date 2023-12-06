@@ -1379,12 +1379,13 @@ class FlashAttention(torch.nn.Module):
                 fa_optional_forward_kwargs = {}
                 if not _flash_attn_2_available:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                if _flash_attn_2_3_plus:
+                    fa_optional_forward_kwargs["window_size"] = window_size
                 output = flash_attn_forward_func(
                     query_layer, key_layer, value_layer,
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
-                    window_size=window_size,
                     **fa_optional_forward_kwargs
                 )
 
