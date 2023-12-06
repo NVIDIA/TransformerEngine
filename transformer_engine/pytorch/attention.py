@@ -853,7 +853,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         elif ctx.qkv_format == "thd":
             grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
         else:
-            raise ValueError(f"Unsupported qkv_format: {qkv_format}.")
+            raise ValueError(f"Unsupported qkv_format: {ctx.qkv_format}.")
 
         return grad_input, None, None, None, None
 
