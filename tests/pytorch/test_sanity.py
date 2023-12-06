@@ -518,7 +518,7 @@ def test_sanity_bert(dtype, bs, fp8_recipe, model, skip_wgrad, zero_centered_gam
             apply_residual_connection_post_layernorm=True,
             output_layernorm=True,
             zero_centered_gamma=zero_centered_gamma,
-            self_attn_mask_type="padding",
+            self_attn_mask_type="causal",
             normalization=normalization,
         )
         .to(dtype=dtype)
