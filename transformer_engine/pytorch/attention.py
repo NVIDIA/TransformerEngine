@@ -1362,7 +1362,7 @@ class FlashAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                window_size == (-1, -1) or window_size == (-1, 0)
+                window_size in ((-1, -1), (-1, 0))
                 ), "Sliding window attention is not supported with context parallelism."
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
@@ -2154,7 +2154,7 @@ class DotProductAttention(torch.nn.Module):
         # is: FlashAttention > FusedAttention (cuDNN) > UnfusedDotProductAttention.
         use_flash_attention = self.use_flash_attention
         use_fused_attention = self.use_fused_attention
-        use_unfused_attention = True 
+        use_unfused_attention = True
 
         # The following section filters out some backends based on
         # certain asserts before executing the forward pass.
@@ -2204,11 +2204,12 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         # Filter: sliding window attention.
-        if window_size != (-1, -1) and window_size != (-1, 0):
+        if window_size not in ((-1, -1), (-1, 0)):
             use_fused_attention = False
             use_unfused_attention = False
-            context_parallel = (self.cp_group is not None) and (get_distributed_world_size(self.cp_group) != 1)
-            if (not _flash_attn_2_3_plus) or context_parallel: 
+            context_parallel = (self.cp_group is not None
+                and get_distributed_world_size(self.cp_group) != 1)
+            if (not _flash_attn_2_3_plus) or context_parallel:
                 use_flash_attention = False
 
         # Filter: ONNX export.

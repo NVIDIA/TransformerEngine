@@ -257,7 +257,7 @@ class TransformerLayer(torch.nn.Module):
             ), "Userbuffer communication backend not available."
 
         self.self_attn_mask_type = self_attn_mask_type
-        self.window_size = window_size 
+        self.window_size = window_size
         if "causal" in self_attn_mask_type:
             if window_size is None:
                 self.window_size = (-1, 0)
