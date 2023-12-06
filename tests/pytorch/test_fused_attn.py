@@ -262,6 +262,68 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
 
     return op, inp.grad
 
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes_lean)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("ckpt_attn", [False])#True, False])
+@pytest.mark.parametrize("bias_type", ["no_bias"])#, "post_scale_bias"])
+def test_dpa_sliding_window(dtype, bs, model, ckpt_attn, bias_type):
+    """Test DotProductAttention module with sliding window"""
+
+    # Get configs
+    config = model_configs[model]
+    tols = dict(atol=5e-3, rtol=5e-3)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+
+    # Skip if only unfused backend is supported
+    fused_attn_supported = _is_fused_attention_supported(
+        config,
+        dtype,
+        bias_type=bias_type,
+    )
+    flash_attn_supported = _is_flash_attention_supported(bias_type=bias_type)
+    if not (fused_attn_supported or flash_attn_supported):
+        pytest.skip(
+            "Neither FusedAttention nor FlashAttention support this model config"
+        )
+
+    # UnfusedDotProductAttention backend
+    unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
+        dtype,
+        bs,
+        config,
+        "UnfusedDotProductAttention",
+        ckpt_attn,
+        bias_type,
+    )
+
+    # FusedAttention backend
+    if fused_attn_supported:
+        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            dtype,
+            bs,
+            config,
+            "FusedAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
+
+    # FlashAttention backend
+    if flash_attn_supported:
+        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+            dtype,
+            bs,
+            config,
+            "FlashAttention",
+            ckpt_attn,
+            bias_type,
+        )
+        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
+        torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
+
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',
     'bs3hd', 'bsh3d', 'bshd_bs2hd', 'bshd_bsh2d', 'bshd_bshd_bshd',

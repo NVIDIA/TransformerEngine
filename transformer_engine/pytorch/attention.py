@@ -57,6 +57,7 @@ _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
 _flash_attn_2_available = _flash_attn_version >= packaging.version.Version("2")
 _flash_attn_2_1_plus = _flash_attn_version >= packaging.version.Version("2.1")
+_flash_attn_2_3_plus = _flash_attn_version >= packaging.version.Version("2.3")
 
 if _flash_attn_2_available:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func # pylint: disable=no-name-in-module
@@ -1248,11 +1249,25 @@ class FlashAttention(torch.nn.Module):
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
         cp_group: Optional[dist_group_type] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
+        window_size: Optional[Tuple[int, int]] = (-1, -1),
     ) -> torch.Tensor:
         """flash-attn fprop"""
+
+        if "causal" in attn_mask_type:
+            if window_size is None:
+                window_size = (-1, 0)
+            else:
+                assert (
+                    window_size[1] == 0
+                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+        else:
+            if window_size is None:
+                window_size = (-1, -1)
+        print("SWA: ",window_size)
 
         assert (
             query_layer.dtype in [torch.float16, torch.bfloat16]
@@ -1348,6 +1363,9 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_kv = seqlens_kv.max().item()
 
         if context_parallel:
+            assert (
+                window_size == (-1, -1) or window_size == (-1, 0)
+                ), "Sliding window attention is not supported with context parallelism."
             with self.attention_dropout_ctx():
                 output = flash_attn_forward_func_with_cp(
                     query_layer, key_layer, value_layer,
@@ -1368,6 +1386,7 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv,
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=1.0/self.norm_factor, causal=attn_mask_type=="causal",
+                    window_size=window_size,
                     **fa_optional_forward_kwargs
                 )
 
@@ -1771,6 +1790,12 @@ class DotProductAttention(torch.nn.Module):
                    mask can also be applied in conjunction with "`padding`" mask by passing
                    in multiple mask type as a comma separated string, for example,
                    `attn_mask_type="causal,padding"`.
+    window_size: Optional[Tuple[int, int]], default = `None`
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                be overridden by :attr:`window_size` in `forward` as well.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
     layer_number: int, default = `None`
@@ -1820,6 +1845,7 @@ class DotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
         attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -1834,6 +1860,17 @@ class DotProductAttention(torch.nn.Module):
 
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
+        self.window_size = window_size
+        if "causal" in attn_mask_type:
+            if window_size is None:
+                self.window_size = (-1, 0)
+            else:
+                assert (
+                    window_size[1] == 0
+                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+        else:
+            if window_size is None:
+                self.window_size = (-1, -1)
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -1961,6 +1998,7 @@ class DotProductAttention(torch.nn.Module):
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -2029,6 +2067,8 @@ class DotProductAttention(torch.nn.Module):
                    with shape [batch_size + 1] and dtype torch.int32.
         attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `None`
                        type of attention mask passed into softmax operation.
+        window_size: Optional[Tuple[int, int]], default = `None`
+                    sliding window size for local attention.
         checkpoint_core_attention : bool, default = `False`
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -2049,8 +2089,17 @@ class DotProductAttention(torch.nn.Module):
         assert (key_layer.shape == value_layer.shape
             ), "Keys and values must have the same shape!"
 
+        if attn_mask_type is not None and "causal" in attn_mask_type:
+            if window_size is None:
+                window_size = (-1, 0)
+            else:
+                assert (
+                    window_size[1] == 0
+                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
+        if window_size is None:
+            window_size = self.window_size
         if qkv_format is None:
             qkv_format = self.qkv_format
         attn_mask_type, causal_mask = _unpack_attn_mask_type(attn_mask_type)
@@ -2103,6 +2152,7 @@ class DotProductAttention(torch.nn.Module):
         # is: FlashAttention > FusedAttention (cuDNN) > UnfusedDotProductAttention.
         use_flash_attention = self.use_flash_attention
         use_fused_attention = self.use_fused_attention
+        use_unfused_attention = True 
 
         # The following section filters out some backends based on
         # certain asserts before executing the forward pass.
@@ -2132,9 +2182,11 @@ class DotProductAttention(torch.nn.Module):
                     and self.device_compute_capability not in ((8, 0), (9, 0)))):
                 use_flash_attention = False
 
+        # Filter: MQA/GQA.
         if not _flash_attn_2_available and self.num_gqa_groups != self.num_attention_heads:
             use_flash_attention = False
 
+        # Filter: cross attention + causal mask.
         if (_flash_attn_2_1_plus
             and causal_mask
             and max_seqlen_q != max_seqlen_kv):
@@ -2145,8 +2197,17 @@ class DotProductAttention(torch.nn.Module):
             )
             use_flash_attention = False
 
+        # Filter: bias.
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
             use_flash_attention = False
+
+        # Filter: sliding window attention.
+        if window_size != (-1, -1) and window_size != (-1, 0):
+            use_fused_attention = False
+            use_unfused_attention = False
+            context_parallel = (self.cp_group is not None) and (get_distributed_world_size(self.cp_group) != 1)
+            if (not _flash_attn_2_3_plus) or context_parallel: 
+                use_flash_attention = False
 
         # Filter: ONNX export.
         if is_in_onnx_export_mode():
@@ -2157,7 +2218,7 @@ class DotProductAttention(torch.nn.Module):
         #    attn_mask_type(s)   |     supported backends
         # ------------------------------------------------
         #   causal               |     All
-        #   padding              |     UnfusedDotProductAttention, FlashAttention
+        #   padding              |     FlashAttention
         #   arbitrary            |     UnfusedDotProductAttention
         #   no_mask              |     All
         #   causal + padding     |     FlashAttention
@@ -2169,6 +2230,10 @@ class DotProductAttention(torch.nn.Module):
             assert use_flash_attention, "No attention backend available for causal + padding masks."
         elif attn_mask_type == "padding":
             use_fused_attention = False
+        if "padding" in attn_mask_type:
+            use_unfused_attention = False
+        if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+            use_unfused_attention = False
 
         if use_fused_attention:
             fused_attention_backend = tex.get_fused_attn_backend(
@@ -2203,6 +2268,7 @@ class DotProductAttention(torch.nn.Module):
                                         cu_seqlens_q=cu_seqlens_q,
                                         cu_seqlens_kv=cu_seqlens_kv,
                                         attn_mask_type=attn_mask_type,
+                                        window_size=window_size,
                                         cp_group=self.cp_group,
                                         cp_global_ranks=self.cp_global_ranks,
                                         cp_stream=self.cp_stream)
@@ -2235,29 +2301,32 @@ class DotProductAttention(torch.nn.Module):
                               core_attention_bias = core_attention_bias,
                               fast_zero_fill = fast_zero_fill)
 
-        if checkpoint_core_attention:
-            return self._checkpointed_attention_forward(
-                self.unfused_attention,
-                query_layer,
-                key_layer,
-                value_layer,
-                qkv_layout = qkv_layout,
-                cu_seqlens_q = cu_seqlens_q,
-                cu_seqlens_kv = cu_seqlens_kv,
-                attn_mask_type = attn_mask_type,
-                attention_mask = attention_mask,
-                core_attention_bias_type = core_attention_bias_type,
-                core_attention_bias = core_attention_bias)
-        return self.unfused_attention(query_layer,
-                key_layer,
-                value_layer,
-                qkv_layout = qkv_layout,
-                cu_seqlens_q = cu_seqlens_q,
-                cu_seqlens_kv = cu_seqlens_kv,
-                attn_mask_type = attn_mask_type,
-                attention_mask = attention_mask,
-                core_attention_bias_type = core_attention_bias_type,
-                core_attention_bias = core_attention_bias)
+        if use_unfused_attention:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(
+                    self.unfused_attention,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_layout = qkv_layout,
+                    cu_seqlens_q = cu_seqlens_q,
+                    cu_seqlens_kv = cu_seqlens_kv,
+                    attn_mask_type = attn_mask_type,
+                    attention_mask = attention_mask,
+                    core_attention_bias_type = core_attention_bias_type,
+                    core_attention_bias = core_attention_bias)
+            return self.unfused_attention(query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_layout = qkv_layout,
+                    cu_seqlens_q = cu_seqlens_q,
+                    cu_seqlens_kv = cu_seqlens_kv,
+                    attn_mask_type = attn_mask_type,
+                    attention_mask = attention_mask,
+                    core_attention_bias_type = core_attention_bias_type,
+                    core_attention_bias = core_attention_bias)
+
+        raise Exception("No dot product attention support for the provided inputs!")
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -2301,6 +2370,12 @@ class MultiheadAttention(torch.nn.Module):
                    arg is useful for dynamically changing mask types, e.g. a different
                    mask for training and inference. The init arg is useful for cases
                    involving compilation/tracing, e.g. ONNX export.
+    window_size: Optional[Tuple[int, int]], default = `None`
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically. Similar to :attr:`attn_mask_type`, it can
+                be overridden by :attr:`window_size` in `forward` as well.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -2392,6 +2467,7 @@ class MultiheadAttention(torch.nn.Module):
         output_layer_init_method: Optional[Callable] = None,
         layer_number: Optional[int] = None,
         attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -2420,6 +2496,17 @@ class MultiheadAttention(torch.nn.Module):
         super().__init__()
 
         self.attn_mask_type = attn_mask_type
+        self.window_size = window_size
+        if "causal" in attn_mask_type:
+            if window_size is None:
+                self.window_size = (-1, 0)
+            else:
+                assert (
+                    window_size[1] == 0
+                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
+        else:
+            if window_size is None:
+                self.window_size = (-1, -1)
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -2633,6 +2720,7 @@ class MultiheadAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         encoder_output: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -2657,6 +2745,8 @@ class MultiheadAttention(torch.nn.Module):
              Boolean tensor used to mask out self-attention softmax input.
         attn_mask_type: {'causal', 'padding', 'no_mask', arbitrary}, default = `None`
                        type of attention mask passed into softmax operation.
+        window_size: Optional[Tuple[int, int]], default = `None`
+                    sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -2690,8 +2780,17 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
+        if attn_mask_type is not None and "causal" in attn_mask_type:
+            if window_size is None:
+                window_size = (-1, 0)
+            else:
+                assert (
+                    window_size[1] == 0
+                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
+        if window_size is None:
+            window_size = self.window_size
 
         if attn_mask_type == "padding" and attention_mask is not None:
             assert (
@@ -2918,6 +3017,7 @@ class MultiheadAttention(torch.nn.Module):
             cu_seqlens_kv=None,
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
+            window_size=window_size,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
