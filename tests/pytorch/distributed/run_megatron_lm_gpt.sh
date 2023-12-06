@@ -90,8 +90,6 @@ options=" \
     --init-method-std ${INIT_METHOD_STD} \
     --log-params-norm \
     --log-num-zeros-in-grad \
-    --no-query-key-layer-scaling \
-    --DDP-impl local \
     --transformer-impl ${TRANSFORMER_IMPL} \
     --tensorboard-dir ${TENSORBOARD_DIR} \
     --fp8-margin 0 \
