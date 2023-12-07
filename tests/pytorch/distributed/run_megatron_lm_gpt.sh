@@ -81,7 +81,6 @@ options=" \
     --merge-file /data/gpt3/pile-cc1-cc2-shuf/bpe/gpt2-merges.txt \
     --save-interval ${SAVE_INTERVAL} \
     --save ${CHECKPOINT_DIR} \
-    --load ${CHECKPOINT_DIR} \
     --split ${SPLIT} \
     --clip-grad ${CLIP_GRAD} \
     --weight-decay ${WEIGHT_DECAY} \
