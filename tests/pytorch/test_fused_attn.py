@@ -226,6 +226,20 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
     else:
         bias = None
 
+    def get_mask(seq_q, seq_kv):
+        w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
+        #w = torch.Tensor([seq_kv,0]).to(dtype=torch.int32)
+        print('w',w)
+        m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
+        mu = torch.triu(m, diagonal=seq_kv-seq_q-w[0])
+        ml = torch.tril(mu, diagonal=seq_kv-seq_q+w[1])
+        #print(ml.to(dtype=torch.int))
+        ml = ~ ml
+        #print(ml.to(dtype=torch.int))
+        return w, ml
+
+    window_size, attention_mask = get_mask(config.seq_len, config.seq_len)
+
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
 
@@ -255,6 +269,8 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
         cu_seqlens_q = cu_seqlens,
         cu_seqlens_kv = cu_seqlens,
         attn_mask_type=config.attn_mask_type,
+        window_size=window_size,
+        attention_mask=attention_mask,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=bias_type,
         core_attention_bias=bias)
@@ -262,32 +278,34 @@ def _run_dot_product_attention(dtype, bs, config, backend, ckpt_attn, bias_type)
 
     return op, inp.grad
 
+model_configs_swa = {
+    "test5": ModelConfig(1, 1024, 16, 64, 128, 0.0, "no_mask"),
+}
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_lean)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", model_configs_swa.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])#True, False])
 @pytest.mark.parametrize("bias_type", ["no_bias"])#, "post_scale_bias"])
 def test_dpa_sliding_window(dtype, bs, model, ckpt_attn, bias_type):
     """Test DotProductAttention module with sliding window"""
 
     # Get configs
-    config = model_configs[model]
+    config = model_configs_swa[model]
     tols = dict(atol=5e-3, rtol=5e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
 
-    # Skip if only unfused backend is supported
-    fused_attn_supported = _is_fused_attention_supported(
-        config,
+    # FlashAttention backend
+    flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
         dtype,
-        bias_type=bias_type,
+        bs,
+        config,
+        "FlashAttention",
+        ckpt_attn,
+        bias_type,
     )
-    flash_attn_supported = _is_flash_attention_supported(bias_type=bias_type)
-    if not (fused_attn_supported or flash_attn_supported):
-        pytest.skip(
-            "Neither FusedAttention nor FlashAttention support this model config"
-        )
 
+    config.attn_mask_type = "arbitrary"
     # UnfusedDotProductAttention backend
     unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
         dtype,
@@ -298,31 +316,9 @@ def test_dpa_sliding_window(dtype, bs, model, ckpt_attn, bias_type):
         bias_type,
     )
 
-    # FusedAttention backend
-    if fused_attn_supported:
-        fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
-            dtype,
-            bs,
-            config,
-            "FusedAttention",
-            ckpt_attn,
-            bias_type,
-        )
-        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-        torch.testing.assert_close(fused_attn_bwd, unfused_attn_bwd, **tols)
-
-    # FlashAttention backend
-    if flash_attn_supported:
-        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
-            dtype,
-            bs,
-            config,
-            "FlashAttention",
-            ckpt_attn,
-            bias_type,
-        )
-        torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
-        torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
+    torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
+    torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
+    print('flash vs unfused')
 
 qkv_layouts = [
     'sb3hd', 'sbh3d', 'sbhd_sb2hd', 'sbhd_sbh2d', 'sbhd_sbhd_sbhd',

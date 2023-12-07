@@ -2207,7 +2207,7 @@ class DotProductAttention(torch.nn.Module):
         # Filter: sliding window attention.
         if window_size not in ((-1, -1), (-1, 0)):
             use_fused_attention = False
-            use_unfused_attention = False
+            #use_unfused_attention = False
             context_parallel = (self.cp_group is not None
                 and get_distributed_world_size(self.cp_group) != 1)
             if (not _flash_attn_2_3_plus) or context_parallel:
