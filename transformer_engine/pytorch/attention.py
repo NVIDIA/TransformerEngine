@@ -69,6 +69,7 @@ else:
 
 
 _cu_seqlens_q, _cu_seqlens_kv, _indices_q, _indices_kv = None, None, None, None
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
@@ -2308,7 +2309,8 @@ class DotProductAttention(torch.nn.Module):
                 use_flash_attention = False
 
         if use_flash_attention:
-            print("[DotProductAttention]: using flash-attn",_flash_attn_version)
+            if _NVTE_DEBUG:
+                print("[DotProductAttention]: using flash-attn",_flash_attn_version)
             return self.flash_attention(query_layer,
                                         key_layer,
                                         value_layer,
@@ -2326,8 +2328,9 @@ class DotProductAttention(torch.nn.Module):
         ), "Context parallelism is only implemented with Flash Attention!"
 
         if use_fused_attention:
-            print("[DotProductAttention]: using cuDNN fused attention (backend "
-                + str(int(fused_attention_backend)) + ")")
+            if _NVTE_DEBUG:
+                print("[DotProductAttention]: using cuDNN fused attention (backend "
+                    + str(int(fused_attention_backend)) + ")")
             if checkpoint_core_attention:
                 return self._checkpointed_attention_forward(self.fused_attention,
                               query_layer,
@@ -2353,7 +2356,8 @@ class DotProductAttention(torch.nn.Module):
                               core_attention_bias = core_attention_bias,
                               fast_zero_fill = fast_zero_fill)
 
-        print("[DotProductAttention]: using unfused DPA")
+        if _NVTE_DEBUG:
+            print("[DotProductAttention]: using unfused DPA")
         if checkpoint_core_attention:
             return self._checkpointed_attention_forward(
                 self.unfused_attention,
