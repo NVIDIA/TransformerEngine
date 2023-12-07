@@ -508,6 +508,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
     return (
         TransformerLayer(
             config.hidden_size,
@@ -524,7 +525,6 @@ def _test_e2e_checkpointing_get_model(config, dtype):
             params_dtype=dtype,
         )
         .cuda()
-        .eval()
     )
 
 
@@ -559,9 +559,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
+        global _cpu_rng_state, _cuda_rng_state
+        _cpu_rng_state = torch.get_rng_state()
+        _cuda_rng_state = torch.cuda.get_rng_state()
+
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path))
+        reset_rng_states()
 
         for p in block.parameters():
             if p.requires_grad:
@@ -815,21 +820,19 @@ def test_dpa_accuracy(dtype, bs, model):
         DotProductAttention(
             config.num_attention_heads,
             config.embed,
-            attention_dropout=0.1,  # dropout
+            attention_dropout=0.0, # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     torch_dpa = (
         TorchDotProductAttention(
             config.embed,
-            0.1,  # dropout
+            0.0, # dropout
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     te_outputs = _test_dpa_accuracy(te_dpa, bs, dtype, config)

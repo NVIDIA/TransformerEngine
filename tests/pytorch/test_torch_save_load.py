@@ -11,14 +11,21 @@ The test verifies the values of FP8 metadata object after saving and loading a c
 are identical to the original values.
 """
 
+import io
 import tempfile
+from typing import Iterable, Union
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, cast_to_fp8
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
 def init_meta(size: int=1):
@@ -29,15 +36,12 @@ def init_meta(size: int=1):
     return meta
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("scale_fwd", [224, 112, 66])
 @pytest.mark.parametrize("scale_bwd", [448, 33])
 @pytest.mark.parametrize("history_fwd", [1.23, 4.56])
 @pytest.mark.parametrize("history_bwd", [2.34, 5.67])
 def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd):
-
-    # Skip FP8 tests on non-hopper devices
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9:
-        pytest.skip("Device compute capability 9.x required for FP8 execution.")
 
     tmp_filename = tempfile.NamedTemporaryFile().name
 
@@ -118,3 +122,113 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     assert torch.allclose(model_in.fp8_meta["scaling_bwd"].scale_inv, model_out.fp8_meta["scaling_bwd"].scale_inv)
     assert torch.allclose(model_in.fp8_meta["scaling_bwd"].amax_history, model_out.fp8_meta["scaling_bwd"].amax_history)
 
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("save_fp8_model", [True, False])
+@pytest.mark.parametrize("load_fp8_model", [True, False])
+def test_fp8_model_checkpoint(
+    save_fp8_model: bool,
+    load_fp8_model: bool,
+    dims: Iterable[int] = [32,32],
+    dtype: torch.dtype = torch.float32,
+    device: Union[torch.device, str] = "cuda",
+):
+
+    # Construct model
+    dims = list(dims)
+    hidden_dim = dims[-1]
+    with te.fp8_model_init(enabled=save_fp8_model):
+        model = te.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
+            params_dtype=dtype,
+            device=device,
+        )
+
+    # Keep track of model output
+    x = torch.randn(dims, dtype=dtype, device=device)
+    with te.fp8_autocast():
+        y_ref = model(x.detach().clone()).detach().clone()
+
+    # Keep track of weights and FP8 scaling factors
+    weight_ref = model.weight.float().detach().clone()
+    fp8_meta_ref = { "scaling_fwd": {}, "scaling_bwd": {} }
+    with te.fp8_autocast(), torch.no_grad():
+        fp8_meta_fwd = model.fp8_meta["scaling_fwd"]
+        fp8_meta_bwd = model.fp8_meta["scaling_bwd"]
+        fp8_meta_fwd_ref = fp8_meta_ref["scaling_fwd"]
+        fp8_meta_bwd_ref = fp8_meta_ref["scaling_bwd"]
+        fp8_meta_fwd_ref["scale"] = torch.rand_like(fp8_meta_fwd.scale) + 0.5
+        fp8_meta_fwd_ref["scale_inv"] = fp8_meta_fwd_ref["scale"].reciprocal()
+        fp8_meta_bwd_ref["scale"] = torch.rand_like(fp8_meta_bwd.scale) + 0.5
+        fp8_meta_bwd_ref["scale_inv"] = fp8_meta_bwd_ref["scale"].reciprocal()
+        fp8_meta_fwd.scale.copy_(fp8_meta_fwd_ref["scale"])
+        fp8_meta_fwd.scale_inv.copy_(fp8_meta_fwd_ref["scale_inv"])
+        fp8_meta_bwd.scale.copy_(fp8_meta_bwd_ref["scale"])
+        fp8_meta_bwd.scale_inv.copy_(fp8_meta_bwd_ref["scale_inv"])
+        del fp8_meta_fwd, fp8_meta_bwd
+
+    # Save checkpoint
+    byte_stream = io.BytesIO()
+    torch.save(model.state_dict(), byte_stream)
+    model_bytes = byte_stream.getvalue()
+    del byte_stream
+
+    # Disturb and destroy model
+    with torch.no_grad():
+        model.weight.zero_()
+    model.fp8_meta = {"This": "is", "filled": "with", "nonsense": 1234}
+    del model
+
+    # Construct new model
+    with te.fp8_model_init(enabled=load_fp8_model):
+        model = te.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
+            params_dtype=dtype,
+            device=device,
+        )
+
+    # Make sure new model does not match saved model
+    tols = dict(rtol=0.125, atol=0.0675)  # fp8e4me3 epsilon = 0.0625
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(model.weight, weight_ref, **tols)
+    with te.fp8_autocast():
+        model.init_fp8_metadata()
+        fp8_meta_fwd = model.fp8_meta["scaling_fwd"]
+        fp8_meta_bwd = model.fp8_meta["scaling_bwd"]
+        fp8_meta_fwd_ref = fp8_meta_ref["scaling_fwd"]
+        fp8_meta_bwd_ref = fp8_meta_ref["scaling_bwd"]
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(fp8_meta_fwd.scale, fp8_meta_fwd_ref["scale"])
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(fp8_meta_fwd.scale_inv, fp8_meta_fwd_ref["scale_inv"])
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(fp8_meta_bwd.scale, fp8_meta_bwd_ref["scale"])
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(fp8_meta_bwd.scale_inv, fp8_meta_bwd_ref["scale_inv"])
+    with te.fp8_autocast():
+        y = model(x.detach().clone())
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(y, y_ref, **tols)
+
+    # Load checkpoint
+    model.load_state_dict(torch.load(io.BytesIO(model_bytes)))
+    del model_bytes
+
+    # Check that loaded model matches saved model
+    torch.testing.assert_close(model.weight, weight_ref, **tols)
+    with te.fp8_autocast():
+        fp8_meta_fwd = model.fp8_meta["scaling_fwd"]
+        fp8_meta_bwd = model.fp8_meta["scaling_bwd"]
+        fp8_meta_fwd_ref = fp8_meta_ref["scaling_fwd"]
+        fp8_meta_bwd_ref = fp8_meta_ref["scaling_bwd"]
+        torch.testing.assert_close(fp8_meta_fwd.scale, fp8_meta_fwd_ref["scale"])
+        torch.testing.assert_close(fp8_meta_fwd.scale_inv, fp8_meta_fwd_ref["scale_inv"])
+        torch.testing.assert_close(fp8_meta_bwd.scale, fp8_meta_bwd_ref["scale"])
+        torch.testing.assert_close(fp8_meta_bwd.scale_inv, fp8_meta_bwd_ref["scale_inv"])
+    with te.fp8_autocast():
+        y = model(x.detach().clone())
+        torch.testing.assert_close(y, y_ref, **tols)
