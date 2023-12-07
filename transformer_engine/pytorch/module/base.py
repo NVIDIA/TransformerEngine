@@ -228,7 +228,7 @@ class _NoopCat(torch.autograd.Function):
         ), "Dimensions not compatible for concatenation"
 
         param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.storage(),
+        param_temp.set_(full_param_buffer.untyped_storage(),
                         full_param_buffer.storage_offset(),
                         full_param_buffer.size(),
                         full_param_buffer.stride())

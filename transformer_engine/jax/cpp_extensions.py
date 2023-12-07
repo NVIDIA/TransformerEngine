@@ -1637,6 +1637,8 @@ class FusedAttnHelper:
     attn_bias_type: NVTE_Bias_Type
     attn_mask_type: NVTE_Mask_Type
     dropout_probability: float
+    num_heads_q: int
+    num_heads_kv: int
     max_seqlen_q: int
     max_seqlen_kv: int
     head_dim: int
@@ -1652,6 +1654,7 @@ class FusedAttnHelper:
                                                              self.qkv_layout, self.attn_bias_type,
                                                              self.attn_mask_type,
                                                              self.dropout_probability,
+                                                             self.num_heads_q, self.num_heads_kv,
                                                              self.max_seqlen_q, self.max_seqlen_kv,
                                                              self.head_dim)
 
@@ -1733,8 +1736,8 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         output_dtype = qkv_dtype
 
         backend = FusedAttnHelper(qkv_dtype, qkv_dtype, NVTE_QKV_Layout.NVTE_BS3HD, attn_bias_type,
-                                  attn_mask_type, dropout_probability, max_seqlen, max_seqlen,
-                                  head_dim).get_fused_attn_backend()
+                                  attn_mask_type, dropout_probability, num_head, num_head,
+                                  max_seqlen, max_seqlen, head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*batch_shape, num_head, max_seqlen, max_seqlen)
@@ -2087,8 +2090,9 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         output_dtype = q_dtype
 
         backend = FusedAttnHelper(q_dtype, kv_dtype, NVTE_QKV_Layout.NVTE_BSHD_BS2HD,
-                                  attn_bias_type, attn_mask_type, dropout_probability, q_max_seqlen,
-                                  kv_max_seqlen, q_head_dim).get_fused_attn_backend()
+                                  attn_bias_type, attn_mask_type, dropout_probability,
+                                  q_num_head, kv_num_head,
+                                  q_max_seqlen, kv_max_seqlen, q_head_dim).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
             softmax_aux_shape = (*q_batch_shape, q_num_head, q_max_seqlen, kv_max_seqlen)

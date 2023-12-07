@@ -77,10 +77,11 @@ class TestDistributedSelfAttn:
         is_training = True
         scaling_factor = 1.0
 
-        _, seqlen, _, _, hidden = data_shape
+        _, seqlen, _, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
-                                              attn_mask_type, dropout_prob, seqlen, seqlen, hidden):
+                                              attn_mask_type, dropout_prob, num_head, num_head,
+                                              seqlen, seqlen, hidden):
             pytest.skip(f"No FusedAttn backwend found")
 
         def target_func(qkv, bias, mask):
@@ -182,10 +183,11 @@ class TestDistributedCrossAttn:
         is_training = True
         scaling_factor = 1.0
 
-        _, seqlen, _, hidden = data_shape
+        _, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BSHD_BS2HD, attn_bias_type,
-                                              attn_mask_type, dropout_prob, seqlen, seqlen, hidden):
+                                              attn_mask_type, dropout_prob, num_head, num_head,
+                                              seqlen, seqlen, hidden):
             pytest.skip(f"No FusedAttn backwend found")
 
         def target_func(q, kv, mask):

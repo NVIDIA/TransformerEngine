@@ -149,17 +149,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type")
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
 
   py::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
-      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK);
+      .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
 
   py::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")
-      .value("NVTE_NOT_INTERLEAVED", NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED)
-      .value("NVTE_QKV_INTERLEAVED", NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED)
-      .value("NVTE_KV_INTERLEAVED", NVTE_QKV_Layout::NVTE_KV_INTERLEAVED)
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)
       .value("NVTE_SBHD_SB2HD", NVTE_QKV_Layout::NVTE_SBHD_SB2HD)
