@@ -106,7 +106,7 @@ if [[ "$WGRAD_FUSION" == "False" ]]; then
 fi
 
 if [[ "$FP8" != "False" ]]; then
-        options+=" --fp8-${FP8}"
+        options+=" --fp8-format ${FP8}"
 fi
 
 if [[ "$DTYPE" != "fp32" ]]; then
