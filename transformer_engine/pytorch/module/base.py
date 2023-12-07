@@ -819,19 +819,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
         return fp8_weight_tensors
 
-    def state_dict(self, *args, **kwargs) -> Dict:
-        """Get dictionary containing module state"""
-        state = super().state_dict(*args, **kwargs)
-
-        # Convert Float8Tensors to plain tensors
-        # Note: Float8Tensors don't serialize well, especially if they
-        # contain references to FP8 metadata.
-        for key, val in state.items():
-            if isinstance(val, Float8Tensor):
-                state[key] = val.from_float8()
-
-        return state
-
     @abstractmethod
     def forward(self):
         """Needs override."""
