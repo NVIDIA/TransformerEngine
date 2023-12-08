@@ -93,7 +93,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
               std::shared_ptr<fe::graph::Tensor_attributes> >;  // dropout_offset
 
         using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
-        static thread_local CacheType sdpa_flash_f16_fprop_cache;
+        static thread_local CacheType sdpa_f16_fprop_cache;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_graph = [&](CacheType &cache, const FADescriptor_v1 &descriptor)
@@ -144,23 +144,21 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                             .set_is_pass_by_value(true)
                             .set_data_type(fe::DataType_t::FLOAT));
 
-            fe::graph::Scaled_dot_product_flash_attention_attributes
-                    scaled_dot_product_flash_attention_options;
-            scaled_dot_product_flash_attention_options =
-                    fe::graph::Scaled_dot_product_flash_attention_attributes()
-                    .set_name("flash_attention")
-                    .set_is_inference(!is_training)
-                    .set_causal_mask(is_causal)
-                    .set_attn_scale(attn_scale);
+            fe::graph::SDPA_attributes sdpa_options;
+            sdpa_options = fe::graph::SDPA_attributes()
+                            .set_name("flash_attention")
+                            .set_is_inference(!is_training)
+                            .set_causal_mask(is_causal)
+                            .set_attn_scale(attn_scale);
 
-            scaled_dot_product_flash_attention_options.set_alibi_mask(is_alibi);
+            sdpa_options.set_alibi_mask(is_alibi);
 
             if (is_bias) {
                 bias = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("bias")
                                 .set_dim({1, h, s_q, s_kv})
                                 .set_stride({h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-                scaled_dot_product_flash_attention_options.set_bias(bias);
+                sdpa_options.set_bias(bias);
             }
 
             if (is_padding) {
@@ -174,7 +172,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 .set_dim({b, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
                                 .set_data_type(fe::DataType_t::INT32));
-                scaled_dot_product_flash_attention_options.set_padding_mask(is_padding)
+                sdpa_options.set_padding_mask(is_padding)
                                 .set_seq_len_q(seq_q)
                                 .set_seq_len_kv(seq_kv);
             }
@@ -190,12 +188,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
                                 .set_data_type(fe::DataType_t::INT64));
-                scaled_dot_product_flash_attention_options.set_dropout(
+                sdpa_options.set_dropout(
                                 dropout_probability, dropout_seed, dropout_offset);
             }
 
-            auto [O, Stats] = mha_graph->scaled_dot_product_flash_attention(
-                            Q, K, V, scaled_dot_product_flash_attention_options);
+            auto [O, Stats] = mha_graph->sdpa(Q, K, V, sdpa_options);
 
             std::vector<int64_t> o_stride(4);
             generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(),
@@ -224,11 +221,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
 
-            mha_graph->validate();
-            mha_graph->build_operation_graph(handle);
-            mha_graph->create_execution_plans({fe::HeurMode_t::A});
-            mha_graph->check_support(handle);
-            mha_graph->build_plans(handle);
+            auto a = mha_graph->validate().is_good();
+            mha_graph->build_operation_graph(handle).is_good();
+            mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good();
+            mha_graph->check_support(handle).is_good();
+            mha_graph->build_plans(handle).is_good();
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,
@@ -240,7 +237,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
         auto [mha_graph, Q, K, V, attn_scale, O, Stats,
             bias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
-                sdpa_flash_f16_fprop_cache, descriptor);
+                sdpa_f16_fprop_cache, descriptor);
 
         auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -286,7 +283,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             variant_pack[dropout_offset] = devPtrDropoutOffset;
         }
 
-        mha_graph->execute(handle, variant_pack, workspace);
+        mha_graph->execute(handle, variant_pack, workspace).is_good();
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
     }
@@ -342,7 +339,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
               std::shared_ptr<fe::graph::Tensor_attributes> >;  // dropout_offset
 
         using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
-        static thread_local CacheType sdpa_flash_f16_bprop_cache;
+        static thread_local CacheType sdpa_f16_bprop_cache;
 
         // Get plan from cache if cache is available, otherwise create one
         auto get_graph = [&](CacheType &cache, const FADescriptor_v1 &descriptor)
@@ -409,15 +406,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                             .set_is_pass_by_value(true)
                             .set_data_type(fe::DataType_t::FLOAT));
 
-            fe::graph::Scaled_dot_product_flash_attention_backward_attributes
-                    scaled_dot_product_flash_attention_backward_options;
-            scaled_dot_product_flash_attention_backward_options =
-                    fe::graph::Scaled_dot_product_flash_attention_backward_attributes()
-                    .set_name("flash_attention_backward")
-                    .set_causal_mask(is_causal)
-                    .set_attn_scale(attn_scale);
+            fe::graph::SDPA_backward_attributes sdpa_backward_options;
+            sdpa_backward_options = fe::graph::SDPA_backward_attributes()
+                            .set_name("flash_attention_backward")
+                            .set_causal_mask(is_causal)
+                            .set_attn_scale(attn_scale);
 
-            scaled_dot_product_flash_attention_backward_options.set_alibi_mask(is_alibi);
+            sdpa_backward_options.set_alibi_mask(is_alibi);
 
             if (is_bias) {
                 bias = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -428,8 +423,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_name("dBias")
                                 .set_dim({1, h, s_q, s_kv})
                                 .set_stride({h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-                scaled_dot_product_flash_attention_backward_options.set_bias(bias);
-                scaled_dot_product_flash_attention_backward_options.set_dbias(dBias);
+                sdpa_backward_options.set_bias(bias);
+                sdpa_backward_options.set_dbias(dBias);
             }
 
             if (is_padding) {
@@ -443,7 +438,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_dim({b, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
                                 .set_data_type(fe::DataType_t::INT32));
-                scaled_dot_product_flash_attention_backward_options.set_padding_mask(is_padding)
+                sdpa_backward_options.set_padding_mask(is_padding)
                                 .set_seq_len_q(seq_q)
                                 .set_seq_len_kv(seq_kv);
             }
@@ -459,12 +454,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                 .set_dim({1, 1, 1, 1})
                                 .set_stride({1, 1, 1, 1})
                                 .set_data_type(fe::DataType_t::INT64));
-                scaled_dot_product_flash_attention_backward_options.set_dropout(
+                sdpa_backward_options.set_dropout(
                                 dropout_probability, dropout_seed, dropout_offset);
             }
 
-            auto [dQ, dK, dV] = mha_graph->scaled_dot_product_flash_attention_backward(
-                q, k, v, o, dO, stats, scaled_dot_product_flash_attention_backward_options);
+            auto [dQ, dK, dV] = mha_graph->sdpa_backward(
+                q, k, v, o, dO, stats, sdpa_backward_options);
 
             dQ->set_output(true)
                     .set_dim({b, h, s_q, d})
@@ -497,11 +492,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 bias_tuple, padding_tuple, dropout_tuple);
 
-            mha_graph->validate();
-            mha_graph->build_operation_graph(handle);
-            mha_graph->create_execution_plans({fe::HeurMode_t::A});
-            mha_graph->check_support(handle);
-            mha_graph->build_plans(handle);
+            mha_graph->validate().is_good();
+            mha_graph->build_operation_graph(handle).is_good();
+            mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good();
+            mha_graph->check_support(handle).is_good();
+            mha_graph->build_plans(handle).is_good();
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,
@@ -513,7 +508,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
         auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV,
             bias, dBias, seq_q, seq_kv, dropout_seed, dropout_offset] = get_graph(
-                sdpa_flash_f16_bprop_cache, descriptor);
+                sdpa_f16_bprop_cache, descriptor);
 
         auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -562,7 +557,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             variant_pack[dropout_offset] = devPtrDropoutOffset;
         }
 
-        mha_graph->execute(handle, variant_pack, workspace);
+        mha_graph->execute(handle, variant_pack, workspace).is_good();
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
     }
