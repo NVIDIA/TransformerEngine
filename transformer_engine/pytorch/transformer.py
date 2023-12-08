@@ -158,6 +158,15 @@ class TransformerLayer(torch.nn.Module):
           The device on which the parameters of the model will allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
+    hidden_states_format: str, default = 'sbhd'
+                         This controls whether the dimensions of the
+                         intermediate hidden states is 'batch first' ('bshd') or
+                         'sequence first' ('sbhd'). `s` stands for the sequence
+                         length, `b` batch size, `h` the number of heads, `d`
+                         head size. Note that these formats are very closely
+                         related to the `qkv_format` in the `MultiHeadAttention`
+                         and `DotProductAttention` modules.
+                         Options are: 'sbhd' and 'bshd'
 
     Parallelism parameters
     ----------------------
@@ -242,6 +251,7 @@ class TransformerLayer(torch.nn.Module):
         activation: str = 'gelu',
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
+        hidden_states_format: str = "sbhd",
     ) -> None:
         super().__init__()
 
@@ -318,6 +328,8 @@ class TransformerLayer(torch.nn.Module):
 
         self.get_rng_state_tracker = get_rng_state_tracker
 
+        self.hidden_states_format = hidden_states_format
+
         attention_args = (
             hidden_size,
             num_attention_heads,
@@ -347,6 +359,7 @@ class TransformerLayer(torch.nn.Module):
             "ub_split_rs" : ub_split_rs,
             "ub_atomic_gemm_rs" : ub_atomic_gemm_rs,
             "ub_atomic_gemm_ag" : ub_atomic_gemm_ag,
+            "qkv_format" : self.hidden_states_format,
         }
 
         self.self_attention = MultiheadAttention(
