@@ -20,6 +20,7 @@ from jax import dtypes
 from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
+from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
@@ -210,6 +211,8 @@ def core_attention(query: Array,
         attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
     else:
         attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+
+    attn_weights = checkpoint_name(attn_weights, 'logits')
 
     attn_weights = _with_sharding_constraint(attn_weights,
                                              (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
@@ -441,8 +444,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate, q_seqlen,
-                                                               kv_seqlen, self.head_dim)
+                                                               self.dropout_rate,
+                                                               self.num_heads, self.num_heads,
+                                                               q_seqlen, kv_seqlen, self.head_dim)
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
@@ -499,6 +503,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     bias_axes=(W_JOINED_AXES, W_TP_AXES),
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
+                qkv_proj = checkpoint_name(qkv_proj, 'combined_qkv_proj')
                 if not use_fused_attn:
                     query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
             else:
@@ -530,6 +535,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                        bias_axes=(W_JOINED_AXES, W_TP_AXES),
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
+                kv_proj = checkpoint_name(kv_proj, 'combined_kv_proj')
                 if not use_fused_attn:
                     key, value = jnp.split(kv_proj, [1], axis=-2)
         else:
@@ -574,6 +580,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             residual = ln_out
 
         if not use_fused_attn:
+            query = checkpoint_name(query, 'query_proj')
+            key = checkpoint_name(key, 'key_proj')
+            value = checkpoint_name(value, 'value_proj')
             query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
             key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
             value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
@@ -667,6 +676,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
                 x = cross_fused_attn(query,
                                      kv_proj,
+                                     bias,
                                      mask,
                                      seed,
                                      attn_bias_type=attn_bias_type,
@@ -705,6 +715,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                dtype=self.dtype,
                                float32_logits=self.float32_logits)
 
+            x = checkpoint_name(x, 'context')
+
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         attn_context_sharding_constraint = \
@@ -723,6 +735,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                            bias_axes=(W_NO_SHARD_AXES,),
                            dtype=self.dtype,
                            name='out')(x)
+        out = checkpoint_name(out, 'out_proj')
         return out, residual
 
 

@@ -8,13 +8,24 @@
 Transformer Engine
 ==================
 
-`Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Model Support <#model-support>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
+`Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `FP8 Convergence <#fp8-convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
 
 Latest News
 ==================
 
-* [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
 
+* [12/2023] `New NVIDIA NeMo Framework Features and NVIDIA H200 <https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility/>`_
+
+.. image:: docs/examples/H200-NeMo-performance.png
+  :width: 600
+  :alt: H200
+
+* [11/2023] `Inflection-2: The Next Step Up <https://inflection.ai/inflection-2>`_
+* [11/2023] `Unleashing The Power Of Transformers With NVIDIA Transformer Engine <https://lambdalabs.com/blog/unleashing-the-power-of-transformers-with-nvidia-transformer-engine>`_
+* [11/2023] `Accelerating PyTorch Training Workloads with FP8 <https://towardsdatascience.com/accelerating-pytorch-training-workloads-with-fp8-5a5123aec7d7>`_
+* [09/2023] `Transformer Engine added to AWS DL Container for PyTorch Training <https://github.com/aws/deep-learning-containers/pull/3315>`_
+* [06/2023] `Breaking MLPerf Training Records with NVIDIA H100 GPUs <https://developer.nvidia.com/blog/breaking-mlperf-training-records-with-nvidia-h100-gpus/>`_
+* [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
 
 What is Transformer Engine?
 ==================
@@ -175,66 +186,32 @@ It is a known issue that FlashAttention-2 compilation is resource-intensive and 
 
 Note that NGC PyTorch 23.08+ containers include FlashAttention-2.
 
-Model Support
-----------
+FP8 Convergence
+==================
 
-While the more granular modules in Transformer Engine allow building any Transformer architecture,
-the `TransformerLayer` API of Transformer Engine is flexible enough to build multiple major
-Transformer model architectures.
+FP8 has been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
 
-Transformer Engine supports the following DL frameworks: PyTorch and JAX (Flax, Praxis).
-
-NOTE: For simplicity, we only show PyTorch examples below. For the usage of `TransformerLayer`
-of all supported frameworks, refer to `examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_.
-
-GPT
-^^^
-
-`GPT` architecture has `LayerNorm` at the input side (before `QKV Gemm`) and the residual connection
-is taken from the input of that `LayerNorm`. In TE this can be achieved by setting the following
-arguments in the `TransformerLayer` API.
-
-.. code-block:: python
-
-  transformer_engine.pytorch.TransformerLayer(
-          ...,
-          ...,
-          apply_residual_connection_post_layernorm=False,
-          output_layernorm=False,
-          layer_type="encoder",
-  )
-
-BERT
-^^^^
-
-`BERT` architecture has `LayerNorm` at the output side (after the final `BiasDropoutAdd`) and the
-residual connection is taken from the output of that `LayerNorm`. In TE this can be achieved by
-setting the following arguments in the `TransformerLayer` API.
-
-.. code-block:: python
-
-  transformer_engine.pytorch.TransformerLayer(
-          ...,
-          ...,
-          apply_residual_connection_post_layernorm=True,
-          output_layernorm=True,
-          layer_type="encoder",
-  )
-
-T5
-^^
-
-`T5` architecture has an additional `cross-attention` + `BiasDropoutAdd` + `LayerNorm` block before
-the `MLP` layer. In TE this can be added by setting the `layer_type` to `decoder` in the
-`TransformerLayer` API.
-
-.. code-block:: python
-
-  transformer_engine.pytorch.TransformerLayer(
-          ...,
-          ...,
-          layer_type="decoder",
-  )
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| Model      | Framework        | Source                                                                                                  |
++============+==================+=========================================================================================================+
+| T5-770M    |  JAX/T5x         | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/t5x#convergence-and-performance|
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| MPT-1.3B   |  Mosaic Composer | https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1                                              |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| GPT-5B     |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results               |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| GPT-5B     |  NeMo Framework  | Available on request                                                                                  |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| T5-11B     |  JAX/T5x         | Available on request                                                                                    |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| GPT-22B    |  NeMo Framework  | Available on request                                                                                  |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
+| GPT-175B   |  JAX/Paxml       | https://github.com/NVIDIA/JAX-Toolbox/tree/main/rosetta/rosetta/projects/pax#h100-results               |
++------------+------------------+---------------------------------------------------------------------------------------------------------+
 
 Integrations
 ==================
@@ -247,7 +224,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
-* `NVIDIA NeMo <https://github.com/NVIDIA/NeMo>`_
+* `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
