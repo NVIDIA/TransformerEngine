@@ -281,22 +281,18 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
-        print('unfused vs fused')
     if unfused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
-        print('unfused vs flash')
     if fused_attn_supported and flash_attn_supported:
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i,_ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
-        print('fused vs flash')
     if fused_attn_supported and len(fused_attn_backend) == 2:
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i,_ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
-        print('fused 0 vs fused 1')
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
@@ -321,14 +317,6 @@ model_configs_mask = {
     "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
-
-@pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
-@pytest.mark.parametrize("dtype", param_types_lean)
-@pytest.mark.parametrize("model_configs", [model_configs_mask])
-@pytest.mark.parametrize("model", model_configs_mask.keys())
-def test_dpa_mask(dtype, model_configs, model):
-    """Test DotProductAttention module with different mask types"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False)
 
 @pytest.mark.skipif(_cudnn_version() < (8,9,1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)

@@ -2321,9 +2321,9 @@ class DotProductAttention(torch.nn.Module):
             use_flash_attention = False
 
         # Filter: sliding window attention.
+        # UnfusedDotProductAttention can support SWA via arbitrary attention mask.
         if window_size not in ((-1, -1), (-1, 0)):
             use_fused_attention = False
-            #use_unfused_attention = False
             context_parallel = (self.cp_group is not None
                 and get_distributed_world_size(self.cp_group) != 1)
             if (not _flash_attn_2_3_plus) or context_parallel:
@@ -2338,7 +2338,7 @@ class DotProductAttention(torch.nn.Module):
         #    attn_mask_type(s)   |     supported backends
         # ------------------------------------------------
         #   no_mask              |     All
-        #   padding              |     FlashAttention, FusedAttention
+        #   padding              |     UnfusedDotProductAttention, FlashAttention, FusedAttention
         #   causal               |     All
         #   padding + causal     |     FlashAttention, FusedAttention
         #   arbitrary            |     UnfusedDotProductAttention
@@ -2346,12 +2346,6 @@ class DotProductAttention(torch.nn.Module):
         if attn_mask_type == "arbitrary":
             use_flash_attention = False
             use_fused_attention = False
-        elif attn_mask_type == "padding" and causal_mask:
-            assert use_flash_attention, "No attention backend available for causal + padding masks."
-        elif attn_mask_type == "padding":
-            use_fused_attention = False
-        if "padding" in attn_mask_type:
-            use_unfused_attention = False
         if "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             use_unfused_attention = False
 
