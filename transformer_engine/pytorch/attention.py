@@ -1522,7 +1522,7 @@ class FlashAttention(torch.nn.Module):
                 ]
 
             if 'padding' in attn_mask_type:
-                assert not context_parallel, "Padding mask not supported with context parallelism."
+                assert not context_parallel, "Padding mask not supported with context parallelism!"
 
                 if self.attention_type == "self":
                     assert (
@@ -1577,7 +1577,7 @@ class FlashAttention(torch.nn.Module):
                             dtype=torch.int32,
                             device=key_layer.device)
         elif qkv_format == 'thd':
-            assert not context_parallel, "thd format is not supported for context parallelism!"
+            assert not context_parallel, "thd format not supported with context parallelism!"
             assert (_flash_attn_2_available
                 ), "flash-attn v2 is required for variable sequence length support!"
             assert (cu_seqlens_q is not None and cu_seqlens_kv is not None
@@ -1951,7 +1951,7 @@ class FusedAttention(torch.nn.Module):
                 batch_size, max_seqlen_q, max_seqlen_kv = (
                     query_layer.shape[0], query_layer.shape[1], key_layer.shape[1])
             if 'padding' in attn_mask_type:
-                assert not context_parallel, "Padding mask not supported with context parallelism."
+                assert not context_parallel, "Padding mask not supported with context parallelism!"
 
                 global _cu_seqlens_q, _cu_seqlens_kv
                 if (cu_seqlens_q is not None and cu_seqlens_kv is not None):
