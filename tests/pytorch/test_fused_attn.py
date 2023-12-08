@@ -248,12 +248,14 @@ def test_dot_product_attention(dtype, model_configs, model, ckpt_attn, workspace
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        attn_mask_type = config.attn_mask_type
-        config.attn_mask_type = "arbitrary"
+        if swa:
+            attn_mask_type = config.attn_mask_type
+            config.attn_mask_type = "arbitrary"
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
             dtype, config, "UnfusedDotProductAttention", ckpt_attn, qkv_layout, workspace_opt, swa,
         )
-        config.attn_mask_type = attn_mask_type
+        if swa:
+            config.attn_mask_type = attn_mask_type
 
     # FusedAttention backend
     if fused_attn_supported:
