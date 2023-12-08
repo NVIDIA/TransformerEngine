@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from collections.abc import Iterable
+import io
 from typing import Any, Dict, List, Tuple, Union
 
 import pytest
@@ -263,7 +264,7 @@ class TestFloat8Tensor:
         dims: DimsType,
         transpose_dims: Tuple[int, int],
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        scale: float = 1,
+        scale: float = 0.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         """Test transpose"""
@@ -316,3 +317,45 @@ class TestFloat8Tensor:
                 x_ref.transpose(*transpose_dims),
                 **tols,
             )
+
+    def test_serialization(
+        self,
+        dims: DimsType = [2,3,5],
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        scale: float = 0.5,
+        dtype: torch.dtype = torch.float32,
+    ):
+
+        # Initialize random data
+        dims = _to_list(dims)
+        x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        x_fp8 = Float8Tensor.to_float8(
+            x_ref,
+            fp8_dtype=fp8_dtype,
+            scale=torch.full([1], scale),
+        )
+        x_ref = x_fp8.from_float8()
+
+        # Serialize tensor
+        byte_stream = io.BytesIO()
+        torch.save(x_fp8, byte_stream)
+        x_bytes = byte_stream.getvalue()
+
+        # Mess up and delete old tensor
+        x_fp8._data.zero_()
+        x_fp8._scale_inv.zero_()
+        del x_fp8, byte_stream
+
+        # Deserialize tensor
+        x_fp8 = torch.load(io.BytesIO(x_bytes))
+        del x_bytes
+
+        # Check results
+        tols = dict(rtol=0, atol=0)
+        torch.testing.assert_close(x_fp8, x_ref, **tols)
+
+        # Make sure we are not trivially passing tests
+        x_fp8._data.zero_()
+        x_fp8._scale_inv.zero_()
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(x_fp8, x_ref, **tols)

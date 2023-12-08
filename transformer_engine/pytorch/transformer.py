@@ -70,8 +70,8 @@ class TransformerLayer(torch.nn.Module):
 
     .. note::
 
-        Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`self_attn_mask_type` is set to `"causal"`.
+        Argument :attr:`attention_mask` in the `forward` call is only used when
+        :attr:`self_attn_mask_type` includes `"padding"` or `"arbitrary"`.
 
     Parameters
     ----------
@@ -127,7 +127,8 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
+    self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
+                        default = `causal`
                         type of attention mask passed into softmax operation. Overridden by
                         :attr:`self_attn_mask_type` in the `forward` method. The forward
                         arg is useful for dynamically changing mask types, e.g. a different
@@ -510,7 +511,7 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         encoder_output: Optional[torch.Tensor] = None,
-        enc_dec_attn_mask: Optional[torch.Tensor] = None,
+        enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -531,19 +532,25 @@ class TransformerLayer(torch.nn.Module):
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+        attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out self-attention softmax input.
-                        Can be a tuple of 2 masks for cross attention with padding masks.
-        self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `None`
-                            type of attention mask passed into softmax operation.
+                        It should be in [batch_size, 1, 1, seqlen_q] for 'padding' mask,
+                        and broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
+                        for 'arbitrary'. It should be 'None' for 'causal' and 'no_mask'.
+        self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
+                            default = `causal`
+                            Type of attention mask passed into softmax operation.
         window_size: Optional[Tuple[int, int]], default = `None`
                     sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
-        enc_dec_attn_mask : Optional[torch.Tensor], default = `None`
-             Boolean tensor used to mask out inter-attention softmax input if using
-             `layer_type="decoder"`.
+        enc_dec_attn_mask : Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+             default = `None`. Boolean tensors used to mask out inter-attention softmax input if
+             using `layer_type="decoder"`. It should be a tuple of two masks in
+             [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for 'padding' mask.
+             It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
+             for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -566,7 +573,7 @@ class TransformerLayer(torch.nn.Module):
                        Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
         core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+                    Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
@@ -604,7 +611,9 @@ class TransformerLayer(torch.nn.Module):
                 hidden_states.shape[0] == self.seq_length // self.tp_size
             ), "Sequence dimension must be split across TP group when using sequence parallel."
 
-        if self_attn_mask_type != "causal" and attention_mask is not None:
+        if (("padding" in self_attn_mask_type
+            or self_attn_mask_type == "arbitrary")
+            and attention_mask is not None):
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
