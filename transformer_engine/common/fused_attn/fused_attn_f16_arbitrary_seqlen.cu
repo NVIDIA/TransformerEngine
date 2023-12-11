@@ -221,7 +221,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
 
-	    if (!mha_graph->validate().is_good()) {
+            if (!mha_graph->validate().is_good()) {
                 NVTE_ERROR("MHA Graph (fwd) validation is unsuccessful.");
             }
             if (!mha_graph->build_operation_graph(handle).is_good()) {
@@ -504,7 +504,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 bias_tuple, padding_tuple, dropout_tuple);
 
-	    if (!mha_graph->validate().is_good()) {
+            if (!mha_graph->validate().is_good()) {
                 NVTE_ERROR("MHA Graph (bwd) validation is unsuccessful.");
             }
             if (!mha_graph->build_operation_graph(handle).is_good()) {
