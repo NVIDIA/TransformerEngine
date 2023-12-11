@@ -41,7 +41,6 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 # Global test configuration knobs.
-torch._dynamo.config.error_on_nested_jit_trace = False
 
 # Enable this to serialize test inputs and outputs to file (as a Polygraphy RunResults instance).
 SAVE_TEST_IO = bool(int(os.getenv("NVTE_ONNX_EXPORT_SAVE_TEST_IO", "0")))

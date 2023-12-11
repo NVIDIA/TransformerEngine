@@ -29,3 +29,9 @@ from .te_onnx_extensions import (
     onnx_rmsnorm_fwd,
     onnx_rmsnorm_fwd_fp8
 )
+try:
+    import torch
+    from .tests.pytorch import seed_default_rng, set_max_seq_len, test_export_gpt_generation
+    test_export_gpt_generation(seed_default_rng, set_max_seq_len, False, precision1, True)
+except:
+    torch._dynamo.config.error_on_nested_jit_trace = False
