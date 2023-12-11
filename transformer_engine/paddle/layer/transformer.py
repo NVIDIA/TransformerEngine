@@ -4,6 +4,7 @@
 """Transformer"""
 
 from typing import Optional, Union
+import warnings
 
 import paddle
 from paddle.incubate.nn.layer.fused_dropout_add import FusedDropoutAdd
@@ -129,6 +130,8 @@ class TransformerLayer(paddle.nn.Layer):
         self.hidden_dropout_rng_state_name = hidden_dropout_rng_state_name
         # SP needs local seed for hidden dropout
         if self.sequence_parallel and self.hidden_dropout_rng_state_name == 'global_seed':
+            warnings.warn("RNG state for hidden dropout needs to be different across TP ranks. "
+                          "Forcing hidden_dropout_rng_state_name to 'local_seed'")
             self.hidden_dropout_rng_state_name = 'local_seed'
 
         assert (self_attn_mask_type
@@ -195,6 +198,7 @@ class TransformerLayer(paddle.nn.Layer):
                 weight_attr,
                 bias_attr,
                 zero_centered_gamma=zero_centered_gamma,
+                sequence_parallel=self.sequence_parallel,
                 backend=backend,
             )
 

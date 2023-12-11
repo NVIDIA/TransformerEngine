@@ -26,6 +26,7 @@ from ..distributed import (
     track_rng_state,
     set_tensor_dist_attr,
     set_weight_tensor_dist_attr,
+    mark_as_sequence_parallel_parameter,
 )
 from ..fp8 import get_fp8_te_dtype
 from ..utils import (
@@ -657,6 +658,10 @@ class LayerNormMLP(TransformerEngineBaseLayer):
             is_bias=True,
         )
 
+        if self.sequence_parallel:
+            mark_as_sequence_parallel_parameter(self.ln_weight)
+            mark_as_sequence_parallel_parameter(self.ln_bias)
+
         # FC1 weights
         with track_rng_state(enable=self.tensor_parallel):
             self.fc1_weight = self.create_parameter(
@@ -707,6 +712,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 dtype=self._dtype,
                 is_bias=True,
             )
+            if self.set_parallel_mode and self.sequence_parallel:
+                mark_as_sequence_parallel_parameter(self.fc2_bias)
         else:
             self.fc2_bias = None
 

@@ -176,3 +176,11 @@ def identity(
     output = mp_ops._c_identity(input_, group=tp_group)
 
     return output
+
+
+def mark_as_sequence_parallel_parameter(parameter: paddle.Tensor):
+    """
+    Set sequence_parallel attribute to input tensor. It is used for registering allreduce
+    hooks in PaddleNLP sequence parallel training.
+    """
+    setattr(parameter, "sequence_parallel", True)

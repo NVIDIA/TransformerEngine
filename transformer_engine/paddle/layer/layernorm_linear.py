@@ -28,6 +28,7 @@ from ..distributed import (
     track_rng_state,
     set_tensor_dist_attr,
     set_weight_tensor_dist_attr,
+    mark_as_sequence_parallel_parameter,
 )
 from ..fp8 import get_fp8_te_dtype
 from ..utils import (
@@ -430,6 +431,10 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             is_bias=True,
         )
 
+        if self.sequence_parallel:
+            mark_as_sequence_parallel_parameter(self.ln_weight)
+            mark_as_sequence_parallel_parameter(self.ln_bias)
+
         # Initialize Linear weight parameter
         with track_rng_state(enable=self.tensor_parallel):
             # TE linear weight is in column major
@@ -456,6 +461,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
             )
             if parallel_mode == "column":
                 set_tensor_dist_attr(self.bias, self.tensor_parallel, axis=0)
+            if parallel_mode == "row" and self.sequence_parallel:
+                mark_as_sequence_parallel_parameter(self.bias)
         else:
             self.bias = None
 
