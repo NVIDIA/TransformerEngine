@@ -221,11 +221,21 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 Stats_tuple, bias_tuple, padding_tuple, dropout_tuple);
 
-            auto a = mha_graph->validate().is_good();
-            mha_graph->build_operation_graph(handle).is_good();
-            mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good();
-            mha_graph->check_support(handle).is_good();
-            mha_graph->build_plans(handle).is_good();
+	    if (!mha_graph->validate().is_good()) {
+                NVTE_ERROR("MHA Graph (fwd) validation is unsuccessful.");
+            }
+            if (!mha_graph->build_operation_graph(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (fwd) graph build is unsuccessful.");
+            }
+            if (!mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good()) {
+                NVTE_ERROR("MHA Graph (fwd) plan creation is unsuccessful.");
+            }
+            if (!mha_graph->check_support(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (fwd) support check is unsuccessful.");
+            }
+            if (!mha_graph->build_plans(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (fwd) plan build is unsuccessful.");
+            }
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,
@@ -283,7 +293,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
             variant_pack[dropout_offset] = devPtrDropoutOffset;
         }
 
-        mha_graph->execute(handle, variant_pack, workspace).is_good();
+        if (!mha_graph->execute(handle, variant_pack, workspace).is_good()) {
+            NVTE_ERROR("MHA Graph (fwd) execution is unsuccessful.");
+        }
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
     }
@@ -492,11 +504,21 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 std::make_tuple(nullptr), key_tensors_tuple,
                 bias_tuple, padding_tuple, dropout_tuple);
 
-            mha_graph->validate().is_good();
-            mha_graph->build_operation_graph(handle).is_good();
-            mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good();
-            mha_graph->check_support(handle).is_good();
-            mha_graph->build_plans(handle).is_good();
+	    if (!mha_graph->validate().is_good()) {
+                NVTE_ERROR("MHA Graph (bwd) validation is unsuccessful.");
+            }
+            if (!mha_graph->build_operation_graph(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (bwd) graph build is unsuccessful.");
+            }
+            if (!mha_graph->create_execution_plans({fe::HeurMode_t::A}).is_good()) {
+                NVTE_ERROR("MHA Graph (bwd) plan creation is unsuccessful.");
+            }
+            if (!mha_graph->check_support(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (bwd) support check is unsuccessful.");
+            }
+            if (!mha_graph->build_plans(handle).is_good()) {
+                NVTE_ERROR("MHA Graph (bwd) plan build is unsuccessful.");
+            }
 
             auto return_tuple = std::tuple_cat(
                 std::make_tuple(mha_graph), key_tensors_tuple,
@@ -557,7 +579,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
             variant_pack[dropout_offset] = devPtrDropoutOffset;
         }
 
-        mha_graph->execute(handle, variant_pack, workspace).is_good();
+        if (!mha_graph->execute(handle, variant_pack, workspace).is_good()) {
+            NVTE_ERROR("MHA Graph (bwd) execution is unsuccessful.");
+        }
     } catch (cudnn_frontend::cudnnException &e) {
         NVTE_ERROR(e.what());
     }
