@@ -367,6 +367,8 @@ class LayerNormLinear(TransformerEngineBaseLayer):
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
                    When set to `None`, no communication is performed.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     """
 
     def __init__(

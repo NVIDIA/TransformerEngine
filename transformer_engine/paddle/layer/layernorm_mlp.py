@@ -593,6 +593,8 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     set_parallel_mode : bool, default = `False`
                       if set to `True`, FC1 is used as Column Parallel and FC2 is used as Row
                       Parallel as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
+    sequence_parallel : bool, default = `False`
+                       if set to `True`, uses sequence parallelism.
     tp_group : paddle.distributed.collective.Group, default = `None`
                tensor parallel process group.
 
