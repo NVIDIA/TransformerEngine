@@ -18,7 +18,6 @@ from ..cpp_extensions import (
     cast_from_fp8,
     dgelu_cast_transpose_bgrad_fp8,
     gelu_fp8,
-    transpose,
 )
 from ..distributed import (
     allreduce,
@@ -38,7 +37,6 @@ from ..utils import (
     save_for_backward_allow_none,
     saved_tensor_allow_none,
 )
-
 
 __all__ = ["LayerNormMLP"]
 
@@ -63,6 +61,7 @@ def _mlp_forward(
     is_grad_enabled: bool,
     set_parallel_mode: bool,
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
     if fp8_enabled:
@@ -78,6 +77,7 @@ def _mlp_forward(
             activation_dtype,
             'column' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             is_grad_enabled,
         )
@@ -100,6 +100,7 @@ def _mlp_forward(
             activation_dtype,
             'row' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             is_grad_enabled,
         )
@@ -116,6 +117,7 @@ def _mlp_forward(
             activation_dtype,
             'column' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             activation=activation,
         )
@@ -132,6 +134,7 @@ def _mlp_forward(
             activation_dtype,
             'row' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     return (
@@ -172,6 +175,7 @@ def _mlp_backward(
     activation: str,
     set_parallel_mode: bool,
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
     (
@@ -186,23 +190,19 @@ def _mlp_backward(
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
         fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
         # FC2 Bwd
-        fc2_input_no_fp8, fc2_input_t = None, None
         fp8_wgrad = not fp8_meta["recipe"].override_linear_precision.wgrad
-        if requires_fc2_wgrad:
-            if fp8_wgrad:
-                fc2_input_t = transpose(fc2_input, fp8_dtype_forward)
-            else:
-                fc2_input_no_fp8 = cast_from_fp8(
-                    fc2_input,
-                    fp8_meta["scaling_fwd"],
-                    fc2_input_fp8_index,
-                    fp8_dtype_forward,
-                    TE_DType[activation_dtype],
-                )
+        if requires_fc2_wgrad and not fp8_wgrad:
+            fc2_input = cast_from_fp8(
+                fc2_input,
+                fp8_meta["scaling_fwd"],
+                fc2_input_fp8_index,
+                fp8_dtype_forward,
+                TE_DType[activation_dtype],
+            )
 
         fc2_dgrad, fc2_wgrad = _linear_bwd_fp8(
-            fc2_input_no_fp8,
-            fc2_input_t,
+            fc2_input,
+            None,
             fc2_input_fp8_index,
             fc2_weight_t_fp8,
             fc2_weight_fp8_index,
@@ -217,6 +217,7 @@ def _mlp_backward(
             activation_dtype,
             'row' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
 
@@ -233,30 +234,27 @@ def _mlp_backward(
             fc1_bgrad = fc1_bgrad_
 
         # FC1 Bwd
-        dgelu_no_fp8, fc1_input_no_fp8, fc1_input_t = None, None, None
-        if requires_fc1_wgrad:
-            if fp8_wgrad:
-                fc1_input_t = transpose(fc1_input, fp8_dtype_forward)
-            else:
-                # TODO(tizheng) Paddle lacks fused dgelu_bgrad OP. Cast from dgrad(fp8) instead.
-                dgelu_no_fp8 = cast_from_fp8(
-                    dgelu,
-                    fp8_meta["scaling_bwd"],
-                    fc1_grad_output_fp8_index,
-                    fp8_dtype_backward,
-                    TE_DType[activation_dtype],
-                )
-                fc1_input_no_fp8 = cast_from_fp8(
-                    fc1_input,
-                    fp8_meta["scaling_fwd"],
-                    fc1_input_fp8_index,
-                    fp8_dtype_forward,
-                    TE_DType[activation_dtype],
-                )
+        dgelu_no_fp8 = None
+        if requires_fc1_wgrad and not fp8_wgrad:
+            # TODO(tizheng) Paddle lacks fused dgelu_bgrad OP. Cast from dgrad(fp8) instead.
+            dgelu_no_fp8 = cast_from_fp8(
+                dgelu,
+                fp8_meta["scaling_bwd"],
+                fc1_grad_output_fp8_index,
+                fp8_dtype_backward,
+                TE_DType[activation_dtype],
+            )
+            fc1_input = cast_from_fp8(
+                fc1_input,
+                fp8_meta["scaling_fwd"],
+                fc1_input_fp8_index,
+                fp8_dtype_forward,
+                TE_DType[activation_dtype],
+            )
 
         fc1_dgrad, fc1_wgrad = _linear_bwd_fp8(
-            fc1_input_no_fp8,
-            fc1_input_t,
+            fc1_input,
+            None,
             fc1_input_fp8_index,
             fc1_weight_t_fp8,
             fc1_weight_fp8_index,
@@ -271,6 +269,7 @@ def _mlp_backward(
             activation_dtype,
             'column' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     else:
@@ -284,6 +283,7 @@ def _mlp_backward(
             activation_dtype,
             'row' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             gelu_input=fc1_out,
             activation=activation,
@@ -298,6 +298,7 @@ def _mlp_backward(
             activation_dtype,
             'column' if set_parallel_mode else None,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     return (
@@ -337,6 +338,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
         activation: str,
         set_parallel_mode: bool,
         tensor_parallel: bool,
+        sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
@@ -398,6 +400,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             is_grad_enabled,
             set_parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
 
@@ -429,6 +432,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
             ctx.zero_centered_gamma = zero_centered_gamma
             ctx.set_parallel_mode = set_parallel_mode
             ctx.tensor_parallel = tensor_parallel
+            ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
@@ -476,7 +480,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 grad_output_c,
                 grad_output_t,
                 fc2_bgrad,
-            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0])
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_outputs[0], True)
 
             (
                 fc1_dgrad,
@@ -513,6 +517,7 @@ class _LayerNormMLP(paddle.autograd.PyLayer):
                 ctx.activation,
                 ctx.set_parallel_mode,
                 ctx.tensor_parallel,
+                ctx.sequence_parallel,
                 ctx.tp_group,
             )
             if not ctx.fp8_enabled:
@@ -604,6 +609,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
         return_layernorm_output: bool = False,
         zero_centered_gamma: bool = False,
         set_parallel_mode: bool = False,
+        sequence_parallel: bool = False,
         tp_group: Optional[dist_group_type] = None,
         backend: str = 'transformer_engine',
     ) -> None:
@@ -626,6 +632,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                                                                   enable_tp=set_parallel_mode)
         self.tensor_parallel = self.tp_size > 1
         self.set_parallel_mode = set_parallel_mode
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
 
         if self.set_parallel_mode:
             self.size_per_partition = divide(self.ffn_hidden_size, self.tp_size)
@@ -751,6 +758,7 @@ class LayerNormMLP(TransformerEngineBaseLayer):
                 self.activation,
                 self.set_parallel_mode,
                 self.tensor_parallel,
+                self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
             )
