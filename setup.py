@@ -276,6 +276,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             if val not in l:
                 l.append(val)
 
+    def get_example_reqs(framework: str) -> List[str]:
+        example_reqs = []
+        for path, _, files in os.walk(f'examples/{framework}'):
+            if 'requirements.txt' in files:
+                with open(f'{path}/requirements.txt') as reqs_file:
+                    add_unique(example_reqs, reqs_file.read().splitlines())
+        return example_reqs
+
     # Requirements that may be installed outside of Python
     if not found_cmake():
         add_unique(setup_reqs, "cmake>=3.18")
@@ -286,14 +294,17 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if "pytorch" in frameworks():
         add_unique(install_reqs, ["torch", "flash-attn>=1.0.6,<=2.3.3,!=2.0.9,!=2.1.0"])
         add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision"])
+        add_unique(test_reqs, get_example_reqs("pytorch"))
     if "jax" in frameworks():
         if not found_pybind11():
             add_unique(setup_reqs, "pybind11")
         add_unique(install_reqs, ["jax", "flax>=0.7.1"])
         add_unique(test_reqs, ["numpy", "praxis"])
+        add_unique(test_reqs, get_example_reqs("jax"))
     if "paddle" in frameworks():
         add_unique(install_reqs, "paddlepaddle-gpu")
         add_unique(test_reqs, "numpy")
+        add_unique(test_reqs, get_example_reqs("paddle"))
 
     return setup_reqs, install_reqs, test_reqs
 
@@ -589,12 +600,46 @@ def setup_paddle_extension() -> setuptools.Extension:
     ext.name = "transformer_engine_paddle_pd_"
     return ext
 
+def find_auxiliary_packages(pkg_name, frameworks=frameworks()):
+    """
+    Find module names, paths and files for auxiliary packages that live outside
+    the TransformerEngine source and therefore cannot be found by `setuptools.find_packages()`.
+    """
+    pkgs = []
+    dirs = {}
+    data = {}
+    for framework in frameworks:
+        for path, _, files in os.walk(f'{pkg_name}/{framework}'):
+            # Construct module name for the auxiliary package
+            parts = path.split('/')
+            module = f'transformer_engine.{framework}.{pkg_name}'
+            for p in parts[2:]:
+                module += f'.{p}'
+            pkgs += [ module ]
+            # Redirect module to auxiliary directory outside TE source path
+            dirs.update( { module : path } )
+            # Include non-Python files (setuptools automatically skips over *.py files)
+            includes = [ f'*.*' ]
+            if '__init__.py' not in files:
+                # Python files need to be added manually for subpackages that are not PyModules
+                includes += [ f'*.py']
+            data.update( { module : includes } )
+    return pkgs, dirs, data
+
 def main():
 
     # Submodules to install
-    packages = setuptools.find_packages(
-        include=["transformer_engine", "transformer_engine.*"],
-    )
+    packages = setuptools.find_packages(include=['transformer_engine', 'transformer_engine.*'])
+    
+    # Add examples (importable)
+    examples_pkgs, package_dir, package_data = find_auxiliary_packages('examples')
+    packages += examples_pkgs
+    
+    # Add tests (not importable)
+    tests_pkgs, tests_dir, tests_data = find_auxiliary_packages('tests')
+    packages += tests_pkgs
+    package_dir.update(tests_dir)
+    package_data.update(tests_data)
 
     # Dependencies
     setup_requires, install_requires, test_requires = setup_requirements()
@@ -608,10 +653,12 @@ def main():
         ext_modules.append(setup_paddle_extension())
 
     # Configure package
-    setuptools.setup(
+    s = setuptools.setup(
         name="transformer_engine",
         version=te_version(),
         packages=packages,
+        package_dir=package_dir,
+        package_data=package_data,
         description="Transformer acceleration library",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
@@ -620,7 +667,6 @@ def main():
         extras_require={"test": test_requires},
         license_files=("LICENSE",),
     )
-
 
 if __name__ == "__main__":
     main()

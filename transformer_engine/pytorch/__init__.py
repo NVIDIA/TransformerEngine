@@ -29,3 +29,13 @@ from .te_onnx_extensions import (
     onnx_rmsnorm_fwd,
     onnx_rmsnorm_fwd_fp8
 )
+
+try:
+    # `pip install .` will move JAX examples to the installed TE/framework folder
+    from . import examples
+except ImportError as e:
+    try:
+        # if the examples are not here, then TE must be installed in editable/develop mode
+        from ...examples import pytorch as examples
+    except ImportError as e:
+        pass

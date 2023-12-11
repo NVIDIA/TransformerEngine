@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """Encoder training on multi-GPU with data parallelism"""
 import argparse
-import unittest
 from functools import partial
 
 import flax
@@ -363,30 +362,6 @@ def encoder_parser(args):
                         help="Use FP8 for inference and training without recalibration")
 
     return parser.parse_args(args)
-
-
-class TestEncoder(unittest.TestCase):
-    """Encoder unittests"""
-
-    gpu_has_fp8, reason = te.fp8.is_fp8_available()
-
-    @classmethod
-    def setUpClass(cls):
-        """Run 3 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3"])
-
-    def test_te_bf16(self):
-        """Test Transformer Engine with BF16"""
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
-
-    @unittest.skipIf(not gpu_has_fp8, reason)
-    def test_te_fp8(self):
-        """Test Transformer Engine with FP8"""
-        self.args.use_fp8 = True
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
-
 
 if __name__ == "__main__":
     train_and_evaluate(encoder_parser(None))
