@@ -18,11 +18,13 @@ from .base import (
 )
 
 from ..constants import FP8FwdTensors, FP8BwdTensors, GemmParallelModes, dist_group_type
-from ..cpp_extensions import gemm, fp8_gemm, cast_to_fp8, cast_transpose
+from ..cpp_extensions import gemm, fp8_gemm, cast_to_fp8, cast_transpose, transpose
 from ..distributed import (
+    allgather,
     allreduce,
     get_tp_group_and_world_size,
     identity,
+    reduce_scatter,
     track_rng_state,
     set_tensor_dist_attr,
     set_weight_tensor_dist_attr,
@@ -52,6 +54,7 @@ def _linear_fwd_fp8(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
 ):
@@ -59,6 +62,11 @@ def _linear_fwd_fp8(
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
     bias_dtype = get_bias_dtype(activation_dtype)
     bias = cast_if_needed(bias, bias_dtype)
+
+    if parallel_mode == "column" and sequence_parallel:
+        inputmat_total, _ = allgather(inputmat, tp_group)
+    else:
+        inputmat_total = inputmat
 
     if is_grad_enabled:
         weight_fp8, weight_t_fp8 = cast_transpose(
@@ -81,7 +89,7 @@ def _linear_fwd_fp8(
         fp8_meta["scaling_fwd"].scale_inv,
         weight_fp8_index,
         fp8_dtype_forward,
-        inputmat,
+        inputmat_total,
         fp8_meta["scaling_fwd"].scale_inv,
         inputmat_fp8_index,
         fp8_dtype_forward,
@@ -92,8 +100,9 @@ def _linear_fwd_fp8(
         use_split_accumulator=_2X_ACC_FPROP,
     )
 
-    # Row Parallel Linear
-    if parallel_mode == "row" and tensor_parallel:
+    if parallel_mode == "row" and sequence_parallel:
+        out, _ = reduce_scatter(out, tp_group)
+    elif parallel_mode == "row" and tensor_parallel:
         out, _ = allreduce(out, tp_group)
 
     return out, weight_t_fp8
@@ -111,10 +120,16 @@ def _linear_fwd_non_fp8(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     activation: str = "",
 ):
     """Non-FP8 path of Linear Fwd"""
+
+    if parallel_mode == "column" and sequence_parallel:
+        inputmat_total, _ = allgather(inputmat, tp_group)
+    else:
+        inputmat_total = inputmat
 
     # Layer parameters are initialized as float32 dtype by default.
     # Cast the parameters to activation_dtype if the current dtype
@@ -126,13 +141,13 @@ def _linear_fwd_non_fp8(
     if fp8_calibration:
         # amax of input
         fp8_meta["scaling_fwd"].amax_history[0, inputmat_fp8_index.value] = \
-            paddle.max(paddle.abs(inputmat)).item()
+            paddle.max(paddle.abs(inputmat_total)).item()
         # amax of weight
         fp8_meta["scaling_fwd"].amax_history[0, weight_fp8_index.value] = \
             paddle.max(paddle.abs(weight)).item()
 
     outputs = gemm(weight,
-                   inputmat,
+                   inputmat_total,
                    activation_dtype,
                    get_workspace(),
                    bias=bias,
@@ -144,8 +159,10 @@ def _linear_fwd_non_fp8(
         return out, gelu_out
 
     out, _, _ = outputs
-    # Row Parallel Linear
-    if parallel_mode == "row" and tensor_parallel:
+
+    if parallel_mode == "row" and sequence_parallel:
+        out, _ = reduce_scatter(out, tp_group)
+    elif parallel_mode == "row" and tensor_parallel:
         out, _ = allreduce(out, tp_group)
     return out
 
@@ -163,6 +180,7 @@ def _linear_fwd(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     is_grad_enabled: bool,
 ):
@@ -178,6 +196,7 @@ def _linear_fwd(
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             is_grad_enabled,
         )
@@ -194,6 +213,7 @@ def _linear_fwd(
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     return (
@@ -219,9 +239,20 @@ def _linear_bwd_fp8(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
     dgrad, wgrad, handle = None, None, None
+
+    # Overlap input AG with dgrad
+    inputmat_total = None
+    inputmat_t_total = None
+    if requires_wgrad and parallel_mode == "column" and sequence_parallel:
+        inputmat_total, handle = allgather(inputmat, tp_group, sync_op=not requires_dgrad)
+    else:
+        inputmat_total = inputmat
+        inputmat_t_total = inputmat_t
+
     fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
     fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
     if requires_dgrad:
@@ -238,13 +269,21 @@ def _linear_bwd_fp8(
             get_workspace(),
             use_split_accumulator=_2X_ACC_DGRAD,
         )
-        if parallel_mode == "column" and tensor_parallel:
+
+        # Overlap dgrad-RS/AR with wgrad
+        if parallel_mode == "column" and sequence_parallel:
+            if handle is not None:
+                handle.wait()
+            dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
+        elif parallel_mode == "column" and tensor_parallel:
             dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
 
     if requires_wgrad:
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
+            if inputmat_t_total is None:
+                inputmat_t_total = transpose(inputmat_total, fp8_dtype_backward)
             wgrad = fp8_gemm(
-                inputmat_t,
+                inputmat_t_total,
                 fwd_scale_inverses,
                 inputmat_fp8_index,
                 fp8_dtype_forward,
@@ -258,7 +297,7 @@ def _linear_bwd_fp8(
             )
         else:
             wgrad, _, _ = gemm(
-                inputmat,
+                inputmat_total,
                 grad_output,
                 activation_dtype,
                 get_workspace(),
@@ -282,6 +321,7 @@ def _linear_bwd_non_fp8(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
     gelu_input: Union[paddle.Tensor, None] = None,
     activation: str = "",
@@ -290,6 +330,14 @@ def _linear_bwd_non_fp8(
     Performs Linear Backward. Optionally, fuses GELU backward and dbias.
     """
     dgrad, wgrad, bgrad, handle = None, None, None, None
+
+    # Overlap input AG with dgrad
+    inputmat_total = None
+    if requires_wgrad and parallel_mode == "column" and sequence_parallel:
+        inputmat_total, handle = allgather(inputmat, tp_group, sync_op=not requires_dgrad)
+    else:
+        inputmat_total = inputmat
+
     if requires_dgrad:
         dgrad, _, _ = gemm(
             weight,
@@ -301,12 +349,17 @@ def _linear_bwd_non_fp8(
             gelu_input=gelu_input,
             grad=True,
         )
-        if parallel_mode == "column" and tensor_parallel:
+        # Overlap dgrad-RS/AR with wgrad
+        if parallel_mode == "column" and sequence_parallel:
+            if handle is not None:
+                handle.wait()
+            dgrad, handle = reduce_scatter(dgrad, tp_group, sync_op=False)
+        elif parallel_mode == "column" and tensor_parallel:
             dgrad, handle = allreduce(dgrad, tp_group, sync_op=False)
 
     if requires_wgrad:
         wgrad, bgrad, _ = gemm(
-            inputmat,
+            inputmat_total,
             grad_output,
             activation_dtype,
             get_workspace(),
@@ -343,6 +396,7 @@ def _linear_bwd(
     activation_dtype: paddle.dtype,
     parallel_mode: Union[str, None],
     tensor_parallel: bool,
+    sequence_parallel: bool,
     tp_group: Union[dist_group_type, None],
 ):
     dgrad, wgrad, bgrad = None, None, None
@@ -364,6 +418,7 @@ def _linear_bwd(
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     else:
@@ -377,6 +432,7 @@ def _linear_bwd(
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
         )
     return dgrad, wgrad, bgrad
@@ -399,6 +455,7 @@ class _Linear(paddle.autograd.PyLayer):
         is_grad_enabled: bool,
         parallel_mode: Union[str, None],
         tensor_parallel: bool,
+        sequence_parallel: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
     ) -> paddle.Tensor:
@@ -413,31 +470,24 @@ class _Linear(paddle.autograd.PyLayer):
         inputmat_no_fp8 = inputmat
 
         # FP8 casting
+        inputmat_t = None
         if fp8_enabled:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-
-            if not fp8_meta["recipe"].override_linear_precision.wgrad:
-                if is_grad_enabled:
-                    inputmat, inputmat_t = cast_transpose(
-                        inputmat,
-                        fp8_meta["scaling_fwd"],
-                        FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                    )
-                else:
-                    inputmat = cast_to_fp8(
-                        inputmat,
-                        fp8_meta["scaling_fwd"],
-                        FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                    )
-            else:
-                inputmat, inputmat_t = cast_to_fp8(
+            if (not fp8_meta["recipe"].override_linear_precision.wgrad and is_grad_enabled
+                    and not sequence_parallel):
+                inputmat, inputmat_t = cast_transpose(
                     inputmat,
                     fp8_meta["scaling_fwd"],
                     FP8FwdTensors.GEMM1_INPUT,
                     fp8_dtype_forward,
-                ), None
+                )
+            else:
+                inputmat = cast_to_fp8(
+                    inputmat,
+                    fp8_meta["scaling_fwd"],
+                    FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                )
 
         # GEMM Fwd
         out, weight_t_fp8 = _linear_fwd(
@@ -453,16 +503,21 @@ class _Linear(paddle.autograd.PyLayer):
             activation_dtype,
             parallel_mode,
             tensor_parallel,
+            sequence_parallel,
             tp_group,
             is_grad_enabled,
         )
 
         if is_grad_enabled:
-            fp8_wgrad = fp8_enabled and not fp8_meta["recipe"].override_linear_precision.wgrad
+            saved_inputmat = None
+            if fp8_enabled and sequence_parallel:
+                saved_inputmat = inputmat
+            else:
+                saved_inputmat = inputmat_no_fp8
             save_for_backward_allow_none(
                 ctx,
-                inputmat_no_fp8 if not weight.stop_gradient and not fp8_wgrad else None,
-                inputmat_t if not weight.stop_gradient and fp8_wgrad else None,
+                saved_inputmat,
+                inputmat_t,
                 weight,
                 weight_t_fp8 if fp8_enabled else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8_enabled else None,
@@ -474,6 +529,7 @@ class _Linear(paddle.autograd.PyLayer):
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tensor_parallel = tensor_parallel
+            ctx.sequence_parallel = sequence_parallel
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = not inp.stop_gradient
@@ -503,7 +559,8 @@ class _Linear(paddle.autograd.PyLayer):
                 grad_output_c,
                 grad_output_t,
                 bgrad,
-            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_output)
+            ) = TransformerEngineBaseLayer.grad_output_preprocess(ctx, grad_output,
+                                                                  ctx.parallel_mode == "row")
 
             dgrad, wgrad, bgrad_ = _linear_bwd(
                 inputmat,
@@ -525,6 +582,7 @@ class _Linear(paddle.autograd.PyLayer):
                 ctx.activation_dtype,
                 ctx.parallel_mode,
                 ctx.tensor_parallel,
+                ctx.sequence_parallel,
                 ctx.tp_group,
             )
 
@@ -580,6 +638,7 @@ class Linear(TransformerEngineBaseLayer):
         weight_attr: Union[paddle.ParamAttr, None] = None,
         bias_attr: Union[paddle.ParamAttr, None, bool] = None,
         parallel_mode: Optional[str] = None,
+        sequence_parallel: bool = False,
         tp_group: Union[dist_group_type, None] = None,
         backend: str = 'transformer_engine',
     ) -> None:
@@ -604,6 +663,8 @@ class Linear(TransformerEngineBaseLayer):
             self.out_features = divide(self.out_features, self.tp_size)
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
+
+        self.sequence_parallel = self.tensor_parallel and sequence_parallel
 
         # Initialize weight parameter
         with track_rng_state(enable=self.tensor_parallel):
@@ -665,6 +726,7 @@ class Linear(TransformerEngineBaseLayer):
                 paddle.is_grad_enabled(),
                 self.parallel_mode,
                 self.tensor_parallel,
+                self.sequence_parallel,
                 self.tp_group,
                 self.tp_size,
             )

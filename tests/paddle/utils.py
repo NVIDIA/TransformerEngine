@@ -40,9 +40,15 @@ def assert_allclose(actual,
                     verbose=True):
     """Compare two input paddle tensors"""
     if isinstance(actual, paddle.Tensor):
-        actual = paddle.cast(actual, 'float32').numpy()
+        actual = paddle.cast(actual, 'float32')
     if isinstance(desired, paddle.Tensor):
-        desired = paddle.cast(desired, 'float32').numpy()
+        desired = paddle.cast(desired, 'float32')
+    if len(actual.shape) == 0:
+        actual = actual.item()
+        desired = desired.item()
+    else:
+        actual = actual.numpy()
+        desired = desired.numpy()
     np.testing.assert_allclose(actual, desired, rtol, atol, equal_nan, err_msg, verbose)
 
 
@@ -59,6 +65,7 @@ def is_devices_enough(required):
 
 def set_random_seed(seed):
     """Set random seed for reproducability."""
+    fleet.meta_parallel.model_parallel_random_seed(seed)
 
     hcg = fleet.get_hybrid_communicate_group()
     if paddle.distributed.get_world_size() > 1:
