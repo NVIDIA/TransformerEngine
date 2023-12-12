@@ -32,5 +32,5 @@ from .te_onnx_extensions import (
 try:
     import torch
     torch._dynamo.config.error_on_nested_jit_trace = False
-except:
+except: # pylint: disable=bare-except
     pass
