@@ -80,7 +80,7 @@ class TestLinearTp(unittest.TestCase):
             grad_input = input_parallel.grad
         return loss, grad_input
 
-    def _test_column_parallel_layer(self):
+    def test_column_parallel_layer(self):
         """Tests column parallel linear"""
         set_random_seed(1024)
         layer_te = te.Linear(
@@ -124,7 +124,7 @@ class TestLinearTp(unittest.TestCase):
             assert_allclose(loss_tp, loss_ref, rtol=self.rtol, atol=self.atol)
             assert_allclose(grad_input, grad_input_ref, rtol=self.rtol, atol=self.atol)
 
-    def _test_row_parallel_layer(self):
+    def test_row_parallel_layer(self):
         """Tests row parallel linear"""
         set_random_seed(1024)
         layer_te = te.Linear(

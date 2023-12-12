@@ -75,6 +75,16 @@ class TestGroupSharding(TestDistributed):
         self.run_2gpu(str(test_root / 'parallel_tests' / 'group_sharding.py'))
 
 
+class TestParallelAttention(TestDistributed):
+    """Test MultiHeadAttention Layer in Parallel mode"""
+
+    @unittest.skipIf(not is_devices_enough(2), "TestParallelAttention needs 2 GPUs")
+    @unittest.skipIf(not gpu_has_fp8, reason)
+    def test_attention_tp(self):
+        """Tests TransMultiHeadAttentionformer Layer with tensor parallel in BF16"""
+        self.run_2gpu(str(test_root / 'parallel_tests' / 'attention_tp.py'))
+
+
 class TestParallelTransformerLayer(TestDistributed):
     """Test Transformer Layer in Parallel mode"""
 

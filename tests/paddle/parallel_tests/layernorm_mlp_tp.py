@@ -63,7 +63,8 @@ class TestLayerNormMLPTp(unittest.TestCase):
         input_parallel.stop_gradient = False
         out = layer(input_parallel)
         if gather_output:
-            total_out = mp_ops._c_concat(out, group=self.tp_group)
+            # Need to concat on the first dim, while _c_concat concats on the last dim
+            total_out = mp_ops._c_concat(out.T, group=self.tp_group).T
         else:
             total_out = out
         loss = total_out.mean()
