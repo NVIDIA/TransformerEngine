@@ -24,8 +24,8 @@ variables:
     RUN_L3_TESTS: 0
     API_LOGGING: 0
     VIRTUAL: 0
-    JOB_START_STRING: "=== JOB START ===\n"
-    JOB_END_STRING: "\n=== JOB END ==="
+    JOB_START_STRING: "=== JOB START ==="
+    JOB_END_STRING: "=== JOB END ==="
 
     # the following will be overridden by jobs of the pipeline that actually need to check out the sources
     GIT_STRATEGY: none
@@ -203,7 +203,7 @@ create_branch:
       FRAMEWORK: pytorch
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
-    - echo -e ${JOB_START_STRING}
+    - echo ${JOB_START_STRING}
     - bash docker-build.sh --pyver=${PYVER}
                            --mode=b --push
                            $(test "$VIRTUAL" -eq 1 && echo "--virtual")
@@ -211,7 +211,7 @@ create_branch:
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
                            $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
-    - echo -e ${JOB_END_STRING}
+    - echo ${JOB_END_STRING}
     tags:
     - builder
     rules:
@@ -386,8 +386,8 @@ paddle-py3-stage:
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              -w ${TEST_WORK_DIR}
              ${DEVEL_IMAGE_NAME_VERSIONED}
-             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo -e ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
-      echo -e ${JOB_END_STRING};
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
+      echo ${JOB_END_STRING};
       if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
       set +x;
       rm -rf logs/;
@@ -429,7 +429,7 @@ paddle-py3-stage:
                    --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
                    --build-arg "GIT_SHA=${GIT_SHA}"
                    -f Dockerfile.docs .
-    - echo -e ${JOB_START_STRING}
+    - echo ${JOB_START_STRING}
     - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
       set -x &&
       docker run $(eval ${NV_DOCKER_ARGS})
@@ -438,7 +438,7 @@ paddle-py3-stage:
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              $(eval echo ${DOCS_IMAGE_NAME})
              /bin/bash -ec "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
-      echo -e ${JOB_END_STRING};
+      echo ${JOB_END_STRING};
       set +x;
       pkill -HUP sleep || true;
       test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
