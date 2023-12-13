@@ -57,7 +57,7 @@ def dequantize(x, dq_dtype, scale_inv):
 
 
 # Apply jit to guarantee correctness of FP8 GEMM.
-@partial(jax.jit, static_argnums=(4, 5))
+@partial(jax.jit, static_argnums=(4, 5, 6))
 def fp8_dot_impl(
         q_lhs: jnp.ndarray,
         q_rhs: jnp.ndarray,
