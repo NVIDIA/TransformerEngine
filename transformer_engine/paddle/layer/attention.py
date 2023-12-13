@@ -577,9 +577,20 @@ class MultiHeadAttention(paddle.nn.Layer):
                                   backprop.
         """
 
-        # hidden_states: [b, s_q, hidden_size]
         if self.attn_mask_type != "causal" and attention_mask is not None:
             assert (attention_mask.dtype == paddle.bool), "Attention mask must be a boolean tensor"
+
+        input_dim = len(hidden_states.shape)
+        if input_dim == 2:
+            # hidden_states: [b * s_q, hidden_size]
+            # need to get max_seq_len from attention_mask
+            assert attention_mask is not None
+            max_seq_len = attention_mask.shape[-1]
+        elif input_dim == 3:
+            # hidden_states: [b, s_q, hidden_size]
+            max_seq_len = hidden_states.shape[1]
+        else:
+            raise ValueError(f"hidden_states should have 2 or 3 dimensions, got {input_dim}.")
 
         if self.attention_type == "self":
             if self.input_layernorm:
@@ -593,7 +604,8 @@ class MultiHeadAttention(paddle.nn.Layer):
 
             # [b, s_q, 3 * hidden_size] --> [b, s_q, 3, num_heads, head_size]
             mixed_qkv_layer = mixed_qkv_layer.reshape(shape=[
-                0, 0, 3, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 3, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
@@ -622,7 +634,8 @@ class MultiHeadAttention(paddle.nn.Layer):
             mixed_kv_layer = self.key_value(encoder_output)
             # [b, s_kv, 2 * hidden_size] --> [b, s_kv, 2, num_heads, head_size]
             mixed_kv_layer = mixed_kv_layer.reshape(shape=[
-                0, 0, 2, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, 2, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
 
             if self.input_layernorm:
@@ -635,7 +648,8 @@ class MultiHeadAttention(paddle.nn.Layer):
                 query_layer = self.query_layer(hidden_states)
 
             query_layer = query_layer.reshape(shape=[
-                0, 0, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
+                -1, max_seq_len, self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
             ])
             with track_rng_state(enable=self.tensor_parallel, name=self.rng_state_name):
                 if recompute_core_attention:
@@ -659,8 +673,13 @@ class MultiHeadAttention(paddle.nn.Layer):
                         set_zero=set_zero,
                     )
 
-        context_layer = paddle.reshape(context_layer,
-                                       [0, 0, context_layer.shape[2] * context_layer.shape[3]])
+        if input_dim == 3:
+            context_layer = paddle.reshape(
+                context_layer, [-1, max_seq_len, context_layer.shape[2] * context_layer.shape[3]])
+        else:    # input_dim == 2
+            context_layer = paddle.reshape(context_layer,
+                                           [-1, context_layer.shape[2] * context_layer.shape[3]])
+
         # Output. [b, s, hidden]
         attention_output = self.proj(context_layer)
 
