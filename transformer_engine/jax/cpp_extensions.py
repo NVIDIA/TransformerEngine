@@ -22,7 +22,11 @@ from jax.interpreters.mlir import ir, dtype_to_ir_type
 from jax.sharding import PartitionSpec, NamedSharding
 from jax._src.interpreters import batching
 from jax._src import dispatch
-jax.config.update('jax_require_devices_during_lowering', False)
+try:
+    # TE-specific flag in JAX nightlies. Will be removed when JAX lowering changes are upstreamed.
+    jax.config.update('jax_require_devices_during_lowering', False)
+except AttributeError:
+    pass
 
 try:
     from jaxlib.hlo_helpers import custom_call
