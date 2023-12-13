@@ -82,10 +82,10 @@ pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, 
 }
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t batch, size_t num_head, size_t q_max_seqlen, size_t kv_max_seqlen, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t batch, size_t num_head, size_t num_gqa_groups, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, DType dtype, bool is_training) {
-    return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, q_max_seqlen, kv_max_seqlen,
+    return PackOpaque(CustomCallFusedAttnDescriptor{batch, num_head, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
                                                     head_dim, scaling_factor, dropout_probability,
                                                     bias_type, mask_type, dtype, is_training});
 }
@@ -768,6 +768,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
@@ -778,6 +779,9 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
+
+    NVTE_CHECK(num_head == num_gqa_groups,
+               "num_head should be equal to num_gqa_groups in the qkvpacked attention");
 
     auto dtype = descriptor.dtype;
     auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
@@ -801,7 +805,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_head, num_head,
+        mask_type, dropout_probability, num_head, num_gqa_groups,
         q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
@@ -853,6 +857,7 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
@@ -863,6 +868,9 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
+
+    NVTE_CHECK(num_head == num_gqa_groups,
+               "num_head should be equal to num_gqa_groups in the qkvpacked attention");
 
     auto dtype = descriptor.dtype;
     auto qkv_shape = std::vector<size_t>{batch * q_max_seqlen, 3, num_head, head_dim};
@@ -941,6 +949,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
@@ -951,7 +960,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
-    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_gqa_groups, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
     // input tensors
@@ -978,7 +987,7 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, num_head, num_head,
+        mask_type, dropout_probability, num_head, num_gqa_groups,
         q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
@@ -1035,6 +1044,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
+    auto num_gqa_groups = descriptor.num_gqa_groups;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
@@ -1045,7 +1055,7 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
-    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
+    auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_gqa_groups, head_dim};
     auto output_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
