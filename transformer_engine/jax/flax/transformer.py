@@ -321,6 +321,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
     head_dim: int
     num_heads: int
+    num_gqa_groups: int | None = None
     dropout_rate: float = 0.
     dropout_rng_name: str = 'dropout'
     layernorm_type: str = "layernorm"
@@ -342,6 +343,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_heads
         super().__post_init__()
 
     @nn.compact
@@ -428,6 +431,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                              "supported attn_mask_type = {'causal', 'padding'}")
 
         is_self_attn = (inputs_q is inputs_kv)
+        is_gqa = (self.num_heads != self.num_gqa_groups)
+        is_qkvpack = (is_self_attn and not is_gqa)
         qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
@@ -436,22 +441,13 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
 
-        def _check_seqlen(seqlen):
-            return seqlen % 64 == 0
-
-        def _check_head_dim(head_dim):
-            return head_dim in [64, 128]
-
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
                                                                self.dropout_rate,
-                                                               self.num_heads, self.num_heads,
+                                                               self.num_heads, self.num_gqa_groups,
                                                                q_seqlen, kv_seqlen, self.head_dim)
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
-            canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
-            _check_seqlen(q_seqlen) and _check_seqlen(kv_seqlen) and \
-            _check_head_dim(self.head_dim) and \
             has_fused_attn_kernel and \
             enable_fused_attn
 
@@ -464,17 +460,6 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                           f"but got {self.transpose_batch_sequence}, "
             if not self.fuse_qkv:
                 reason += f"fuse_qkv=True is required but got {self.fuse_qkv}, "
-            if canonicalize_dtype not in [jnp.bfloat16, jnp.float16]:
-                reason += f"dtype in [BF16, FP16] is required " \
-                          f"but got dtype={canonicalize_dtype}, "
-            if not _check_seqlen(q_seqlen):
-                reason += f"q_seqlen % 64 == 0 is required " \
-                          f"but got {q_seqlen=}, "
-            if not _check_seqlen(kv_seqlen):
-                reason += f"kv_seqlen % 64 == 0 is required " \
-                          f"but got {kv_seqlen=}, "
-            if not _check_head_dim(self.head_dim):
-                reason += f"head_dim should be 64 or 128 but got {self.head_dim}, "
             if not has_fused_attn_kernel:
                 reason += "no fused attention kernel is available, "
 
@@ -484,7 +469,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         residual = inputs_q
         if self.fuse_qkv:
-            if is_self_attn:
+            if is_qkvpack:
                 qkv_proj, ln_out = LayerNormDenseGeneral(
                     enable_layernorm=not self.output_layernorm,
                     layernorm_type=self.layernorm_type,
@@ -526,7 +511,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     kernel_init=query_init,
                     name='query')(inputs_q)
                 kv_proj = DenseGeneral(axis=-1,
-                                       features=(2, self.num_heads * self.head_dim),
+                                       features=(2, self.num_gqa_groups * self.head_dim),
                                        transpose_batch_sequence=self.transpose_batch_sequence,
                                        kernel_axes=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
                                        kernel_init=kv_init,
@@ -542,7 +527,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             kv_projection = functools.partial(
                 DenseGeneral,
                 axis=-1,
-                features=self.num_heads * self.head_dim,
+                features=self.num_gqa_groups * self.head_dim,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 kernel_axes=(W_FSDP_AXES, W_TP_AXES),
                 use_bias=self.use_bias,
@@ -583,9 +568,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             query = checkpoint_name(query, 'query_proj')
             key = checkpoint_name(key, 'key_proj')
             value = checkpoint_name(value, 'value_proj')
-            query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
-            key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
-            value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
+            query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
+            key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+            value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
             qkv_sharding_constraint = \
                 (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
                 if self.transpose_batch_sequence \
@@ -650,7 +635,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 # ensure the old key never used
                 del dropout_rng
 
-            if is_self_attn:
+            if is_qkvpack:
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
                 qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                            HIDDEN_AXES)
@@ -667,7 +652,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             else:
                 assert bias is None
                 query = query.reshape((*query.shape[:-1], self.num_heads, self.head_dim))
-                kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_heads, self.head_dim))
+                kv_proj = kv_proj.reshape((*kv_proj.shape[:-1], self.num_gqa_groups, self.head_dim))
                 q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
                 kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                           HIDDEN_AXES)
@@ -961,6 +946,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     hidden_size: int = 512
     mlp_hidden_size: int = 2048
     num_attention_heads: int = 8
+    num_gqa_groups: int | None = None
     layernorm_type: str = 'layernorm'
     layernorm_epsilon: float = 1e-6
     zero_centered_gamma: bool = False
@@ -995,6 +981,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         if self.mlp_kernel_init is None:
             self.mlp_kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in',
                                                                     'truncated_normal')
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
 
     @nn.compact
@@ -1091,6 +1079,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             num_heads=self.num_attention_heads,
             dtype=self.dtype,
             head_dim=head_dim,
+            num_gqa_groups=self.num_gqa_groups,
             transpose_batch_sequence=self.transpose_batch_sequence,
             dropout_rate=self.attention_dropout,
             dropout_rng_name=self.dropout_rng_name,
@@ -1141,6 +1130,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 num_heads=self.num_attention_heads,
                 dtype=self.dtype,
                 head_dim=head_dim,
+                num_gqa_groups=self.num_gqa_groups,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 dropout_rate=self.attention_dropout,
                 dropout_rng_name=self.dropout_rng_name,
