@@ -11,6 +11,8 @@ import jax.numpy as jnp
 from .cpp_extensions import cast_transpose
 from .fp8 import FP8Helper, FP8MetaPackage
 
+Precision = jax.lax.Precision
+
 
 def type_safe_dot_general(
     x,
@@ -62,7 +64,8 @@ def fp8_dot_impl(
         lhs_scale_inv: jnp.ndarray,
         rhs_scale_inv: jnp.ndarray,
         ctype: jnp.dtype,    # computing type
-        contracting_dims: Tuple[Sequence[int], Sequence[int]]):
+        contracting_dims: Tuple[Sequence[int], Sequence[int]],
+        precision: Precision = None):
     """
     FP8 GEMM for XLA pattern match
     """
@@ -71,7 +74,14 @@ def fp8_dot_impl(
     lhs = dequantize(q_lhs, ctype, lhs_scale_inv)
     rhs = dequantize(q_rhs, ctype, rhs_scale_inv)
 
-    return jax.lax.dot_general(lhs, rhs, dim_nums)
+    return jax.lax.dot_general(lhs, rhs, dim_nums, precision=precision)
+
+
+def get_precision_of_fp8_dot(enable_2xACC: bool):
+    """
+    Get Precision of FP8 DOT.
+    """
+    return jax.lax.Precision.HIGHEST if enable_2xACC else jax.lax.Precision.DEFAULT
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8))
@@ -116,7 +126,8 @@ def _fp8_dot_fwd_rule(
     casted_kernel, updated_kernel_amax = quantize(kernel, fwd_dtype, kernel_scale)
 
     output = fp8_dot_impl(casted_x, casted_kernel, x_scale_inv, kernel_scale_inv, x.dtype,
-                          (lhs_contracting_dims, rhs_contracting_dims))
+                          (lhs_contracting_dims, rhs_contracting_dims),
+                          get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     ctx = (casted_x, casted_kernel, fp8_max, amax, scale, scale_inv, updated_x_amax,
            updated_kernel_amax, x.shape, kernel.shape)
@@ -144,14 +155,16 @@ def _fp8_dot_bwd_rule(fwd_dtype, bwd_dtype, contracting_dims, ctx, grad):    # p
     gt_constracting_dim = tuple(range(grad.ndim - len(x_constracting_dim), grad.ndim))
     x_scale_inv = scale_inv[gemm_x_idx]
     wgrad = fp8_dot_impl(casted_x, casted_grad_t, x_scale_inv, grad_scale_inv, grad.dtype,
-                         (x_constracting_dim, gt_constracting_dim))
+                         (x_constracting_dim, gt_constracting_dim),
+                         get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     g_constracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(rhs_contracting_dims), grad.ndim))
     k_constracting_dim = tuple(range(len(rhs_contracting_dims), len(kernel_shape)))
     kernel_scale_inv = scale_inv[gemm_kernel_idx]
     dgrad = fp8_dot_impl(casted_grad, casted_kernel, grad_scale_inv, kernel_scale_inv, grad.dtype,
-                         (g_constracting_dim, k_constracting_dim))
+                         (g_constracting_dim, k_constracting_dim),
+                         get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     amax = amax.at[gemm_x_idx, 0].set(updated_x_amax)
     amax = amax.at[gemm_kernel_idx, 0].set(updated_kernel_amax)

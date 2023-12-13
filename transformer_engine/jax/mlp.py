@@ -14,7 +14,7 @@ from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
-from .dot import fp8_dot_impl, quantize
+from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
 
@@ -177,7 +177,8 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
 
     # (batch..., hidden_in) x (hidden_in, 2, hidden_out)
     dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
-                                (x_contracting_dims, (0,)))
+                                (x_contracting_dims, (0,)),
+                                get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
 
@@ -198,7 +199,8 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
 
     # (batch..., hidden_in) x (hidden_out, hidden_in)
     dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kernel_2, geglu_out_scale_inv,
-                                kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)))
+                                kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)),
+                                get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kernel_1,
            casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
@@ -237,12 +239,14 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     # (hidden, batch...,) x (hidden, batch...)
     gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
     wgrad_2 = fp8_dot_impl(casted_geglu_out_t, casted_grad_t, gemm2_x_scale_inv, grad_scale_inv,
-                           grad.dtype, (xt_batch_dims, xt_batch_dims))
+                           grad.dtype, (xt_batch_dims, xt_batch_dims),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
     dgrad_2 = fp8_dot_impl(casted_grad, casted_kernel_2, grad_scale_inv, kernel_2_scale_inv,
-                           grad.dtype, (x_contracting_dims, (1,)))
+                           grad.dtype, (x_contracting_dims, (1,)),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     gemm1_x_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
@@ -265,17 +269,16 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     xt_batch_dims_plus_act_dim = tuple(i + 1 for i in xt_batch_dims)
     gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dgeglu_t, gemm1_x_scale_inv, dgeglu_scale_inv,
-                           grad.dtype, (xt_batch_dims, xt_batch_dims_plus_act_dim))
+                           grad.dtype, (xt_batch_dims, xt_batch_dims_plus_act_dim),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., 2, hidden_out) x (hidden_in, 2, hidden_out)
     x_contracting_dims_plus_act_dim = (min(x_contracting_dims),) + tuple(
         i + 1 for i in x_contracting_dims)
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
     dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kernel_1, dgeglu_scale_inv, kernel_1_scale_inv,
-                           grad.dtype, (x_contracting_dims_plus_act_dim, (
-                               1,
-                               2,
-                           )))
+                           grad.dtype, (x_contracting_dims_plus_act_dim, (1, 2)),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dgrad_1,
