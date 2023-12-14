@@ -310,14 +310,10 @@ paddle-py3-devel:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
-      SQRL_REGISTRY_URL: "sqrl.nvidia.com:443"
-      TARGET_TOKEN_SQRL: "nvadmin"
-      TARGET_REGISTRY_USER_SQRL: "nvadmin"
       FRAMEWORK: pytorch
     dependencies: []
     script:
     - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
-    - echo "${TARGET_TOKEN_SQRL}" | (set -x && docker login -u "${TARGET_REGISTRY_USER_SQRL}" --password-stdin "${SQRL_REGISTRY_URL}")
     - bash docker-build.sh --pyver=${PYVER}
                            --mode=s --push
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
@@ -336,8 +332,6 @@ paddle-py3-devel:
     - if: $FRAMEWORK == "paddle" && $BUILD_PADDLE == "0"
       when: never
     - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
-    - if: $CI_COMMIT_BRANCH =~ /sqrl/
-    - if: $CI_COMMIT_BRANCH =~ /sqrl_registry/
 
 pytorch-py3-stage:
     stage: build stage
