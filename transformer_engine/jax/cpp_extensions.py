@@ -18,7 +18,6 @@ from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 from jax.lib import xla_client
 from jax import core, dtypes
@@ -33,12 +32,6 @@ from .sharding import all_reduce_max_along_all_axes_except_PP
 from .sharding import all_reduce_sum_along_dp_fsdp
 from .sharding import get_all_mesh_axes, num_of_devices
 from .sharding import get_padded_spec as te_get_padded_spec
-
-try:
-    # TE-specific flag in JAX nightlies. Will be removed when JAX lowering changes are upstreamed.
-    jax.config.update('jax_require_devices_during_lowering', False)
-except AttributeError:
-    pass
 
 try:
     from jaxlib.hlo_helpers import custom_call
