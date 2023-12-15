@@ -199,6 +199,8 @@ if torch.cuda.is_bf16_supported():
 param_types_lean = [torch.bfloat16]
 
 def get_swa(seq_q, seq_kv, w=None):
+    """Generate a random sliding window size (left, right) if w is None,
+    and create its equivalent attention mask in [seq_q, seq_kv] shape"""
     if w is None:
         w = torch.randint(0, seq_kv, [2], dtype=torch.int32, device="cuda")
     m = torch.ones(seq_q, seq_kv, dtype=torch.bool, device="cuda")
