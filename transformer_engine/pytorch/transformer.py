@@ -619,7 +619,6 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
-                attn_mask_type=self_attn_mask_type,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,

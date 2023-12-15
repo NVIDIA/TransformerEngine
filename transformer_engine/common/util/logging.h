@@ -64,6 +64,19 @@
     }                                                                   \
   } while (false)
 
+#define NVTE_CHECK_CUDNN_FE(expr)                                       \
+  do {                                                                  \
+    const auto error = (expr);                                          \
+    if (error.is_bad()) {                                               \
+      NVTE_ERROR("cuDNN Error: ",                                       \
+                 error.err_msg,                                         \
+                 ". "                                                   \
+                 "For more information, enable cuDNN error logging "    \
+                 "by setting CUDNN_LOGERR_DBG=1 and "                   \
+                 "CUDNN_LOGDEST_DBG=stderr in the environment.");       \
+    }                                                                   \
+  } while (false)
+
 #define NVTE_CHECK_NVRTC(expr)                                  \
   do {                                                          \
     const nvrtcResult status_NVTE_CHECK_NVRTC = (expr);         \

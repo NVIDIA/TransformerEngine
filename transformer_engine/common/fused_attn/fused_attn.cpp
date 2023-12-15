@@ -131,11 +131,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                 || (cudnn_runtime_version >= 8907))
             && ((head_dim <= 128) && (head_dim % 8 == 0))
             && ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)
-                || ((cudnn_runtime_version >= 8906 && sm_arch_ == 90)
+                || ((cudnn_runtime_version >= 8906)
                     && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS
                         || (bias_type == NVTE_Bias_Type::NVTE_ALIBI
-                            && attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK)
-                        || bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)))
+                            && attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK
+                            && sm_arch_ == 90)
+                        || (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS
+                            && sm_arch_ == 90))))
             && ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
                 || ((cudnn_runtime_version >= 8906)
                     && (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK
