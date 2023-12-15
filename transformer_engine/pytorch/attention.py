@@ -1251,23 +1251,22 @@ def _get_qkv_layout(
 
 def check_set_window_size(
         attn_mask_type: str,
-        window_size_in: Tuple[int, int] = None,
-        window_size_out: Tuple[int, int] = None,
+        window_size: Tuple[int, int] = None,
     ):
     """Check if sliding window size is compliant with mask type and if not,
     assert or set it to the appropriate size
     """
     if "causal" in attn_mask_type:
-        if window_size_in is None:
-            window_size_out = (-1, 0)
+        if window_size is None:
+            window_size = (-1, 0)
         else:
             assert (
-                window_size_in[1] == 0
+                window_size[1] == 0
             ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
     else:
-        if window_size_in is None:
-            window_size_out = (-1, -1)
-    return window_size_out
+        if window_size is None:
+            window_size = (-1, -1)
+    return window_size
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
@@ -1313,7 +1312,7 @@ class FlashAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
-        window_size = check_set_window_size(attn_mask_type, window_size, window_size)
+        window_size = check_set_window_size(attn_mask_type, window_size)
 
         assert (
             query_layer.dtype in [torch.float16, torch.bfloat16]
@@ -1971,7 +1970,7 @@ class DotProductAttention(torch.nn.Module):
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, window_size, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
         self.tp_size = tp_size if tp_group is None else get_distributed_world_size(tp_group)
         self.tp_group = tp_group
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -2200,7 +2199,7 @@ class DotProductAttention(torch.nn.Module):
             ), "Keys and values must have the same shape!"
 
         if attn_mask_type is not None:
-            window_size = check_set_window_size(attn_mask_type, window_size, window_size)
+            window_size = check_set_window_size(attn_mask_type, window_size)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         else:
@@ -2636,7 +2635,7 @@ class MultiheadAttention(torch.nn.Module):
 
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
-        self.window_size = check_set_window_size(attn_mask_type, window_size, self.window_size)
+        self.window_size = check_set_window_size(attn_mask_type, self.window_size)
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -2918,7 +2917,7 @@ class MultiheadAttention(torch.nn.Module):
         # hidden_states: [sq, b, h]
 
         if attn_mask_type is not None:
-            window_size = check_set_window_size(attn_mask_type, window_size, window_size)
+            window_size = check_set_window_size(attn_mask_type, window_size)
         if attn_mask_type is None:
             attn_mask_type = self.attn_mask_type
         if window_size is None:
