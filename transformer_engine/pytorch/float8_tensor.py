@@ -563,16 +563,21 @@ class Float8Tensor(torch.Tensor):
                     dst._data.copy_(src._data)
                     dst._scale_inv = src._scale_inv.clone()
                     if dst._fp8_meta is not None:
+                        if src._fp8_meta is None:
+                            src_min, src_max = src.from_float8().aminmax()
+                            src_amax = torch.maximum(-src_min, src_max)
+                        else:
+                            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                                forward=src._fp8_meta_forward,
+                            )
+                            fp8_meta_index = src._fp8_meta_index
+                            src_amax = src._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
                         fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                             forward=dst._fp8_meta_forward,
                         )
                         fp8_meta_index = dst._fp8_meta_index
-                        amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-                        src_min, src_max = src.from_float8().aminmax()
-                        torch.max(
-                            torch.cat([-src_min.reshape(1), src_max.reshape(1), amax.reshape(1)]),
-                            out=amax,
-                        )
+                        dst_amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
+                        torch.maximum(src_amax, dst_amax, out=dst_amax)
                 else:
                     dst.copy_(src.from_float8())
 
