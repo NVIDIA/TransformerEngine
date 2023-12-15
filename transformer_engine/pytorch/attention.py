@@ -2378,7 +2378,7 @@ class DotProductAttention(torch.nn.Module):
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and self.deterministic
             and self.device_compute_capability != (9, 0)):
-                use_fused_attention = False
+            use_fused_attention = False
 
         # Select FusedAttention on sm90 and FlashAttention on others for performance
         if (use_flash_attention
