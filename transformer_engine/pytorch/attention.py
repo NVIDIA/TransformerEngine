@@ -2005,8 +2005,8 @@ class DotProductAttention(torch.nn.Module):
         if _flash_attn_2_available and self.deterministic:
             self.use_flash_attention = False
             warnings.warn(
-                "Disabling usage of FlashAttention since version 2 does not support deterministic"
-                "execution. In order to use FA with deterministic behavior, please install"
+                "Disabling usage of FlashAttention since version 2 does not support deterministic "
+                "execution. In order to use FA with deterministic behavior, please install "
                 "FlashAttention version 1."
             )
 
@@ -2360,6 +2360,13 @@ class DotProductAttention(torch.nn.Module):
                 [FusedAttnBackend["F16_max512_seqlen"], FusedAttnBackend["F16_arbitrary_seqlen"]])
             use_fused_attention = (use_fused_attention
                                   and is_backend_avail)
+
+        # Filter: determinism.
+        if (use_fused_attention
+            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            and self.deterministic
+            and self.device_compute_capability != (9, 0)):
+                use_fused_attention = False
 
         # Select FusedAttention on sm90 and FlashAttention on others for performance
         if (use_flash_attention
