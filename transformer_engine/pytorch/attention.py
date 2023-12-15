@@ -51,7 +51,7 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 
 _flash_attn_version = packaging.version.Version(version("flash-attn"))
 _flash_attn_version_required = packaging.version.Version("1.0.6")
@@ -1742,6 +1742,7 @@ class FusedAttention(torch.nn.Module):
             if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
                 os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
+    @no_torch_dynamo()
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -2090,6 +2091,7 @@ class DotProductAttention(torch.nn.Module):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
+    @no_torch_dynamo(recursive=False)
     def forward(
         self,
         query_layer: torch.Tensor,
