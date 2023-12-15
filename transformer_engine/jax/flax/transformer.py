@@ -28,8 +28,12 @@ from ..fused_attn import AttnBiasType, AttnMaskType, QKVLayout
 from ..fused_attn import is_fused_attn_kernel_available
 from ..fused_attn import self_fused_attn, cross_fused_attn
 from ..softmax import SoftmaxType
-from ..sharding import global_mesh_resource, num_of_devices
-from ..sharding import with_sharding_constraint
+from ..sharding import num_of_devices
+from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
+from ..sharding import with_sharding_constraint_by_logical_axes
+from ..sharding import BATCH_AXES, SEQLEN_AXES, SEQLEN_TP_AXES, HEAD_AXES
+from ..sharding import HIDDEN_AXES, HIDDEN_TP_AXES, JOINED_AXES
+from ..sharding import W_NO_SHARD_AXES, W_FSDP_AXES, W_TP_AXES, W_JOINED_AXES
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -39,17 +43,6 @@ PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Preci
                                                                        lax.Precision]]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 LogicalRules = Sequence[Tuple[str, Union[str, None]]]
-
-BATCH_AXES = 'nvte_batch'
-SEQLEN_AXES = 'nvte_seqlen'
-HEAD_AXES = 'nvte_head'
-HIDDEN_AXES = 'nvte_hidden'
-HIDDEN_TP_AXES = 'nvte_hidden_tp'
-JOINED_AXES = 'nvte_joined'
-W_NO_SHARD_AXES = 'nvte_w_no_shard'
-W_FSDP_AXES = 'nvte_w_fsdp'
-W_TP_AXES = 'nvte_w_tp'
-W_JOINED_AXES = 'nvte_w_joined'
 
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:
@@ -102,36 +95,8 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         else:
             rules_map[key] = [val]
 
-    gsr = global_mesh_resource()
-
-    batch_dim_rule = []
-    if gsr.dp_resource is not None:
-        batch_dim_rule.append(gsr.dp_resource)
-    if gsr.fsdp_resource is not None and gsr.dp_resource != gsr.fsdp_resource:
-        batch_dim_rule.append(gsr.fsdp_resource)
-
-    if len(batch_dim_rule) <= 0:
-        batch_dim_rule = None
-    elif len(batch_dim_rule) == 1:
-        batch_dim_rule = batch_dim_rule[0]
-    else:
-        batch_dim_rule = tuple(batch_dim_rule)
-
-    te_logical_axis_rules = (
-        (BATCH_AXES, batch_dim_rule),
-        (SEQLEN_AXES, None),
-        (HEAD_AXES, gsr.tp_resource),
-        (HIDDEN_AXES, None),
-        (HIDDEN_TP_AXES, gsr.tp_resource),
-        (JOINED_AXES, None),
-        (W_NO_SHARD_AXES, None),
-        (W_FSDP_AXES, gsr.fsdp_resource),
-        (W_TP_AXES, gsr.tp_resource),
-        (W_JOINED_AXES, None),
-    )
-
     extended_rules = [*rules]
-    for item in te_logical_axis_rules:
+    for item in get_sharding_map_logic_axis_to_mesh_axis().items():
         key = item[0]
         val = item[1]
         if key in rules_map:
@@ -142,18 +107,6 @@ def extend_logical_axis_rules(rules: LogicalRules) -> LogicalRules:
         else:
             extended_rules.append(item)
     return tuple(extended_rules)
-
-
-def _with_sharding_constraint(x: Array, logical_axis_names: Shape):
-    assert len(x.shape) == len(logical_axis_names)
-    rules = extend_logical_axis_rules(tuple())
-    rules_dict = {}
-    for key, value in rules:
-        rules_dict[key] = value
-
-    mesh_axis_names = [rules_dict[name] for name in logical_axis_names]
-    pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
-    return with_sharding_constraint(x, pspec)
 
 
 def _merge_mask(func, *masks: Optional[Array]):
@@ -176,7 +129,10 @@ def combine_masks(*masks: Optional[Array], dtype: DType = jnp.float32):
 
 def combine_biases(*masks: Optional[Array]):
     """Combine attention biases."""
-    func = lambda a, b: a + b
+
+    def func(a, b):
+        return a + b
+
     return _merge_mask(func, *masks)
 
 
@@ -214,8 +170,8 @@ def core_attention(query: Array,
 
     attn_weights = checkpoint_name(attn_weights, 'logits')
 
-    attn_weights = _with_sharding_constraint(attn_weights,
-                                             (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
+    attn_weights = with_sharding_constraint_by_logical_axes(
+        attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
 
     # When a bias is present, the computation is performed as Softmax(attn_weights * scale + bias).
     # In this case, the scale can not fused into the Softmax module.
@@ -335,6 +291,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     dtype: DType = jnp.float32
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False    # computes logits in float32 for stability.
@@ -427,7 +384,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             raise ValueError(f"Unsupported {attn_mask_type=}, "
                              "supported attn_mask_type = {'causal', 'padding'}")
 
-        is_self_attn = (inputs_q is inputs_kv)
+        is_self_attn = inputs_q is inputs_kv
         qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
@@ -482,6 +439,22 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 f"Fused attention is not enabled. Because " \
                 f"{reason}fall back to unfused attention.")
 
+        def generate_batch_seqlen_logical_axes(is_sharded_seq):
+            sequence_dim = 0 if self.transpose_batch_sequence else 1
+            batch_dim = 1 - sequence_dim
+
+            axes = [None, None]
+
+            axes[batch_dim] = BATCH_AXES
+            axes[sequence_dim] = SEQLEN_TP_AXES if is_sharded_seq else SEQLEN_AXES
+            return tuple(axes)
+
+        inputs_logical_axes_maybe_sp = (*generate_batch_seqlen_logical_axes(
+            self.enable_sequence_parallel), HIDDEN_AXES)
+        inputs_logical_axes_no_sp = (*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES)
+
+        inputs_q = with_sharding_constraint_by_logical_axes(inputs_q, inputs_logical_axes_maybe_sp)
+
         residual = inputs_q
         if self.fuse_qkv:
             if is_self_attn:
@@ -501,6 +474,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     use_bias=self.use_bias,
                     bias_init=self.bias_init,
                     bias_axes=(W_JOINED_AXES, W_TP_AXES),
+                    layernorm_input_axes=inputs_logical_axes_maybe_sp,
+                    dot_input_axes=inputs_logical_axes_no_sp,
                     name='qkv',
                     dtype=self.dtype)(inputs_q)
                 qkv_proj = checkpoint_name(qkv_proj, 'combined_qkv_proj')
@@ -524,6 +499,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     bias_axes=(W_TP_AXES,),
                     dtype=self.dtype,
                     kernel_init=query_init,
+                    layernorm_input_axes=inputs_logical_axes_maybe_sp,
+                    dot_input_axes=inputs_logical_axes_no_sp,
                     name='query')(inputs_q)
                 kv_proj = DenseGeneral(axis=-1,
                                        features=(2, self.num_heads * self.head_dim),
@@ -566,6 +543,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 bias_axes=(W_TP_AXES,),
                 dtype=self.dtype,
                 kernel_init=query_init,
+                layernorm_input_axes=inputs_logical_axes_maybe_sp,
+                dot_input_axes=inputs_logical_axes_no_sp,
                 name='query')(inputs_q)
 
             if is_self_attn:
@@ -590,9 +569,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 (SEQLEN_AXES, BATCH_AXES, HEAD_AXES, HIDDEN_AXES) \
                 if self.transpose_batch_sequence \
                 else (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
-            query = _with_sharding_constraint(query, qkv_sharding_constraint)
-            key = _with_sharding_constraint(key, qkv_sharding_constraint)
-            value = _with_sharding_constraint(value, qkv_sharding_constraint)
+            query = with_sharding_constraint_by_logical_axes(query, qkv_sharding_constraint)
+            key = with_sharding_constraint_by_logical_axes(key, qkv_sharding_constraint)
+            value = with_sharding_constraint_by_logical_axes(value, qkv_sharding_constraint)
 
         if decode:
             is_initialized = self.has_variable('cache', 'cached_key')
@@ -654,7 +633,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 qkv_proj = qkv_proj.reshape((*qkv_proj.shape[:-1], self.num_heads, self.head_dim))
                 qkv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                            HIDDEN_AXES)
-                qkv_proj = _with_sharding_constraint(qkv_proj, qkv_sharding_constraint)
+                qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
+                                                                    qkv_sharding_constraint)
                 x = self_fused_attn(qkv_proj,
                                     bias,
                                     mask,
@@ -671,8 +651,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                 q_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, HEAD_AXES, HIDDEN_AXES)
                 kv_sharding_constraint = (BATCH_AXES, SEQLEN_AXES, JOINED_AXES, HEAD_AXES,
                                           HIDDEN_AXES)
-                query = _with_sharding_constraint(query, q_sharding_constraint)
-                kv_proj = _with_sharding_constraint(kv_proj, kv_sharding_constraint)
+                query = with_sharding_constraint_by_logical_axes(query, q_sharding_constraint)
+                kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
 
                 x = cross_fused_attn(query,
                                      kv_proj,
@@ -723,7 +703,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             (SEQLEN_AXES, BATCH_AXES, HIDDEN_TP_AXES) \
             if self.transpose_batch_sequence \
             else (BATCH_AXES, SEQLEN_AXES, HIDDEN_TP_AXES)
-        x = _with_sharding_constraint(x, attn_context_sharding_constraint)
+        x = with_sharding_constraint_by_logical_axes(x, attn_context_sharding_constraint)
 
         out = DenseGeneral(features=inputs_q.shape[-1],
                            transpose_batch_sequence=self.transpose_batch_sequence,
@@ -986,6 +966,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = False
+    enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
 
@@ -1053,6 +1034,16 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
 
+        def generate_batch_seqlen_logical_axes(is_shared_seq=None):
+            axes = [None, None]
+
+            is_shared_seq = self.enable_sequence_parallel if is_shared_seq is None \
+                            else is_shared_seq
+
+            axes[batch_dim] = BATCH_AXES
+            axes[sequence_dim] = SEQLEN_TP_AXES if is_shared_seq else SEQLEN_AXES
+            return tuple(axes)
+
         attn_bias = None
         if self.enable_relative_embedding:
             if self.relative_embedding is None:
@@ -1084,7 +1075,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         else:
             mha_name = 'self_attention'
 
-        inputs = _with_sharding_constraint(inputs, (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES))
+        inputs = with_sharding_constraint_by_logical_axes(
+            inputs, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         x, residual = MultiHeadAttention(
@@ -1092,6 +1084,7 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             dtype=self.dtype,
             head_dim=head_dim,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             dropout_rate=self.attention_dropout,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_attention_logits,
@@ -1124,6 +1117,11 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                               broadcast_dims=self.hidden_dropout_dims,
                               rng_collection=self.dropout_rng_name)(x, deterministic=deterministic)
 
+        x = with_sharding_constraint_by_logical_axes(
+            x, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+        residual = with_sharding_constraint_by_logical_axes(
+            residual, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+
         x = hidden_dropout(x, deterministic)
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(x.shape, batch_dim)
@@ -1137,11 +1135,15 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             assert encoded is not None, \
                 "encoded is required when layer_type == TransformerLayerType.DECODER."
 
+            x = with_sharding_constraint_by_logical_axes(
+                x, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+
             y, residual = MultiHeadAttention(
                 num_heads=self.num_attention_heads,
                 dtype=self.dtype,
                 head_dim=head_dim,
                 transpose_batch_sequence=self.transpose_batch_sequence,
+                enable_sequence_parallel=self.enable_sequence_parallel,
                 dropout_rate=self.attention_dropout,
                 dropout_rng_name=self.dropout_rng_name,
                 layernorm_type=self.layernorm_type,
@@ -1162,10 +1164,17 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                                                   encoded,
                                                   encoder_decoder_mask,
                                                   deterministic=deterministic)
+
+            y = with_sharding_constraint_by_logical_axes(
+                y, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+            residual = with_sharding_constraint_by_logical_axes(
+                residual, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+
             y = hidden_dropout(y, deterministic)
             mlp_input = y + residual
 
-        mlp_input = _with_sharding_constraint(mlp_input, (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES))
+        mlp_input = with_sharding_constraint_by_logical_axes(
+            mlp_input, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
         # MlpBlock
         residual = mlp_input
@@ -1190,12 +1199,20 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             bias_init=self.bias_init,
             bias_axes_1=(W_JOINED_AXES, W_TP_AXES),
             bias_axes_2=(W_NO_SHARD_AXES,),
+            layernorm_input_axes=(*generate_batch_seqlen_logical_axes(), HIDDEN_AXES),
+            dot_1_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_AXES),
+            dot_2_input_axes=(*generate_batch_seqlen_logical_axes(False), HIDDEN_TP_AXES),
             name='mlp',
         )(mlp_input, deterministic=deterministic)
 
         if self.apply_residual_connection_post_layernorm:
             assert ln_out is not None
             residual = ln_out
+
+        z = with_sharding_constraint_by_logical_axes(
+            z, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
+        residual = with_sharding_constraint_by_logical_axes(
+            residual, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
 
         z = hidden_dropout(z, deterministic)
         if self.drop_path > 0.0:
@@ -1205,6 +1222,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         z = z + residual
 
         if self.output_layernorm:
+            z = with_sharding_constraint_by_logical_axes(
+                z, (*generate_batch_seqlen_logical_axes(), HIDDEN_AXES))
             z = LayerNorm(layernorm_type=self.layernorm_type,
                           zero_centered_gamma=self.zero_centered_gamma,
                           epsilon=self.layernorm_epsilon,

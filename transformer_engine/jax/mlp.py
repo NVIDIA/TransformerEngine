@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX MLP modules"""
 
-from typing import List
+from typing import List, Tuple
 from functools import partial
 
 import jax
@@ -17,6 +17,7 @@ from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
+from .sharding import with_sharding_constraint_by_logical_axes
 
 
 def geglu(x: jnp.ndarray):
@@ -62,7 +63,10 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
                             fp8_gemm_pkg: FP8MetaPackage,
                             layernorm_type: str,
                             zero_centered_gamma: bool = False,
-                            epsilon: float = 1e-6) -> jnp.ndarray:
+                            epsilon: float = 1e-6,
+                            layernorm_input_axes: Tuple[str, ...] = None,
+                            dot_1_input_axes: Tuple[str, ...] = None,
+                            dot_2_input_axes: Tuple[str, ...] = None) -> jnp.ndarray:
     """
     Layernorm + GEMM1 + GeGLU + GEMM2
     """
@@ -88,19 +92,24 @@ def layernrom_geglu_fp8_mlp(x: jnp.ndarray,
 
     output = _layernrom_geglu_fp8_mlp(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax, scale,
                                       scale_inv, fwd_dtype, bwd_dtype, layernorm_type,
-                                      zero_centered_gamma, epsilon)
+                                      zero_centered_gamma, epsilon, layernorm_input_axes,
+                                      dot_1_input_axes, dot_2_input_axes)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 def _layernrom_geglu_fp8_mlp(x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray,
                              kernel_1: jnp.ndarray, kernel_2: jnp.ndarray, fp8_max: jnp.ndarray,
                              amax: jnp.ndarray, scale: jnp.ndarray, scale_inv: jnp.ndarray,
                              fwd_dtype: jnp.dtype, bwd_dtype: jnp.dtype, layernorm_type: str,
-                             zero_centered_gamma: bool, epsilon: float):
+                             zero_centered_gamma: bool, epsilon: float,
+                             layernorm_input_axes: Tuple[str, ...],
+                             dot_1_input_axes: Tuple[str, ...], dot_2_input_axes: Tuple[str, ...]):
     output, _ = _layernrom_geglu_fp8_mlp_fwd_rule(x, gamma, beta, kernel_1, kernel_2, fp8_max, amax,
                                                   scale, scale_inv, fwd_dtype, bwd_dtype,
-                                                  layernorm_type, zero_centered_gamma, epsilon)
+                                                  layernorm_type, zero_centered_gamma, epsilon,
+                                                  layernorm_input_axes, dot_1_input_axes,
+                                                  dot_2_input_axes)
     return output
 
 
@@ -118,7 +127,10 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
         bwd_dtype,    # pylint: disable=unused-argument
         layernorm_type,
         zero_centered_gamma,
-        epsilon):
+        epsilon,
+        layernorm_input_axes,
+        dot_1_input_axes,
+        dot_2_input_axes):
 
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (Hidden_in, 2, Hidden_out)
@@ -140,6 +152,8 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     x_amax = amax[gemm1_x_idx, 0:1]
     x_scale = scale[gemm1_x_idx]
     x_scale_inv = scale_inv[gemm1_x_idx]
+
+    x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
         ln_out, mu, rsigma, updated_x_amax = layernorm_fwd_fp8(
@@ -175,6 +189,8 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     casted_kernel_1, updated_kernel_1_amax = \
         cast_fp8(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
 
+    ln_out = with_sharding_constraint_by_logical_axes(ln_out, dot_1_input_axes)
+
     # (batch..., hidden_in) x (hidden_in, 2, hidden_out)
     dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
                                 (x_contracting_dims, (0,)),
@@ -190,6 +206,8 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     casted_geglu_out, updated_geglu_amax = gated_gelu_fp8(dot_1_output, geglu_out_amax,
                                                           geglu_out_scale, geglu_out_scale_inv,
                                                           fwd_dtype)
+
+    casted_geglu_out = with_sharding_constraint_by_logical_axes(casted_geglu_out, dot_2_input_axes)
 
     kernel_2_scale = scale[gemm2_kernel_idx]
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
@@ -215,6 +233,9 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
         layernorm_type,
         zero_centered_gamma,
         epsilon,
+        layernorm_input_axes,
+        dot_1_input_axes,
+        dot_2_input_axes,
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, \
@@ -227,6 +248,9 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     grad_amax = amax[gemm2_grad_idx, 0:1]
     grad_scale = scale[gemm2_grad_idx]
     grad_scale_inv = scale_inv[gemm2_grad_idx]
+
+    # Since the sharding of outputs should be the same as dot_1's input
+    grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
 
     casted_grad, casted_grad_t, updated_grad_amax = \
         cast_transpose(grad, grad_amax, grad_scale, grad_scale_inv, bwd_dtype,
@@ -247,6 +271,8 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     dgrad_2 = fp8_dot_impl(casted_grad, casted_kernel_2, grad_scale_inv, kernel_2_scale_inv,
                            grad.dtype, (x_contracting_dims, (1,)),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
+
+    dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
     gemm1_x_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
@@ -279,6 +305,8 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kernel_1, dgeglu_scale_inv, kernel_1_scale_inv,
                            grad.dtype, (x_contracting_dims_plus_act_dim, (1, 2)),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
+
+    dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, layernorm_input_axes)
 
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dgrad_1,
