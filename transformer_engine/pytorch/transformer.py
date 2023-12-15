@@ -263,7 +263,7 @@ class TransformerLayer(torch.nn.Module):
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = window_size
-        self.window_size = check_set_window_size(self_attn_mask_type, window_size, self.window_size)
+        self.window_size = check_set_window_size(self_attn_mask_type, self.window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
@@ -579,7 +579,7 @@ class TransformerLayer(torch.nn.Module):
         """
 
         if self_attn_mask_type is not None:
-            window_size = check_set_window_size(self_attn_mask_type, window_size, window_size)
+            window_size = check_set_window_size(self_attn_mask_type, window_size)
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
