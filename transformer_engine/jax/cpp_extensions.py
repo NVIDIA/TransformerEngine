@@ -1705,7 +1705,7 @@ def generate_cu_seqlen(mask):
     """
     Generating cumsum seqlen for a batch
     """
-    seqlen = jnp.sum(mask == 0, axis=(-1, -2), dtype=jnp.int32)
+    seqlen = jnp.sum(mask, axis=(-1, -2), dtype=jnp.int32)
     cu_seqlen = jnp.cumsum(seqlen)
     cu_seqlen = jnp.hstack((0, cu_seqlen))
     return cu_seqlen

@@ -83,6 +83,7 @@ def _self_fused_attn_fwd_rule(qkv: jnp.ndarray, bias: jnp.ndarray, mask: jnp.nda
                               seed: jnp.ndarray, attn_bias_type: AttnBiasType,
                               attn_mask_type: AttnMaskType, scaling_factor: float,
                               dropout_probability: float, is_training: bool):
+    mask = jnp.logical_not(mask)
     squeezed_mask = mask[..., 0]
     output, softmax_aux, rng_state = self_fused_attn_fwd(qkv,
                                                          bias,
@@ -159,8 +160,15 @@ def _cross_fused_attn(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray, mask: 
 def _cross_fused_attn_fwd_rule(q, kv, bias, mask, seed, attn_bias_type, attn_mask_type,
                                scaling_factor, dropout_probability, is_training):
 
-    q_squeezed_mask = mask[..., 0]
-    kv_squeezed_mask = mask[..., 0, :]
+    mask = jnp.logical_not(mask)
+    if attn_mask_type != AttnMaskType.PADDING_CAUSAL_MASK:
+        kv_squeezed_mask = mask[..., 0, :]
+    else:
+        # WAR, When mask is padding + causal, the actual seqlen is not the last row
+        # TODO(rewang): re-design the mask/seqlen/cu_seqlen of fused attn for the better perf
+        squeezed_mask = jnp.sum(mask, axis=-1)    # (b, 1, sq)
+        kv_squeezed_mask = jnp.max(squeezed_mask, axis=-1, keepdims=True)    # (b, 1, 1)
+    q_squeezed_mask = mask[..., 0].astype(kv_squeezed_mask.dtype)
 
     output, softmax_aux, rng_state = cross_fused_attn_fwd(q,
                                                           kv,
