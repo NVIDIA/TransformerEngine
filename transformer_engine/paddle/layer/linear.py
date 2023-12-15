@@ -39,6 +39,7 @@ from ..utils import (
     get_bias_dtype,
     save_for_backward_allow_none,
     saved_tensor_allow_none,
+    clear_tensor_data,
 )
 
 __all__ = ["Linear"]
@@ -270,6 +271,7 @@ def _linear_bwd_fp8(
             get_workspace(),
             use_split_accumulator=_2X_ACC_DGRAD,
         )
+        clear_tensor_data(grad_output_c)
 
         # Overlap dgrad-RS/AR with wgrad
         if parallel_mode == "column" and sequence_parallel:
@@ -283,6 +285,7 @@ def _linear_bwd_fp8(
         if not fp8_meta["recipe"].override_linear_precision.wgrad:
             if inputmat_t_total is None:
                 inputmat_t_total = transpose(inputmat_total, fp8_dtype_backward)
+                clear_tensor_data(inputmat_total)
             wgrad = fp8_gemm(
                 inputmat_t_total,
                 fwd_scale_inverses,
@@ -296,6 +299,7 @@ def _linear_bwd_fp8(
                 get_workspace(),
                 use_split_accumulator=_2X_ACC_WGRAD,
             )
+            clear_tensor_data(inputmat_t_total, grad_output_t)
         else:
             wgrad, _, _ = gemm(
                 inputmat_total,
@@ -305,6 +309,7 @@ def _linear_bwd_fp8(
                 layout="NT",
                 grad=True,
             )
+            clear_tensor_data(inputmat_total)
 
     if parallel_mode == "column" and tensor_parallel and handle is not None:
         handle.wait()
