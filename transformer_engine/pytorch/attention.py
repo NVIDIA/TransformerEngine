@@ -2327,7 +2327,7 @@ class DotProductAttention(torch.nn.Module):
             use_fused_attention = False
 
         # Filter: Attention mask type.
-        #    attn_mask_type(s)   |     supported backends
+        #   attn_mask_type(s)    |     supported backends
         # ------------------------------------------------
         #   no_mask              |     All
         #   padding              |     UnfusedDotProductAttention, FlashAttention, FusedAttention
@@ -2362,6 +2362,17 @@ class DotProductAttention(torch.nn.Module):
                                   and is_backend_avail)
 
         # Filter: determinism.
+        # backend                                  | deterministic
+        # ---------------------------------------------------------
+        # flash-attn v1                            | yes
+        # flash-attn v2                            | no
+        # FusedAttnBackend["F16_max512_seqlen"]    | yes
+        # FusedAttnBackend["F16_arbitrary_seqlen"] | workspace optimization path: yes; otherwise: no
+        # UnfusedDotProductAttention               | yes
+        #
+        # Note that FusedAttnBackend["F16_arbitrary_seqlen"] only has workspace optimization path
+        # on sm90 architectures.
+        #
         if (use_fused_attention
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and self.deterministic
