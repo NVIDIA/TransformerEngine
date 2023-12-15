@@ -12,7 +12,11 @@ import torch
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import InferenceParams, MultiheadAttention
+from transformer_engine.pytorch.attention import (
+    InferenceParams,
+    MultiheadAttention,
+    check_set_window_size,
+)
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -259,16 +263,7 @@ class TransformerLayer(torch.nn.Module):
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = window_size
-        if "causal" in self_attn_mask_type:
-            if window_size is None:
-                self.window_size = (-1, 0)
-            else:
-                assert (
-                    window_size[1] == 0
-                ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
-        else:
-            if window_size is None:
-                self.window_size = (-1, -1)
+        self.window_size = check_set_window_size(self_attn_mask_type, window_size, self.window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
@@ -584,17 +579,7 @@ class TransformerLayer(torch.nn.Module):
         """
 
         if self_attn_mask_type is not None:
-            if "causal" in self_attn_mask_type:
-                if window_size is None:
-                    window_size = (-1, 0)
-                else:
-                    assert (
-                        window_size[1] == 0
-                    ), "window_size[1] should be 0 when self_attn_mask_type includes 'causal'!"
-            else:
-                if window_size is None:
-                    window_size = (-1, -1)
-
+            window_size = check_set_window_size(self_attn_mask_type, window_size, window_size)
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
