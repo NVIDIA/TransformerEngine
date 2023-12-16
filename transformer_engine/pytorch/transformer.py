@@ -12,7 +12,11 @@ import torch
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import InferenceParams, MultiheadAttention
+from transformer_engine.pytorch.attention import (
+    InferenceParams,
+    MultiheadAttention,
+    check_set_window_size,
+)
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -134,6 +138,12 @@ class TransformerLayer(torch.nn.Module):
                         arg is useful for dynamically changing mask types, e.g. a different
                         mask for training and inference. The init arg is useful for cases
                         involving compilation/tracing, e.g. ONNX export.
+    window_size: Optional[Tuple[int, int]], default = `None`
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically. Similar to :attr:`self_attn_mask_type`, it can
+                be overridden by :attr:`window_size` in `forward` as well.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -220,6 +230,7 @@ class TransformerLayer(torch.nn.Module):
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
         self_attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -251,6 +262,8 @@ class TransformerLayer(torch.nn.Module):
             ), "Userbuffer communication backend not available."
 
         self.self_attn_mask_type = self_attn_mask_type
+        self.window_size = window_size
+        self.window_size = check_set_window_size(self_attn_mask_type, self.window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
@@ -491,6 +504,7 @@ class TransformerLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         self_attn_mask_type: Optional[str] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -521,6 +535,8 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                             default = `causal`
                             Type of attention mask passed into softmax operation.
+        window_size: Optional[Tuple[int, int]], default = `None`
+                    sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -562,8 +578,12 @@ class TransformerLayer(torch.nn.Module):
                          to efficienly calculate and store the context during inference.
         """
 
+        if self_attn_mask_type is not None:
+            window_size = check_set_window_size(self_attn_mask_type, window_size)
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
+        if window_size is None:
+            window_size = self.window_size
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -594,6 +614,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             attention_mask=attention_mask,
             attn_mask_type=self_attn_mask_type,
+            window_size=window_size,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
@@ -619,6 +640,7 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
+                window_size=window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
