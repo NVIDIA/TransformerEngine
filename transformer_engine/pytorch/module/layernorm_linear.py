@@ -884,7 +884,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if self.parameters_split is None:
             del self.weight_tensor
             if self.use_bias:
-                del bias_tensor
+                del self.bias_tensor
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
