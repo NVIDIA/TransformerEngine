@@ -771,7 +771,7 @@ class Linear(TransformerEngineBaseModule):
         if self.parameters_split is None:
             del self.weight_tensor
             if self.use_bias:
-                del bias_tensor
+                del self.bias_tensor
 
     def get_fp8_weights_scratchpad(
         self,
