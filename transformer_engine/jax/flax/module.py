@@ -6,6 +6,7 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
 import operator
+import warnings
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 
 import jax.numpy as jnp
@@ -15,15 +16,14 @@ from flax.linen import partitioning as nn_partitioning
 from jax import lax
 from jax import nn as jax_nn
 from jax import random as jax_random
+from jax.ad_checkpoint import checkpoint_name
 
-from ..dot import fp8_dot
-from ..fp8 import FP8GemmPackage, FP8Helper
+from ..dot import type_safe_dot_general
+from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import fp8_ln_mlp, geglu
-from ..sharding import infer_sharding_type
+from ..mlp import layernrom_geglu_fp8_mlp, geglu
 from ..softmax import is_softmax_kernel_available
-from ..sharding import MajorShardingType, ShardingType
 from ..softmax import softmax, SoftmaxType
 
 PRNGKey = Any
@@ -102,7 +102,7 @@ def _combine_biases(*masks: List[Array]):
     return mask
 
 
-class Softmax(nn.Module):
+class Softmax(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies softmax over a mini-batch of inputs.
     The input's shape should be [batch, heads, q_seqlen, k_seqlen].
@@ -119,16 +119,10 @@ class Softmax(nn.Module):
         Scalar for the input to softmax.
     softmax_type : SoftmaxType, default = SoftmaxType.SCALED
         Indicate the type of softmax.
-
-    Optimization parameters
-    -----------------------
-    sharding_type : ShardingType, default = ShardingType.SINGLE
-        Indicate the sharding pattern.
     """
 
     scale_factor: float = 1.0
     softmax_type: SoftmaxType = SoftmaxType.SCALED
-    sharding_type: ShardingType = ShardingType.SINGLE
 
     @nn.compact
     def __call__(self, inputs: Array, mask: Array = None, bias: Array = None) -> jnp.ndarray:
@@ -149,8 +143,7 @@ class Softmax(nn.Module):
             if self.softmax_type is not SoftmaxType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type,
-                              self.sharding_type)
+            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
         else:
             attention_bias = None
             if mask is not None:
@@ -168,15 +161,14 @@ class Softmax(nn.Module):
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
             if is_softmax_kernel_available(SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen,
                                            dtype):
-                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED,
-                                  self.sharding_type)
+                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
 
         return outputs
 
 
-class LayerNorm(nn.Module):
+class LayerNorm(nn.Module):    # pylint: disable=too-few-public-methods
     r"""
     Applies layer normalization over a mini-batch of inputs.
     There are two types of normalization supported by this module,
@@ -242,8 +234,6 @@ class LayerNorm(nn.Module):
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
-    sharding_type : ShardingType, default = ShardingType.SINGLE
-        Indicate the sharding pattern.
     """
     epsilon: float = 1e-6
     layernorm_type: str = 'layernorm'
@@ -254,7 +244,7 @@ class LayerNorm(nn.Module):
     bias_axes: Tuple[str, ...] = ('embed',)
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
-    sharding_type: ShardingType = ShardingType.SINGLE
+    sharding_type = None
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
@@ -276,6 +266,8 @@ class LayerNorm(nn.Module):
         outputs : jax.numpy.ndarray
             Output tensors.
         """
+        warnings.warn("sharding_type of LayerNorm would be removed in the near feature",
+                      DeprecationWarning)
 
         features = x.shape[-1]
         scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
@@ -286,9 +278,7 @@ class LayerNorm(nn.Module):
                          ln_bias,
                          layernorm_type=self.layernorm_type,
                          zero_centered_gamma=self.zero_centered_gamma,
-                         epsilon=self.epsilon,
-                         sharding_type=self.sharding_type,
-                         dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                         epsilon=self.epsilon)
 
 
 class TransformerEngineBase(nn.Module):
@@ -329,17 +319,15 @@ class TransformerEngineBase(nn.Module):
         return fp8_max.value, fp8_metas_amax.value, fp8_metas_scale.value, fp8_metas_scale_inv.value
 
     @staticmethod
-    def get_fp8_gemm_package(num_of_gemm: int, inputs: jnp.ndarray,
-                             kernels: List[jnp.ndarray]) -> FP8GemmPackage:
+    def get_fp8_meta_package(num_of_gemm: int) -> FP8MetaPackage:
         """
         Get the FP8 metas
         """
-        assert num_of_gemm == len(kernels)
         fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
             TransformerEngineBase.get_fp8_metas(num_of_gemm)
 
-        return FP8GemmPackage(num_of_gemm, inputs, kernels, fp8_max, fp8_metas_amax,
-                              fp8_metas_scale, fp8_metas_scale_inv)
+        return FP8MetaPackage(num_of_gemm, fp8_max, fp8_metas_amax, fp8_metas_scale,
+                              fp8_metas_scale_inv)
 
 
 class DenseGeneral(TransformerEngineBase):
@@ -376,8 +364,6 @@ class DenseGeneral(TransformerEngineBase):
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
-    sharding_type : ShardingType, default = ShardingType.SINGLE
-        Indicate the sharding pattern.
     """
 
     features: Union[Iterable[int], int]
@@ -389,7 +375,7 @@ class DenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
-    sharding_type: ShardingType = ShardingType.SINGLE
+    sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -411,6 +397,9 @@ class DenseGeneral(TransformerEngineBase):
         outputs : jax.numpy.ndarray
             Output tensors.
         """
+        warnings.warn("sharding_type of DenseGeneral would be removed in the near feature",
+                      DeprecationWarning)
+
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
@@ -431,24 +420,22 @@ class DenseGeneral(TransformerEngineBase):
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
         else:
             bias = None
 
         contract_ind = tuple(range(0, len(axis)))
-
+        fp8_gemm_pkg = None
         if FP8Helper.is_fp8_enabled():
-            fp8_gemm_package = \
-                TransformerEngineBase.get_fp8_gemm_package(1, inputs, [kernel])
-            y = fp8_dot(fp8_gemm_package,
-                        FP8Helper.FWD_DTYPE,
-                        FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                        sharding_type=self.sharding_type,
-                        dp_dim_index=1 if self.transpose_batch_sequence else 0)
-        else:
-            kernel = jnp.asarray(kernel, self.dtype)
-            y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+            fp8_gemm_pkg = \
+                    TransformerEngineBase.get_fp8_meta_package(1)
+
+        y = type_safe_dot_general(inputs,
+                                  kernel,
+                                  fp8_meta_pkg=fp8_gemm_pkg,
+                                  contracting_dims=(axis, contract_ind))
 
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
@@ -527,8 +514,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     depth_scaling: float, default = None
         The factor to scale the output from `DenseGeneral`. It should be a float
         value or None. When None is set, then no scaling is applied.
-    sharding_type : ShardingType, default = ShardingType.SINGLE
-        Indicate the sharding pattern.
     """
 
     features: Union[Iterable[int], int]
@@ -550,7 +535,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
     depth_scaling: float = None
-    sharding_type: ShardingType = ShardingType.SINGLE
+    sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -577,12 +562,16 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
+        warnings.warn("sharding_type of LayerNormDenseGeneral would be removed in the near feature",
+                      DeprecationWarning)
+
         ln_output = None
 
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
         if self.enable_layernorm:
+            assert self.axis == -1    # Only support axis = =-1 at this moment
             features = inputs.shape[-1]
 
             scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
@@ -596,9 +585,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                               ln_bias,
                               layernorm_type=self.layernorm_type,
                               zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon,
-                              sharding_type=self.sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                              epsilon=self.epsilon)
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -626,38 +613,34 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
+        fp8_meta_package = None
         if FP8Helper.is_fp8_enabled():
-            fp8_gemm_package = \
-                    TransformerEngineBase.get_fp8_gemm_package(1, y, [kernel])
+            fp8_meta_package = \
+                    TransformerEngineBase.get_fp8_meta_package(1)
 
-            if not fuse_layernorm:
-                z = fp8_dot(fp8_gemm_package,
-                            FP8Helper.FWD_DTYPE,
-                            FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                            sharding_type=self.sharding_type,
-                            dp_dim_index=1 if self.transpose_batch_sequence else 0)
-            else:
-                z = layernorm_fp8_dot(fp8_gemm_package,
-                                      scale,
-                                      ln_bias,
-                                      self.layernorm_type,
-                                      FP8Helper.FWD_DTYPE,
-                                      FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                                      zero_centered_gamma=self.zero_centered_gamma,
-                                      epsilon=self.epsilon,
-                                      sharding_type=self.sharding_type,
-                                      dp_dim_index=1 if self.transpose_batch_sequence else 0)
+        if fuse_layernorm:
+            z = layernorm_fp8_dot(y,
+                                  kernel,
+                                  scale,
+                                  ln_bias,
+                                  fp8_meta_package,
+                                  self.layernorm_type,
+                                  zero_centered_gamma=self.zero_centered_gamma,
+                                  epsilon=self.epsilon)
         else:
-            kernel = jnp.asarray(kernel, self.dtype)
-            z = lax.dot_general(y, kernel, ((axis, contract_ind), ((), ())))
+            z = type_safe_dot_general(y,
+                                      kernel,
+                                      fp8_meta_pkg=fp8_meta_package,
+                                      contracting_dims=(axis, contract_ind))
 
         bias = None
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
                                                    self.bias_init,
                                                    features,
-                                                   self.dtype,
+                                                   jnp.float32,
                                                    axes=self.bias_axes)
+            bias = bias.astype(self.dtype)
 
         if bias is not None:
             bias_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
@@ -756,8 +739,6 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
-    major_sharding_type : MajorShardingType, default = MajorShardingType.SINGLE
-        Indicate the sharding pattern.
     """
 
     intermediate_dim: int = 2048
@@ -774,10 +755,7 @@ class LayerNormMLP(TransformerEngineBase):
     kernel_axes_2: Tuple[str, ...] = ('mlp', 'embed')
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
-    bias_axes_1: Tuple[str, ...] = (
-        'act',
-        'mlp',
-    )
+    bias_axes_1: Tuple[str, ...] = ('act', 'mlp')
     bias_axes_2: Tuple[str, ...] = ('embed',)
     return_layernorm_output: bool = True
     activations: Sequence[Union[str, Callable]] = ('relu',)
@@ -787,7 +765,7 @@ class LayerNormMLP(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
-    major_sharding_type: MajorShardingType = MajorShardingType.SINGLE
+    major_sharding_type = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -816,19 +794,32 @@ class LayerNormMLP(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
+        warnings.warn("major_sharding_type of LayerNormMLP would be removed in the near feature",
+                      DeprecationWarning)
+
         ln_output = None
 
         fuse_layernorm = FP8Helper.is_fp8_enabled(
         ) and not self.return_layernorm_output and self.enable_layernorm
 
-        use_fused_ln_mlp = fuse_layernorm \
-            and (not self.use_bias) and self.activations == ('gelu', 'linear') \
-                and (self.intermediate_dropout_rate < 1e-3)
+        def is_geglu(acts):
+            geglu_act_pool = [('gelu', 'linear'), ('linear', 'gelu')]
 
-        first_sharding_type, second_sharding_type = infer_sharding_type(self.major_sharding_type)
+            normalize_acts = []
+            for act in acts:
+                if not isinstance(act, str):
+                    return False
+                normalize_acts.append(act.lower())
+            return normalize_acts in geglu_act_pool
+
+        use_fused_ln_mlp = fuse_layernorm \
+            and (not self.use_bias) and is_geglu(self.activations) \
+                and (self.intermediate_dropout_rate < 1e-3)
 
         # LayerNorm
         if self.enable_layernorm:
+            assert self.axis == -1    # Only support axis == -1 at this moment
+
             features = inputs.shape[-1]
 
             scale, ln_bias = _create_layernorm_parameters(self.layernorm_type, (features,),
@@ -842,9 +833,7 @@ class LayerNormMLP(TransformerEngineBase):
                               ln_bias,
                               layernorm_type=self.layernorm_type,
                               zero_centered_gamma=self.zero_centered_gamma,
-                              epsilon=self.epsilon,
-                              sharding_type=first_sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
+                              epsilon=self.epsilon)
             else:
                 assert not self.return_layernorm_output
                 y = inputs
@@ -862,123 +851,84 @@ class LayerNormMLP(TransformerEngineBase):
             return jnp.stack(kernels, axis=stack_axis, dtype=jnp.float32)
 
         num_of_gemm = 2
+        fp8_meta_package = None
+        if FP8Helper.is_fp8_enabled():
+            fp8_meta_package = \
+                    TransformerEngineBase.get_fp8_meta_package(num_of_gemm)
+
+        num_activations = len(self.activations)
+        axis = _canonicalize_tuple(self.axis)
+        axis = _normalize_axes(axis, y.ndim)
+
+        intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
+        kernel_1_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
+        kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
+        kernel_1 = nn_partitioning.param_with_axes('wi_kernel',
+                                                   kernel_1_init,
+                                                   num_activations,
+                                                   -2,
+                                                   kernel_1_each_shape,
+                                                   jnp.float32,
+                                                   axes=self.kernel_axes_1)
+        kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
+        hidden_size = inputs.shape[-1]
+        hidden_size_tuple = _canonicalize_tuple(hidden_size)
+        kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
+        kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
+        kernel_2 = nn_partitioning.param_with_axes('wo_kernel',
+                                                   self.kernel_init,
+                                                   kernel_2_param_shape,
+                                                   jnp.float32,
+                                                   axes=self.kernel_axes_2)
+        kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
+        contract_ind = tuple(range(0, len(axis)))
+
         if use_fused_ln_mlp:
-            num_activations = len(self.activations)
-            axis = _canonicalize_tuple(self.axis)
-            axis = _normalize_axes(axis, inputs.ndim)
+            assert self.axis == -1    # Only support axis = =-1 at this moment
 
-            intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
-            kernel_1_shape = tuple(inputs.shape[ax] for ax in axis) + intermediate_dim
-            kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
-            kernel_1 = nn_partitioning.param_with_axes('wi_kernel',
-                                                       kernel_1_init,
-                                                       num_activations,
-                                                       -2,
-                                                       kernel_1_each_shape,
-                                                       jnp.float32,
-                                                       axes=self.kernel_axes_1)
-            kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
-            hidden_size = inputs.shape[-1]
-            hidden_size_tuple = _canonicalize_tuple(hidden_size)
-            kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
-            kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
-            kernel_2 = nn_partitioning.param_with_axes('wo_kernel',
-                                                       self.kernel_init,
-                                                       kernel_2_param_shape,
-                                                       jnp.float32,
-                                                       axes=self.kernel_axes_2)
-            kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
-            contract_ind = tuple(range(0, len(axis)))
-
-            fp8_gemm_package = \
-                TransformerEngineBase.get_fp8_gemm_package(num_of_gemm, y, [kernel_1, kernel_2])
-            out = fp8_ln_mlp(fp8_gemm_package,
-                             scale,
-                             ln_bias,
-                             self.layernorm_type,
-                             FP8Helper.FWD_DTYPE,
-                             FP8Helper.BWD_DTYPE,
-                             zero_centered_gamma=self.zero_centered_gamma,
-                             epsilon=self.epsilon,
-                             contracting_dims=(axis, contract_ind),
-                             major_sharding_type=self.major_sharding_type,
-                             dp_dim_index=1 if self.transpose_batch_sequence else 0,
-                             activations=self.activations)
+            out = layernrom_geglu_fp8_mlp(y,
+                                          scale,
+                                          ln_bias, [kernel_1, kernel_2],
+                                          fp8_meta_package,
+                                          self.layernorm_type,
+                                          zero_centered_gamma=self.zero_centered_gamma,
+                                          epsilon=self.epsilon)
         else:    # not use_fused_ln_mlp
 
-            def fp8_meta_generator():
-                fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = (None, None, None,
-                                                                                 None)
-                if FP8Helper.is_fp8_enabled():
-                    fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
-                        TransformerEngineBase.get_fp8_metas(num_of_gemm)
-                return fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv
-
-            fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv = \
-                fp8_meta_generator()
-
             # DenseGeneral 1
-            activations = []
-            num_activations = len(self.activations)
-            axis = _canonicalize_tuple(self.axis)
-            axis = _normalize_axes(axis, y.ndim)
-
-            intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
-            kernel_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
-            kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
-            kernel = nn_partitioning.param_with_axes('wi_kernel',
-                                                     kernel_1_init,
-                                                     num_activations,
-                                                     -2,
-                                                     kernel_1_each_shape,
-                                                     jnp.float32,
-                                                     axes=self.kernel_axes_1)
-            kernel = jnp.reshape(kernel, kernel_shape)
-            contract_ind = tuple(range(0, len(axis)))
-
-            if FP8Helper.is_fp8_enabled():
-                fp8_gemm_package = FP8GemmPackage(
-                    1, y, [kernel], fp8_max[:FP8Helper.NUM_META_PER_GEMM, :],
-                    fp8_metas_amax[:FP8Helper.NUM_META_PER_GEMM, :],
-                    fp8_metas_scale[:FP8Helper.NUM_META_PER_GEMM, :],
-                    fp8_metas_scale_inv[:FP8Helper.NUM_META_PER_GEMM, :])
-
-                if not fuse_layernorm:
-                    x = fp8_dot(fp8_gemm_package,
-                                FP8Helper.FWD_DTYPE,
-                                FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                                sharding_type=first_sharding_type,
-                                dp_dim_index=1 if self.transpose_batch_sequence else 0)
-                else:
-                    x = layernorm_fp8_dot(fp8_gemm_package,
-                                          scale,
-                                          ln_bias,
-                                          self.layernorm_type,
-                                          FP8Helper.FWD_DTYPE,
-                                          FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                                          zero_centered_gamma=self.zero_centered_gamma,
-                                          epsilon=self.epsilon,
-                                          sharding_type=first_sharding_type,
-                                          dp_dim_index=1 if self.transpose_batch_sequence else 0)
-            else:    # not enable fp8
-                kernel = jnp.asarray(kernel, self.dtype)
-                x = lax.dot_general(y, kernel, ((axis, contract_ind), ((), ())))
+            gemm1_fp8_meta_package = None if fp8_meta_package is None \
+                                     else fp8_meta_package.get_package_by_gemm_idx(0)
+            if fuse_layernorm:
+                x = layernorm_fp8_dot(y,
+                                      kernel_1,
+                                      scale,
+                                      ln_bias,
+                                      gemm1_fp8_meta_package,
+                                      self.layernorm_type,
+                                      zero_centered_gamma=self.zero_centered_gamma,
+                                      epsilon=self.epsilon)
+            else:
+                x = type_safe_dot_general(y,
+                                          kernel_1,
+                                          fp8_meta_pkg=gemm1_fp8_meta_package,
+                                          contracting_dims=(axis, contract_ind))
 
             bias = None
             if self.use_bias:
                 bias = nn_partitioning.param_with_axes('wi_bias',
                                                        self.bias_init,
                                                        intermediate_dim,
-                                                       self.dtype,
+                                                       jnp.float32,
                                                        axes=self.bias_axes_1)
+                bias = bias.astype(self.dtype)
                 bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
                 x += jnp.reshape(bias, bias_shape)
 
-            if self.activations == ('gelu', 'linear'):
-                z = geglu(x,
-                          contracting_dims=(-2, -1),
-                          sharding_type=second_sharding_type,
-                          dp_dim_index=1 if self.transpose_batch_sequence else 0)
+            x = checkpoint_name(x, 'ffn1')
+
+            activations = []
+            if is_geglu(self.activations):
+                z = geglu(x)
             else:
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(self.activations):
@@ -993,44 +943,23 @@ class LayerNormMLP(TransformerEngineBase):
                                z, deterministic=deterministic)
 
             # DenseGeneral 2
-            hidden_size = inputs.shape[-1]
-            hidden_size_tuple = _canonicalize_tuple(hidden_size)
-            axis = _canonicalize_tuple(self.axis)
-            axis = _normalize_axes(axis, z.ndim)
+            gemm2_fp8_meta_package = None if fp8_meta_package is None \
+                                     else fp8_meta_package.get_package_by_gemm_idx(1)
 
-            kernel_shape = tuple(z.shape[ax] for ax in axis) + hidden_size_tuple
-            kernel_param_shape = (np.prod([z.shape[ax] for ax in axis]), np.prod(hidden_size_tuple))
-            kernel = nn_partitioning.param_with_axes('wo_kernel',
-                                                     self.kernel_init,
-                                                     kernel_param_shape,
-                                                     jnp.float32,
-                                                     axes=self.kernel_axes_2)
-            kernel = jnp.reshape(kernel, kernel_shape)
-
-            contract_ind = tuple(range(0, len(axis)))
-
-            if FP8Helper.is_fp8_enabled():
-                fp8_gemm_package = FP8GemmPackage(
-                    1, z, [kernel], fp8_max[FP8Helper.NUM_META_PER_GEMM:, :],
-                    fp8_metas_amax[FP8Helper.NUM_META_PER_GEMM:, :],
-                    fp8_metas_scale[FP8Helper.NUM_META_PER_GEMM:, :],
-                    fp8_metas_scale_inv[FP8Helper.NUM_META_PER_GEMM:, :])
-
-                out = fp8_dot(fp8_gemm_package,
-                              FP8Helper.FWD_DTYPE,
-                              FP8Helper.BWD_DTYPE, (axis, contract_ind),
-                              sharding_type=second_sharding_type,
-                              dp_dim_index=1 if self.transpose_batch_sequence else 0)
-            else:
-                kernel = jnp.asarray(kernel, self.dtype)
-                out = lax.dot_general(z, kernel, ((axis, contract_ind), ((), ())))
+            out = type_safe_dot_general(z,
+                                        kernel_2,
+                                        fp8_meta_pkg=gemm2_fp8_meta_package,
+                                        contracting_dims=(axis, contract_ind))
 
             bias = None
             if self.use_bias:
                 bias = nn_partitioning.param_with_axes('wo_bias',
                                                        self.bias_init, (hidden_size,),
-                                                       self.dtype,
+                                                       jnp.float32,
                                                        axes=self.bias_axes_2)
+                bias = bias.astype(self.dtype)
                 out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
+
+            out = checkpoint_name(out, 'ffn2')
 
         return out, ln_output    # Output, layner_norm_output

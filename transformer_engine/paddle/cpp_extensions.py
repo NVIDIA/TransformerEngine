@@ -472,7 +472,12 @@ def fused_attn_fwd_qkvpacked(
         out = paddle.empty(shape=[b, max_seqlen, h, d], dtype=qkv.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, max_seqlen], dtype=qkv.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 
@@ -631,7 +636,12 @@ def fused_attn_fwd_kvpacked(
         out = paddle.empty(shape=[b, max_seqlen_q, h, d], dtype=q.dtype)
 
     if is_training:
-        softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, max_seqlen_kv], dtype=q.dtype)
+        elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+            softmax_aux = paddle.empty(shape=[b, h, max_seqlen_q, 1], dtype='float32')
+        else:
+            raise ValueError("Unsupported fused attention backend.")
     else:
         softmax_aux = None
 

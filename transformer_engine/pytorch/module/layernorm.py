@@ -156,7 +156,7 @@ class LayerNorm(torch.nn.Module):
             init.zeros_(self.weight)
         init.zeros_(self.bias)
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
         # Set the activation type for AMP.

@@ -228,7 +228,7 @@ class _NoopCat(torch.autograd.Function):
         ), "Dimensions not compatible for concatenation"
 
         param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.storage(),
+        param_temp.set_(full_param_buffer.untyped_storage(),
                         full_param_buffer.storage_offset(),
                         full_param_buffer.size(),
                         full_param_buffer.stride())
@@ -818,19 +818,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
             )
         return fp8_weight_tensors
-
-    def state_dict(self, *args, **kwargs) -> Dict:
-        """Get dictionary containing module state"""
-        state = super().state_dict(*args, **kwargs)
-
-        # Convert Float8Tensors to plain tensors
-        # Note: Float8Tensors don't serialize well, especially if they
-        # contain references to FP8 metadata.
-        for key, val in state.items():
-            if isinstance(val, Float8Tensor):
-                state[key] = val.from_float8()
-
-        return state
 
     @abstractmethod
     def forward(self):

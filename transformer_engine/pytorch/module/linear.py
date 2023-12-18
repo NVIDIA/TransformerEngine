@@ -26,6 +26,7 @@ from ..utils import (
     get_default_init_method,
     cast_if_needed,
     assert_dim_for_fp8_exec,
+    clear_tensor_data,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -34,7 +35,6 @@ from ..distributed import (
     initialize_affine_weight_gpu,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    gather_along_last_dim,
 )
 from ..cpp_extensions import (
     fp8_gemm,
@@ -82,6 +82,7 @@ class _Linear(torch.autograd.Function):
         ub_split_ag: bool,
         ub_atomic_gemm_rs: bool,
         ub_atomic_gemm_ag: bool,
+        ub_name: str,
     ) -> torch.Tensor:
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -100,35 +101,34 @@ class _Linear(torch.autograd.Function):
                 ub_atomic_gemm_rs = False
         if ub_atomic_gemm_rs or ub_atomic_gemm_ag:
             assert fp8, "AtomicGemm overlap supported only for FP8 GEMM."
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        inputmat_no_fp8 = inputmat
 
+        # Cast input to expected dtype
+        inputmat = cast_if_needed(inputmat, activation_dtype)
+        inputmat_t = None
+        inputmat_no_fp8 = inputmat
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-
-            if not fp8_meta["recipe"].override_linear_precision.wgrad:
-                if is_grad_enabled:
-                    inputmat, inputmat_t = fp8_cast_transpose_fused(
-                        inputmat,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                    )
-                else:
-                    inputmat = cast_to_fp8(
-                        inputmat,
-                        fp8_meta["scaling_fwd"],
-                        tex.FP8FwdTensors.GEMM1_INPUT,
-                        fp8_dtype_forward,
-                    )
-            else:
-                inputmat, inputmat_t = cast_to_fp8(
+            if (
+                not fp8_meta["recipe"].override_linear_precision.wgrad
+                and is_grad_enabled
+                and weight.requires_grad
+                and not sequence_parallel
+            ):
+                # FP8 input for forward, FP8 input transpose for backward wgrad
+                inputmat, inputmat_t = fp8_cast_transpose_fused(
                     inputmat,
                     fp8_meta["scaling_fwd"],
                     tex.FP8FwdTensors.GEMM1_INPUT,
                     fp8_dtype_forward,
-                ), None
+                )
+            else:
+                # FP8 input for forward
+                inputmat = cast_to_fp8(
+                    inputmat,
+                    fp8_meta["scaling_fwd"],
+                    tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype_forward,
+                )
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
@@ -149,9 +149,6 @@ class _Linear(torch.autograd.Function):
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
                 weight_t_fp8 = None
-                if is_grad_enabled:
-                    weight_t_fp8 = weight_fp8.transpose(update_cache=is_first_microbatch)
-
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -180,7 +177,7 @@ class _Linear(torch.autograd.Function):
             proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                 None, None, None, activation_dtype)
             if ub_split_rs or ub_atomic_gemm_rs:
-                ub_obj_projout = get_ub("proj_fprop")
+                ub_obj_projout = get_ub(ub_name+"_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
@@ -229,11 +226,13 @@ class _Linear(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of input
+                amin, amax = inputmat_total.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(inputmat_total).float()
+                    torch.max(-amin, amax).float()
                 # amax of weight
+                amin, amax = weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(weight).float()
+                    torch.max(-amin, amax).float()
 
             if ub_split_rs:
                 ub_obj_projout = get_ub("proj_fprop")
@@ -261,13 +260,19 @@ class _Linear(torch.autograd.Function):
             )
 
         if is_grad_enabled:
-            fp8_wgrad = fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad
-            if fp8:
-                assert hasattr(weight_t_fp8, "_data"), \
-                       "_data attr doesn't exist (before save for bwd)"
+            saved_inputmat = None
+            saved_inputmat_t = None
+            if weight.requires_grad:
+                if fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad:
+                    if inputmat_t is None:
+                        saved_inputmat = inputmat
+                    else:
+                        saved_inputmat_t = inputmat_t
+                else:
+                    saved_inputmat = inputmat_no_fp8
             ctx.save_for_backward(
-                inputmat_no_fp8 if weight.requires_grad and not fp8_wgrad else None,
-                inputmat_t if weight.requires_grad and fp8_wgrad else None,
+                saved_inputmat,
+                saved_inputmat_t,
                 weight,
                 weight_t_fp8 if fp8 else None,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -285,6 +290,7 @@ class _Linear(torch.autograd.Function):
             ctx.tp_group = tp_group
             ctx.ub_split_ag = ub_split_ag
             ctx.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+            ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
 
@@ -314,9 +320,10 @@ class _Linear(torch.autograd.Function):
                 weight_t_fp8,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
-            if weight_t_fp8 is not None:
-                assert hasattr(weight_t_fp8, "_data"), \
-                       "_data attr doesn't exist (after restore in bwd)"
+
+            # Primary weights are in FP8.
+            if ctx.fp8 and weight_t_fp8 is None:
+                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
 
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -326,7 +333,7 @@ class _Linear(torch.autograd.Function):
             if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
-                ctx.ub_obj_gradout = get_ub("proj_dgrad")
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name+"_dgrad")
             (
                 grad_output,
                 grad_output_c,
@@ -338,19 +345,16 @@ class _Linear(torch.autograd.Function):
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
+            inputmat_total = None
+            inputmat_t_total = None
+            handle = None
             if weight.requires_grad and ctx.parallel_mode == "column" and ctx.sequence_parallel:
-                if ctx.fp8 and not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                    inputmat_t_total, handle = gather_along_last_dim(
-                        inputmat_t, ctx.tp_group, async_op=ctx.requires_dgrad
-                    )
-                else:
-                    inputmat_total, handle = gather_along_first_dim(
-                        inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
-                    )
+                inputmat_total, handle = gather_along_first_dim(
+                    inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
+                )
             else:
-                inputmat_t_total = inputmat_t
                 inputmat_total = inputmat
-                handle = None
+                inputmat_t_total = inputmat_t
 
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -414,6 +418,8 @@ class _Linear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         if ctx.ub_split_ag or ctx.ub_atomic_gemm_ag:
                             grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                        if inputmat_t_total is None:
+                            inputmat_t_total = tex.fp8_transpose(inputmat_total, fp8_dtype_backward)
                         wgrad, _ = fp8_gemm(
                             inputmat_t_total,
                             fwd_scale_inverses,
@@ -454,6 +460,10 @@ class _Linear(torch.autograd.Function):
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     )
 
+                # Deallocate input tensor
+                clear_tensor_data(inputmat_total)
+                clear_tensor_data(inputmat_t_total)
+
             # Column Parallel Linear
             if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
                 handle.wait()
@@ -465,11 +475,18 @@ class _Linear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
-                wgrad = torch.empty(weight.main_grad.shape,
-                                   dtype=weight.dtype,
-                                   device=torch.cuda.current_device(),
-                                   requires_grad=False
-                                   )
+                if getattr(weight, 'zero_out_wgrad', False):
+                    wgrad = torch.zeros(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
+                else:
+                    wgrad = torch.empty(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
@@ -481,6 +498,7 @@ class _Linear(torch.autograd.Function):
             None,
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -588,6 +606,7 @@ class Linear(TransformerEngineBaseModule):
         ub_split_ag: bool = False,
         ub_atomic_gemm_rs: bool = False,
         ub_atomic_gemm_ag: bool = False,
+        ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -604,6 +623,9 @@ class Linear(TransformerEngineBaseModule):
         self.ub_split_ag = ub_split_ag
         self.ub_atomic_gemm_rs = ub_atomic_gemm_rs
         self.ub_atomic_gemm_ag = ub_atomic_gemm_ag
+        if any([ub_atomic_gemm_rs, ub_atomic_gemm_ag]):
+            assert ub_name is not None, "Userbuffer name [string] is not set."
+        self.ub_name = ub_name
 
         if ub_split_rs or ub_split_ag or ub_atomic_gemm_rs:
             assert (
@@ -745,6 +767,12 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        # Clean up weight and bias buffers
+        if self.parameters_split is None:
+            del self.weight_tensor
+            if self.use_bias:
+                del self.bias_tensor
+
     def get_fp8_weights_scratchpad(
         self,
         is_first_microbatch: Union[bool, None],
@@ -769,7 +797,7 @@ class Linear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
@@ -848,6 +876,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_split_ag,
                 self.ub_atomic_gemm_rs,
                 self.ub_atomic_gemm_ag,
+                self.ub_name,
             )
             out = linear_fn(*args)
 
