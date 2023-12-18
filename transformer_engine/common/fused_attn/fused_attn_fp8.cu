@@ -366,8 +366,7 @@ static cudnn_frontend::Tensor createDropoutForward(
           .setDataType(CUDNN_DATA_FLOAT)
           .setVirtual(true)
           .setByValue(false)
-          .setReorderType(cudnn_frontend::cudnnBackendTensorReordering_t::
-                          CUDNN_TENSOR_REORDERING_F16x16)
+          .setReorderType(cudnn_frontend::TensorReordering_t::F16x16)
           .build();
   // Scale after dropout
   auto scaleDropoutTensor = tensor_create(
@@ -448,8 +447,7 @@ static cudnn_frontend::Tensor createDropoutBackward(
           .setDataType(CUDNN_DATA_FLOAT)
           .setVirtual(true)
           .setByValue(false)
-          .setReorderType(cudnn_frontend::cudnnBackendTensorReordering_t::
-                          CUDNN_TENSOR_REORDERING_F16x16)
+          .setReorderType(cudnn_frontend::TensorReordering_t::F16x16)
           .build();
   // Scale after dropout (1 / (1 - p))
   auto scaleDropoutTensor = tensor_create(
@@ -992,7 +990,7 @@ static cudnn_frontend::Tensor createdSQBMM(
 }
 
 // fused attention FWD FP8
-void fused_attn_fp8_fwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
+void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             bool isTraining, float attnScale,
             float dropoutProbability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
@@ -1305,7 +1303,7 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, in
 }
 
 // fused attention BWD FP8
-void fused_attn_fp8_bwd_impl(int64_t b, int64_t s_q, int64_t s_kv, int64_t h, int64_t d,
+void fused_attn_fp8_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
             float attnScale, float dropoutProbability, NVTE_QKV_Layout layout,
             void* devPtrQ, void* devPtrK, void* devPtrV,
             void* devPtrM, void* devPtrZInv,
@@ -1935,7 +1933,7 @@ void fused_attn_fp8_fwd_qkvpacked(
   size_t workspace_size = 0;
 
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, max_seqlen, max_seqlen, h, d,
+                  b, h, max_seqlen, max_seqlen, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2025,7 +2023,7 @@ void fused_attn_fp8_bwd_qkvpacked(
   size_t workspace_size = 0;
 
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, max_seqlen, max_seqlen, h, d,
+                  b, h, max_seqlen, max_seqlen, d,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2131,7 +2129,7 @@ void fused_attn_fp8_fwd(
   size_t workspace_size = 0;
 
   fused_attn::fused_attn_fp8_fwd_impl(
-                  b, max_seqlen_q, max_seqlen_kv, h, d,
+                  b, h, max_seqlen_q, max_seqlen_kv, d,
                   is_training, attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
@@ -2224,7 +2222,7 @@ void fused_attn_fp8_bwd(
   size_t workspace_size = 0;
 
   fused_attn::fused_attn_fp8_bwd_impl(
-                  b, max_seqlen_q, max_seqlen_kv, h, d,
+                  b, h, max_seqlen_q, max_seqlen_kv, d,
                   attn_scale, p_dropout, qkv_layout,
                   devPtrQ, devPtrK, devPtrV,
                   devPtrM, devPtrZInv,
