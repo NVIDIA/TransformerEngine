@@ -2038,11 +2038,11 @@ class DotProductAttention(torch.nn.Module):
                    Cumulative sum of sequence lengths in a batch for `key_layer` and `value_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
         max_seqlen_q: Optional[int], default = `None`
-                   Max sequence length of the batch of query sequences.
-                   Calculate when not provided.
+                      Maximum sequence length in `query_layer`.
+                      Calculated from `cu_seqlens_q` if not provided.
         max_seqlen_kv: Optional[int], default = `None`
-                   Max sequence length of the batch of key-value sequences.
-                   Calculate when not provided.
+                       Maximum sequence length in `key_layer` and `value_layer`.
+                       Calculated from `cu_seqlens_kv` if not provided.
         attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `None`
                        type of attention mask passed into softmax operation.
         checkpoint_core_attention : bool, default = `False`
