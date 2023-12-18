@@ -95,6 +95,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -420,6 +421,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 clear_tensor_data(gelu_out)
 
         if is_grad_enabled:
+            if cpu_offloading:
+                if fuse_wgrad_accumulation:
+                    fc1_weight.main_grad.avoid_offloading = True
+                    fc2_weight.main_grad.avoid_offloading = True
+                if fp8:
+                    fc1_weight_t_fp8.avoid_offloading = True
+                    fc2_weight_t_fp8.avoid_offloading = True
+                ln_weight.avoid_offloading = True
+                fc1_weight.avoid_offloading = True
+                fc2_weight.avoid_offloading = True
+                fc1_bias.avoid_offloading = True
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
@@ -429,8 +442,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out,
                 gelu_out,
                 fc1_weight,
+                fc1_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc1_weight_t_fp8,
                 fc2_weight,
+                fc2_weight.main_grad if (cpu_offloading and fuse_wgrad_accumulation) else None,
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -440,6 +455,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_fc1_bias = use_fc1_bias
             ctx.use_fc2_bias = use_fc2_bias
@@ -492,12 +508,21 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_out,
                 gelu_out,
                 fc1_weight,
+                fc1_weight_main_grad,
                 fc1_weight_t_fp8,
                 fc2_weight,
+                fc2_weight_main_grad,
                 fc2_weight_t_fp8,
                 fc1_bias,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                fc1_weight = Parameter(fc1_weight, False)
+                fc2_weight = Parameter(fc2_weight, False)
+ 
+                fc1_weight.main_grad = fc1_weight_main_grad
+                fc2_weight.main_grad = fc2_weight_main_grad
 
             # Primary weights are in FP8.
             if ctx.fp8 and fc1_weight_t_fp8 is None:
@@ -993,6 +1018,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1064,6 +1090,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
+    cpu_offloading : bool, default = 'False'
+                    if set to `True`, offloads the input activation to this module to the CPU.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias for FC2, but
                  instead return the bias value during the forward pass together with the
@@ -1099,6 +1127,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation : str = "gelu",
         output_layer_init_method: Optional[Callable] = None,
         fuse_wgrad_accumulation: bool = False,
+        cpu_offloading: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         return_layernorm_output: bool = False,
         seq_length: Optional[int] = None,
@@ -1117,6 +1146,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+        self.cpu_offloading = cpu_offloading
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
@@ -1374,6 +1404,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
+                self.cpu_offloading,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

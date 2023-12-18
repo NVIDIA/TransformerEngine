@@ -70,6 +70,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fp8_calibration: bool,
         fp8_meta: Dict[str, Any],
         fuse_wgrad_accumulation: bool,
+        cpu_offloading: bool,
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -241,12 +242,20 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
         if is_grad_enabled:
+            if cpu_offloading:
+                if fuse_wgrad_accumulation:
+                    weight.main_grad.avoid_offloading = True
+                if fp8:
+                    weight_t_fp8.avoid_offloading = True
+                ln_weight.avoid_offloading = True
+
             ctx.save_for_backward(
                 inputmat,
                 ln_weight,
                 mu,
                 rsigma,
                 weight,
+                weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 weight_t_fp8,
                 ln_out,
                 fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
@@ -256,6 +265,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_meta = fp8_meta
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
@@ -300,10 +310,15 @@ class _LayerNormLinear(torch.autograd.Function):
                 mu,
                 rsigma,
                 weight,
+                main_grad,
                 weight_t_fp8,
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                weight = Parameter(weight, False)
+                weight.main_grad = main_grad
 
             # Primary weights are in FP8.
             if ctx.fp8 and weight_t_fp8 is None:
@@ -584,6 +599,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -656,6 +672,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              have an additional `main_grad` attribute (used instead of the
                              regular `grad`) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in.
+    cpu_offloading : bool, default = 'False'
+                    if set to `True`, offloads the input activation to this module to the CPU.
     return_bias : bool, default = `False`
                  when set to `True`, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
@@ -674,6 +692,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         eps: float = 1e-5,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
+        cpu_offloading: bool = False,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -699,6 +718,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.in_features = in_features
         self.out_features = out_features
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+        self.cpu_offloading = cpu_offloading
         self.normalization = normalization
         assert normalization in ['LayerNorm', 'RMSNorm'], "Unsupported normalization type!"
         self.use_bias = bias
@@ -983,6 +1003,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
+                self.cpu_offloading,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
