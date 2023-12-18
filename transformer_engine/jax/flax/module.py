@@ -16,6 +16,7 @@ from flax.linen import partitioning as nn_partitioning
 from jax import lax
 from jax import nn as jax_nn
 from jax import random as jax_random
+from jax.ad_checkpoint import checkpoint_name
 
 from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
@@ -923,6 +924,8 @@ class LayerNormMLP(TransformerEngineBase):
                 bias_shape = (1,) * (x.ndim - bias.ndim) + bias.shape
                 x += jnp.reshape(bias, bias_shape)
 
+            x = checkpoint_name(x, 'ffn1')
+
             activations = []
             if is_geglu(self.activations):
                 z = geglu(x)
@@ -956,5 +959,7 @@ class LayerNormMLP(TransformerEngineBase):
                                                        axes=self.bias_axes_2)
                 bias = bias.astype(self.dtype)
                 out += jnp.reshape(bias, (1,) * (out.ndim - 1) + (-1,))
+
+            out = checkpoint_name(out, 'ffn2')
 
         return out, ln_output    # Output, layner_norm_output

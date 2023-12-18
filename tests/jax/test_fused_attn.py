@@ -163,7 +163,7 @@ def customcall_cross_fused_attn(q, kv, q_token, kv_token, dropout_rng, **kwargs)
     # mask invert
     mask = (mask == 0)
 
-    return cross_fused_attn(q, kv, mask, dropout_rng, **kwargs)
+    return cross_fused_attn(q, kv, None, mask, dropout_rng, **kwargs)
 
 
 @pytest.mark.parametrize('b, s, h, d', SELF_CASES)
@@ -180,12 +180,14 @@ class TestSelfFusedAttn():
 
     @staticmethod
     def _check_inputs(s, *, attn_bias_type, attn_mask_type, backend, dropout_probability, dtype,
-                      head_dim):
+                      num_heads_q, num_heads_kv, head_dim):
 
         assert isinstance(backend, Backend)
 
         if not is_fused_attn_kernel_available(dtype, dtype, QKVLayout.BS3HD, attn_bias_type,
-                                              attn_mask_type, dropout_probability, s, s, head_dim):
+                                              attn_mask_type, dropout_probability,
+                                              num_heads_q, num_heads_kv,
+                                              s, s, head_dim):
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
     def _set_inputs(self, b, s, h, d, *, attn_bias_type, attn_mask_type, backend,
@@ -197,6 +199,8 @@ class TestSelfFusedAttn():
                                      backend=backend,
                                      dropout_probability=dropout_probability,
                                      dtype=dtype,
+                                     num_heads_q=h,
+                                     num_heads_kv=h,
                                      head_dim=d)
 
         if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:

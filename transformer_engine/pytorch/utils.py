@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional, Tuple
 import torch
 
 
-def clear_tensor_data(*tensors: Tuple[torch.Tensor, ...]) -> None:
+def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
     release the tensor due to PyTorch override.
@@ -16,8 +16,9 @@ def clear_tensor_data(*tensors: Tuple[torch.Tensor, ...]) -> None:
     Must be used carefully.
     """
     for t in tensors:
-        t.data = torch.Tensor()
-        del t
+        if t is not None:
+            t.data = torch.Tensor()
+            del t
 
 
 def get_device_compute_capability() -> Tuple[int, int]:

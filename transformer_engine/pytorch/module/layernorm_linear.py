@@ -168,9 +168,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.reset_fp8_meta_scale_inv()
                 weight_fp8 = weight
                 weight_t_fp8 = None
-                if is_grad_enabled:
-                    weight_t_fp8 = weight_fp8.transpose(update_cache=is_first_microbatch)
-
             elif update_fp8_weights:
                 # Need to cast weights to FP8
                 weight_fp8 = Float8Tensor(
@@ -223,11 +220,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if fp8_calibration:
                 # amax of input
+                amin, amax = ln_out_total.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = \
-                    torch.amax(ln_out_total).float()
+                    torch.max(-amin, amax).float()
                 # amax of weight
+                amin, amax = weight.aminmax()
                 fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = \
-                    torch.amax(weight).float()
+                    torch.max(-amin, amax).float()
 
             out, _, _ = tex.gemm(
                 weight,
@@ -305,6 +304,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 fwd_scale_inverses,
             ) = ctx.saved_tensors
+
+            # Primary weights are in FP8.
+            if ctx.fp8 and weight_t_fp8 is None:
+                weight_t_fp8 = weight.transpose(update_cache=ctx.is_first_microbatch)
 
             if ctx.ub_bulk_dgrad:
                 tp_world_size = get_distributed_world_size(ctx.tp_group)
@@ -531,11 +534,18 @@ class _LayerNormLinear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(weight, 'grad_added_to_main_grad'):
                 weight.grad_added_to_main_grad = True
-                wgrad = torch.empty(weight.main_grad.shape,
-                                   dtype=weight.dtype,
-                                   device=torch.cuda.current_device(),
-                                   requires_grad=False
-                                   )
+                if getattr(weight, 'zero_out_wgrad', False):
+                    wgrad = torch.zeros(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
+                else:
+                    wgrad = torch.empty(weight.main_grad.shape,
+                                        dtype=weight.dtype,
+                                        device=torch.cuda.current_device(),
+                                        requires_grad=False
+                                       )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
@@ -870,6 +880,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
+        # Clean up weight and bias buffers
+        if self.parameters_split is None:
+            del self.weight_tensor
+            if self.use_bias:
+                del self.bias_tensor
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         if not self.zero_centered_gamma:
@@ -903,7 +919,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
