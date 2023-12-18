@@ -10,11 +10,17 @@ import torch
 import transformer_engine.pytorch as te
 
 # Model names for test_torch_dynamo
-_model_names = ["Linear", "LayerNorm", "LayerNormLinear", "LayerNormMLP"]
+_model_factory = {
+        "Linear": [(lambda: te.Linear(16, 16)), [16, 16]],
+        "LayerNorm": [(lambda: te.LayerNorm(16)), [16, 16]],
+        "LayerNormLinear": [(lambda: te.LayerNormLinear(16, 16)), [16, 16]],
+        "LayerNormMLP": [(lambda: te.LayerNormMLP(16, 16)), [16, 16]],
+        "TransformerLayer": [(lambda: te.TransformerLayer(128, 128, 2)), [4, 1, 128]],
+}
 
 
 @pytest.mark.skipif(torch.__version__ < "2", reason="torch.compile not available")
-@pytest.mark.parametrize("model_name", _model_names)
+@pytest.mark.parametrize("model_name", list(_model_factory.keys()))
 def test_torch_dynamo(model_name: str):
     """Test compatibility with Torch Dynamo
 
@@ -40,21 +46,9 @@ def test_torch_dynamo(model_name: str):
         )
 
     # Construct model and input tensors
-    model = None
-    inputs = []
-    if model_name == "Linear":
-        model = te.Linear(16, 16)
-        inputs = [make_tensor([16,16])]
-    elif model_name == "LayerNorm":
-        model = te.LayerNorm(16)
-        inputs = [make_tensor([16,16])]
-    elif model_name == "LayerNormLinear":
-        model = te.LayerNormLinear(16,16)
-        inputs = [make_tensor([16,16])]
-    elif model_name == "LayerNormMLP":
-        model = te.LayerNormMLP(16,16)
-        inputs = [make_tensor([16,16])]
-    assert model is not None, f"could not construct {model_name}"
+    model_builder, input_builder = _model_factory[model_name]
+    model = model_builder()
+    inputs = [make_tensor(input_builder)]
 
     # Optimize model with TorchDynamo
     torch.compile(model)
