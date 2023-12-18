@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,9 +14,9 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 import transformer_engine_extensions as tex
+from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
     get_default_fp8_recipe,
@@ -213,44 +213,6 @@ def get_ub(name: str):
     return _ub_communicators[name]
 
 
-class _NoopCat(torch.autograd.Function):
-    """This class is a no-op replacement for `torch.cat`."""
-
-    @staticmethod
-    def forward(ctx,
-                full_param_buffer: torch.Tensor,
-                *params_split: Tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        assert not full_param_buffer.requires_grad, "Buffers should not require gradient"
-        sum_params_shape = sum(p.shape[0] for p in params_split)
-        assert (
-            full_param_buffer.shape[0] == sum_params_shape
-        ), "Dimensions not compatible for concatenation"
-
-        param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.untyped_storage(),
-                        full_param_buffer.storage_offset(),
-                        full_param_buffer.size(),
-                        full_param_buffer.stride())
-        param_temp.requires_grad = True
-
-        ctx.save_for_backward(*params_split)
-        return param_temp
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        params_split = ctx.saved_tensors
-        grads = []
-        slice_begin = 0
-        for i, _ in enumerate(params_split):
-            slice_size = params_split[i].shape[0]
-            slice_end = slice_begin + slice_size
-            grads.append(grad_output[slice_begin:slice_end])
-            slice_begin = slice_end
-
-        return None, *grads
-
-
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -273,6 +235,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["async_amax_reduction"] = bool(
             int(os.getenv("NVTE_ASYNC_AMAX_REDUCTION", "0"))
         )
+        self.param_init_meta = {}
+        self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
 
     def set_meta_tensor(self, fwd: bool) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -742,40 +706,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return grad_output_mat, grad_output_c, grad_output_t, grad_bias
 
-    def noop_cat(self,
-        buffer_name: str,
-        pnames: List[str],
-        parameters_split: Dict[str, int]
-        ) -> torch.Tensor:
-        """No-op replacement of `torch.cat`. The buffer and split parameters must occupy
-           the same memory region. If this is not the case, then the split parameters
-           are concatenated and the buffer is overwritten. The parameters' memory is then
-           re-assigned to point to the buffer to avoid subsequent concatenations.
-        """
-
-        assert hasattr(self, buffer_name), f"No buffer named {buffer_name}"
-        full_param_buffer = getattr(self, buffer_name)
-        params = [getattr(self, name) for name in pnames]
-        slice_begin = 0
-        for i, p in enumerate(params):
-            slice_size = parameters_split[pnames[i].split('_')[0]+'_']
-            slice_end = slice_begin + slice_size
-            if p.data.data_ptr() != full_param_buffer[slice_begin:slice_end].data_ptr():
-                with torch.no_grad():
-                    setattr(self, buffer_name, torch.cat(params))
-                    slice_begin_j = 0
-                    for pname in pnames:
-                        slice_size_j = parameters_split[pname.split('_')[0]+'_']
-                        slice_end_j = slice_begin_j + slice_size_j
-                        full_param_buffer = getattr(self, buffer_name)
-                        setattr(self, pname,
-                                Parameter(full_param_buffer[slice_begin_j:slice_end_j]))
-                        slice_begin_j = slice_end_j
-                break
-            slice_begin = slice_end
-
-        return _NoopCat.apply(getattr(self, buffer_name), *[getattr(self, name) for name in pnames])
-
     def get_fp8_weights_empty_tensors(
         self,
         is_first_microbatch: Union[bool, None],
@@ -818,6 +748,52 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
             )
         return fp8_weight_tensors
+
+    def register_parameter(self, name, param, **kwargs):
+        """
+        Thin wrapper around PyTorch parameter registration to stash additional parameter
+        metedata used in deferred initialization.
+        """
+        super().register_parameter(name, param)
+        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+
+    def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
+        """
+        Reset all module parameters to initial values. Unless deferred initialization
+        is specified, all parameters on a 'meta' device are also materialized on a real cuda
+        device before the values are reset to initial.
+        """
+        if defer_init:
+            return
+
+        for name, param in self.named_parameters(recurse=False):
+            # Ensure parameter is on a real device
+            if param.device == torch.device('meta'):
+                param = torch.empty_like(param, device='cuda')
+
+            # Initialize the parameter values on device
+            init_fn = self.param_init_meta[name].init_fn
+            get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
+            if get_rng_state_tracker is None:
+                init_fn(param)
+            else:
+                with get_rng_state_tracker().fork():
+                    init_fn(param)
+
+            # If primary weights are in fp8, wrap the parameter as Float8Tensor
+            fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                param = Float8Tensor.to_float8(
+                    param,
+                    fp8_meta=self.fp8_meta,
+                    fp8_meta_index=fp8_meta_index
+                )
+
+            # Redo parameter wrap in case we broke it above
+            # NOTE: Currently this can only be broken when primary weights are in Fp8 but
+            #       re-applying the nn.Parameter() wrap is a no-op when the input is already
+            #       a parameter so we always re-apply it just for extra safety.
+            setattr(self, name, torch.nn.Parameter(param))
 
     @abstractmethod
     def forward(self):

@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -102,6 +102,7 @@ Flax
 
 .. code-block:: python
 
+  import flax
   import jax
   import jax.numpy as jnp
   import transformer_engine.jax as te
@@ -130,7 +131,7 @@ Flax
 
       # Initialize models.
       variables = model.init(init_rng, inp)
-      other_variables, params = variables.pop('params')
+      other_variables, params = flax.core.pop(variables, 'params')
 
       # Construct the forward and backward function
       fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
@@ -228,6 +229,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel.html>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
+* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!
 
 
 Contributing

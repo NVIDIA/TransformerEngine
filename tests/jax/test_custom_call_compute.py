@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -55,7 +55,7 @@ class TestFP8Dot:
         scale = jnp.asarray(FP8_E4M3_MAX / amax, jnp.float32).reshape(1)
         scale_inv = (1 / scale).reshape(1)
 
-        y = quantize(x, q_dtype=jnp.float8_e4m3fn, scale=scale)
+        y, _ = quantize(x, q_dtype=jnp.float8_e4m3fn, scale=scale)
         z = dequantize(y, dq_dtype=jnp.float32, scale_inv=scale_inv)
 
         assert_allclose(z, x, dtype=jnp.float8_e4m3fn)

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -810,7 +810,7 @@ class LayerNormMLP(TransformerEngineBase):
                 if not isinstance(act, str):
                     return False
                 normalize_acts.append(act.lower())
-            return normalize_acts in geglu_act_pool
+            return tuple(normalize_acts) in geglu_act_pool
 
         use_fused_ln_mlp = fuse_layernorm \
             and (not self.use_bias) and is_geglu(self.activations) \

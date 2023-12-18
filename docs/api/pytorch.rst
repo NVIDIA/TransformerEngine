@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -40,3 +40,5 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
 
 .. autoapifunction:: transformer_engine.pytorch.onnx_export
+
+.. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context

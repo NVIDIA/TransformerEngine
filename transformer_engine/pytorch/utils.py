@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -38,6 +38,21 @@ def attention_mask_func(
 def get_default_init_method() -> Callable:
     """Weight initialization method if not provided by user"""
     return init_method_normal(0.023)
+
+
+def init_method_constant(val: float) -> Callable:
+    """Init method to set all tensor elements to a constant value."""
+    if val == 1.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.ones_(tensor)
+    elif val == 0.0:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.zeros_(tensor)
+    else:
+        def init_(tensor: torch.Tensor) -> Callable:
+            return torch.nn.init.constant_(tensor, val)
+
+    return init_
 
 
 def init_method_normal(sigma: float) -> Callable:
@@ -207,3 +222,9 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
         "Tensor dimensions are not compatible for FP8 execution: "
         f"({tensor.shape[0]} % 8 != 0, {tensor.shape[1]} % 16 != 0)"
     )
+
+def is_bf16_compatible() -> None:
+    """Replaces torch.cuda.is_bf16_compatible() with an explicit
+       check on device compute capability to enforce sm_80 or higher.
+    """
+    return torch.cuda.get_device_capability()[0] >= 8

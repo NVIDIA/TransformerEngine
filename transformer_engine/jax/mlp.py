@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX MLP modules"""
@@ -9,12 +9,12 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .cpp_extensions import transpose, cast_transpose
+from .cpp_extensions import cast_fp8, transpose, cast_transpose
 from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
-from .dot import fp8_dot_impl
+from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
 
@@ -170,13 +170,15 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
     kernel_1_scale = scale[gemm1_kernel_idx]
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
 
-    casted_kerenl_1, casted_kerenl_1_t, updated_kernel_1_amax = \
-        cast_transpose(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype,
-                       static_axis_boundary=-1, transpose_axis_boundary=-2)
+    # Note (Ming Huang): Use cast only to allow XLA handle tranpose for avoiding
+    # unnecessary copy to break FP8 GEMM pattern matching.
+    casted_kernel_1, updated_kernel_1_amax = \
+        cast_fp8(kernel_1, kernel_1_amax, kernel_1_scale, kernel_1_scale_inv, fwd_dtype)
 
-    # (batch..., hidden_in) x (2, hidden_out, hidden_in)
-    dot_1_output = fp8_dot_impl(ln_out, casted_kerenl_1_t, x_scale_inv, kernel_1_scale_inv, x.dtype,
-                                (x_contracting_dims, (2,)))
+    # (batch..., hidden_in) x (hidden_in, 2, hidden_out)
+    dot_1_output = fp8_dot_impl(ln_out, casted_kernel_1, x_scale_inv, kernel_1_scale_inv, x.dtype,
+                                (x_contracting_dims, (0,)),
+                                get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
     gemm2_x_idx, gemm2_kernel_idx, _ = FP8Helper.get_fp8_meta_indices(1)
 
@@ -189,20 +191,19 @@ def _layernrom_geglu_fp8_mlp_fwd_rule(
                                                           geglu_out_scale, geglu_out_scale_inv,
                                                           fwd_dtype)
 
-    kernel_2_amax = amax[gemm2_kernel_idx, 0:1]
     kernel_2_scale = scale[gemm2_kernel_idx]
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
-
-    casted_kerenl_2, casted_kerenl_2_t, updated_kernel_2_amax = \
-        cast_transpose(kernel_2, kernel_2_amax, kernel_2_scale, kernel_2_scale_inv, fwd_dtype,
-                       static_axis_boundary=-1, transpose_axis_boundary=-1)
+    # Note (Ming Huang): Use native cast to allow XLA handle tranpose for avoiding
+    # unnecessary copy to break FP8 GEMM pattern matching.
+    casted_kernel_2, updated_kernel_2_amax = quantize(kernel_2, fwd_dtype, kernel_2_scale)
 
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kerenl_2_t, geglu_out_scale_inv,
-                                kernel_2_scale_inv, x.dtype, (x_contracting_dims, (1,)))
+    dot_2_output = fp8_dot_impl(casted_geglu_out, casted_kernel_2, geglu_out_scale_inv,
+                                kernel_2_scale_inv, x.dtype, (x_contracting_dims, (0,)),
+                                get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_FPROP))
 
-    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kerenl_1,
-           casted_kerenl_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
+    ctx = (x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, casted_kernel_1,
+           casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, updated_geglu_amax,
            updated_kernel_1_amax, updated_kernel_2_amax, x_contracting_dims, xt_batch_dims)
 
     return dot_2_output, ctx
@@ -217,7 +218,7 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
         ctx,
         grad):
     x, ln_out, mu, rsigma, gamma, dot_1_output, casted_geglu_out, \
-    casted_kerenl_1, casted_kerenl_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
+    casted_kernel_1, casted_kernel_2, fp8_max, amax, scale, scale_inv, updated_x_amax, \
     updated_geglu_amax, updated_kernel_1_amax, updated_kernel_2_amax, \
     x_contracting_dims, xt_batch_dims = ctx
 
@@ -238,12 +239,14 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     # (hidden, batch...,) x (hidden, batch...)
     gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
     wgrad_2 = fp8_dot_impl(casted_geglu_out_t, casted_grad_t, gemm2_x_scale_inv, grad_scale_inv,
-                           grad.dtype, (xt_batch_dims, xt_batch_dims))
+                           grad.dtype, (xt_batch_dims, xt_batch_dims),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)
     kernel_2_scale_inv = scale_inv[gemm2_kernel_idx]
-    dgrad_2 = fp8_dot_impl(casted_grad, casted_kerenl_2, grad_scale_inv, kernel_2_scale_inv,
-                           grad.dtype, (x_contracting_dims, (1,)))
+    dgrad_2 = fp8_dot_impl(casted_grad, casted_kernel_2, grad_scale_inv, kernel_2_scale_inv,
+                           grad.dtype, (x_contracting_dims, (1,)),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     gemm1_x_idx, gemm1_kernel_idx, gemm1_grad_idx = FP8Helper.get_fp8_meta_indices(0)
 
@@ -266,17 +269,16 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     xt_batch_dims_plus_act_dim = tuple(i + 1 for i in xt_batch_dims)
     gemm1_x_scale_inv = scale_inv[gemm1_x_idx]
     wgrad_1 = fp8_dot_impl(ln_out_t, casted_dgeglu_t, gemm1_x_scale_inv, dgeglu_scale_inv,
-                           grad.dtype, (xt_batch_dims, xt_batch_dims_plus_act_dim))
+                           grad.dtype, (xt_batch_dims, xt_batch_dims_plus_act_dim),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
 
     # (batch..., 2, hidden_out) x (hidden_in, 2, hidden_out)
     x_contracting_dims_plus_act_dim = (min(x_contracting_dims),) + tuple(
         i + 1 for i in x_contracting_dims)
     kernel_1_scale_inv = scale_inv[gemm1_kernel_idx]
-    dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kerenl_1, dgeglu_scale_inv, kernel_1_scale_inv,
-                           grad.dtype, (x_contracting_dims_plus_act_dim, (
-                               1,
-                               2,
-                           )))
+    dgrad_1 = fp8_dot_impl(casted_dgeglu, casted_kernel_1, dgeglu_scale_inv, kernel_1_scale_inv,
+                           grad.dtype, (x_contracting_dims_plus_act_dim, (1, 2)),
+                           get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_DGRAD))
 
     if layernorm_type == 'layernorm':
         dx, dgamma, dbeta = layernorm_bwd(dgrad_1,
@@ -296,7 +298,7 @@ def _layernrom_geglu_fp8_mlp_bwd_rule(
     amax = amax.at[gemm1_kernel_idx, 0].set(updated_kernel_1_amax[0])
     amax = amax.at[gemm1_grad_idx, 0].set(updated_dgeglu_amax[0])
     amax = amax.at[gemm2_x_idx, 0].set(updated_geglu_amax[0])
-    amax = amax.at[gemm2_kernel_idx, 0].set(updated_kernel_2_amax[0])
+    amax = amax.at[gemm2_kernel_idx, 0].set(updated_kernel_2_amax)
     amax = amax.at[gemm2_grad_idx, 0].set(updated_grad_amax[0])
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)

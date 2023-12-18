@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,12 +12,22 @@ jit_fuser = torch.jit.script
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
 
+# See: https://github.com/NVIDIA/TransformerEngine/issues/597
+dropout_fuser = torch.jit.script
+if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+    dropout_fuser = torch.compile
+
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
 no_torch_dynamo = lambda recursive=True: lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
-    no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+    if torch.__version__ >= "2.1":
+        no_torch_dynamo = lambda recursive=True: lambda f: \
+                                                    torch._dynamo.disable(f, recursive=recursive)
+    else:
+        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
 
 
 def set_jit_fusion_options() -> None:
@@ -134,7 +144,7 @@ def get_bias_dropout_add(training: bool) -> Callable:
     return _bias_dropout_add
 
 
-@torch.jit.script
+@dropout_fuser
 def bias_dropout_add_fused_train_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
@@ -151,7 +161,7 @@ def bias_dropout_add_fused_train(
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
-@torch.jit.script
+@dropout_fuser
 def bias_dropout_add_fused_inference_(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
