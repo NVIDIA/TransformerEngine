@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -318,13 +318,12 @@ class TorchLayerNormMLP(nn.Module):
 
 
 class TorchGPT(nn.Module):
-    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int):
+    def __init__(self, hidden_size: int, eps: float, num_attention_heads: int, parallel_attention_mlp: bool):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size, eps=eps)
         self.causal_attn = TorchMHA(hidden_size, num_attention_heads)
         self.ln_mlp = TorchLayerNormMLP(hidden_size, 4 * hidden_size, eps)
-        self.resid_attn_dropout = nn.Dropout(0.1)
-        self.resid_mlp_dropout = nn.Dropout(0.1)
+        self.parallel_attention_mlp = parallel_attention_mlp
 
     def forward(
         self,
@@ -333,13 +332,18 @@ class TorchGPT(nn.Module):
     ) -> torch.Tensor:
         a = self.ln(x)
         b = self.causal_attn(a, attn_mask)
-        x = x + self.resid_attn_dropout(b)
-        n = self.ln_mlp(x)
-        x = x + self.resid_mlp_dropout(n)
+        if self.parallel_attention_mlp:
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(b + n, p=0.1, training=self.training)
+        else:
+            x = x + nn.functional.dropout(b, p=0.1, training=self.training)
+            n = self.ln_mlp(x)
+            x = x + nn.functional.dropout(n, p=0.1, training=self.training)
         return x
 
 
-def _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False):
+
+def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -354,24 +358,26 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False):
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    block = (
-        TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            layernorm_epsilon=config.eps,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            hidden_dropout=0.1,
-            attention_dropout=0.1,
-            kv_channels=config.embed,
-            apply_residual_connection_post_layernorm=False,
-            output_layernorm=False,
-            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            params_dtype=dtype,
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        block = (
+            TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_attention_heads,
+                layernorm_epsilon=config.eps,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.1,
+                attention_dropout=0.1,
+                kv_channels=config.embed,
+                apply_residual_connection_post_layernorm=False,
+                output_layernorm=False,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            )
+            .cuda()
         )
-        .cuda()
-    )
 
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
@@ -400,18 +406,19 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
-def test_gpt_selective_activation_recompute(dtype, bs, model, fp8):
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
-    outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=False)
-    outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, recompute=True)
+    outputs = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
+    outputs_recompute = _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
 
 
-def _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False):
+def _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -426,7 +433,8 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False):
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    block = (
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        block = (
         TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -441,9 +449,10 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False):
             output_layernorm=False,
             get_rng_state_tracker=get_dummy_cuda_rng_tracker,
             params_dtype=dtype,
+            fuse_qkv_params=True,
         )
         .cuda()
-    )
+        )
 
     te_inp_hidden_states = torch.randn(
         config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
@@ -483,14 +492,15 @@ def _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
-def test_gpt_full_activation_recompute(dtype, bs, model, fp8):
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
 
-    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=False)
-    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, recompute=True)
+    outputs = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=False)
+    outputs_recompute = _test_e2e_full_recompute(bs, dtype, config, fp8, fp8_model_params, recompute=True)
     assert_all_equal(outputs, outputs_recompute)
 
 
@@ -498,6 +508,7 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
     return (
         TransformerLayer(
             config.hidden_size,
@@ -514,7 +525,6 @@ def _test_e2e_checkpointing_get_model(config, dtype):
             params_dtype=dtype,
         )
         .cuda()
-        .eval()
     )
 
 
@@ -549,9 +559,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
+        global _cpu_rng_state, _cuda_rng_state
+        _cpu_rng_state = torch.get_rng_state()
+        _cuda_rng_state = torch.cuda.get_rng_state()
+
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path))
+        reset_rng_states()
 
         for p in block.parameters():
             if p.requires_grad:
@@ -613,7 +628,8 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-def test_gpt_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
+def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
 
     te_gpt = (
@@ -626,6 +642,7 @@ def test_gpt_accuracy(dtype, bs, model):
             hidden_dropout=0.1,
             fuse_qkv_params=True,
             qkv_weight_interleaved=False,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -637,6 +654,7 @@ def test_gpt_accuracy(dtype, bs, model):
             config.hidden_size,
             config.eps,
             config.num_attention_heads,
+            parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
         .cuda()
@@ -802,21 +820,19 @@ def test_dpa_accuracy(dtype, bs, model):
         DotProductAttention(
             config.num_attention_heads,
             config.embed,
-            attention_dropout=0.1,  # dropout
+            attention_dropout=0.0, # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     torch_dpa = (
         TorchDotProductAttention(
             config.embed,
-            0.1,  # dropout
+            0.0, # dropout
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     te_outputs = _test_dpa_accuracy(te_dpa, bs, dtype, config)
@@ -871,6 +887,7 @@ def test_linear_accuracy(dtype, bs, model):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
@@ -910,6 +927,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps):
         assert_allclose(te_outputs[0], torch_outputs[0], 1e-7)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 2e-2)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1110,3 +1128,72 @@ def test_gpt_cuda_graph(dtype, bs, model):
     assert_allclose(out, graphed_out, 1e-3)
     assert_allclose(params, graphed_params, 1e-3)
     assert_allclose(grads, graphed_grads, 1e-3)
+
+
+def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    sigma = 0.023
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
+
+    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
+
+    def get_dummy_cuda_rng_tracker():
+        """Get cuda rng tracker."""
+        return _DUMMY_CUDA_RNG_STATE_TRACKER
+
+    with fp8_model_init(enabled=fp8_model_params):
+        block = (
+            TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_attention_heads,
+                layernorm_epsilon=config.eps,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.1,
+                attention_dropout=0.1,
+                kv_channels=config.embed,
+                apply_residual_connection_post_layernorm=False,
+                output_layernorm=False,
+                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            )
+            .cuda()
+        )
+
+    te_inp_hidden_states = torch.randn(
+        config.seq_len, bs, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    te_inp_hidden_states.retain_grad()
+    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+
+    with fp8_autocast(enabled=True):
+        te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    outputs = [te_out, te_inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+def test_gpt_fp8_parameters(dtype, bs, model):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+
+    outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
+    outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
+    assert_all_equal(outputs, outputs_fp8_params)

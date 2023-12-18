@@ -69,9 +69,9 @@ pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, DType
 }
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t n, size_t hidden, DType x_dtype, DType w_dtype,
-                                             bool zero_centered_gamma, float eps) {
+                                             bool zero_centered_gamma, float eps, int sm_margin) {
     return PackOpaque(
-        CustomCallNormDescriptor{n, hidden, x_dtype, w_dtype, zero_centered_gamma, eps});
+        CustomCallNormDescriptor{n, hidden, x_dtype, w_dtype, zero_centered_gamma, eps, sm_margin});
 }
 
 pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch, size_t pad_batch, size_t heads,
@@ -282,10 +282,10 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
                      desc.use_split_accumulator, 0, stream);
 }
 
-void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps, void *input,
-                          DType in_dtype, void *weight, DType w_dtype, void *bias, void *output,
-                          DType out_dtype, void *mu, void *rsigma, float *amax, float *scale,
-                          float *scale_inv, cudaStream_t stream) {
+void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps,
+                          int sm_margin, void *input, DType in_dtype, void *weight, DType w_dtype,
+                          void *bias, void *output, DType out_dtype, void *mu, void *rsigma,
+                          float *amax, float *scale, float *scale_inv, cudaStream_t stream) {
     auto input_shape = std::vector<size_t>{n, hidden};
     auto weight_shape = std::vector<size_t>{hidden};
     auto intermediates_shape = std::vector<size_t>{n};
@@ -302,7 +302,7 @@ void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, flo
 
     // Create uninitialized workspace, barrier and init them on the first
     TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
-    auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+    auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
 
     auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
     if (!is_layer_norm) {
@@ -351,9 +351,9 @@ void LayerNormForwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, flo
 }
 
 void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, float eps,
-                           void *input, DType in_dtype, void *weight, DType w_dtype, void *ograd,
-                           void *mu, void *rsigma, void *xgrad, void *wgrad, void *dbeta,
-                           cudaStream_t stream) {
+                           int sm_margin, void *input, DType in_dtype, void *weight, DType w_dtype,
+                           void *ograd, void *mu, void *rsigma, void *xgrad, void *wgrad,
+                           void *dbeta, cudaStream_t stream) {
     auto input_shape = std::vector<size_t>{n, hidden};
     auto weight_shape = std::vector<size_t>{hidden};
     auto intermediates_shape = std::vector<size_t>{n};
@@ -376,7 +376,7 @@ void LayerNormBackwardImpl(size_t n, size_t hidden, bool zero_centered_gamma, fl
 
     TensorWrapper dummy_workspace_tensor, dummy_barrier_tensor;
     TensorWrapper dummy_dgamma_part_tensor, dummy_dbeta_part_tensor;
-    auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+    auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
     size_t dbeta_part_size{};
 
     auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
@@ -465,11 +465,13 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
 
     auto out_dtype = DType::kFloat8E4M3;
 
-    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                         w_dtype, bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv,
+                         stream);
 }
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -492,9 +494,11 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
     auto eps = desc.eps;
     auto out_dtype = in_dtype;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
 
-    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                         w_dtype, bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv,
+                         stream);
 }
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -506,6 +510,7 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
 
     auto *ograd = buffers[0];
     auto *mu = buffers[1];
@@ -516,8 +521,8 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto *wgrad = buffers[6];
     auto *dbeta = buffers[7];
 
-    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                          ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
+    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                          w_dtype, ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
 }
 
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -541,10 +546,12 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
     auto out_dtype = DType::kFloat8E4M3;
 
-    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                         w_dtype, bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv,
+                         stream);
 }
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -566,10 +573,12 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
     auto out_dtype = in_dtype;
 
-    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                         bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv, stream);
+    LayerNormForwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                         w_dtype, bias, output, out_dtype, mu, rsigma, amax, scale, scale_inv,
+                         stream);
 }
 
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -587,12 +596,13 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
     auto w_dtype = desc.w_dtype;
     auto eps = desc.eps;
     auto zero_centered_gamma = desc.zero_centered_gamma;
+    auto sm_margin = desc.sm_margin;
 
     void *mu = nullptr;
     void *dbeta = nullptr;
 
-    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, input, in_dtype, weight, w_dtype,
-                          ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
+    LayerNormBackwardImpl(n, hidden, zero_centered_gamma, eps, sm_margin, input, in_dtype, weight,
+                          w_dtype, ograd, mu, rsigma, xgrad, wgrad, dbeta, stream);
 }
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -730,11 +740,13 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
+                                            size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t head_dim) {
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, q_num_heads, kv_num_heads,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     return backend;
 }
 
@@ -762,7 +774,7 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BS3HD;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -789,7 +801,8 @@ void SelfFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaqu
 
     auto backend = nvte_get_fused_attn_backend(
         static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
+        mask_type, dropout_probability, num_head, num_head,
+        q_max_seqlen, kv_max_seqlen, head_dim);
     PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
@@ -827,15 +840,16 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
 
     // input
     void *qkv = buffers[0];
-    void *softmax_aux = buffers[1];
-    void *rng_state = buffers[2];
-    void *output = buffers[3];
-    void *doutput = buffers[4];
-    void *cu_seqlens = buffers[5];
+    void *bias = buffers[1];
+    void *softmax_aux = buffers[2];
+    void *rng_state = buffers[3];
+    void *output = buffers[4];
+    void *doutput = buffers[5];
+    void *cu_seqlens = buffers[6];
 
     // output
-    void *dqkv = buffers[6];
-    void *dbias = buffers[7];
+    void *dqkv = buffers[7];
+    void *dbias = buffers[8];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -845,7 +859,7 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BS3HD;
 
     NVTE_CHECK(q_max_seqlen == kv_max_seqlen,
                "q_max_seqlen should be equal to kv_max_seqlen in the self attention.");
@@ -871,13 +885,15 @@ void SelfFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaq
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 2;
+    aux_output_tensors.size = 3;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
     auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
     rng_state_tensor->data.shape = std::vector<size_t>{2};
     rng_state_tensor->data.dtype = DType::kInt64;
     rng_state_tensor->data.dptr = rng_state;
+    auto *bias_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[2]);
+    bias_tensor->data = SimpleTensor(bias, bias_shape, dtype);
 
     TensorWrapper query_workspace_tensor;
 
@@ -913,13 +929,15 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     // input
     void *q = buffers[0];
     void *kv = buffers[1];
-    void *q_cu_seqlens = buffers[2];
-    void *kv_cu_seqlens = buffers[3];
-    void *seed = buffers[4];
+    void *bias = buffers[2];
+    void *q_cu_seqlens = buffers[3];
+    void *kv_cu_seqlens = buffers[4];
+    void *seed = buffers[5];
 
     // output
-    void *output = buffers[5];
-    void *softmax_aux = buffers[6];
+    void *output = buffers[6];
+    void *softmax_aux = buffers[7];
+    void *rng_state = buffers[8];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
@@ -929,30 +947,40 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     auto dropout_probability = descriptor.dropout_probability;
     auto bias_type = descriptor.bias_type;
     auto mask_type = descriptor.mask_type;
-    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BS2HD;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
     auto kv_shape = std::vector<size_t>{batch * kv_max_seqlen, 2, num_head, head_dim};
     auto bias_shape = std::vector<size_t>{1, num_head, q_max_seqlen, kv_max_seqlen};
 
+    // input tensors
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
 
-    // TODO(rewang): add bias for cross attn?
-    auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
-
-    // FP16/BF16 doesn't use this tensor
-    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
-    auto o_tensor =
-        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
+    auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
 
     auto q_cu_seqlens_tensor =
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
 
-    auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
+    // output tensors
+    auto o_tensor =
+        TensorWrapper(output, std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim}, dtype);
+
+    // aux tensors
+
+    // F16 doesn't use s_tensor
+    auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+
+    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+
+    auto backend = nvte_get_fused_attn_backend(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+        mask_type, dropout_probability, num_head, num_head,
+        q_max_seqlen, kv_max_seqlen, head_dim);
+    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
@@ -962,29 +990,17 @@ void CrossFusedAttnForward(cudaStream_t stream, void **buffers, const char *opaq
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
+        rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, descriptor.is_training,
         descriptor.scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
         query_workspace_tensor.data(), stream);
 
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
     output_s->data.dptr = softmax_aux;
 
-    // fused attn workspace + workspace for rng_state
-    auto plan_workspace_size =
-        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
-    auto rng_workspace_size = 2 * sizeof(int64_t);
-    auto total_workspace_size = plan_workspace_size + rng_workspace_size;
-    auto *workspace = WorkspaceManager::Instance().GetWorkspace(total_workspace_size);
+    auto workspace_size = query_workspace_tensor.shape().data[0];
+    auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
     auto workspace_tensor =
         TensorWrapper(workspace, query_workspace_tensor.shape(), query_workspace_tensor.dtype());
-
-    auto rng_state = static_cast<uint8_t *>(workspace) + plan_workspace_size;
-    auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-
-    auto backend = nvte_get_fused_attn_backend(
-        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-        mask_type, dropout_probability, q_max_seqlen, kv_max_seqlen, head_dim);
-    PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
     nvte_fused_attn_fwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
@@ -1004,21 +1020,28 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
     // input
     void *q = buffers[0];
     void *kv = buffers[1];
-    void *softmax_aux = buffers[2];
-    void *doutput = buffers[3];
-    void *q_cu_seqlens = buffers[4];
-    void *kv_cu_seqlens = buffers[5];
+    void *bias = buffers[2];
+    void *softmax_aux = buffers[3];
+    void *rng_state = buffers[4];
+    void *output = buffers[5];
+    void *doutput = buffers[6];
+    void *q_cu_seqlens = buffers[7];
+    void *kv_cu_seqlens = buffers[8];
 
     // output
-    void *dq = buffers[6];
-    void *dkv = buffers[7];
-    void *dp = softmax_aux;
+    void *dq = buffers[9];
+    void *dkv = buffers[10];
+    void *dbias = buffers[11];
 
     auto batch = descriptor.batch;
     auto num_head = descriptor.num_head;
     auto q_max_seqlen = descriptor.q_max_seqlen;
     auto kv_max_seqlen = descriptor.kv_max_seqlen;
     auto head_dim = descriptor.head_dim;
+    auto dropout_probability = descriptor.dropout_probability;
+    auto bias_type = descriptor.bias_type;
+    auto mask_type = descriptor.mask_type;
+    constexpr auto qkv_layout = NVTE_QKV_Layout::NVTE_BSHD_BS2HD;
 
     auto dtype = descriptor.dtype;
     auto q_shape = std::vector<size_t>{batch * q_max_seqlen, num_head, head_dim};
@@ -1028,33 +1051,33 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
 
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(kv, kv_shape, dtype);
+    auto output_tensor = TensorWrapper(output, output_shape, dtype);
     auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
-    // It's a little trick that the flash attn needs fwd output
-    // But when seqlen <= 512, it is not needed
-    auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
-    // FP16/BF16 doesn't use this tensor
+    // F16 doesn't use this tensor
     auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
 
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
     auto dkv_tensor = TensorWrapper(dkv, kv_shape, dtype);
-    // TODO(rewang): generalize cross attn
-    auto dbias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
+    auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
 
     auto q_cu_seqlens_tensor =
         TensorWrapper(q_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
     auto kv_cu_seqlens_tensor =
         TensorWrapper(kv_cu_seqlens, std::vector<size_t>{batch + 1}, DType::kInt32);
-    // Currently, no rng_state required for bwd
-    auto rng_state = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt64);
 
     // TODO(rewang): need to think about how to pass aux_output_tensors
     NVTETensorPack aux_output_tensors;
     nvte_tensor_pack_create(&aux_output_tensors);
 
-    aux_output_tensors.size = 1;
+    aux_output_tensors.size = 3;
     auto *output_s = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[0]);
-    output_s->data.shape = std::vector<size_t>{batch * num_head, q_max_seqlen, kv_max_seqlen};
     output_s->data.dptr = softmax_aux;
+    auto *rng_state_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[1]);
+    rng_state_tensor->data.shape = std::vector<size_t>{2};
+    rng_state_tensor->data.dtype = DType::kInt64;
+    rng_state_tensor->data.dptr = rng_state;
+    auto *bias_tensor = reinterpret_cast<Tensor *>(aux_output_tensors.tensors[2]);
+    bias_tensor->data = SimpleTensor(bias, bias_shape, dtype);
 
     TensorWrapper query_workspace_tensor;
 
@@ -1064,12 +1087,10 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
-        query_workspace_tensor.data(), stream);
+        descriptor.scaling_factor, dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD, bias_type,
+        mask_type, query_workspace_tensor.data(), stream);
 
-    size_t workspace_size =
-        query_workspace_tensor.shape().data[0] * typeToSize(query_workspace_tensor.dtype());
+    size_t workspace_size = query_workspace_tensor.shape().data[0];
     auto *workspace = WorkspaceManager::Instance().GetWorkspace(workspace_size);
 
     auto workspace_tensor =
@@ -1081,9 +1102,8 @@ void CrossFusedAttnBackward(cudaStream_t stream, void **buffers, const char *opa
         s_tensor.data(),  // not used for FP16/BF16
         &aux_output_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        descriptor.scaling_factor, descriptor.dropout_probability,
-        NVTE_QKV_Layout::NVTE_KV_INTERLEAVED, descriptor.bias_type, descriptor.mask_type,
-        workspace_tensor.data(), stream);
+        descriptor.scaling_factor, dropout_probability, NVTE_QKV_Layout::NVTE_BSHD_BS2HD, bias_type,
+        mask_type, workspace_tensor.data(), stream);
 
     nvte_tensor_pack_destroy(&aux_output_tensors);
 }

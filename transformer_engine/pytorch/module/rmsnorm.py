@@ -158,7 +158,7 @@ class RMSNorm(torch.nn.Module):
             init.zeros_(self.weight)
 
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """RMSNorm FWD"""
 

@@ -634,12 +634,14 @@ def test_dot_product_attention(bs, hidden_size, num_heads, q_seqlen, kv_seqlen, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        head_size=head_size,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
+        head_size=head_size,
         dtype=math_dtype,
         dropout=0.0,
-        qkv_layout="qkv_interleaved" if attn_type == "self" else "kv_interleaved",
+        qkv_layout="bs3hd" if attn_type == "self" else "bshd_bs2hd",
         bias_type="no_bias",
         mask_type=mask_type,
     ):
@@ -762,12 +764,14 @@ def test_transformer_encoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        head_size=hidden_size // num_heads,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
+        head_size=hidden_size // num_heads,
         dtype=math_dtype,
         dropout=0.0,
-        qkv_layout="qkv_interleaved",
+        qkv_layout="bs3hd",
         bias_type="no_bias",
         mask_type=mask_type,
     ):
@@ -940,23 +944,27 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
 
     # Skip if cuDNN fused attention is not supported
     if not is_fused_attention_supported(
-        head_size=hidden_size // num_heads,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
+        head_size=hidden_size // num_heads,
         dtype=math_dtype,
         dropout=0.0,
-        qkv_layout="qkv_interleaved",
+        qkv_layout="bs3hd",
         bias_type="no_bias",
         mask_type=mask_type,
     ):
         pytest.skip("cuDNN fused attention is not supported")
     if not is_fused_attention_supported(
         head_size=hidden_size // num_heads,
+        num_heads=num_heads,
+        num_gqa_groups=num_heads,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
         dtype=math_dtype,
         dropout=0.0,
-        qkv_layout="kv_interleaved",
+        qkv_layout="bshd_bs2hd",
         bias_type="no_bias",
         mask_type=mask_type,
     ):

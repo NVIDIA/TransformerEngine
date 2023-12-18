@@ -593,6 +593,19 @@ struct DynamicReducer : public Reducer<T, 1, WARPS_M, WARPS_N> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+/*
+This is an implementation of the parallel Welford algorithm for incrementally computing variance
+
+This algorithm is known as Chan's update formulae (Chat et al '79):
+http://i.stanford.edu/pub/cstr/reports/cs/tr/79/773/CS-TR-79-773.pdf
+
+An introduction is provided by Wikipedia here:
+https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance?section=5#Parallel_algorithm
+
+A detailed reference on the exact version implemented (with better numerical stability) is provided here:
+https://dbs.ifi.uni-heidelberg.de/files/Team/eschubert/publications/SSDBM18-covariance-authorcopy.pdf
+*/
+
 template<typename T>
 inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, T &n_a, int num_active) { // NOLINT(*)
     // Assume at least leftmost is valid and

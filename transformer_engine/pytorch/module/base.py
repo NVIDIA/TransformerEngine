@@ -36,6 +36,7 @@ from ..cpp_extensions import (
     cast_to_fp8,
 )
 from ..constants import dist_group_type
+from ..float8_tensor import Float8Tensor
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -227,7 +228,7 @@ class _NoopCat(torch.autograd.Function):
         ), "Dimensions not compatible for concatenation"
 
         param_temp = full_param_buffer.new()
-        param_temp.set_(full_param_buffer.storage(),
+        param_temp.set_(full_param_buffer.untyped_storage(),
                         full_param_buffer.storage_offset(),
                         full_param_buffer.size(),
                         full_param_buffer.stride())
@@ -451,21 +452,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             setattr(
                 self,
                 weight_cast_attr,
-                torch.empty(
-                    shape,
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
-                ),
+                Float8Tensor(
+                    data=torch.empty(
+                        shape,
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
+                )
             )
             setattr(
                 self,
                 weight_transpose_attr,
-                torch.empty(
-                    shape[1],
-                    shape[0],
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
-                ),
+                Float8Tensor(
+                    data=torch.empty(
+                        shape[1],
+                        shape[0],
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
+                )
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -483,11 +492,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
-    def fp8_init(self, num_gemms: int = 1) -> None:
+    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
+        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+
+        if self.fp8_parameters and not self.fp8_initialized:
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors()
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
@@ -536,7 +550,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert self.tp_group_initialized, "TP group not initialized."
 
             self.set_activation_dtype(inp)
-            self.fp8_init(num_gemms=num_gemms)
+            self.init_fp8_metadata(num_gemms=num_gemms)
 
             # Create persistent tensors for fp8 weights and their transposes
             # only when fp8 weight caching is used.
@@ -765,7 +779,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def get_fp8_weights_empty_tensors(
         self,
         is_first_microbatch: Union[bool, None],
-    ) -> List[torch.Tensor]:
+    ) -> List[Float8Tensor]:
         """
         Returns empty tensors to be later used to store fp8 version of weights
         and their transposes (for the bwd pass) for this batch (or microbatch).
@@ -781,23 +795,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_weight_tensors = []
         for shape in self.fp8_weight_shapes:
             fp8_weight_tensors.append(
-                torch.empty(
-                    shape,
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
+                Float8Tensor(
+                    data=torch.empty(
+                        shape,
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
                 )
             )
-
             fp8_weight_tensors.append(
-                torch.empty(
-                    shape[1],
-                    shape[0],
-                    device=torch.cuda.current_device(),
-                    dtype=torch.uint8,
+                Float8Tensor(
+                    data=torch.empty(
+                        shape[1],
+                        shape[0],
+                        device=torch.cuda.current_device(),
+                        dtype=torch.uint8,
+                    ),
+                    fp8_dtype=tex.DType.kFloat8E4M3,
+                    fp8_scale_inv=1,
                 )
             )
         return fp8_weight_tensors
-
 
     @abstractmethod
     def forward(self):

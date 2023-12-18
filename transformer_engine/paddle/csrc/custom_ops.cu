@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <cub/cub.cuh>
+#include <map>
 #include <vector>
 
 #include "common.h"
@@ -12,20 +13,6 @@
 
 namespace transformer_engine {
 namespace paddle_ext {
-
-// MHA utils
-// convert QKV layout to enum
-NVTE_QKV_Layout get_nvte_qkv_layout(const std::string qkv_layout) {
-    if (qkv_layout == "not_interleaved") {
-        return NVTE_QKV_Layout::NVTE_NOT_INTERLEAVED;
-    } else if (qkv_layout == "qkv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_QKV_INTERLEAVED;
-    } else if (qkv_layout == "kv_interleaved") {
-        return NVTE_QKV_Layout::NVTE_KV_INTERLEAVED;
-    } else {
-        NVTE_ERROR("Invalid QKV layout. \n");
-    }
-}
 
 // convert bias type to enum
 NVTE_Bias_Type get_nvte_bias_type(const std::string bias_type) {
@@ -1284,14 +1271,15 @@ PD_BUILD_OP(te_rmsnorm_bwd)
 
 PD_BUILD_OP(te_fused_attn_fwd_qkvpacked)
     .Inputs({"QKV", "cu_seqlens", paddle::Optional("Bias"), "_O", paddle::Optional("_softmax_aux"),
-             "rng_state"})
-    .Outputs({"O", paddle::Optional("softmax_aux")})
+             "_rng_state"})
+    .Outputs({"O", paddle::Optional("softmax_aux"), "rng_state"})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs: int64_t", "max_seqlen: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
             "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
             "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
-                    {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
+                    {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")},
+                    {"_rng_state", "rng_state"}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_qkvpacked));
 
 PD_BUILD_OP(te_fused_attn_bwd_qkvpacked)
@@ -1306,15 +1294,16 @@ PD_BUILD_OP(te_fused_attn_bwd_qkvpacked)
 
 PD_BUILD_OP(te_fused_attn_fwd_kvpacked)
     .Inputs({"Q", "KV", "cu_seqlens_q", "cu_seqlens_kv", paddle::Optional("Bias"), "_O",
-             paddle::Optional("_softmax_aux"), "rng_state"})
-    .Outputs({"O", paddle::Optional("softmax_aux")})
+             paddle::Optional("_softmax_aux"), "_rng_state"})
+    .Outputs({"O", paddle::Optional("softmax_aux"), "rng_state"})
     .Attrs({"b: int64_t", "h: int64_t", "d: int64_t", "total_seqs_q: int64_t",
             "total_seqs_kv: int64_t", "max_seqlen_q: int64_t", "max_seqlen_kv: int64_t",
             "is_training: bool", "attn_scale: float", "p_dropout: float", "qkv_layout: std::string",
             "bias_type: std::string", "attn_mask_type: std::string", "qkv_type: int64_t",
             "rng_elts_per_thread: int64_t"})
     .SetInplaceMap({{"_O", "O"},
-                    {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")}})
+                    {paddle::Optional("_softmax_aux"), paddle::Optional("softmax_aux")},
+                    {"_rng_state", "rng_state"}})
     .SetKernelFn(PD_KERNEL(transformer_engine::paddle_ext::te_fused_attn_fwd_kvpacked));
 
 PD_BUILD_OP(te_fused_attn_bwd_kvpacked)

@@ -14,13 +14,12 @@ from paddle.distributed.fleet.meta_parallel import get_rng_state_tracker
 import transformer_engine    # pylint: disable=unused-import
 from transformer_engine.paddle.constants import (
     TE_DType,
-    QKVLayout,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
 )
 from transformer_engine.paddle.fp8 import FP8TensorMeta
-import transformer_engine_paddle as tex
+import transformer_engine_paddle as tex    # pylint: disable=wrong-import-order
 
 
 def create_fp8_meta(num_gemms=1, amax_history_len=10):
@@ -101,13 +100,16 @@ def set_random_seed(seed):
 
     paddle.seed(global_seed)
 
+
 def get_fused_attention_backend(
-    head_size: int,
+    num_heads: int,
+    num_gqa_groups: int,
     q_seqlen: int,
     kv_seqlen: int,
+    head_size: int,
     dtype: Union[paddle.dtype, str],
     dropout: float,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     mask_type: str = "causal",
 ) -> tex.NVTE_Fused_Attn_Backend:
@@ -121,30 +123,37 @@ def get_fused_attention_backend(
     return tex.get_fused_attn_backend(
         TE_DType[dtype],
         TE_DType[dtype],
-        QKVLayout[qkv_layout],
+        tex.get_nvte_qkv_layout(qkv_layout),
         AttnBiasType[bias_type],
         AttnMaskType[mask_type],
         dropout,
+        num_heads,
+        num_gqa_groups,
         q_seqlen,
         kv_seqlen,
         head_size,
     )
 
+
 def is_fused_attention_supported(
-    head_size: int,
+    num_heads: int,
+    num_gqa_groups: int,
     q_seqlen: int,
     kv_seqlen: int,
+    head_size: int,
     dtype: Union[paddle.dtype, str],
     dropout: float,
-    qkv_layout: str = "qkv_interleaved",
+    qkv_layout: str = "bs3hd",
     bias_type: str = "no_bias",
     mask_type: str = "causal",
 ) -> bool:
     """Check if cuDNN fused attention is supported for attention config"""
     backend = get_fused_attention_backend(
-        head_size=head_size,
+        num_heads=num_heads,
+        num_gqa_groups=num_gqa_groups,
         q_seqlen=q_seqlen,
         kv_seqlen=kv_seqlen,
+        head_size=head_size,
         dtype=dtype,
         dropout=dropout,
         qkv_layout=qkv_layout,

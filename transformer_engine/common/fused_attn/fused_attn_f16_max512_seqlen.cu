@@ -217,14 +217,14 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
     int64_t maskOutputTensor_virtual = true;
     cudnnDataType_t maskOutputTensor_dataType = CUDNN_DATA_FLOAT;
     auto maskOutputTensor_reorderType =
-        cudnn_frontend::cudnnBackendTensorReordering_t::CUDNN_TENSOR_REORDERING_NONE;
+        cudnn_frontend::TensorReordering_t::NONE;
 
     if (is_bprop) {
         maskOutputTensor_id = dS_ID;
         maskOutputTensor_virtual = false;
         maskOutputTensor_dataType = tensorType;
         maskOutputTensor_reorderType =
-            cudnn_frontend::cudnnBackendTensorReordering_t::CUDNN_TENSOR_REORDERING_F16x16;
+            cudnn_frontend::TensorReordering_t::F16x16;
     }
 
     auto maskOutputTensor =
@@ -298,7 +298,8 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
 
     /////////////////// Apply the mask //////////////////////////
 
-    auto maskTensor = (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK)
+    auto maskTensor = (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                       mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
                           ? std::move(causalMaskTensor)
                           : std::move(paddingMaskTensor);
 
@@ -314,7 +315,8 @@ static cudnn_frontend::Tensor createMask(int64_t b, int64_t h, int64_t s_q, int6
     ops.push_back(std::move(lessThanRow_op));
     ops.push_back(std::move(lessThanCol_op));
     ops.push_back(std::move(paddingMaskAnd_op));
-    if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) {
+    if (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+        mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) {
         ops.push_back(std::move(rowGreaterCol_op));
         ops.push_back(std::move(causalMaskAnd_op));
     }
@@ -355,7 +357,7 @@ static cudnn_frontend::Tensor createSoftmaxForward(
     // divide (e/ sum(e))
 
     auto reorder_type =
-        cudnn_frontend::cudnnBackendTensorReordering_t::CUDNN_TENSOR_REORDERING_F16x16;
+        cudnn_frontend::TensorReordering_t::F16x16;
 
     auto afterDivisionTensor =
         cudnn_frontend::TensorBuilder()
@@ -446,7 +448,7 @@ static cudnn_frontend::Tensor createDropout(int64_t b, int64_t h, int64_t s_q, i
                                            afterBMM1_stride, true, false);  // is virtual
 
     auto reorder_type =
-        cudnn_frontend::cudnnBackendTensorReordering_t::CUDNN_TENSOR_REORDERING_F16x16;
+        cudnn_frontend::TensorReordering_t::F16x16;
 
     // after dropout tensor
     auto afterDropoutTensor =
@@ -680,7 +682,8 @@ void fused_attn_max_512_fwd_impl(
             // WAR: causal_mask without bias needs memset the S buffer
             // inference mode doesn't need the S auxiliary
             auto zero_s = (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) && is_training;
+                          (mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) && is_training;
             std::shared_ptr<cudnn_frontend::Tensor> maskInput;
             auto bmm1_output = createBMM1(b, h, s_q, s_kv, d, layout, tensorType, zero_s, ops);
 
@@ -915,7 +918,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
             auto doTensor = tensor_create(tensorType, dO_ID, o_dim, o_stride, false, false);
 
             auto reorder_type =
-                cudnn_frontend::cudnnBackendTensorReordering_t::CUDNN_TENSOR_REORDERING_F16x16;
+                cudnn_frontend::TensorReordering_t::F16x16;
 
             // activation from fprop
             auto pTensor =
@@ -1243,7 +1246,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
 
 using namespace transformer_engine::fused_attn;
 void fused_attn_max_512_fwd_qkvpacked(
-    size_t batch, size_t max_seqlen, size_t num_head, size_t head_dim, bool is_training,
+    size_t batch, size_t num_head, size_t max_seqlen, size_t head_dim, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, const Tensor *input_QKV, const Tensor *input_Bias, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens, const Tensor *rng_state,
@@ -1309,8 +1312,8 @@ void fused_attn_max_512_fwd_qkvpacked(
     }
 }
 
-void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-                                     size_t num_head, size_t head_dim, bool is_training,
+void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t num_head, size_t q_max_seqlen,
+                                     size_t kv_max_seqlen, size_t head_dim, bool is_training,
                                      float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
                                      NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                      const Tensor *input_Q, const Tensor *input_KV,
@@ -1386,8 +1389,8 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         NVTE_ERROR("Unexpected workspace_size.");
     }
 }
-void fused_attn_max_512_fwd(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-                                     size_t num_head, size_t head_dim, bool is_training,
+void fused_attn_max_512_fwd(size_t batch, size_t num_head, size_t q_max_seqlen,
+                                     size_t kv_max_seqlen, size_t head_dim, bool is_training,
                                      float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
                                      NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                      const Tensor *input_Q, const Tensor *input_K,
@@ -1457,7 +1460,7 @@ void fused_attn_max_512_fwd(size_t batch, size_t q_max_seqlen, size_t kv_max_seq
     }
 }
 
-void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t num_head,
+void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t num_head, size_t max_seqlen,
                                       size_t head_dim, float attn_scale, float p_dropout,
                                       NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                       NVTE_Mask_Type mask_type, const Tensor *input_QKV,
@@ -1516,8 +1519,8 @@ void fused_attn_max_512_bwd_qkvpacked(size_t batch, size_t max_seqlen, size_t nu
     }
 }
 
-void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-                                     size_t num_head, size_t head_dim, float attn_scale,
+void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t num_head, size_t q_max_seqlen,
+                                     size_t kv_max_seqlen, size_t head_dim, float attn_scale,
                                      float p_dropout, NVTE_QKV_Layout qkv_layout,
                                      NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                      const Tensor *input_Q, const Tensor *input_KV,
@@ -1577,8 +1580,8 @@ void fused_attn_max_512_bwd_kvpacked(size_t batch, size_t q_max_seqlen, size_t k
         NVTE_ERROR("Unexpected workspace_size.");
     }
 }
-void fused_attn_max_512_bwd(size_t batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-                                     size_t num_head, size_t head_dim, float attn_scale,
+void fused_attn_max_512_bwd(size_t batch, size_t num_head, size_t q_max_seqlen,
+                                     size_t kv_max_seqlen, size_t head_dim, float attn_scale,
                                      float p_dropout, NVTE_QKV_Layout qkv_layout,
                                      NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                      const Tensor *input_Q, const Tensor *input_K,

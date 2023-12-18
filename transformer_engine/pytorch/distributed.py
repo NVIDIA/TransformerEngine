@@ -83,14 +83,16 @@ def initialize_affine_weight_gpu(
     weight: torch.Tensor,
     init_method: Callable,
     get_rng_state_tracker: Callable,
-    partition_dim: int,
+    partition_dim: int = 0,
     stride: int = 1,
+    set_tp_attributes: bool = True,
 ) -> None:
     """Initialize affine weight for model parallel on GPU."""
 
-    set_tensor_model_parallel_attributes(
-        tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
-    )
+    if set_tp_attributes:
+        set_tensor_model_parallel_attributes(
+            tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
+        )
 
     if get_rng_state_tracker is None:
         init_method(weight)
@@ -460,29 +462,6 @@ def gather_along_first_dim(
 
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
-
-    output = torch.empty(
-        dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
-    )
-    handle = torch.distributed.all_gather_into_tensor(
-        output, input_.contiguous(), group=tp_group, async_op=async_op
-    )
-
-    return output, handle
-
-
-def gather_along_last_dim(
-    input_: torch.Tensor, tp_group: dist_group_type, async_op: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Gather tensors and concatinate along the last dimension."""
-
-    world_size = get_distributed_world_size(tp_group)
-    # Bypass the function if we are using only 1 GPU.
-    if world_size == 1:
-        return input_, None
-
-    dim_size = list(input_.size())
-    dim_size[-1] = dim_size[-1] * world_size
 
     output = torch.empty(
         dim_size, dtype=input_.dtype, device=torch.cuda.current_device()
