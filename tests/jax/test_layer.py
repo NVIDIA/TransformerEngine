@@ -85,6 +85,7 @@ _KEY_OF_LAYERNORM_TYPE = 'layernorm_type'
 _KEY_OF_ZERO_CENTERED_GAMMA = 'zero_centered_gamma'
 _KEY_OF_TRANSPOSE_BS = 'transpose_batch_sequence'
 _KEY_OF_SCALE_ATTN_LOGITS = "scale_attn_logits"
+_KEY_OF_ENABLE_ROPE = "enable_rope"
 
 BASE_ATTRS = {_KEY_OF_TRANSPOSE_BS: True}
 
@@ -129,6 +130,18 @@ ATTRS = [{
     _KEY_OF_DROPOUT_RATE: 0.0,
     _KEY_OF_MLP_ACTIVATIONS: (('gelu', 'linear')),
     _KEY_OF_FUSE_MLP_WI: True
+}, {
+    _KEY_OF_TRANSPOSE_BS: False,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True
+}, {
+    _KEY_OF_TRANSPOSE_BS: True,
+    _KEY_OF_LAYERNORM_TYPE: 'layernorm',
+    _KEY_OF_DROPOUT_RATE: 0.0,
+    _KEY_OF_FUSE_MLP_WI: True,
+    _KEY_OF_ENABLE_ROPE: True
 }]
 
 ATTRS = [{**BASE_ATTRS, **attr} for attr in ATTRS]

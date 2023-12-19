@@ -199,6 +199,39 @@ def core_attention(query: Array,
     return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
 
+def rope(x: Array, windows: Tuple[int, int], transpose_batch_seqlen: bool):
+    """
+    Rotary Positional Embedding
+    x should be in shape of
+    [Batch, Seqlen, ..., Hidden] if transpose_batch_seqlen is False, or
+    [Seqlen, Batch, ..., Hidden] if transpose_batch_seqlen is True, or
+    """
+    embed_dim = x.shape[-1]
+    half_embed_dim = embed_dim // 2
+    min_window = windows[0]
+    max_window = windows[1]
+
+    fraction = 2 * jnp.arange(0, half_embed_dim) / embed_dim
+    time_scales = min_window * (max_window / min_window)**fraction
+    time_scales = jnp.expand_dims(time_scales, axis=tuple(range(x.ndim - 1)))
+
+    batch_dim = 1 if transpose_batch_seqlen else 0
+    seq_dim = 1 - batch_dim
+
+    positions = jnp.expand_dims(jnp.arange(x.shape[seq_dim]), axis=batch_dim)
+    positions = jnp.expand_dims(positions, axis=tuple(range(2, x.ndim)))
+
+    sinusoidal_positions = positions / time_scales
+    sin = jnp.sin(sinusoidal_positions)
+    cos = jnp.cos(sinusoidal_positions)
+
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    part_1 = (x1 * cos - x2 * sin).astype(x.dtype)
+    part_2 = (x2 * cos + x1 * sin).astype(x.dtype)
+
+    return jnp.concatenate([part_1, part_2], axis=-1)
+
+
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
@@ -288,6 +321,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     attn_mask_type: str = 'causal'
+    enable_rope: bool = False
+    rope_windows: Tuple[int, int] = (1, 1000)
     dtype: DType = jnp.float32
     fuse_qkv: bool = True
     transpose_batch_sequence: bool = True
@@ -401,9 +436,9 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate,
-                                                               self.num_heads, self.num_heads,
-                                                               q_seqlen, kv_seqlen, self.head_dim)
+                                                               self.dropout_rate, self.num_heads,
+                                                               self.num_heads, q_seqlen, kv_seqlen,
+                                                               self.head_dim)
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             canonicalize_dtype in [jnp.bfloat16, jnp.float16] and \
@@ -558,6 +593,22 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
             assert ln_out is not None
             residual = ln_out
 
+        if self.enable_rope:
+            if self.fuse_qkv and use_fused_attn:
+                if is_self_attn:
+                    query, key, value = jnp.split(qkv_proj, [1, 2], axis=-2)
+                else:
+                    key, value = jnp.split(kv_proj, [1], axis=-2)
+
+            query = rope(query, self.rope_windows, self.transpose_batch_sequence)
+            key = rope(key, self.rope_windows, self.transpose_batch_sequence)
+
+            if use_fused_attn:
+                if is_self_attn:
+                    qkv_proj = jnp.concatenate([query, key, value], axis=-2)
+                else:
+                    kv_proj = jnp.concatenate([key, value], axis=-2)
+
         if not use_fused_attn:
             query = checkpoint_name(query, 'query_proj')
             key = checkpoint_name(key, 'key_proj')
@@ -635,6 +686,7 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                                            HIDDEN_AXES)
                 qkv_proj = with_sharding_constraint_by_logical_axes(qkv_proj,
                                                                     qkv_sharding_constraint)
+
                 x = self_fused_attn(qkv_proj,
                                     bias,
                                     mask,
@@ -962,6 +1014,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
     self_attn_mask_type: str = 'causal'
     enable_relative_embedding: bool = True
     relative_embedding: nn.Module = None
+    enable_rope: bool = False
+    rope_windows: Tuple[int, int] = (1, 1000)
     dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
@@ -1096,6 +1150,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
             apply_residual_connection_post_layernorm=self.apply_residual_connection_post_layernorm,
             output_layernorm=self.output_layernorm,
             attn_mask_type=self.self_attn_mask_type,
+            enable_rope=self.enable_rope,
+            rope_windows=self.rope_windows,
             fuse_qkv=self.fuse_qkv_params,
             kernel_init=self.mha_kernel_init,
             use_bias=self.use_bias,
@@ -1153,6 +1209,8 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
                 apply_residual_connection_post_layernorm,
                 output_layernorm=False,    # Must do LayerNorm before MHA.
                 attn_mask_type='padding',
+                enable_rope=self.enable_rope,
+                rope_windows=self.rope_windows,
                 float32_logits=self.float32_attention_logits,
                 scale_attn_logits=self.scale_attn_logits,
                 scaled_query_init=self.scaled_query_init,
