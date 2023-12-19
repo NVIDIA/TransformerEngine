@@ -51,7 +51,7 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     batch_dim_rule = []
     for resource in batch_resources:
         if resource is not None and resource not in batch_dim_rule:
-            batch_dim_rule.append(gsr.dp_resource)
+            batch_dim_rule.append(resource)
 
     if len(batch_dim_rule) <= 0:
         batch_dim_rule = None
