@@ -854,8 +854,9 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: st
         freqs: torch.Tensor
             rotary positional embeding tensor `freqs` is of shape
             `[seq_length, ..., dim]`
-        batch_first_format: bool, default = False
-            is `True` if `t` is of shape [bs, seq, ...], `False` otherwise
+        tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+            of shape `[seq, bs, ...]`.
 
     """
     assert tensor_format in ("sbhd", "bshd"),("Only formats `sbhd` or `bshd` "
@@ -877,7 +878,7 @@ def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, tensor_format: st
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    t = (t * freqs.cos().to(t.dtype)) + (_rotate_half(t) * freqs.sin().to(t.dtype))
     return torch.cat((t, t_pass), dim=-1)
 
 
