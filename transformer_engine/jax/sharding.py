@@ -43,7 +43,7 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
-    IS_FSDP_OUTER = bool(int(os.environ.get("nvte_batch_fsdp_outer", False)))
+    IS_FSDP_OUTER = bool(int(os.environ.get("NVTE_OUTER_BATCH_FSDP_DIM", False)))
 
     batch_resources = [gsr.fsdp_resource, gsr.dp_resource] if IS_FSDP_OUTER \
                       else [gsr.dp_resource, gsr.fsdp_resource]
