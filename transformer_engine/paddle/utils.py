@@ -9,6 +9,24 @@ import paddle
 import paddle.nn.functional as F
 
 
+class _cudaGraphEmptyTensorManager:
+
+    def __init__(self):
+        self.tensor = {}
+
+    def __contains__(self, key):
+        return self.tensor.__contains__(key)
+
+    def __setitem__(self, key, value):
+        return self.tensor.__setitem__(key, value)
+
+    def __getitem__(self, key):
+        return self.tensor[key].zero_()
+
+
+cudagraph_fp8_meta_update_manager = _cudaGraphEmptyTensorManager()
+
+
 def cast_if_needed(tensor: Union[paddle.Tensor, None],
                    dtype: paddle.dtype) -> Union[paddle.Tensor, None]:
     """Cast tensor to dtype"""

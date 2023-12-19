@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <cublasLt.h>
+#include "common/util/logging.h"
 #include "paddle/extension.h"
 #include "paddle/phi/backends/all_context.h"
 

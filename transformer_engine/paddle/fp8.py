@@ -15,9 +15,7 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 from .constants import dist_group_type
 from .fp8_buffer import FP8MetaFwdBuffer, FP8MetaBwdBuffer, FP8RecomputeBuffer
 
-
 __all__ = ['fp8_autocast']
-
 
 # FP8 support
 _is_fp8_available = None
@@ -67,6 +65,9 @@ class FP8State:
         self._fp8_fwd_buffer = FP8MetaFwdBuffer()
         self._fp8_bwd_buffer = FP8MetaBwdBuffer()
         self._fp8_recompute_buffer = FP8RecomputeBuffer()
+        self._fp8_first_module_fp8_meta = None
+        self._fp8_first_module_tp_group = None
+        self._fp8_first_module_tp_size = 1
 
     def is_fp8_enabled(self) -> bool:
         """Is FP8 enabled"""
@@ -119,6 +120,18 @@ class FP8State:
     def get_fp8_recompute_buffer(self) -> FP8RecomputeBuffer:
         """Returns global fp8 recompute buffer."""
         return self._fp8_recompute_buffer
+
+    def set_first_module_state(self, fp8_meta: Dict[str, Any], tp_group: dist_group_type,
+                               tp_size: int):
+        """Set fp8 first module state for finalizing fp8"""
+        self._fp8_first_module_fp8_meta = fp8_meta
+        self._fp8_first_module_tp_group = tp_group
+        self._fp8_first_module_tp_size = tp_size
+
+    def get_first_module_state(self) -> (Dict[str, Any], dist_group_type, int):
+        """Get fp8 first module state for finalizing fp8"""
+        return (self._fp8_first_module_fp8_meta, self._fp8_first_module_tp_group,
+                self._fp8_first_module_tp_size)
 
     def enter(
         self,
