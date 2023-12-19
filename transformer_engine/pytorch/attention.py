@@ -446,6 +446,10 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
             q, k, v = [x.view(x.shape[0], 2, x.shape[1]//2, *x.shape[2:]) for x in [q, k, v]]
         if _flash_attn_2_available:
             assert(q.shape[-1] % 8 == 0), "hidden size per attention head should be multiple of 8"
+        fa_optional_forward_kwargs = {}
+        if _flash_attn_2_3_plus:
+            fa_optional_forward_kwargs["window_size"] = [-1, 0] if causal else [-1, -1]
+
         # Flash Attn inputs
         q_inputs = [None, None]
         kv_inputs = [None, None]
@@ -506,6 +510,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                         q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                         cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                                         dropout_p, softmax_scale, causal=True, return_softmax=False,
+                                        **fa_optional_forward_kwargs
                                     )
                                 else:
                                     out_per_step[i] = torch.empty_like(q_inputs[i%2])
@@ -534,11 +539,14 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                 # [2, b, 2, sk//2, np, hn] -> [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2][:, :, 0, ...].contiguous().view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_available:
+                                    if _flash_attn_2_3_plus:
+                                        fa_optional_forward_kwargs["window_size"] = [-1, -1]
                                     _, _, _, _, out_per_step[i], \
                                     softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                         q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                         cu_seqlens_q, cu_seqlens_k//2, max_seqlen_q, max_seqlen_k//2,
                                         dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                        **fa_optional_forward_kwargs
                                     )
                                 else:
                                     out_per_step[i] = torch.empty_like(q_inputs[i%2])
@@ -567,11 +575,14 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                 # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                                 kv_inputs[i%2] = kv_inputs[i%2].view(2, -1, *k.shape[-2:])
                                 if _flash_attn_2_available:
+                                    if _flash_attn_2_3_plus:
+                                        fa_optional_forward_kwargs["window_size"] = [-1, -1]
                                     _, _, _, _, out_per_step[i], \
                                     softmax_lse_per_step[i], _, rng_states[i] = _flash_attn_forward(
                                         q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                         cu_seqlens_q//2, cu_seqlens_k, max_seqlen_q//2, max_seqlen_k,
                                         dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                        **fa_optional_forward_kwargs
                                     )
                                 else:
                                     out_per_step[i] = torch.empty_like(q_inputs[i%2])
@@ -601,6 +612,7 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                                     q_inputs[i%2], kv_inputs[i%2][0], kv_inputs[i%2][1],
                                     cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                                     dropout_p, softmax_scale, causal=False, return_softmax=False,
+                                    **fa_optional_forward_kwargs
                                 )
                             else:
                                 out_per_step[i] = torch.empty_like(q_inputs[i%2])
@@ -763,6 +775,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
+                        if _flash_attn_2_3_plus:
+                            fa_optional_backward_kwargs["window_size"] = [-1, 0]
                         _flash_attn_backward(
                             dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
@@ -801,6 +815,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
+                        if _flash_attn_2_3_plus:
+                            fa_optional_backward_kwargs["window_size"] = [-1, -1]
                         _flash_attn_backward(
                             dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k//2,
@@ -839,6 +855,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
                         out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
                         dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
+                        if _flash_attn_2_3_plus:
+                            fa_optional_backward_kwargs["window_size"] = [-1, -1]
                         _flash_attn_backward(
                             dout_, q_, kv_[0], kv_[1], out_, softmax_lse_,
                             dq_, dkv_[0], dkv_[1], cu_seqlens_q//2, cu_seqlens_k,
@@ -870,6 +888,8 @@ class FlashAttnUnpaddedFuncWithCP(torch.autograd.Function):
                     # [b, sq, np, hn] -> [b*sq, np, hn]
                     out_ = out.view(-1, *out.shape[-2:])
                     dout_ = dout.view(-1, *dout.shape[-2:])
+                    if _flash_attn_2_3_plus:
+                        fa_optional_backward_kwargs["window_size"] = [-1, -1]
                     _flash_attn_backward(
                         dout_, q_, kv_[0], kv_[1], out_, softmax_lse,
                         dq_, dkv_[0], dkv_[1], cu_seqlens_q, cu_seqlens_k,
