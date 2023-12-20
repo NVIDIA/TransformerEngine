@@ -52,22 +52,6 @@ struct CustomCallCommonDescriptor {
 pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
                                                DType out_dtype);
 
-struct CustomCallGemmDescriptor {
-    size_t m;
-    size_t n;
-    size_t k;
-    DType A_dtype;
-    DType B_dtype;
-    DType D_dtype;
-    bool transa;
-    bool transb;
-    bool use_split_accumulator;
-};
-
-pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, DType A_dtype,
-                                             DType B_dtype, DType D_dtype, bool transa, bool transb,
-                                             bool use_split_accumulator);
-
 struct CustomCallNormDescriptor {
     size_t batch_size;
     size_t hidden_size;
@@ -151,10 +135,6 @@ void DGatedGelu(cudaStream_t stream, void **buffers, const char *opaque, size_t 
 
 void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                              size_t opaque_len);
-
-pybind11::tuple GetGemmWorkspaceSizes();
-
-void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(
     size_t batch_size, size_t hidden_size, DType in_dtype, DType w_dtype, DType out_dtype,

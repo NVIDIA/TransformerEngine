@@ -29,7 +29,6 @@ pybind11::dict Registrations() {
     dict["te_gated_gelu_fp8"] = EncapsulateFunction(GatedGeluFP8);
     dict["te_dgated_gelu"] = EncapsulateFunction(DGatedGelu);
     dict["te_dgated_gelu_cast_transpose"] = EncapsulateFunction(DGatedGeluCastTranspose);
-    dict["te_gemm"] = EncapsulateFunction(Gemm);
     dict["te_layernorm_forward"] = EncapsulateFunction(LayerNormForward);
     dict["te_layernorm_forward_fp8"] = EncapsulateFunction(LayerNormForwardFP8);
     dict["te_layernorm_backward"] = EncapsulateFunction(LayerNormBackward);
@@ -56,7 +55,6 @@ pybind11::dict Registrations() {
 PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("registrations", &Registrations);
     m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor);
-    m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
     m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
     m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
     m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
@@ -64,7 +62,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
     m.def("get_cuda_version", &GetCudaRuntimeVersion);
     m.def("get_device_compute_capability", &GetDeviceComputeCapability);
     m.def("get_cublasLt_version", &cublasLtGetVersion);
-    m.def("get_gemm_workspace_sizes", &GetGemmWorkspaceSizes);
     m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
     m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
     m.def("get_self_fused_attn_fwd_workspace_sizes", &GetSelfFusedAttnForwardWorkspaceSizes);

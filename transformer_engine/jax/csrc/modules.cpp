@@ -22,7 +22,6 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/fused_attn.h"
-#include "transformer_engine/gemm.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
 #include "transformer_engine/softmax.h"
@@ -32,9 +31,6 @@
 
 namespace transformer_engine {
 namespace jax {
-
-constexpr size_t kCublasLtForwardWorkspaceSize = 32 * 1024 * 1024;
-constexpr size_t kCublasLtBackwardWorkspaceSize = 32 * 1024 * 1024;
 
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
@@ -63,13 +59,6 @@ pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape,
     desc.in_dtype = in_dtype;
     desc.out_dtype = out_dtype;
     return PackOpaque(desc);
-}
-
-pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, DType A_dtype,
-                                             DType B_dtype, DType D_dtype, bool transa, bool transb,
-                                             bool use_split_accumulator) {
-    return PackOpaque(CustomCallGemmDescriptor{m, n, k, A_dtype, B_dtype, D_dtype, transa, transb,
-                                               use_split_accumulator});
 }
 
 pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
@@ -260,45 +249,6 @@ void DGatedGeluCastTranspose(cudaStream_t stream, void **buffers, const char *op
 
     nvte_dgeglu_cast_transpose(input_tensor.data(), gelu_input_tensor.data(), output_tensor.data(),
                                output_trans_tensor.data(), stream);
-}
-
-pybind11::tuple GetGemmWorkspaceSizes() {
-    return pybind11::make_tuple(kCublasLtForwardWorkspaceSize, kCublasLtBackwardWorkspaceSize);
-}
-
-void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-    auto *A = buffers[0];
-    auto *B = buffers[1];
-    auto *A_scale_inverse = reinterpret_cast<float *>(buffers[2]);
-    auto *B_scale_inverse = reinterpret_cast<float *>(buffers[3]);
-    auto *D = buffers[4];
-    auto *workspace = buffers[5];
-
-    // We transposes shape of A, B and D here to correctly invoke
-    // cuBlasLt GEMM (col-major) for row-major data.
-    const auto &desc = *UnpackOpaque<CustomCallGemmDescriptor>(opaque, opaque_len);
-
-    auto m = desc.m;
-    auto n = desc.n;
-    auto k = desc.k;
-    auto A_shape = std::vector<size_t>{k, m};
-    auto A_tensor = TensorWrapper(A, A_shape, desc.A_dtype, nullptr, nullptr, A_scale_inverse);
-
-    auto B_shape = std::vector<size_t>{n, k};
-    auto B_tensor = TensorWrapper(B, B_shape, desc.B_dtype, nullptr, nullptr, B_scale_inverse);
-
-    auto D_shape = std::vector<size_t>{n, m};
-    auto D_tensor = TensorWrapper(D, D_shape, desc.D_dtype);
-
-    auto null_tensor = TensorWrapper(nullptr, std::vector<size_t>{0}, DType::kFloat32);
-
-    size_t workspace_size = kCublasLtForwardWorkspaceSize;
-    auto wk_tensor = TensorWrapper(workspace, std::vector<size_t>{workspace_size}, DType::kByte);
-
-    nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), null_tensor.data(),
-                     null_tensor.data(), (desc.transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-                     (desc.transb) ? CUBLAS_OP_T : CUBLAS_OP_N, false, wk_tensor.data(), false,
-                     desc.use_split_accumulator, 0, stream);
 }
 
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(
