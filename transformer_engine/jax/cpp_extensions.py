@@ -1701,12 +1701,11 @@ class _FusedAttnRNGStateChecker:
         return seed
 
 
-def generate_cu_seqlen(mask):
+def generate_cu_seqlen(actual_seqlen):
     """
     Generating cumsum seqlen for a batch
     """
-    seqlen = jnp.sum(mask, axis=(-1, -2), dtype=jnp.int32)
-    cu_seqlen = jnp.cumsum(seqlen)
+    cu_seqlen = jnp.cumsum(actual_seqlen)
     cu_seqlen = jnp.hstack((0, cu_seqlen))
     return cu_seqlen
 
@@ -1722,13 +1721,13 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(qkv_aval, bias_aval, mask_or_cu_seqlen_aval, seed_aval, *, attn_bias_type,
+    def abstract(qkv_aval, bias_aval, seqlen_or_cu_seqlen_aval, seed_aval, *, attn_bias_type,
                  attn_mask_type, scaling_factor, dropout_probability, is_training):
         """
         Self fused attention fwd abstract
         """
-        # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
-        del mask_or_cu_seqlen_aval, scaling_factor, is_training
+        # outer_primitve is seqlen, inner_primitive is cu_seqlen
+        del seqlen_or_cu_seqlen_aval, scaling_factor, is_training
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
         *batch_shape, max_seqlen, nqkv, num_head, head_dim = qkv_aval.shape
         assert nqkv == 3
@@ -1789,11 +1788,11 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(qkv, bias, squeezed_mask, seed, attn_bias_type, attn_mask_type, scaling_factor,
+    def impl(qkv, bias, seqlen, seed, attn_bias_type, attn_mask_type, scaling_factor,
              dropout_probability, is_training):
         assert SelfFusedAttnFwdPrimitive.inner_primitive is not None
 
-        cu_seqlen = generate_cu_seqlen(squeezed_mask)
+        cu_seqlen = generate_cu_seqlen(seqlen)
 
         output, softmax_aux, rng_state = SelfFusedAttnFwdPrimitive.inner_primitive.bind(
             qkv,
@@ -1859,7 +1858,7 @@ class SelfFusedAttnFwdPrimitive(BasePrimitive):
 register_primitive(SelfFusedAttnFwdPrimitive)
 
 
-def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, squeezed_mask: jnp.ndarray,
+def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, seqlen: jnp.ndarray,
                         seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
                         attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                         dropout_probability: float, is_training: bool):
@@ -1875,7 +1874,7 @@ def self_fused_attn_fwd(qkv: jnp.ndarray, bias: jnp.ndarray, squeezed_mask: jnp.
         bias = jnp.zeros(0, dtype=qkv.dtype)
     return SelfFusedAttnFwdPrimitive.outer_primitive.bind(qkv,
                                                           bias,
-                                                          squeezed_mask,
+                                                          seqlen,
                                                           seed,
                                                           attn_bias_type=attn_bias_type,
                                                           attn_mask_type=attn_mask_type,
@@ -1896,14 +1895,14 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(qkv_aval, bias_aval, softmax_aux_aval, rng_state_aval, output_aval, doutput_aval,
-                 mask_or_cu_seqlen_aval, *, attn_bias_type, attn_mask_type, scaling_factor,
+                 seqlen_or_cu_seqlen_aval, *, attn_bias_type, attn_mask_type, scaling_factor,
                  dropout_probability, is_training):
         """
         Self fused attention bwd abstract
         """
         del softmax_aux_aval, rng_state_aval
-        # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
-        del mask_or_cu_seqlen_aval, attn_bias_type, attn_mask_type
+        # outer_primitve is seqlen, inner_primitive is cu_seqlen
+        del seqlen_or_cu_seqlen_aval, attn_bias_type, attn_mask_type
         del scaling_factor, dropout_probability, is_training
         qkv_dtype = dtypes.canonicalize_dtype(qkv_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
@@ -1942,11 +1941,11 @@ class SelfFusedAttnBwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(qkv, bias, softmax_aux, rng_state, output, doutput, squeezed_mask, attn_bias_type,
+    def impl(qkv, bias, softmax_aux, rng_state, output, doutput, seqlen, attn_bias_type,
              attn_mask_type, scaling_factor, dropout_probability, is_training):
         assert SelfFusedAttnBwdPrimitive.inner_primitive is not None
 
-        cu_seqlen = generate_cu_seqlen(squeezed_mask)
+        cu_seqlen = generate_cu_seqlen(seqlen)
 
         dqkv, dbias = SelfFusedAttnBwdPrimitive.inner_primitive.bind(
             qkv,
@@ -2029,7 +2028,7 @@ register_primitive(SelfFusedAttnBwdPrimitive)
 
 def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.ndarray,
                         rng_state: jnp.ndarray, output: jnp.ndarray, doutput: jnp.ndarray,
-                        squeezed_mask: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                        seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
                         attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                         dropout_probability: float, is_training: bool):
     """
@@ -2045,7 +2044,7 @@ def self_fused_attn_bwd(qkv: jnp.ndarray, bias: jnp.ndarray, softmax_aux: jnp.nd
                                                           rng_state,
                                                           output,
                                                           doutput,
-                                                          squeezed_mask,
+                                                          seqlen,
                                                           attn_bias_type=attn_bias_type,
                                                           attn_mask_type=attn_mask_type,
                                                           scaling_factor=scaling_factor,
@@ -2064,13 +2063,13 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(q_aval, kv_aval, bias_aval, q_mask_or_cu_seqlen_aval, kv_mask_or_cu_seqlen_aval,
+    def abstract(q_aval, kv_aval, bias_aval, q_seqlen_or_cu_seqlen_aval, kv_seqlen_or_cu_seqlen_aval,
                  seed_aval, *, attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
                  is_training):
         """
         Cross fused attention fwd abstract
         """
-        # outer_primitve is squeezed_mask, inner_primitive is cu_seqlen
+        # outer_primitve is seqlen, inner_primitive is cu_seqlen
         del scaling_factor, is_training
 
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
@@ -2085,7 +2084,7 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         assert q_batch_shape == kv_batch_shape
         assert q_head_dim == kv_head_dim
         assert nkv == 2
-        assert q_mask_or_cu_seqlen_aval.dtype == kv_mask_or_cu_seqlen_aval.dtype
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
         output_shape = q_aval.shape
         output_dtype = q_dtype
@@ -2147,12 +2146,12 @@ class CrossFusedAttnFwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(q, kv, bias, q_squeezed_mask, kv_squeezed_mask, seed, attn_bias_type, attn_mask_type,
+    def impl(q, kv, bias, q_seqlen, kv_seqlen, seed, attn_bias_type, attn_mask_type,
              scaling_factor, dropout_probability, is_training):
         assert CrossFusedAttnFwdPrimitive.inner_primitive is not None
 
-        q_cu_seqlen = generate_cu_seqlen(q_squeezed_mask)
-        kv_cu_seqlen = generate_cu_seqlen(kv_squeezed_mask)
+        q_cu_seqlen = generate_cu_seqlen(q_seqlen)
+        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen)
 
         output, softmax_aux, rng_state = CrossFusedAttnFwdPrimitive.inner_primitive.bind(
             q,
@@ -2224,7 +2223,7 @@ register_primitive(CrossFusedAttnFwdPrimitive)
 
 
 def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
-                         q_squeezed_mask: jnp.ndarray, kv_squeezed_mask: jnp.ndarray,
+                         q_seqlen: jnp.ndarray, kv_seqlen: jnp.ndarray,
                          seed: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
                          attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                          dropout_probability: float, is_training: bool):
@@ -2242,8 +2241,8 @@ def cross_fused_attn_fwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
     return CrossFusedAttnFwdPrimitive.outer_primitive.bind(q,
                                                            kv,
                                                            bias,
-                                                           q_squeezed_mask,
-                                                           kv_squeezed_mask,
+                                                           q_seqlen,
+                                                           kv_seqlen,
                                                            seed,
                                                            attn_bias_type=attn_bias_type,
                                                            attn_mask_type=attn_mask_type,
@@ -2318,13 +2317,13 @@ class CrossFusedAttnBwdPrimitive(BasePrimitive):
         return out
 
     @staticmethod
-    def impl(q, kv, bias, softmax_aux, rng_state, output, doutput, q_squeezed_mask,
-             kv_squeezed_mask, attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
+    def impl(q, kv, bias, softmax_aux, rng_state, output, doutput, q_seqlen,
+             kv_seqlen, attn_bias_type, attn_mask_type, scaling_factor, dropout_probability,
              is_training):
         assert CrossFusedAttnBwdPrimitive.inner_primitive is not None
 
-        q_cu_seqlen = generate_cu_seqlen(q_squeezed_mask)
-        kv_cu_seqlen = generate_cu_seqlen(kv_squeezed_mask)
+        q_cu_seqlen = generate_cu_seqlen(q_seqlen)
+        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen)
 
         dq, dkv, dbias = CrossFusedAttnBwdPrimitive.inner_primitive.bind(
             q,
@@ -2416,8 +2415,8 @@ register_primitive(CrossFusedAttnBwdPrimitive)
 
 def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
                          softmax_aux: jnp.ndarray, rng_state: jnp.ndarray, output: jnp.ndarray,
-                         doutput: jnp.ndarray, q_squeezed_mask: jnp.ndarray,
-                         kv_squeezed_mask: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
+                         doutput: jnp.ndarray, q_seqlen: jnp.ndarray,
+                         kv_seqlen: jnp.ndarray, attn_bias_type: NVTE_Bias_Type,
                          attn_mask_type: NVTE_Mask_Type, scaling_factor: float,
                          dropout_probability: float, is_training: bool):
     """
@@ -2434,8 +2433,8 @@ def cross_fused_attn_bwd(q: jnp.ndarray, kv: jnp.ndarray, bias: jnp.ndarray,
                                                            rng_state,
                                                            output,
                                                            doutput,
-                                                           q_squeezed_mask,
-                                                           kv_squeezed_mask,
+                                                           q_seqlen,
+                                                           kv_seqlen,
                                                            attn_bias_type=attn_bias_type,
                                                            attn_mask_type=attn_mask_type,
                                                            scaling_factor=scaling_factor,
