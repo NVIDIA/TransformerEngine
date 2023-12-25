@@ -831,6 +831,10 @@ class FusedRoPEFunc(torch.autograd.Function):
     ) -> torch.Tensor:
         if qkv_format == "sbhd":
             output = tex.fused_rope_forward(t, freqs, transpose_output_memory)
+        elif qkv_format == "bshd":
+            output = tex.fused_rope_forward(
+                t.transpose(0, 1), freqs, not transpose_output_memory
+            ).transpose(0, 1)
         elif qkv_format == "thd":
             output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
         else:
@@ -850,6 +854,10 @@ class FusedRoPEFunc(torch.autograd.Function):
             grad_input = tex.fused_rope_backward(
                 grad_output, freqs, ctx.transpose_output_memory
             )
+        elif ctx.qkv_format == "bshd":
+            grad_input = tex.fused_rope_backward(
+                grad_output.transpose(0, 1), freqs, not ctx.transpose_output_memory
+            ).transpose(0, 1)
         elif ctx.qkv_format == "thd":
             grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
         else:
@@ -892,21 +900,17 @@ def apply_rotary_pos_emb(
         `output.transpose(0, 1)`. It's only supported when `fused` = True and
         `qkv_format` = 'sbhd'.
     qkv_format: str, default = 'sbhd'.
-        It could be 'sbhd' or 'thd', and 'thd' is only supported when `fused` = True.
+        It could be 'sbhd', 'bshd' or 'thd', and 'thd' is only supported when `fused` = True.
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `qkv_format` = 'thd'.
     """
     if fused:
-        assert qkv_format in (
-            "sbhd",
-            "thd",
-        ), f"Only 'sbhd' and 'thd' formats are supported when fused is True, got {qkv_format}."
         assert not (
             transpose_output_memory and qkv_format == "thd"
-        ), "transpose_output_memory is only supported with 'sbhd' format."
+        ), "transpose_output_memory only supports 'sbhd' or 'bshd' format."
         assert (
-            qkv_format == "sbhd" or cu_seqlens is not None
+            qkv_format != "thd" or cu_seqlens is not None
         ), "cu_seqlens must not be None when qkv_format is 'thd'."
         return FusedRoPEFunc.apply(
             t, freqs, transpose_output_memory, qkv_format, cu_seqlens
