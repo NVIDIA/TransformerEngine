@@ -198,21 +198,30 @@ def core_attention(query: Array,
     batch_dim = 1 if transpose_batch_sequence else 0
     assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
         'q, k, v batch dims must match.')
-    assert query.shape[-2] == key.shape[-2] == value.shape[-2], ('q, k, v num_heads must match.')
     sequence_dim = 0 if transpose_batch_sequence else 1
     assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
+    assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
+    assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
     if float32_logits:
         query = query.astype(jnp.float32)
         key = key.astype(jnp.float32)
 
+    h_q, h_kv = query.shape[-2], key.shape[-2]
+    assert (h_q % h_kv == 0) and (h_q >= h_kv)
+    num_groups = h_q // h_kv
+    grouped_query = query.reshape((*query.shape[:2], h_kv, num_groups, query.shape[-1]))
+
     if transpose_batch_sequence:
-        attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
+        attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
     else:
-        attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+        attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
 
     attn_weights = checkpoint_name(attn_weights, 'logits')
+
+    b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
+    attn_weights_without_groups_shape = (b, h * g, q, k)
+    attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
     attn_weights = _with_sharding_constraint(attn_weights,
                                              (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES))
@@ -229,6 +238,8 @@ def core_attention(query: Array,
     attn_weights = Softmax(softmax_type=softmax_type,
                            scale_factor=fused_scale_factor)(attn_weights, mask, bias).astype(dtype)
 
+    attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+
     if not deterministic and dropout_rate > 0.:
         keep_prob = 1.0 - dropout_rate
         dropout_shape = list(attn_weights.shape)
@@ -238,9 +249,9 @@ def core_attention(query: Array,
         attn_weights = attn_weights * multiplier
 
     if transpose_batch_sequence:
-        return jnp.einsum('bhqk,kbhd->qbhd', attn_weights, value)
+        return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
 
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+    return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
