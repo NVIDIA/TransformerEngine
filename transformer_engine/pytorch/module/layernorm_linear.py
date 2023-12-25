@@ -880,6 +880,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
+        # Clean up weight and bias buffers
+        if self.parameters_split is None:
+            del self.weight_tensor
+            if self.use_bias:
+                del self.bias_tensor
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         if not self.zero_centered_gamma:
@@ -913,7 +919,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,

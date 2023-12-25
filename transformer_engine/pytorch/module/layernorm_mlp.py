@@ -1313,7 +1313,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         return fp8_weight_tensors
 
-    @no_torch_dynamo
+    @no_torch_dynamo()
     def forward(
         self, inp: torch.Tensor, is_first_microbatch: Optional[bool] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:

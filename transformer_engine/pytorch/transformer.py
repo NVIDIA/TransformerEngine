@@ -12,7 +12,11 @@ import torch
 
 import transformer_engine_extensions as tex
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import InferenceParams, MultiheadAttention
+from transformer_engine.pytorch.attention import (
+    InferenceParams,
+    MultiheadAttention,
+    check_set_window_size,
+)
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -70,8 +74,8 @@ class TransformerLayer(torch.nn.Module):
 
     .. note::
 
-        Argument :attr:`attention_mask` will be ignored in the `forward` call when
-        :attr:`self_attn_mask_type` is set to `"causal"`.
+        Argument :attr:`attention_mask` in the `forward` call is only used when
+        :attr:`self_attn_mask_type` includes `"padding"` or `"arbitrary"`.
 
     Parameters
     ----------
@@ -127,12 +131,19 @@ class TransformerLayer(torch.nn.Module):
     kv_channels: int, default = `None`
                 number of key-value channels. defaults to
                 :attr:`hidden_size` / :attr:`num_attention_heads` if `None`.
-    self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
+    self_attn_mask_type: {'no_mask', 'padding', 'causal', 'padding_causal', 'arbitrary'},
+                        default = `causal`
                         type of attention mask passed into softmax operation. Overridden by
                         :attr:`self_attn_mask_type` in the `forward` method. The forward
                         arg is useful for dynamically changing mask types, e.g. a different
                         mask for training and inference. The init arg is useful for cases
                         involving compilation/tracing, e.g. ONNX export.
+    window_size: Optional[Tuple[int, int]], default = `None`
+                sliding window size for local attention, where query at position i attends to keys
+                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+                window and causal mask specifically. Similar to :attr:`self_attn_mask_type`, it can
+                be overridden by :attr:`window_size` in `forward` as well.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -219,6 +230,7 @@ class TransformerLayer(torch.nn.Module):
         layer_number: Optional[int] = None,
         kv_channels: Optional[int] = None,
         self_attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -250,6 +262,8 @@ class TransformerLayer(torch.nn.Module):
             ), "Userbuffer communication backend not available."
 
         self.self_attn_mask_type = self_attn_mask_type
+        self.window_size = window_size
+        self.window_size = check_set_window_size(self_attn_mask_type, self.window_size)
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_tp_comm_overlap = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_OVERLAP", "1")))
         ub_bulk_wgrad = ub_tp_comm_overlap and bool(int(os.getenv("NVTE_UB_BULK_WGRAD", "1")))
@@ -490,8 +504,9 @@ class TransformerLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         self_attn_mask_type: Optional[str] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         encoder_output: Optional[torch.Tensor] = None,
-        enc_dec_attn_mask: Optional[torch.Tensor] = None,
+        enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -512,17 +527,25 @@ class TransformerLayer(torch.nn.Module):
         ----------
         hidden_states : torch.Tensor
              Input tensor.
-        attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
+        attention_mask : Optional[torch.Tensor], default = `None`
                         Boolean tensor used to mask out self-attention softmax input.
-                        Can be a tuple of 2 masks for cross attention with padding masks.
-        self_attn_mask_type: {'causal', 'padding', 'no_mask', 'arbitrary'}, default = `causal`
-                            type of attention mask passed into softmax operation.
+                        It should be in [batch_size, 1, 1, seqlen_q] for 'padding' mask,
+                        and broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
+                        for 'arbitrary'. It should be 'None' for 'causal' and 'no_mask'.
+        self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
+                            default = `causal`
+                            Type of attention mask passed into softmax operation.
+        window_size: Optional[Tuple[int, int]], default = `None`
+                    sliding window size for local attention.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
-        enc_dec_attn_mask : Optional[torch.Tensor], default = `None`
-             Boolean tensor used to mask out inter-attention softmax input if using
-             `layer_type="decoder"`.
+        enc_dec_attn_mask : Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+             default = `None`. Boolean tensors used to mask out inter-attention softmax input if
+             using `layer_type="decoder"`. It should be a tuple of two masks in
+             [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for 'padding' mask.
+             It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
+             for 'arbitrary' mask. It should be 'None' for 'causal' and 'no_mask'.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -545,7 +568,7 @@ class TransformerLayer(torch.nn.Module):
                        Embeddings for query and key tensors for applying rotary position
                        embedding. By default no input embedding is applied.
         core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, 'post_scale_bias`}
+                    Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
                     Bias tensor for Q * K.T
         fast_zero_fill: bool, default = `True`
@@ -555,8 +578,12 @@ class TransformerLayer(torch.nn.Module):
                          to efficienly calculate and store the context during inference.
         """
 
+        if self_attn_mask_type is not None:
+            window_size = check_set_window_size(self_attn_mask_type, window_size)
         if self_attn_mask_type is None:
             self_attn_mask_type = self.self_attn_mask_type
+        if window_size is None:
+            window_size = self.window_size
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -569,7 +596,9 @@ class TransformerLayer(torch.nn.Module):
                 hidden_states.shape[0] == self.seq_length // self.tp_size
             ), "Sequence dimension must be split across TP group when using sequence parallel."
 
-        if self_attn_mask_type != "causal" and attention_mask is not None:
+        if (("padding" in self_attn_mask_type
+            or self_attn_mask_type == "arbitrary")
+            and attention_mask is not None):
             assert (
                 attention_mask.dtype == torch.bool
             ), "Attention mask must be a boolean tensor"
@@ -585,6 +614,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             attention_mask=attention_mask,
             attn_mask_type=self_attn_mask_type,
+            window_size=window_size,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
@@ -610,7 +640,7 @@ class TransformerLayer(torch.nn.Module):
             inter_attention_outputs = self.inter_attention(
                 hidden_states,
                 attention_mask=enc_dec_attn_mask,
-                attn_mask_type=self_attn_mask_type,
+                window_size=window_size,
                 encoder_output=encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
