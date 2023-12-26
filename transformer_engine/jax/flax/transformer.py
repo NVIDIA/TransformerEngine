@@ -511,7 +511,8 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     axis=-1,
                     features=self.num_heads * self.head_dim,
                     transpose_batch_sequence=self.transpose_batch_sequence,
-                    return_layernorm_output=self.apply_residual_connection_post_layernorm,
+                    return_layernorm_output=(self.apply_residual_connection_post_layernorm
+                                             or is_self_attn),
                     scale_axes=(W_NO_SHARD_AXES,),
                     ln_bias_axes=(W_NO_SHARD_AXES,),
                     kernel_axes=(W_FSDP_AXES, W_TP_AXES),
@@ -521,6 +522,11 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
                     dtype=self.dtype,
                     kernel_init=query_init,
                     name='query')(inputs_q)
+
+                if is_self_attn:
+                    assert ln_out is not None
+                    inputs_kv = ln_out
+
                 kv_proj = DenseGeneral(axis=-1,
                                        features=(2, self.num_gqa_groups * self.head_dim),
                                        transpose_batch_sequence=self.transpose_batch_sequence,

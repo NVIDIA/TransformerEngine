@@ -121,9 +121,9 @@ def dot_product_attention(query: Array,
     query: queries for calculating attention with shape of `[batch, q_length,
       num_heads, qk_depth_per_head]`.
     key: keys for calculating attention with shape of `[batch, kv_length,
-      num_heads, qk_depth_per_head]`.
+      num_gqa_groups, qk_depth_per_head]`.
     value: values to be used in attention with shape of `[batch, kv_length,
-      num_heads, v_depth_per_head]`.
+      num_gqa_groups, v_depth_per_head]`.
     bias: bias for the attention weights. This should be broadcastable to the
       shape `[batch, num_heads, q_length, kv_length]` This can be used for
       incorporating causal masks, padding masks, proximity bias, etc.
@@ -141,21 +141,31 @@ def dot_product_attention(query: Array,
     batch_dim = 1 if transpose_batch_sequence else 0
     assert query.shape[batch_dim] == key.shape[batch_dim] == value.shape[batch_dim], (
         'q, k, v batch dims must match.')
-    assert query.shape[-2] == key.shape[-2] == value.shape[-2], ('q, k, v num_heads must match.')
     sequence_dim = 0 if transpose_batch_sequence else 1
     assert key.shape[sequence_dim] == value.shape[sequence_dim], 'k, v lengths must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
+    assert key.shape[-2] == value.shape[-2], 'k, v num_heads must match.'
+    assert query.shape[-1] == key.shape[-1], 'q, k head_dim must match.'
 
     # Casting logits and softmax computation for float32 for model stability.
     if float32_logits:
         query = query.astype(jnp.float32)
         key = key.astype(jnp.float32)
 
-    # `attn_weights`: [batch, num_heads, q_length, kv_length]
+    # `attn_weights`: [batch, num_heads, groups, q_length, kv_length]
+    h_q, h_kv = query.shape[-2], key.shape[-2]
+    assert (h_q % h_kv == 0) and (h_q >= h_kv)
+    num_groups = h_q // h_kv
+    grouped_query = query.reshape((*query.shape[:2], h_kv, num_groups, query.shape[-1]))
+
     if transpose_batch_sequence:
-        attn_weights = jnp.einsum('qbhd,kbhd->bhqk', query, key)
+        attn_weights = jnp.einsum('qbhgd,kbhd->bhgqk', grouped_query, key)
     else:
-        attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+        attn_weights = jnp.einsum('bqhgd,bkhd->bhgqk', grouped_query, key)
+
+    # reshape back to normal DPA shape for bias/softmax/dropout
+    b, h, g, q, k = attn_weights_with_groups_shape = attn_weights.shape
+    attn_weights_without_groups_shape = (b, h * g, q, k)
+    attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
     # Apply attention bias: masking, dropout, proximity bias, etc.
     if bias is not None:
@@ -174,11 +184,13 @@ def dot_product_attention(query: Array,
         multiplier = (keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
         attn_weights = attn_weights * multiplier
 
+    attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+
     # Take the linear combination of `value`.
     if transpose_batch_sequence:
-        return jnp.einsum('bhqk,kbhd->qbhd', attn_weights, value)
+        return jnp.einsum('bhgqk,kbhd->qbhgd', attn_weights, value).reshape(query.shape)
 
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+    return jnp.einsum('bhgqk,bkhd->bqhgd', attn_weights, value).reshape(query.shape)
 
 
 class DenseGeneral(nn.Module):
@@ -235,7 +247,8 @@ class DenseGeneral(nn.Module):
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes('bias',
-                                                   self.bias_init, (self.features,),
+                                                   self.bias_init,
+                                                   self.features,
                                                    self.dtype,
                                                    axes=self.bias_axes)
         else:
@@ -332,6 +345,7 @@ class MultiHeadAttention(nn.Module):
     Attributes:
       num_heads: number of attention heads. Features (i.e. inputs_q.shape[-1])
         should be divisible by the number of heads.
+      num_gqa_groups: number of kv attention heads
       head_dim: dimension of each head.
       dtype: the dtype of the computation.
       dropout_rate: dropout rate
@@ -340,9 +354,10 @@ class MultiHeadAttention(nn.Module):
         numerical issues with bfloat16.
   """
 
-    num_heads: int
-    head_dim: int
-    transpose_batch_sequence: bool
+    num_heads: int = 8
+    num_gqa_groups: int | None = None
+    head_dim: int = 64
+    transpose_batch_sequence: bool = True
     dtype: DType = jnp.float32
     dropout_rate: float = 0.
     kernel_init: Initializer = None
@@ -354,6 +369,8 @@ class MultiHeadAttention(nn.Module):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal')
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
 
     @nn.compact
@@ -393,11 +410,17 @@ class MultiHeadAttention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-        projection = functools.partial(DenseGeneral,
-                                       axis=-1,
-                                       features=self.num_heads * self.head_dim,
-                                       kernel_axes=('embed', 'joined_kv'),
-                                       dtype=self.dtype)
+        q_projection = functools.partial(DenseGeneral,
+                                         axis=-1,
+                                         features=self.num_heads * self.head_dim,
+                                         kernel_axes=('embed', 'joined_kv'),
+                                         dtype=self.dtype)
+
+        kv_projection = functools.partial(DenseGeneral,
+                                          axis=-1,
+                                          features=self.num_gqa_groups * self.head_dim,
+                                          kernel_axes=('embed', 'joined_kv'),
+                                          dtype=self.dtype)
 
         # NOTE: T5 does not explicitly rescale the attention logits by
         #       1/sqrt(depth_kq)!  This is folded into the initializers of the
@@ -422,8 +445,12 @@ class MultiHeadAttention(nn.Module):
 
             return jnp.concatenate([q_kernel, k_kernel, v_kernel], axis=-1, dtype=dtype)
 
+        is_self_attn = (inputs_q is inputs_kv)
+        is_gqa = (self.num_heads != self.num_gqa_groups)
+        is_qkvpack = (is_self_attn and not is_gqa)
+
         if self.fuse_qkv:
-            if inputs_q is inputs_kv:
+            if is_qkvpack:
                 qkv_proj = DenseGeneral(axis=-1,
                                         features=self.num_heads * self.head_dim * 3,
                                         kernel_axes=('embed', 'joined_kv'),
@@ -436,24 +463,24 @@ class MultiHeadAttention(nn.Module):
                 if self.scale_attn_logits:
                     query = query / depth_scaling
             else:
-                query = projection(kernel_init=query_init, name='query')( \
+                query = q_projection(kernel_init=query_init, name='query')( \
                         (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
                 kv_proj = DenseGeneral(axis=-1,
-                                       features=self.num_heads * self.head_dim * 2,
+                                       features=self.num_gqa_groups * self.head_dim * 2,
                                        kernel_axes=('embed', 'joined_kv'),
                                        kernel_init=self.kernel_init,
                                        name='kv',
                                        dtype=self.dtype)(inputs_kv)
-                key, value = jnp.split(kv_proj, [self.num_heads * self.head_dim], axis=-1)
+                key, value = jnp.split(kv_proj, [self.num_gqa_groups * self.head_dim], axis=-1)
         else:
-            query = projection(kernel_init=query_init, name='query')( \
+            query = q_projection(kernel_init=query_init, name='query')( \
                     (inputs_q / depth_scaling) if self.scale_attn_logits else inputs_q)
-            key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
-            value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+            key = kv_projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
+            value = kv_projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-        query = query.reshape((query.shape[0], query.shape[1], self.num_heads, self.head_dim))
-        key = key.reshape((key.shape[0], key.shape[1], self.num_heads, self.head_dim))
-        value = value.reshape((value.shape[0], value.shape[1], self.num_heads, self.head_dim))
+        query = query.reshape((*query.shape[:2], self.num_heads, self.head_dim))
+        key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
+        value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
 
         if self.transpose_batch_sequence:
             query = nn_partitioning.with_sharding_constraint(query,
@@ -755,7 +782,8 @@ class RelativePositionBiases(nn.Module):
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
     relative_embedding: nn.Module = None
-    num_heads: int = 8
+    num_attention_heads: int = 8
+    num_gqa_groups: int | None = None
     head_dim: int = 64
     dropout_rate: float = 0.1
     transpose_batch_sequence: bool = True
@@ -773,6 +801,11 @@ class EncoderLayer(nn.Module):
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
 
+    def __post_init__(self):
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_attention_heads
+        super().__post_init__()
+
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
         # Relative position embedding as attention biases.
@@ -782,7 +815,7 @@ class EncoderLayer(nn.Module):
         if self.relative_embedding is None:
             rel_emb = RelativePositionBiases(num_buckets=32,
                                              max_distance=128,
-                                             num_heads=self.num_heads,
+                                             num_heads=self.num_attention_heads,
                                              dtype=self.dtype,
                                              embedding_init=nn.initializers.variance_scaling(
                                                  1.0, 'fan_avg', 'uniform'),
@@ -807,7 +840,8 @@ class EncoderLayer(nn.Module):
             x = inputs
 
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
-        x = MultiHeadAttention(num_heads=self.num_heads,
+        x = MultiHeadAttention(num_heads=self.num_attention_heads,
+                               num_gqa_groups=self.num_gqa_groups,
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
@@ -868,7 +902,8 @@ class EncoderLayer(nn.Module):
 class DecoderLayer(nn.Module):
     """Transformer decoder layer that attends to the encoder."""
     relative_embedding: nn.Module = None
-    num_heads: int = 8
+    num_attention_heads: int = 8
+    num_gqa_groups: int | None = None
     head_dim: int = 64
     dropout_rate: float = 0.1
     transpose_batch_sequence: bool = True
@@ -885,6 +920,11 @@ class DecoderLayer(nn.Module):
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = False
+
+    def __post_init__(self):
+        if self.num_gqa_groups is None:
+            self.num_gqa_groups = self.num_attention_heads
+        super().__post_init__()
 
     @nn.compact
     def __call__(self,
@@ -903,7 +943,7 @@ class DecoderLayer(nn.Module):
         if self.relative_embedding is None:
             rel_emb = RelativePositionBiases(num_buckets=32,
                                              max_distance=128,
-                                             num_heads=self.num_heads,
+                                             num_heads=self.num_attention_heads,
                                              dtype=self.dtype,
                                              embedding_init=nn.initializers.variance_scaling(
                                                  1.0, 'fan_avg', 'uniform'),
@@ -928,7 +968,8 @@ class DecoderLayer(nn.Module):
             x = inputs
 
         # Self-attention block
-        x = MultiHeadAttention(num_heads=self.num_heads,
+        x = MultiHeadAttention(num_heads=self.num_attention_heads,
+                               num_gqa_groups=self.num_gqa_groups,
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,
@@ -960,7 +1001,8 @@ class DecoderLayer(nn.Module):
 
         if self.apply_residual_connection_post_layernorm:
             residual = y
-        y = MultiHeadAttention(num_heads=self.num_heads,
+        y = MultiHeadAttention(num_heads=self.num_attention_heads,
+                               num_gqa_groups=self.num_gqa_groups,
                                dtype=self.dtype,
                                head_dim=self.head_dim,
                                transpose_batch_sequence=self.transpose_batch_sequence,

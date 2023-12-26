@@ -674,6 +674,8 @@ class MultiHeadAttnAttr:
     LN_TYPE = 'layernorm_type'
     ATTN_MASK_TYPE = 'attn_mask_type'
     ZERO_CEN = 'zero_centered_gamma'
+    NUM_ATTN_HEADS = 'num_attention_heads'
+    NUM_GQA_GROUPS = 'num_gqa_groups'
     ATTRS = [{
         USE_BIAS: True,
         LN_TYPE: 'layernorm',
@@ -703,6 +705,13 @@ class MultiHeadAttnAttr:
         USE_BIAS: True,
         LN_TYPE: 'rmsnorm',
         ZERO_CEN: False,
+        ATTN_MASK_TYPE: 'causal'
+    }, {
+        USE_BIAS: True,
+        LN_TYPE: 'rmsnorm',
+        ZERO_CEN: False,
+        NUM_ATTN_HEADS: 8,
+        NUM_GQA_GROUPS: 4,
         ATTN_MASK_TYPE: 'causal'
     }]
 
