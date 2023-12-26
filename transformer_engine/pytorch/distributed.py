@@ -216,7 +216,6 @@ class CheckpointFunction(torch.autograd.Function):
             )
 
         # Store everything.
-
         ctx.inputs = []
         ctx.tensor_indices = []
         tensor_inputs = []
@@ -227,7 +226,6 @@ class CheckpointFunction(torch.autograd.Function):
                 ctx.inputs.append(None)
             else:
                 ctx.inputs.append(arg)
-
         ctx.save_for_backward(*tensor_inputs)
 
         ctx.get_cuda_rng_tracker = get_cuda_rng_tracker
@@ -294,9 +292,9 @@ class CheckpointFunction(torch.autograd.Function):
 
         outputs_with_grad = []
         args_with_grad = []
-        for i, item in enumerate(outputs):
-            if torch.is_tensor(item) and item.requires_grad:
-                outputs_with_grad.append(item)
+        for i, output in enumerate(outputs):
+            if torch.is_tensor(output) and output.requires_grad:
+                outputs_with_grad.append(output)
                 args_with_grad.append(args[i])
         if len(outputs_with_grad) == 0:
             raise RuntimeError(
