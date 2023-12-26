@@ -216,7 +216,20 @@ class CheckpointFunction(torch.autograd.Function):
             )
 
         # Store everything.
-        ctx.save_for_backward(*args)
+
+        ctx.inputs = []
+        ctx.tensor_indices = []
+        tensor_inputs = []
+        for i, arg in enumerate(args):
+            if torch.is_tensor(arg):
+                tensor_inputs.append(arg)
+                ctx.tensor_indices.append(i)
+                ctx.inputs.append(None)
+            else:
+                ctx.inputs.append(arg)
+
+        ctx.save_for_backward(*tensor_inputs)
+
         ctx.get_cuda_rng_tracker = get_cuda_rng_tracker
         ctx.tp_group = tp_group
         ctx.kwargs = kwargs
@@ -233,7 +246,16 @@ class CheckpointFunction(torch.autograd.Function):
                 "Checkpointing is not compatible with .grad(), "
                 "please use .backward() if possible"
             )
-        inputs = ctx.saved_tensors
+
+        inputs = list(ctx.inputs)
+        tensor_indices = ctx.tensor_indices
+        tensors = ctx.saved_tensors
+
+        # Fill in inputs with appropriate saved tensors.
+        for i, idx in enumerate(tensor_indices):
+            inputs[idx] = tensors[i]
+        inputs = tuple(inputs)
+
         get_cuda_rng_tracker = ctx.get_cuda_rng_tracker
 
         if ctx.distribute_saved_activations:
@@ -269,9 +291,22 @@ class CheckpointFunction(torch.autograd.Function):
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
-        torch.autograd.backward(outputs, args)
+
+        outputs_with_grad = []
+        args_with_grad = []
+        for i, item in enumerate(outputs):
+            if torch.is_tensor(item) and item.requires_grad:
+                outputs_with_grad.append(item)
+                args_with_grad.append(args[i])
+        if len(outputs_with_grad) == 0:
+            raise RuntimeError(
+                "none of output has requires_grad=True,"
+                " this checkpoint() is not necessary"
+            )
+
+        torch.autograd.backward(outputs_with_grad, args_with_grad)
         grads = tuple(
-            inp.grad if isinstance(inp, torch.Tensor) else inp
+            inp.grad if isinstance(inp, torch.Tensor) else None
             for inp in detached_inputs
         )
         return (None, None, None, None, None) + grads
