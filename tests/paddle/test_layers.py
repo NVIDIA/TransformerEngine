@@ -1339,3 +1339,121 @@ def test_transformer_decoder_layer(bs, hidden_size, num_heads, ffn_hidden_size, 
                             layer_pd.inter_attention.layernorm_query.bias.grad,
                             rtol=rtol,
                             atol=atol)
+
+
+@pytest.mark.parametrize('bs', [8])
+@pytest.mark.parametrize('hidden_size, num_heads, ffn_hidden_size', [[1024, 16, 4096]])
+@pytest.mark.parametrize('q_seqlen, kv_seqlen', [[128, 128]])
+@pytest.mark.parametrize('mask_type', ['causal'])
+@pytest.mark.parametrize('math_dtype', ['bfloat16'])
+@pytest.mark.parametrize('num_microbatch', [8])
+def test_transformer_encoder_layer_microbatch(bs, hidden_size, num_heads, ffn_hidden_size, q_seqlen,
+                                              kv_seqlen, mask_type, math_dtype, num_microbatch):
+    """
+    Test Transformer Encoder Layer with FP8 weight caching
+    """
+    paddle.set_default_dtype(math_dtype)
+    rtol = 1e-5
+    atol = 1e-5
+    eps = 1e-3
+
+    # Skip if cuDNN fused attention is not supported
+    if not is_fused_attention_supported(
+            num_heads=num_heads,
+            num_gqa_groups=num_heads,
+            q_seqlen=q_seqlen,
+            kv_seqlen=kv_seqlen,
+            head_size=hidden_size // num_heads,
+            dtype=math_dtype,
+            dropout=0.0,
+            qkv_layout="bs3hd",
+            bias_type="no_bias",
+            mask_type=mask_type,
+    ):
+        pytest.skip("cuDNN fused attention is not supported")
+
+    layer_cached = te.TransformerLayer(hidden_size,
+                                       ffn_hidden_size,
+                                       num_heads,
+                                       layernorm_epsilon=eps,
+                                       hidden_dropout=0.0,
+                                       attention_dropout=0.0,
+                                       weight_attr=None,
+                                       bias_attr=None,
+                                       self_attn_mask_type=mask_type,
+                                       layer_type='encoder')
+    layer_normal = te.TransformerLayer(hidden_size,
+                                       ffn_hidden_size,
+                                       num_heads,
+                                       layernorm_epsilon=eps,
+                                       hidden_dropout=0.0,
+                                       attention_dropout=0.0,
+                                       weight_attr=None,
+                                       bias_attr=None,
+                                       self_attn_mask_type=mask_type,
+                                       layer_type='encoder')
+
+    layer_normal.self_attention.layernorm_qkv.ln_weight.copy_(
+        layer_cached.self_attention.layernorm_qkv.ln_weight, True)
+    layer_normal.self_attention.layernorm_qkv.ln_bias.copy_(
+        layer_cached.self_attention.layernorm_qkv.ln_bias, True)
+    layer_normal.self_attention.layernorm_qkv.weight.copy_(
+        layer_cached.self_attention.layernorm_qkv.weight, True)
+    layer_normal.self_attention.layernorm_qkv.bias.copy_(
+        layer_cached.self_attention.layernorm_qkv.bias, True)
+
+    layer_normal.self_attention.proj.weight.copy_(layer_cached.self_attention.proj.weight, True)
+    layer_normal.self_attention.proj.bias.copy_(layer_cached.self_attention.proj.bias, True)
+
+    # LayerNorm MLP params
+    layer_normal.layernorm_mlp.ln_weight.copy_(layer_cached.layernorm_mlp.ln_weight, True)
+    layer_normal.layernorm_mlp.ln_bias.copy_(layer_cached.layernorm_mlp.ln_bias, True)
+    layer_normal.layernorm_mlp.fc1_weight.copy_(layer_cached.layernorm_mlp.fc1_weight, True)
+    layer_normal.layernorm_mlp.fc2_weight.copy_(layer_cached.layernorm_mlp.fc2_weight, True)
+    layer_normal.layernorm_mlp.fc1_bias.copy_(layer_cached.layernorm_mlp.fc1_bias, True)
+    layer_normal.layernorm_mlp.fc2_bias.copy_(layer_cached.layernorm_mlp.fc2_bias, True)
+
+    recipe = DelayedScaling()
+
+    def generate_input():
+        encoder_input = paddle.uniform(shape=(bs, q_seqlen, hidden_size), dtype=math_dtype)
+
+        q_actual_seqlen = paddle.ones(shape=(bs,), dtype='int32') * q_seqlen
+        kv_actual_seqlen = q_actual_seqlen
+        attn_mask = paddle.ones(shape=(bs, 1, q_seqlen, kv_seqlen), dtype='bool')
+
+        grad_out = paddle.normal(mean=0.0, std=0.02,
+                                 shape=(bs, q_seqlen, hidden_size)).astype('float32')
+        for i in range(0, bs):
+            grad_out[i, q_actual_seqlen[i]:, :] = 0
+        grad_out = grad_out.astype(math_dtype)
+
+        for i in range(0, bs):
+            attn_mask[i, 0, 0:q_actual_seqlen[i], 0:kv_actual_seqlen[i]] = False
+
+        return encoder_input, attn_mask, grad_out
+
+    # Calibration to make sure weight scale is the same
+    encoder_input, mask, _ = generate_input()
+    with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+        _ = layer_cached(encoder_input, mask)
+
+    with fp8_autocast(enabled=False, calibrating=True, fp8_recipe=recipe):
+        _ = layer_normal(encoder_input, mask)
+
+    for iteration in range(num_microbatch):
+        encoder_input, mask, grad_out = generate_input()
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            out = layer_cached(encoder_input, mask, is_first_microbatch=(iteration == 0))
+            out.backward(grad_out)
+
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            out_ref = layer_normal(encoder_input, mask)
+            out_ref.backward(grad_out)
+
+        assert_allclose(out, out_ref, rtol=rtol, atol=atol)
+        assert_allclose(layer_cached.self_attention.layernorm_qkv.weight.grad,
+                        layer_normal.self_attention.layernorm_qkv.weight.grad,
+                        rtol=rtol,
+                        atol=atol)

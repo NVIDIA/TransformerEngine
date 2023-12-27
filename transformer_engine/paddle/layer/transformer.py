@@ -217,6 +217,7 @@ class TransformerLayer(paddle.nn.Layer):
         core_attention_bias: Optional[paddle.Tensor] = None,
         set_zero: bool = True,
         recompute_core_attention: bool = False,
+        is_first_microbatch: Optional[bool] = None,
     ) -> paddle.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -248,6 +249,16 @@ class TransformerLayer(paddle.nn.Layer):
                                   during the backward pass in order to save memory that would
                                   otherwise be occupied to store the forward activations until
                                   backprop.
+        is_first_microbatch : {True, False, None}, default = None
+                             During training using either gradient accumulation or
+                             pipeline parallelism a minibatch of data is further split
+                             into microbatches. Between the microbatches of the same minibatch
+                             the model weights are not updated. Setting this parameter indicates
+                             whether the current microbatch is the first in a minibatch or not.
+                             When set, this parameter enables additional optimizations:
+
+                             * during FP8 training, it allows caching of the FP8 versions of
+                               the weights
         """
 
         if self.self_attn_mask_type != "causal" and attention_mask is not None:
@@ -264,6 +275,7 @@ class TransformerLayer(paddle.nn.Layer):
             core_attention_bias=core_attention_bias,
             set_zero=set_zero,
             recompute_core_attention=recompute_core_attention,
+            is_first_microbatch=is_first_microbatch,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
@@ -286,6 +298,7 @@ class TransformerLayer(paddle.nn.Layer):
                 core_attention_bias=core_attention_bias,
                 set_zero=set_zero,
                 recompute_core_attention=recompute_core_attention,
+                is_first_microbatch=is_first_microbatch,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, residual = inter_attention_outputs
@@ -298,7 +311,7 @@ class TransformerLayer(paddle.nn.Layer):
                 bda_output = self.fused_dropout_add2(attention_output, residual)
 
         # MLP.
-        mlp_outputs = self.layernorm_mlp(bda_output)
+        mlp_outputs = self.layernorm_mlp(bda_output, is_first_microbatch=is_first_microbatch)
         if self.apply_residual_connection_post_layernorm:
             mlp_output, residual = mlp_outputs
         else:
