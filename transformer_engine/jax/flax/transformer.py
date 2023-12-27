@@ -272,6 +272,14 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         The hidden dimension of each attention head.
     num_heads : int
         The number of attention heads
+    num_gqa_groups : int, default = `None`
+        Number of GQA groups. When `None` is present, it is equal to num_heads.
+        Grouped Query Attention is described in
+        `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+        This only affects the keys and values, not the querys.
+        GQA-1 is equivalent to Multi-Query Attention
+        (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+        is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     dropout_rate : float, default = 0.0
         Dropout probability for the dropout op during multi-head attention.
     dropout_rng_name: str, default = 'dropout'
@@ -865,6 +873,14 @@ class TransformerLayer(nn.Module):    # pylint: disable=too-few-public-methods
         Intermediate size to which input samples are projected.
     num_attention_heads: int, default = 8
         Number of attention heads in the transformer layer.
+    num_gqa_groups : int, default = `None`
+        Number of GQA groups. When `None` is present, it is equal to num_attention_heads.
+        Grouped Query Attention is described in
+        `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
+        This only affects the keys and values, not the querys.
+        GQA-1 is equivalent to Multi-Query Attention
+        (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
+        is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     layernorm_epsilon: float, default = 1e-6
