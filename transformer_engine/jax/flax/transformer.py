@@ -16,7 +16,6 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-from jax import dtypes
 from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
@@ -447,16 +446,15 @@ class MultiHeadAttention(nn.Module):    # pylint: disable=too-few-public-methods
         qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
         attn_mask_type = canonicalize_attn_mask_type(self.attn_mask_type)
 
-        canonicalize_dtype = dtypes.canonicalize_dtype(self.dtype)
         q_seqlen = inputs_q.shape[0] if self.transpose_batch_sequence else inputs_q.shape[1]
         kv_seqlen = inputs_kv.shape[0] if self.transpose_batch_sequence else inputs_kv.shape[1]
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
                                                                attn_bias_type, attn_mask_type,
-                                                               self.dropout_rate,
-                                                               self.num_heads, self.num_gqa_groups,
-                                                               q_seqlen, kv_seqlen, self.head_dim)
+                                                               self.dropout_rate, self.num_heads,
+                                                               self.num_gqa_groups, q_seqlen,
+                                                               kv_seqlen, self.head_dim)
 
         use_fused_attn = not decode and not self.transpose_batch_sequence and self.fuse_qkv and \
             has_fused_attn_kernel and \
